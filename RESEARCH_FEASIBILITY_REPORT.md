@@ -7,12 +7,12 @@
 
 ## 1. Executive Summary
 
-**Conclusion:** The project is feasible *in principle*, but it requires **non-trivial engineering and research extensions** beyond the current EvoLMM design because BLIP3-o has a **dual-head architecture (AR understanding + diffusion generation)** while EvoLMM’s self-play loop only trains the *understanding* pathway. A viable path is to extend EvoLMM’s internal-consistency rewards to image generation via **cycle-consistency, perceptual agreement, and text-image alignment** rewards computed *without external labels*. This can be done by using BLIP3-o’s own understanding head (and optionally its CLIP-like features) as the internal judge.
+**Conclusion:** The project is feasible *in principle*, but it requires **non-trivial engineering and research extensions** beyond the current EvoLMM design because BLIP3-o has a **dual-head architecture (AR understanding + diffusion generation)** while EvoLMM’s self-play loop only trains the *understanding* pathway. A viable path is to extend EvoLMM’s internal-consistency rewards to image generation via **cycle-consistency, perceptual agreement, and text-image alignment** rewards computed *without external labels*. This can be done by using BLIP3-o’s own understanding head (and optionally its SigLIP/CLIP-derived features) as the internal judge.
 
 Key feasibility points:
 - **Backbone compatibility:** Both projects use a Qwen2.5-VL-family AR core, which makes adapter sharing and role-splitting feasible with minimal model surgery. The EvoLMM code explicitly instantiates proposer/solver from the same backbone and uses LoRA adapters to isolate roles.【F:EvoLMM/src/train.py†L519-L705】
 - **Unified generation path exists in BLIP3-o:** BLIP3-o couples an AR core to a diffusion transformer (Sana) via a learned connector and flow-matching scheduler, enabling image generation from AR-produced features.【F:BLIP3o/blip3o/model/blip3o_arch.py†L16-L150】【F:BLIP3o/blip3o/model/multimodal_decoder/builder.py†L1-L11】
-- **Self-evolving signal is well-defined for understanding but not for generation:** EvoLMM’s continuous rewards are derived from solver answer agreement (entropy/consensus).【F:EvoLMM/src/train.py†L935-L1037】 This must be extended to a generation-consistency reward for images.
+- **Self-evolving signal is well-defined for understanding but not for generation:** EvoLMM’s continuous rewards are derived from solver answer agreement (entropy/consensus).【F:EvoLMM/src/train.py†L935-L1037】 This must be extended to a generation-consistency reward for images **and** the reward must be routed through the *AR token generation* rather than backpropagated through diffusion denoising steps (see §4.2).
 
 ---
 
@@ -55,7 +55,7 @@ Key feasibility points:
 **A. Generation rewards without external labels**  
 EvoLMM’s reward is defined on text-answer consistency. BLIP3-o generation requires a **self-supervised image quality/consistency reward**. This is not in the current codebase. We need one or more of:
 - **Text-image cycle-consistency:** Generate an image from a prompt, then re-describe it using BLIP3-o’s understanding head. Reward agreement between original prompt and regenerated caption.
-- **Visual agreement across samples:** Generate multiple images and reward based on CLIP-feature similarity or agreement under BLIP3-o’s own encoder (self-consistency in the visual embedding space).
+- **Visual agreement across samples:** Generate multiple images and reward based on **SigLIP/CLIP encoder features** or **vision-language projection features** (the latter are more “internal” because they include BLIP3-o’s projection head).
 - **Self-critique prompting:** Use the proposer to write “verification questions” about the generated image and reward the solver’s agreement.
 
 **B. Joint or alternating training of AR and diffusion components**  
@@ -63,6 +63,9 @@ BLIP3-o’s paper emphasizes sequential training (understanding → generation) 
 
 **C. Bridging the modalities in the reward signal**  
 We must connect text-domain rewards (EvoLMM) to the diffusion output. A research contribution is to define a **purely internal reward** that depends on BLIP3-o’s own encoders/decoders rather than an external CLIP or human metric.
+
+**D. Prompt source for generation (avoiding trivial caption→reconstruction loops)**  
+EvoLMM’s proposer currently generates questions *about* an input image. For generation, a naive loop would be “caption image → generate image → re-caption,” which can improve reconstruction but does not necessarily improve **novel prompt generation**. We need a prompt source that yields *creative but grounded* variation (see §4.1).
 
 ---
 
@@ -72,32 +75,43 @@ We must connect text-domain rewards (EvoLMM) to the diffusion output. A research
 
 **Goal:** Extend EvoLMM to include a generation reward without external labels.
 
-**Loop:**
-1. **Proposer** generates a text prompt (or question) from an image (existing EvoLMM flow).【F:EvoLMM/src/train.py†L935-L952】
-2. **BLIP3-o generator** produces K images from that prompt (AR→diffusion path).【F:BLIP3o/blip3o/model/blip3o_arch.py†L16-L150】【F:BLIP3o/inference.py†L22-L73】
-3. **BLIP3-o understanding head** captions each generated image.
-4. Compute reward as **caption-consistency** with the original prompt (e.g., token-level agreement or embedding similarity). Use this as a **self-generated reward** for the generation path.
-5. Update proposer/solver/generator with REINFORCE + KL (reuse EvoLMM’s updater).【F:EvoLMM/src/train.py†L535-L639】
+**Loop (creative-variation MVP):**
+1. **Proposer** generates a *modified prompt* from an image (e.g., “same scene but at night,” “replace the main object,” “change the viewpoint”) rather than a pure caption. This can be implemented by extending the proposer prompt template to require a *controlled edit*.【F:EvoLMM/src/train.py†L301-L336】
+2. **BLIP3-o generator** produces K images from that modified prompt (AR→diffusion path).【F:BLIP3o/blip3o/model/blip3o_arch.py†L16-L150】【F:BLIP3o/inference.py†L22-L73】
+3. **BLIP3-o understanding head** captions each generated image and answers verification questions such as “Was it nighttime?” or “Is the main object now a bicycle?” using the same solver loop.
+4. Compute reward as **(a) verification success**, plus **(b) semantic alignment** between the modified prompt and the generated captions.
+5. Update proposer/solver/generator with REINFORCE + KL for the AR token policy (see §4.2).【F:EvoLMM/src/train.py†L535-L639】
 
 ### 4.2 Reward designs (purely internal)
 
 | Reward Type | Definition | Rationale |
 |---|---|---|
 | **Text-image cycle consistency** | prompt → image → caption; reward similarity(prompt, caption) | Purely internal; enforces semantic fidelity. |
-| **Multi-sample visual agreement** | generate K images; reward consistency in BLIP3-o vision features | Encourages stable, non-chaotic generation without external model. |
+| **Multi-sample visual agreement** | generate K images; reward consistency in SigLIP/CLIP *encoder* features or the *post-projection* internal features | Encourages stable, non-chaotic generation; post-projection features are more internal than raw CLIP/SigLIP. |
 | **Question-based verification** | proposer asks a follow-up question about generated image; solver answers; reward self-consistency | Directly extends EvoLMM’s proposer/solver loop. |
+| **Diversity regularization (anti-collapse)** | penalize low variance across K samples in embedding space | Mitigates “generic image” collapse where every prompt yields the same image. |
+| **Entropy-targeted prompts** | reward moderate caption entropy (not trivial, not random) | Mirrors EvoLMM’s proposer entropy shaping to avoid trivial prompts. |
 
 ### 4.3 Training schedule
 
 - **Phase 1 (Warm-start):** Use BLIP3-o understanding path with EvoLMM-style self-play (identical to current EvoLMM loop).【F:EvoLMM/src/train.py†L935-L1037】
-- **Phase 2 (Generation adaptation):** Freeze understanding head; train diffusion path using cycle-consistency rewards.
+- **Phase 2 (Generation adaptation):** Freeze understanding head; train generation via AR-token RL + diffusion head reward-weighted flow-matching loss (see §4.2).
 - **Phase 3 (Alternating):** Alternate N steps of self-play understanding with M steps of generation self-play to prevent forgetting.
 
-### 4.4 Expected research contributions
+### 4.4 Where the gradient flows (diffusion-specific clarification)
+
+The diffusion denoising chain is **not a standard policy gradient environment**, so we should not naively apply REINFORCE across denoising steps. Two practical options aligned with BLIP3-o’s architecture:
+
+**Option A (recommended, aligns with BLIP3o-NEXT):** Apply RL **only to the AR discrete image-token generation**. Keep the diffusion model frozen initially, or fine-tune it using a **reward-weighted flow-matching (MSE) loss** while treating the AR tokens as the policy outputs. This aligns with the GRPO-friendly discrete token supervision mentioned in BLIP3o-NEXT and avoids backprop through the full denoising chain. This is the most realistic path for an MVP.
+
+**Option B (DDPO-style, advanced):** Treat each denoising step as a policy action and apply diffusion-specific policy optimization. This is research-heavy and likely not needed for the first iteration.
+
+### 4.5 Expected research contributions
 
 1. **Unsupervised image-generation reward** derived solely from the model’s own vision-language alignment.
 2. **Unified self-evolving loop** that co-trains understanding and generation without human labels.
-3. **Empirical analysis** of how question difficulty and image generation fidelity co-evolve.
+3. **Cross-task co-evolution**: proposer learns to ask questions that the generator must satisfy, creating mutual supervision where better questions drive better images and vice versa.
+4. **Empirical analysis** of how question difficulty and image generation fidelity co-evolve.
 
 ---
 
@@ -105,9 +119,9 @@ We must connect text-domain rewards (EvoLMM) to the diffusion output. A research
 
 | Risk | Why it matters | Mitigation |
 |---|---|---|
-| Reward hacking / mode collapse | Self-consistency can be gamed by trivial captions | Add entropy targets (like EvoLMM proposer entropy) or diversity penalties. 【F:EvoLMM/src/train.py†L973-L989】 |
+| Reward hacking / mode collapse | Cycle-consistency can be satisfied by generic images or caption copying | Add diversity regularization across K samples + entropy-targeted prompts; include verification questions that must match the image content.【F:EvoLMM/src/train.py†L973-L989】 |
 | Diffusion instability | Generation path is sensitive to reward noise | Use alternating schedule and small KL steps to preserve base behavior. 【F:EvoLMM/src/train.py†L535-L639】 |
-| Compute cost | Multi-sample generation is expensive | Start with small K and low-res; scale later. |
+| Compute cost | Multi-sample diffusion generation is expensive | Start with small K and low-res; batch generation; freeze diffusion initially; estimate budget up-front. |
 
 ---
 
@@ -126,6 +140,9 @@ We must connect text-domain rewards (EvoLMM) to the diffusion output. A research
 - Adopt EvoLMM’s shared-backbone adapter approach for proposer/solver and (optionally) generator. 【F:EvoLMM/src/train.py†L651-L705】
 - Keep KL-regularized REINFORCE to stabilize updates and prevent drift. 【F:EvoLMM/src/train.py†L535-L639】
 
+### 6.4 Reuse BLIP3-o GRPO infrastructure
+BLIP3-o already ships GRPO training code and a GRPO-capable model wrapper. This can be adapted to accept **self-evolving rewards** (cycle-consistency, verification) rather than external reward models, reducing engineering effort and aligning with discrete token RL on the AR head.【F:BLIP3o/README.md†L24-L72】【F:BLIP3o/trl/train_grpo.py†L1-L22】【F:BLIP3o/blip3o/model/language_model/blip3o_qwen_grpo.py†L41-L86】
+
 ---
 
 ## 7. Feasibility Verdict
@@ -133,13 +150,35 @@ We must connect text-domain rewards (EvoLMM) to the diffusion output. A research
 **Yes, it is possible**, but only by **introducing a new self-supervised reward for generation** and **carefully orchestrating training to avoid destroying understanding performance**. The necessary innovations are:
 - **Internal generation rewards** (cycle consistency, self-embedding agreement).
 - **Alternating or staged training** to preserve understanding (aligned with BLIP3-o’s sequential training insights).【F:blip30.txt†L12-L37】
-- **Unified self-play loop** that updates both AR and diffusion components under KL-regularized RL. 【F:EvoLMM/src/train.py†L535-L639】
+- **AR-token-centric RL** with diffusion frozen or updated via reward-weighted flow-matching losses, not naive backprop through denoising steps.
+- **Unified self-play loop** that updates AR policies with KL-regularized RL. 【F:EvoLMM/src/train.py†L535-L639】
 
 If these are implemented, the project becomes a meaningful research contribution to fully unsupervised unified vision-language modeling.
 
 ---
 
-## 8. Sources in This Repo
+## 8. Evaluation Plan (Success Criteria)
+
+**Understanding benchmarks (already aligned with EvoLMM):** ChartQA, DocVQA, MathVista, etc., using EvoLMM’s evaluation flow if available (or lmms-eval in `EvoLMM/Evaluation`).【F:evolmm.txt†L16-L76】
+
+**Generation benchmarks (external but standard):** FID/CLIPScore/Human Preference (for publication), while keeping **internal metrics** for self-evolving signals:
+- **Cycle-consistency score** over training steps.
+- **Verification-question accuracy** on generated images.
+- **Embedding diversity** across K samples (to monitor collapse).
+
+**Ablations:**
+- Freeze diffusion vs. reward-weighted diffusion fine-tuning.
+- Caption-only vs. creative-variation prompts.
+- With/without diversity regularization and entropy targets.
+
+## 9. Compute Budget (Order-of-Magnitude)
+
+**Rough per-step estimate (illustrative):**
+- EvoLMM understanding: N solver samples (e.g., 5) + proposer (1) ≈ 6 forward passes.
+- Generation: K samples (e.g., 3) × 20–50 denoising steps ≈ 60–150 diffusion forward passes, plus K caption passes.
+- Net: generation increases per-step compute by **~10–25×** relative to understanding-only training. This strongly argues for low-res images, small K, and freezing diffusion initially.
+
+## 10. Sources in This Repo
 
 - BLIP3-o model architecture and diffusion integration: `BLIP3o/blip3o/model/blip3o_arch.py`, `BLIP3o/blip3o/model/multimodal_decoder/builder.py`.
 - BLIP3-o inference entrypoint: `BLIP3o/inference.py`.
