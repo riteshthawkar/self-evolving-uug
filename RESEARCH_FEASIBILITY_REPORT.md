@@ -120,8 +120,10 @@ The diffusion denoising chain is **not a standard policy gradient environment**,
 | Risk | Why it matters | Mitigation |
 |---|---|---|
 | Reward hacking / mode collapse | Cycle-consistency can be satisfied by generic images or caption copying | Add diversity regularization across K samples + entropy-targeted prompts; include verification questions that must match the image content.【F:EvoLMM/src/train.py†L973-L989】 |
-| Diffusion instability | Generation path is sensitive to reward noise | Use alternating schedule and small KL steps to preserve base behavior. 【F:EvoLMM/src/train.py†L535-L639】 |
+| Diffusion instability | Generation path is sensitive to reward noise | Use alternating schedule and small KL steps to preserve base behavior.【F:EvoLMM/src/train.py†L535-L639】 |
 | Compute cost | Multi-sample diffusion generation is expensive | Start with small K and low-res; batch generation; freeze diffusion initially; estimate budget up-front. |
+| Semantic drift | Generator may learn to satisfy verification questions without true semantic understanding | Use diverse question templates; periodically evaluate on held-out prompts; monitor perplexity on base tasks. |
+| Evaluation validity | Internal metrics may not correlate with human judgment | Include external benchmarks (FID, human preference) for final validation, even if not used for training. |
 
 ---
 
@@ -170,6 +172,10 @@ If these are implemented, the project becomes a meaningful research contribution
 - Freeze diffusion vs. reward-weighted diffusion fine-tuning.
 - Caption-only vs. creative-variation prompts.
 - With/without diversity regularization and entropy targets.
+- Understanding-only vs. generation-only vs. joint training.
+- Effect of adapter rank; shared vs. separate adapters for proposer/solver/generator.
+
+---
 
 ## 9. Compute Budget (Order-of-Magnitude)
 
@@ -178,9 +184,50 @@ If these are implemented, the project becomes a meaningful research contribution
 - Generation: K samples (e.g., 3) × 20–50 denoising steps ≈ 60–150 diffusion forward passes, plus K caption passes.
 - Net: generation increases per-step compute by **~10–25×** relative to understanding-only training. This strongly argues for low-res images, small K, and freezing diffusion initially.
 
-## 10. Sources in This Repo
+**Recommended starting configuration:**
+- K = 2 generated images per prompt (minimize cost)
+- 512×512 resolution initially
+- Freeze diffusion decoder for first 5K steps
+- N = 5 solver samples (matching EvoLMM)
+- Alternating: 10 understanding steps per 1 generation step initially
+
+---
+
+## 10. Limitations of This Analysis
+
+1. **No empirical validation yet:** This report is a feasibility assessment; the proposed loop has not been implemented or tested.
+2. **Reward design is speculative:** The cycle-consistency and verification rewards are theoretically motivated but may require significant tuning.
+3. **Codebase assumptions:** We assume BLIP3-o and EvoLMM codebases can be merged without major dependency conflicts (e.g., diffusers versions, PEFT versions).
+4. **Scalability unknown:** The compute estimates are order-of-magnitude; actual GPU hours will depend on hardware, batch sizes, and convergence behavior.
+5. **Generation quality floor:** If BLIP3-o's base generation is weak, self-evolution may not improve it without strong initialization.
+
+---
+
+## 11. Next Steps (Actionable)
+
+| Priority | Task | Estimated Time |
+|----------|------|----------------|
+| 1 | Set up unified environment (merge BLIP3-o + EvoLMM deps) | 1–2 days |
+| 2 | Run baseline EvoLMM on BLIP3-o backbone (understanding only) | 2–3 days |
+| 3 | Implement `GeneratorRole` wrapper for BLIP3-o generation | 1–2 days |
+| 4 | Implement cycle-consistency reward function | 1 day |
+| 5 | Implement verification-question reward (reuse EvoLMM proposer/solver) | 1–2 days |
+| 6 | Run MVP: understanding + generation with frozen diffusion | 3–5 days |
+| 7 | Evaluate on understanding benchmarks (ChartQA, DocVQA) | 1 day |
+| 8 | Evaluate on generation metrics (FID, CLIPScore) | 1 day |
+| 9 | Ablations and hyperparameter tuning | 1–2 weeks |
+
+---
+
+## 12. Sources in This Repo
 
 - BLIP3-o model architecture and diffusion integration: `BLIP3o/blip3o/model/blip3o_arch.py`, `BLIP3o/blip3o/model/multimodal_decoder/builder.py`.
+- BLIP3-o GRPO training: `BLIP3o/trl/train_grpo.py`, `BLIP3o/trl/trl/trainer/grpo_trainer.py`.
 - BLIP3-o inference entrypoint: `BLIP3o/inference.py`.
 - EvoLMM self-evolving training loop: `EvoLMM/src/train.py`.
+- EvoLMM evaluation: `EvoLMM/Evaluation/lmms-eval/`.
 - Papers: `blip30.txt`, `evolmm.txt`.
+
+---
+
+*Report prepared for research planning. Implementation details subject to refinement during experimentation.*
