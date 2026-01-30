@@ -151,3 +151,6 @@ htmlcov/
 # touch checkpoints/.gitkeep
 # etc.
 !.gitkeep
+
+
+run_eval.sh
