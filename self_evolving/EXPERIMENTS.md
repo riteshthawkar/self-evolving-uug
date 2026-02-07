@@ -63,7 +63,7 @@ The table below is for the **understanding-only self-evolving** study from this 
 | `U06` | LoRA capacity sensitivity | `lora_r`,`lora_alpha` | `(8,16),(16,32),(32,64)` | `42` | `3` |
 | `U07` | Proposer-learning ablation (proxy) | proposer effectively frozen | `proposer_update_freq=total_steps+1` | `42` | `1` |
 
-Total full matrix runs: `23`
+Total full matrix runs: `26`
 
 ## Understanding Launchers
 
@@ -71,11 +71,10 @@ All understanding launchers live in:
 
 - `self_evolving/scripts/understanding_experiments/`
 
-Recommended (single-file, no script dependencies):
+Each launcher is standalone and has no bash dependency on other scripts.
+Scripts include only exports and direct run commands.
 
-- `run_understanding_all_standalone.sh` (`--suite core|full`)
-
-Legacy split scripts:
+Per-experiment scripts:
 
 - `00_u00_main_method.sh`
 - `01_u01_solver_samples.sh`
@@ -86,34 +85,27 @@ Legacy split scripts:
 - `06_u06_lora_capacity.sh`
 - `07_u07_frozen_proposer_proxy.sh`
 
-Example (standalone full matrix):
+Full matrix scripts:
+
+- `90_run_all_understanding.sh`
+- `run_understanding_all_standalone.sh`
+
+Example (single experiment file):
 
 ```bash
-bash self_evolving/scripts/understanding_experiments/run_understanding_all_standalone.sh \
-  --suite full \
-  --data_dir /path/to/images/train \
-  --output_root ./runs/understanding_experiments \
-  --wandb_mode online \
-  --wandb_project self-evolving-uug-understanding
+export DATA_DIR="/path/to/images/train"
+export OUTPUT_ROOT="./runs/understanding_experiments"
+export WANDB_MODE="online"
+export WANDB_PROJECT="self-evolving-uug-understanding"
+bash self_evolving/scripts/understanding_experiments/04_u04_entropy_band.sh
 ```
 
-Example (legacy split orchestrator):
+Example (full matrix):
 
 ```bash
-bash self_evolving/scripts/understanding_experiments/90_run_all_understanding.sh \
-  --suite full \
-  --data_dir /path/to/images/train \
-  --output_root ./runs/understanding_experiments
-```
-
-Dry run (print commands only):
-
-```bash
-bash self_evolving/scripts/understanding_experiments/run_understanding_all_standalone.sh \
-  --suite full \
-  --data_dir /path/to/images/train \
-  --output_root ./runs/understanding_experiments \
-  --dry_run
+export DATA_DIR="/path/to/images/train"
+export OUTPUT_ROOT="./runs/understanding_experiments"
+bash self_evolving/scripts/understanding_experiments/90_run_all_understanding.sh
 ```
 
 ## Log and Naming Layout
@@ -127,10 +119,6 @@ Each experiment family writes to its own folder:
 Inside each experiment family:
 
 - One run directory per configuration via descriptive `--run_name` (e.g., `u04_mu0p90_sigma0p35_s42`).
-- Separate launcher logs per run:
-  - `launcher_logs/<UTC_TIMESTAMP>/<run_name>.log`
-
-This keeps raw training logs and launcher/system logs separated and traceable.
 
 ## W&B Token and Env
 
