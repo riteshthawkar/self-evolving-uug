@@ -38,6 +38,7 @@ export SAVE_EVERY="${SAVE_EVERY:-200}"
 export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-3}"
 export CUDA_DEVICE="${CUDA_DEVICE:-0}"
 export PYTHON_BIN="${PYTHON_BIN:-python3}"
+export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -50,7 +51,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_1_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -100,7 +101,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_3_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -150,7 +151,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_5_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -200,7 +201,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_10_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
