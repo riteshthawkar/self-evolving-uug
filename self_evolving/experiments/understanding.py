@@ -472,6 +472,7 @@ class UnderstandingSelfEvolvingConfig:
 
     # Data
     data_dir: str = ""
+    data_split: str = "train"  # train|val|test|all
     include_subfolders: Optional[Tuple[str, ...]] = None
     max_images: Optional[int] = None
 
@@ -564,6 +565,7 @@ class UnderstandingSelfEvolvingTrainer:
         pool_cfg = ImagePoolConfig(
             data_dir=config.data_dir,
             include_subfolders=list(config.include_subfolders) if config.include_subfolders else None,
+            split=None if config.data_split == "all" else config.data_split,
             max_images=config.max_images,
             seed=config.seed,
         )
