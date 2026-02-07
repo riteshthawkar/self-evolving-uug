@@ -21,7 +21,7 @@ class ImagePoolConfig:
     data_dir: str
     include_subfolders: Optional[List[str]] = None
     split: Optional[str] = None  # train|val|test|None(all)
-    prefer_manifest: bool = True
+    prefer_manifest: bool = False
     manifest_name: Optional[str] = None
     seed: int = 42
     max_images: Optional[int] = None  # Limit for debugging
