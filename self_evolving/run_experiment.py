@@ -42,6 +42,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Core
     p.add_argument("--experiment", type=str, required=True, choices=EXPERIMENT_CHOICES)
     p.add_argument("--data_dir", type=str, default="")
+    p.add_argument("--data_split", type=str, default="train", choices=["train", "val", "test", "all"])
     p.add_argument("--output_dir", type=str, default="./runs")
     p.add_argument("--run_name", type=str, default=None)
     p.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct")
@@ -131,6 +132,7 @@ def run_understanding_self_evolving(args: argparse.Namespace):
         run_name=args.run_name,
         output_dir=args.output_dir,
         data_dir=args.data_dir,
+        data_split=args.data_split,
         include_subfolders=_parse_subfolders(args.include_subfolders),
         max_images=args.max_images,
         model_name=args.model_name,
