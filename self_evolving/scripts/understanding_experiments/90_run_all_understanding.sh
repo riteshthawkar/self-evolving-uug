@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 
+# Experiment U90: Full Understanding Matrix
+# Runs the complete U00-U07 understanding-only self-evolving matrix.
+# Changing values: all matrix values across U00-U07
+
 export REPO_ROOT="/Users/ritesh.thawkar/Ritesh/self-evolving-uug"
 cd "$REPO_ROOT"
 
+# Cache locations
 export CACHE_ROOT="${CACHE_ROOT:-$REPO_ROOT/.cache}"
 export HF_HOME="${HF_HOME:-$CACHE_ROOT/huggingface}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
@@ -16,6 +21,7 @@ export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
 mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" "$HF_METRICS_CACHE" "$TORCH_HOME" "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME"
 
+# Weights & Biases
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_MODE="${WANDB_MODE:-disabled}"
 export WANDB_PROJECT="${WANDB_PROJECT:-self-evolving-uug-understanding}"
@@ -23,6 +29,7 @@ export WANDB_ENTITY="${WANDB_ENTITY:-}"
 export WANDB_BASE_URL="${WANDB_BASE_URL:-https://api.wandb.ai}"
 export WANDB_LOG_IMAGES_EVERY="${WANDB_LOG_IMAGES_EVERY:-0}"
 
+# Run defaults (override via environment)
 export DATA_DIR="${DATA_DIR:-/path/to/images/train}"
 export MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-VL-3B-Instruct}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/runs/understanding_experiments}"
@@ -34,55 +41,1312 @@ export PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 mkdir -p "$OUTPUT_ROOT"
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U00_main_method" --run_name "u00_main_default_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u00_main_default_s42" --seed 42
+# Run: u00_main_default_s42
+# U00 baseline with seed 42.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U00_main_method" \
+  --run_name "u00_main_default_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u00_main_default_s42" \
+  --seed 42
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U00_main_method" --run_name "u00_main_default_s123" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u00_main_default_s123" --seed 123
+# Run: u00_main_default_s123
+# U00 baseline with seed 123.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U00_main_method" \
+  --run_name "u00_main_default_s123" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u00_main_default_s123" \
+  --seed 123
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U00_main_method" --run_name "u00_main_default_s777" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u00_main_default_s777" --seed 777
+# Run: u00_main_default_s777
+# U00 baseline with seed 777.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U00_main_method" \
+  --run_name "u00_main_default_s777" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u00_main_default_s777" \
+  --seed 777
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U01_solver_samples" --run_name "u01_nsamples_3_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u01_nsamples_3_s42" --seed 42 --num_solver_samples 3
+# Run: u01_nsamples_3_s42
+# U01 with num_solver_samples=3.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U01_solver_samples" \
+  --run_name "u01_nsamples_3_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u01_nsamples_3_s42" \
+  --seed 42 \
+  --num_solver_samples 3
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U01_solver_samples" --run_name "u01_nsamples_5_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u01_nsamples_5_s42" --seed 42 --num_solver_samples 5
+# Run: u01_nsamples_5_s42
+# U01 with num_solver_samples=5.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U01_solver_samples" \
+  --run_name "u01_nsamples_5_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u01_nsamples_5_s42" \
+  --seed 42 \
+  --num_solver_samples 5
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U01_solver_samples" --run_name "u01_nsamples_7_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u01_nsamples_7_s42" --seed 42 --num_solver_samples 7
+# Run: u01_nsamples_7_s42
+# U01 with num_solver_samples=7.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U01_solver_samples" \
+  --run_name "u01_nsamples_7_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u01_nsamples_7_s42" \
+  --seed 42 \
+  --num_solver_samples 7
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U02_solver_gamma" --run_name "u02_gamma_0p5_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u02_gamma_0p5_s42" --seed 42 --solver_soft_gamma 0.5
+# Run: u02_gamma_0p5_s42
+# U02 with solver_soft_gamma=0.5.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U02_solver_gamma" \
+  --run_name "u02_gamma_0p5_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u02_gamma_0p5_s42" \
+  --seed 42 \
+  --solver_soft_gamma 0.5
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U02_solver_gamma" --run_name "u02_gamma_0p7_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u02_gamma_0p7_s42" --seed 42 --solver_soft_gamma 0.7
+# Run: u02_gamma_0p7_s42
+# U02 with solver_soft_gamma=0.7.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U02_solver_gamma" \
+  --run_name "u02_gamma_0p7_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u02_gamma_0p7_s42" \
+  --seed 42 \
+  --solver_soft_gamma 0.7
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U02_solver_gamma" --run_name "u02_gamma_1p0_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u02_gamma_1p0_s42" --seed 42 --solver_soft_gamma 1.0
+# Run: u02_gamma_1p0_s42
+# U02 with solver_soft_gamma=1.0.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U02_solver_gamma" \
+  --run_name "u02_gamma_1p0_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u02_gamma_1p0_s42" \
+  --seed 42 \
+  --solver_soft_gamma 1.0
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" --run_name "u03_propfreq_1_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u03_propfreq_1_s42" --seed 42 --proposer_update_freq 1
+# Run: u03_propfreq_1_s42
+# U03 with proposer_update_freq=1.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
+  --run_name "u03_propfreq_1_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u03_propfreq_1_s42" \
+  --seed 42 \
+  --proposer_update_freq 1
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" --run_name "u03_propfreq_3_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u03_propfreq_3_s42" --seed 42 --proposer_update_freq 3
+# Run: u03_propfreq_3_s42
+# U03 with proposer_update_freq=3.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
+  --run_name "u03_propfreq_3_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u03_propfreq_3_s42" \
+  --seed 42 \
+  --proposer_update_freq 3
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" --run_name "u03_propfreq_5_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u03_propfreq_5_s42" --seed 42 --proposer_update_freq 5
+# Run: u03_propfreq_5_s42
+# U03 with proposer_update_freq=5.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
+  --run_name "u03_propfreq_5_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u03_propfreq_5_s42" \
+  --seed 42 \
+  --proposer_update_freq 5
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" --run_name "u03_propfreq_10_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u03_propfreq_10_s42" --seed 42 --proposer_update_freq 10
+# Run: u03_propfreq_10_s42
+# U03 with proposer_update_freq=10.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
+  --run_name "u03_propfreq_10_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u03_propfreq_10_s42" \
+  --seed 42 \
+  --proposer_update_freq 10
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U04_entropy_band" --run_name "u04_mu0p70_sigma0p25_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u04_mu0p70_sigma0p25_s42" --seed 42 --prop_entropy_mu 0.70 --prop_entropy_sigma 0.25
+# Run: u04_mu0p70_sigma0p25_s42
+# U04 with mu=0.70 sigma=0.25.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
+  --run_name "u04_mu0p70_sigma0p25_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u04_mu0p70_sigma0p25_s42" \
+  --seed 42 \
+  --prop_entropy_mu 0.70 \
+  --prop_entropy_sigma 0.25
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U04_entropy_band" --run_name "u04_mu0p70_sigma0p35_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u04_mu0p70_sigma0p35_s42" --seed 42 --prop_entropy_mu 0.70 --prop_entropy_sigma 0.35
+# Run: u04_mu0p70_sigma0p35_s42
+# U04 with mu=0.70 sigma=0.35.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
+  --run_name "u04_mu0p70_sigma0p35_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u04_mu0p70_sigma0p35_s42" \
+  --seed 42 \
+  --prop_entropy_mu 0.70 \
+  --prop_entropy_sigma 0.35
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U04_entropy_band" --run_name "u04_mu0p90_sigma0p25_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u04_mu0p90_sigma0p25_s42" --seed 42 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.25
+# Run: u04_mu0p90_sigma0p25_s42
+# U04 with mu=0.90 sigma=0.25.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
+  --run_name "u04_mu0p90_sigma0p25_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u04_mu0p90_sigma0p25_s42" \
+  --seed 42 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.25
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U04_entropy_band" --run_name "u04_mu0p90_sigma0p35_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u04_mu0p90_sigma0p35_s42" --seed 42 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35
+# Run: u04_mu0p90_sigma0p35_s42
+# U04 with mu=0.90 sigma=0.35.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
+  --run_name "u04_mu0p90_sigma0p35_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u04_mu0p90_sigma0p35_s42" \
+  --seed 42 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U04_entropy_band" --run_name "u04_mu1p10_sigma0p25_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u04_mu1p10_sigma0p25_s42" --seed 42 --prop_entropy_mu 1.10 --prop_entropy_sigma 0.25
+# Run: u04_mu1p10_sigma0p25_s42
+# U04 with mu=1.10 sigma=0.25.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
+  --run_name "u04_mu1p10_sigma0p25_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u04_mu1p10_sigma0p25_s42" \
+  --seed 42 \
+  --prop_entropy_mu 1.10 \
+  --prop_entropy_sigma 0.25
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U04_entropy_band" --run_name "u04_mu1p10_sigma0p35_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u04_mu1p10_sigma0p35_s42" --seed 42 --prop_entropy_mu 1.10 --prop_entropy_sigma 0.35
+# Run: u04_mu1p10_sigma0p35_s42
+# U04 with mu=1.10 sigma=0.35.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
+  --run_name "u04_mu1p10_sigma0p35_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u04_mu1p10_sigma0p35_s42" \
+  --seed 42 \
+  --prop_entropy_mu 1.10 \
+  --prop_entropy_sigma 0.35
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U05_kl_sensitivity" --run_name "u05_klcoef2e3_kltarget0p01_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u05_klcoef2e3_kltarget0p01_s42" --seed 42 --kl_coef 2e-3 --kl_target 0.01
+# Run: u05_klcoef2e3_kltarget0p01_s42
+# U05 with kl_coef=2e-3 kl_target=0.01.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U05_kl_sensitivity" \
+  --run_name "u05_klcoef2e3_kltarget0p01_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u05_klcoef2e3_kltarget0p01_s42" \
+  --seed 42 \
+  --kl_coef 2e-3 \
+  --kl_target 0.01
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U05_kl_sensitivity" --run_name "u05_klcoef1e3_kltarget0p02_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u05_klcoef1e3_kltarget0p02_s42" --seed 42 --kl_coef 1e-3 --kl_target 0.02
+# Run: u05_klcoef1e3_kltarget0p02_s42
+# U05 with kl_coef=1e-3 kl_target=0.02.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U05_kl_sensitivity" \
+  --run_name "u05_klcoef1e3_kltarget0p02_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u05_klcoef1e3_kltarget0p02_s42" \
+  --seed 42 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U05_kl_sensitivity" --run_name "u05_klcoef5e4_kltarget0p05_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u05_klcoef5e4_kltarget0p05_s42" --seed 42 --kl_coef 5e-4 --kl_target 0.05
+# Run: u05_klcoef5e4_kltarget0p05_s42
+# U05 with kl_coef=5e-4 kl_target=0.05.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U05_kl_sensitivity" \
+  --run_name "u05_klcoef5e4_kltarget0p05_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u05_klcoef5e4_kltarget0p05_s42" \
+  --seed 42 \
+  --kl_coef 5e-4 \
+  --kl_target 0.05
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U06_lora_capacity" --run_name "u06_lorar8_alpha16_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u06_lorar8_alpha16_s42" --seed 42 --lora_r 8 --lora_alpha 16
+# Run: u06_lorar8_alpha16_s42
+# U06 with lora_r=8 lora_alpha=16.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U06_lora_capacity" \
+  --run_name "u06_lorar8_alpha16_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u06_lorar8_alpha16_s42" \
+  --seed 42 \
+  --lora_r 8 \
+  --lora_alpha 16
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U06_lora_capacity" --run_name "u06_lorar16_alpha32_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u06_lorar16_alpha32_s42" --seed 42 --lora_r 16 --lora_alpha 32
+# Run: u06_lorar16_alpha32_s42
+# U06 with lora_r=16 lora_alpha=32.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U06_lora_capacity" \
+  --run_name "u06_lorar16_alpha32_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u06_lorar16_alpha32_s42" \
+  --seed 42 \
+  --lora_r 16 \
+  --lora_alpha 32
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U06_lora_capacity" --run_name "u06_lorar32_alpha64_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u06_lorar32_alpha64_s42" --seed 42 --lora_r 32 --lora_alpha 64
+# Run: u06_lorar32_alpha64_s42
+# U06 with lora_r=32 lora_alpha=64.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U06_lora_capacity" \
+  --run_name "u06_lorar32_alpha64_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u06_lorar32_alpha64_s42" \
+  --seed 42 \
+  --lora_r 32 \
+  --lora_alpha 64
 
-"$PYTHON_BIN" self_evolving/run_experiment.py --experiment understanding_self_evolving --data_dir "$DATA_DIR" --model_name "$MODEL_NAME" --output_dir "$OUTPUT_ROOT/U07_frozen_proposer_proxy" --run_name "u07_frozen_proposer_proxy_s42" --dtype bfloat16 --device_map single --cuda_device "$CUDA_DEVICE" --total_steps "$TOTAL_STEPS" --save_every "$SAVE_EVERY" --log_every 1 --max_checkpoints "$MAX_CHECKPOINTS" --deterministic --use_lora --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector --lr 1e-6 --weight_decay 0.01 --grad_clip 1.0 --proposer_update_freq 5 --temp 1.0 --top_p 1.0 --max_new_tokens_solver 128 --max_new_tokens_proposer 128 --num_solver_samples 5 --solver_soft_gamma 0.7 --len_penalty_weight 0.10 --len_penalty_target_words 6 --prop_entropy_mu 0.90 --prop_entropy_sigma 0.35 --kl_coef 1e-3 --kl_target 0.02 --kl_adapt_rate 0.10 --kl_min 1e-8 --kl_max 1e2 --baseline_momentum 0.9 --clear_cache_every 25 --wandb_mode "$WANDB_MODE" --wandb_project "$WANDB_PROJECT" --wandb_entity "$WANDB_ENTITY" --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" --wandb_run_name "u07_frozen_proposer_proxy_s42" --seed 42 --proposer_update_freq 6001
+# Run: u07_frozen_proposer_proxy_s42
+# U07 frozen proposer proxy.
+"$PYTHON_BIN" self_evolving/run_experiment.py \
+  --experiment understanding_self_evolving \
+  --data_dir "$DATA_DIR" \
+  --model_name "$MODEL_NAME" \
+  --output_dir "$OUTPUT_ROOT/U07_frozen_proposer_proxy" \
+  --run_name "u07_frozen_proposer_proxy_s42" \
+  --dtype bfloat16 \
+  --device_map single \
+  --cuda_device "$CUDA_DEVICE" \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every 1 \
+  --max_checkpoints "$MAX_CHECKPOINTS" \
+  --deterministic \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --proposer_update_freq 5 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 128 \
+  --max_new_tokens_proposer 128 \
+  --num_solver_samples 5 \
+  --solver_soft_gamma 0.7 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --kl_coef 1e-3 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 25 \
+  --wandb_mode "$WANDB_MODE" \
+  --wandb_project "$WANDB_PROJECT" \
+  --wandb_entity "$WANDB_ENTITY" \
+  --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
+  --wandb_run_name "u07_frozen_proposer_proxy_s42" \
+  --seed 42 \
+  --proposer_update_freq 6001
 
