@@ -38,6 +38,7 @@ export SAVE_EVERY="${SAVE_EVERY:-200}"
 export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-3}"
 export CUDA_DEVICE="${CUDA_DEVICE:-0}"
 export PYTHON_BIN="${PYTHON_BIN:-python3}"
+export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -50,7 +51,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U00_main_method" \
   --run_name "u00_main_default_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -99,7 +100,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U00_main_method" \
   --run_name "u00_main_default_s123" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -148,7 +149,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U00_main_method" \
   --run_name "u00_main_default_s777" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -197,7 +198,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U01_solver_samples" \
   --run_name "u01_nsamples_3_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -247,7 +248,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U01_solver_samples" \
   --run_name "u01_nsamples_5_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -297,7 +298,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U01_solver_samples" \
   --run_name "u01_nsamples_7_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -347,7 +348,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U02_solver_gamma" \
   --run_name "u02_gamma_0p5_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -397,7 +398,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U02_solver_gamma" \
   --run_name "u02_gamma_0p7_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -447,7 +448,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U02_solver_gamma" \
   --run_name "u02_gamma_1p0_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -497,7 +498,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_1_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -547,7 +548,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_3_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -597,7 +598,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_5_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -647,7 +648,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_10_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -697,7 +698,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
   --run_name "u04_mu0p70_sigma0p25_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -748,7 +749,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
   --run_name "u04_mu0p70_sigma0p35_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -799,7 +800,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
   --run_name "u04_mu0p90_sigma0p25_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -850,7 +851,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
   --run_name "u04_mu0p90_sigma0p35_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -901,7 +902,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
   --run_name "u04_mu1p10_sigma0p25_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -952,7 +953,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
   --run_name "u04_mu1p10_sigma0p35_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -1003,7 +1004,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U05_kl_sensitivity" \
   --run_name "u05_klcoef2e3_kltarget0p01_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -1054,7 +1055,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U05_kl_sensitivity" \
   --run_name "u05_klcoef1e3_kltarget0p02_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -1105,7 +1106,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U05_kl_sensitivity" \
   --run_name "u05_klcoef5e4_kltarget0p05_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -1156,7 +1157,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U06_lora_capacity" \
   --run_name "u06_lorar8_alpha16_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -1207,7 +1208,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U06_lora_capacity" \
   --run_name "u06_lorar16_alpha32_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -1258,7 +1259,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U06_lora_capacity" \
   --run_name "u06_lorar32_alpha64_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -1309,7 +1310,7 @@ mkdir -p "$OUTPUT_ROOT"
   --output_dir "$OUTPUT_ROOT/U07_frozen_proposer_proxy" \
   --run_name "u07_frozen_proposer_proxy_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \

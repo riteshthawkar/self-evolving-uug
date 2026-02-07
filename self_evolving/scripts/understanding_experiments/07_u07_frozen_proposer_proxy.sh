@@ -38,6 +38,7 @@ export SAVE_EVERY="${SAVE_EVERY:-200}"
 export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-3}"
 export CUDA_DEVICE="${CUDA_DEVICE:-0}"
 export PYTHON_BIN="${PYTHON_BIN:-python3}"
+export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -53,7 +54,7 @@ export FROZEN_PROPOSER_UPDATE_FREQ="${FROZEN_PROPOSER_UPDATE_FREQ:-6001}"
   --output_dir "$OUTPUT_ROOT/U07_frozen_proposer_proxy" \
   --run_name "u07_frozen_proposer_proxy_s42" \
   --dtype bfloat16 \
-  --device_map single \
+  --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
