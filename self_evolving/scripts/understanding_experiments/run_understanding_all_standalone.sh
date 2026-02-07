@@ -10,7 +10,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 # It runs the understanding-only experiment matrix from one file.
 #
 # Usage:
-#   bash self_evolving/scripts/understanding_experiments/90_run_all_understanding.sh \
+#   bash self_evolving/scripts/understanding_experiments/run_understanding_all_standalone.sh \
 #     --data_dir /path/to/images/train \
 #     --output_root ./runs/understanding_experiments \
 #     --suite full

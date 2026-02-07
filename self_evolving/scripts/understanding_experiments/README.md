@@ -1,18 +1,45 @@
 # Understanding Experiment Launchers
 
-This folder contains separate bash launchers for each understanding-only experiment family.
+This folder contains:
 
-## Scripts
+- A single self-contained runner with all understanding commands inline:
+  - `run_understanding_all_standalone.sh`
+- Separate family launchers (each one is now self-contained; no sourcing other scripts):
+  - `00_u00_main_method.sh`
+  - `01_u01_solver_samples.sh`
+  - `02_u02_solver_gamma.sh`
+  - `03_u03_proposer_update_freq.sh`
+  - `04_u04_entropy_band.sh`
+  - `05_u05_kl_sensitivity.sh`
+  - `06_u06_lora_capacity.sh`
+  - `07_u07_frozen_proposer_proxy.sh`
+  - `90_run_all_understanding.sh`
 
-- `00_u00_main_method.sh`
-- `01_u01_solver_samples.sh`
-- `02_u02_solver_gamma.sh`
-- `03_u03_proposer_update_freq.sh`
-- `04_u04_entropy_band.sh`
-- `05_u05_kl_sensitivity.sh`
-- `06_u06_lora_capacity.sh`
-- `07_u07_frozen_proposer_proxy.sh`
-- `90_run_all_understanding.sh`
+## Recommended (dependency-free) usage
+
+```bash
+bash self_evolving/scripts/understanding_experiments/run_understanding_all_standalone.sh \
+  --data_dir /path/to/images/train \
+  --output_root ./runs/understanding_experiments \
+  --suite full
+```
+
+This script does not source any other script and includes:
+
+- all U00-U07 run commands
+- Hugging Face/PyTorch cache exports
+- W&B env handling and CLI wiring
+
+## Per-experiment standalone usage
+
+Each per-experiment script (`00` to `07`) is also fully standalone and includes:
+
+- cache exports
+- W&B env exports/flags
+- argument parsing
+- direct `run_experiment.py` commands
+
+No `common.sh` dependency is required for these scripts.
 
 ## Common usage
 
