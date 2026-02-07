@@ -1,75 +1,27 @@
 # Understanding Experiment Launchers
 
-This folder contains:
+All scripts here are pure standalone scripts:
 
-- A single self-contained runner with all understanding commands inline:
-  - `run_understanding_all_standalone.sh`
-- Separate family launchers (each one is now self-contained; no sourcing other scripts):
-  - `00_u00_main_method.sh`
-  - `01_u01_solver_samples.sh`
-  - `02_u02_solver_gamma.sh`
-  - `03_u03_proposer_update_freq.sh`
-  - `04_u04_entropy_band.sh`
-  - `05_u05_kl_sensitivity.sh`
-  - `06_u06_lora_capacity.sh`
-  - `07_u07_frozen_proposer_proxy.sh`
-  - `90_run_all_understanding.sh`
+- `00_u00_main_method.sh`
+- `01_u01_solver_samples.sh`
+- `02_u02_solver_gamma.sh`
+- `03_u03_proposer_update_freq.sh`
+- `04_u04_entropy_band.sh`
+- `05_u05_kl_sensitivity.sh`
+- `06_u06_lora_capacity.sh`
+- `07_u07_frozen_proposer_proxy.sh`
+- `90_run_all_understanding.sh`
+- `run_understanding_all_standalone.sh`
 
-## Recommended (dependency-free) usage
+No script sources any other bash file.  
+Each script only has:
 
-```bash
-bash self_evolving/scripts/understanding_experiments/run_understanding_all_standalone.sh \
-  --data_dir /path/to/images/train \
-  --output_root ./runs/understanding_experiments \
-  --suite full
-```
-
-This script does not source any other script and includes:
-
-- all U00-U07 run commands
-- Hugging Face/PyTorch cache exports
-- W&B env handling and CLI wiring
-
-## Per-experiment standalone usage
-
-Each per-experiment script (`00` to `07`) is also fully standalone and includes:
-
-- cache exports
-- W&B env exports/flags
-- argument parsing
-- direct `run_experiment.py` commands
-
-No `common.sh` dependency is required for these scripts.
-
-## Common usage
-
-```bash
-bash self_evolving/scripts/understanding_experiments/00_u00_main_method.sh \
-  --data_dir /path/to/images/train \
-  --output_root ./runs/understanding_experiments
-```
-
-Common flags accepted by all scripts:
-
-- `--data_dir` (required)
-- `--model_name`
-- `--output_root`
-- `--total_steps`
-- `--save_every`
-- `--max_checkpoints`
-- `--cuda_device`
-- `--python_bin`
-- `--wandb_mode`
-- `--wandb_project`
-- `--wandb_entity`
-- `--wandb_log_images_every`
-- `--dry_run`
-
-Unknown flags are forwarded to `self_evolving/run_experiment.py`.
+- `export` lines (cache, W&B, run config)
+- direct `python self_evolving/run_experiment.py ...` commands
 
 ## W&B environment variables
 
-Each bash file exports the following at the top (using existing env values if set):
+Each script exports these (override before running if needed):
 
 - `WANDB_API_KEY` (token read by the Python trainer)
 - `WANDB_MODE` (`online|offline|disabled`)
@@ -87,14 +39,19 @@ export WANDB_PROJECT="self-evolving-uug-understanding"
 export WANDB_ENTITY="<team_or_user>"
 ```
 
-## Output naming
+## Running
 
-Each experiment family writes to its own folder under `--output_root`, and each run uses descriptive names like:
+Set env vars, then run a script:
 
-- `u01_nsamples_7_s42`
-- `u04_mu0p90_sigma0p35_s42`
-- `u07_frozen_proposer_proxy_s42`
+```bash
+export DATA_DIR="/path/to/images/train"
+export OUTPUT_ROOT="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/runs/understanding_experiments"
+bash self_evolving/scripts/understanding_experiments/00_u00_main_method.sh
+```
 
-Launcher logs are stored separately in:
+Run full matrix:
 
-- `<experiment_family>/launcher_logs/<UTC_TIMESTAMP>/<run_name>.log`
+```bash
+export DATA_DIR="/path/to/images/train"
+bash self_evolving/scripts/understanding_experiments/90_run_all_understanding.sh
+```
