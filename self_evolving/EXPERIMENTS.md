@@ -65,13 +65,17 @@ The table below is for the **understanding-only self-evolving** study from this 
 
 Total full matrix runs: `23`
 
-## Separate Experiment Scripts
+## Understanding Launchers
 
-All understanding experiment launchers now live in:
+All understanding launchers live in:
 
 - `self_evolving/scripts/understanding_experiments/`
 
-Individual scripts:
+Recommended (single-file, no script dependencies):
+
+- `run_understanding_all_standalone.sh` (`--suite core|full`)
+
+Legacy split scripts:
 
 - `00_u00_main_method.sh`
 - `01_u01_solver_samples.sh`
@@ -82,21 +86,18 @@ Individual scripts:
 - `06_u06_lora_capacity.sh`
 - `07_u07_frozen_proposer_proxy.sh`
 
-Orchestrator:
-
-- `90_run_all_understanding.sh` (`--suite core|full`)
-
-Example (single experiment family):
+Example (standalone full matrix):
 
 ```bash
-bash self_evolving/scripts/understanding_experiments/04_u04_entropy_band.sh \
+bash self_evolving/scripts/understanding_experiments/run_understanding_all_standalone.sh \
+  --suite full \
   --data_dir /path/to/images/train \
   --output_root ./runs/understanding_experiments \
   --wandb_mode online \
   --wandb_project self-evolving-uug-understanding
 ```
 
-Example (full matrix):
+Example (legacy split orchestrator):
 
 ```bash
 bash self_evolving/scripts/understanding_experiments/90_run_all_understanding.sh \
@@ -108,7 +109,7 @@ bash self_evolving/scripts/understanding_experiments/90_run_all_understanding.sh
 Dry run (print commands only):
 
 ```bash
-bash self_evolving/scripts/understanding_experiments/90_run_all_understanding.sh \
+bash self_evolving/scripts/understanding_experiments/run_understanding_all_standalone.sh \
   --suite full \
   --data_dir /path/to/images/train \
   --output_root ./runs/understanding_experiments \
