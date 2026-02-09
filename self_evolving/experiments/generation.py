@@ -333,7 +333,8 @@ class TextPolicyUpdater:
         baseline: float,
         device: torch.device,
     ) -> Dict[str, float]:
-        completion = completion or "\n<image>"
+        if not completion or not str(completion).strip():
+            raise ValueError("Generator update requires non-empty token completion trace.")
         self.step_id += 1
 
         text_prompt = prompt
@@ -454,6 +455,7 @@ class GenerationSelfEvolvingConfig:
     max_new_tokens_caption: int = 96
     max_new_tokens_generator: int = 768
     num_solver_samples: int = 5
+    num_solver_samples_spec: int = 3
     num_generations: int = 4
 
     # Generation backend
@@ -461,7 +463,8 @@ class GenerationSelfEvolvingConfig:
     generation_guidance_scale: float = 2.0
     generation_height: int = 1024
     generation_width: int = 1024
-    strict_require_generation_tokens: bool = False
+    strict_require_generation_tokens: bool = True
+    verification_use_reference_solver: bool = True
 
     # Reward shaping
     solver_soft_gamma: float = 0.7
@@ -473,6 +476,10 @@ class GenerationSelfEvolvingConfig:
     reward_cycle_weight: float = 0.20
     reward_diversity_weight: float = 0.10
     reward_contradiction_weight: float = 0.20
+    min_spec_quality_for_update: float = 0.35
+    min_spec_qa_pairs: int = 2
+    max_expected_words: int = 8
+    max_question_words: int = 24
 
     # KL control
     kl_coef: float = 1e-3
@@ -920,7 +927,6 @@ class GenerationSelfEvolvingTrainer:
                 (step_dir / "solver").is_dir()
                 and (step_dir / "proposer").is_dir()
                 and (step_dir / "generator").is_dir()
-                and (step_dir / "trainable_adapters.pt").is_file()
             )
         return (step_dir / "model").is_dir()
 
@@ -1055,6 +1061,60 @@ class GenerationSelfEvolvingTrainer:
         spec = _parse_generation_spec(raw)
         return spec
 
+    def _sanitize_and_score_spec(self, spec: GenerationSpec) -> Tuple[GenerationSpec, float, Dict[str, float]]:
+        filtered: List[GenerationQAPair] = []
+        seen_questions = set()
+        valid_count = 0
+
+        for qa in spec.qa_pairs:
+            q = " ".join((qa.question or "").split())
+            e = " ".join((qa.expected or "").split())
+            if q and not q.endswith("?"):
+                q = f"{q}?"
+
+            q_words = len(_tokenize_words(q))
+            e_words = len(_tokenize_words(e))
+            is_valid = bool(q and e and q_words <= self.cfg.max_question_words and 1 <= e_words <= self.cfg.max_expected_words)
+            if not is_valid:
+                continue
+
+            q_key = normalize_answer(q)
+            if q_key in seen_questions:
+                continue
+            seen_questions.add(q_key)
+            valid_count += 1
+            filtered.append(GenerationQAPair(question=q, expected=e))
+
+        filtered = filtered[:3]
+        qa_count = len(filtered)
+        raw_count = len(spec.qa_pairs)
+
+        count_score = min(1.0, qa_count / float(max(1, self.cfg.min_spec_qa_pairs)))
+        validity_score = qa_count / float(max(1, raw_count))
+        uniqueness_score = len({normalize_answer(qa.question) for qa in filtered}) / float(max(1, qa_count))
+        all_yes_no = qa_count > 0 and all(_yes_no_polarity(qa.expected) != 0 for qa in filtered)
+        yes_no_penalty = 0.2 if all_yes_no and qa_count >= self.cfg.min_spec_qa_pairs else 0.0
+
+        quality = 0.5 * count_score + 0.3 * validity_score + 0.2 * uniqueness_score - yes_no_penalty
+        quality = float(max(0.0, min(1.0, quality)))
+
+        sanitized = GenerationSpec(
+            prompt=spec.prompt,
+            qa_pairs=tuple(filtered),
+            raw_output=spec.raw_output,
+            fallback_used=spec.fallback_used or (qa_count < self.cfg.min_spec_qa_pairs),
+        )
+        details = {
+            "raw_qa_count": float(raw_count),
+            "filtered_qa_count": float(qa_count),
+            "count_score": float(count_score),
+            "validity_score": float(validity_score),
+            "uniqueness_score": float(uniqueness_score),
+            "yes_no_penalty": float(yes_no_penalty),
+            "spec_quality": float(quality),
+        }
+        return sanitized, quality, details
+
     def _generate_image_candidate(self, prompt: str) -> Dict[str, object]:
         model_ref = _unwrap_model(self.model)
 
@@ -1123,7 +1183,7 @@ class GenerationSelfEvolvingTrainer:
             return {
                 "image": _ensure_pil_image(image_out),
                 "policy_prompt": prompt,
-                "policy_completion": "\n<image>",
+                "policy_completion": "",
                 "backend": "generate_image",
             }
 
@@ -1136,12 +1196,15 @@ class GenerationSelfEvolvingTrainer:
         solver_prompt = build_solver_prompt(question)
         rollouts = []
         answers_norm: List[str] = []
+        adapter_name: Optional[str] = None
+        if self.cfg.use_lora and not self.cfg.verification_use_reference_solver:
+            adapter_name = "default"
 
-        for _ in range(self.cfg.num_solver_samples):
+        for _ in range(self.cfg.num_solver_samples_spec):
             completion = self._generate(
                 image=image,
                 prompt=solver_prompt,
-                adapter_name="default" if self.cfg.use_lora else None,
+                adapter_name=adapter_name,
                 max_new_tokens=self.cfg.max_new_tokens_solver,
                 temperature=self.cfg.temp,
                 top_p=self.cfg.top_p,
@@ -1169,6 +1232,7 @@ class GenerationSelfEvolvingTrainer:
 
         return {
             "solver_prompt": solver_prompt,
+            "verification_adapter": "default" if adapter_name == "default" else "reference",
             "rollouts": rollouts,
             "majority_answer": maj_answer,
             "majority_count": maj_count,
@@ -1241,6 +1305,7 @@ class GenerationSelfEvolvingTrainer:
         prompt: str,
         qa_pairs: Tuple[GenerationQAPair, ...],
         candidates: List[Dict[str, object]],
+        spec_quality: float,
     ) -> List[Dict[str, object]]:
         images = [cand["image"] for cand in candidates]
         diversity = _image_diversity_score(images)
@@ -1251,12 +1316,13 @@ class GenerationSelfEvolvingTrainer:
             spec_score, contradiction_score, qa_logs = self._score_spec(image=image, qa_pairs=qa_pairs)
             cycle_score, cycle_caption = self._cycle_reward(prompt=prompt, image=image)
 
-            total_reward = (
+            base_reward = (
                 self.cfg.reward_spec_weight * spec_score
                 + self.cfg.reward_cycle_weight * cycle_score
                 + self.cfg.reward_diversity_weight * diversity
                 - self.cfg.reward_contradiction_weight * contradiction_score
             )
+            total_reward = spec_quality * base_reward
             scored.append(
                 {
                     "candidate_idx": idx,
@@ -1268,6 +1334,8 @@ class GenerationSelfEvolvingTrainer:
                     "cycle_score": cycle_score,
                     "cycle_caption": cycle_caption,
                     "diversity_score": diversity,
+                    "base_reward": base_reward,
+                    "spec_quality": spec_quality,
                     "total_reward": total_reward,
                     "qa_logs": qa_logs,
                     "image": image,
@@ -1418,6 +1486,15 @@ class GenerationSelfEvolvingTrainer:
         spec: GenerationSpec,
         scored: List[Dict[str, object]],
         best_idx: int,
+        spec_quality: float,
+        reward_mean_global: float,
+        reward_max_global: float,
+        reward_min_global: float,
+        best_spec_global: float,
+        best_cycle_global: float,
+        best_diversity_global: float,
+        best_contradiction_global: float,
+        generator_skipped_reason: Optional[str],
         proposer_stats: Optional[Dict[str, float]],
         generator_stats: Optional[Dict[str, float]],
     ):
@@ -1425,27 +1502,30 @@ class GenerationSelfEvolvingTrainer:
             return
 
         best = scored[best_idx]
-        rewards = [float(c["total_reward"]) for c in scored]
         metrics: Dict[str, object] = {
             "train/step": step,
             "train/source_caption": source_caption,
             "train/spec_fallback_used": 1.0 if spec.fallback_used else 0.0,
+            "train/spec_quality": float(spec_quality),
             "train/spec_qa_count": float(len(spec.qa_pairs)),
-            "train/candidate_reward_mean": sum(rewards) / max(1, len(rewards)),
-            "train/candidate_reward_max": max(rewards) if rewards else 0.0,
-            "train/candidate_reward_min": min(rewards) if rewards else 0.0,
-            "train/best_spec_score": float(best["spec_score"]),
-            "train/best_cycle_score": float(best["cycle_score"]),
-            "train/best_diversity_score": float(best["diversity_score"]),
-            "train/best_contradiction_score": float(best["contradiction_score"]),
+            "train/candidate_reward_mean": float(reward_mean_global),
+            "train/candidate_reward_max": float(reward_max_global),
+            "train/candidate_reward_min": float(reward_min_global),
+            "train/best_spec_score": float(best_spec_global),
+            "train/best_cycle_score": float(best_cycle_global),
+            "train/best_diversity_score": float(best_diversity_global),
+            "train/best_contradiction_score": float(best_contradiction_global),
             "train/generator_baseline": self.generator_baseline,
             "train/proposer_baseline": self.proposer_baseline,
+            "train/generator_update_skipped": 1.0 if generator_skipped_reason else 0.0,
             "kl/generator_beta": self.generator_updater.kl_coef,
             "kl/proposer_beta": self.proposer_updater.kl_coef,
             "text/prompt": spec.prompt,
             "text/proposer_raw": spec.raw_output,
             "text/best_cycle_caption": best.get("cycle_caption", ""),
         }
+        if generator_skipped_reason:
+            metrics["train/generator_skip_reason"] = generator_skipped_reason
         if image_path:
             metrics["data/image_path"] = image_path
 
@@ -1494,15 +1574,22 @@ class GenerationSelfEvolvingTrainer:
                 fallback_used=True,
             )
 
+        spec, spec_quality, spec_quality_details = self._sanitize_and_score_spec(spec)
         candidates = [self._generate_image_candidate(spec.prompt) for _ in range(self.cfg.num_generations)]
-        scored = self._score_candidates(prompt=spec.prompt, qa_pairs=spec.qa_pairs, candidates=candidates)
+        scored = self._score_candidates(
+            prompt=spec.prompt,
+            qa_pairs=spec.qa_pairs,
+            candidates=candidates,
+            spec_quality=spec_quality,
+        )
         best_idx = max(range(len(scored)), key=lambda i: float(scored[i]["total_reward"]))
         best = scored[best_idx]
 
         proposer_stats = None
         generator_stats = None
+        generator_skipped_reason = None
 
-        if step % self.cfg.generator_update_freq == 0:
+        if step % self.cfg.generator_update_freq == 0 and spec_quality >= self.cfg.min_spec_quality_for_update:
             baseline_before = self.generator_baseline
             completion = str(best.get("policy_completion", ""))
             if self.cfg.strict_require_generation_tokens and not completion.strip():
@@ -1510,27 +1597,55 @@ class GenerationSelfEvolvingTrainer:
                     "No generation token trace was returned by the model backend. "
                     "Set --strict_require_generation_tokens false or use a backend exposing token traces."
                 )
-            generator_stats = self.generator_updater.step(
-                prompt=str(best.get("policy_prompt", spec.prompt)),
-                completion=completion,
-                reward=float(best["total_reward"]),
-                baseline=baseline_before,
-                device=self.device,
-            )
-            self._policy_update_counts["generator"] += 1
-            self._update_baseline("generator", float(best["total_reward"]))
-            self._sync_state_scalars()
+            if completion.strip():
+                generator_stats = self.generator_updater.step(
+                    prompt=str(best.get("policy_prompt", spec.prompt)),
+                    completion=completion,
+                    reward=float(best["total_reward"]),
+                    baseline=baseline_before,
+                    device=self.device,
+                )
+                self._policy_update_counts["generator"] += 1
+                self._update_baseline("generator", float(best["total_reward"]))
+                self._sync_state_scalars()
 
+                self._append_jsonl(
+                    self.policy_updates_log_path,
+                    {
+                        "step": step,
+                        "role": "generator",
+                        "reward": float(best["total_reward"]),
+                        "baseline_before": baseline_before,
+                        "baseline_after": self.generator_baseline,
+                        "stats": generator_stats,
+                        "candidate_idx": int(best_idx),
+                        "spec_quality": spec_quality,
+                    },
+                )
+            else:
+                generator_skipped_reason = "missing_generation_token_trace"
+                self._append_jsonl(
+                    self.policy_updates_log_path,
+                    {
+                        "step": step,
+                        "role": "generator",
+                        "skipped": True,
+                        "reason": generator_skipped_reason,
+                        "candidate_idx": int(best_idx),
+                        "spec_quality": spec_quality,
+                    },
+                )
+        elif step % self.cfg.generator_update_freq == 0:
+            generator_skipped_reason = "low_spec_quality"
             self._append_jsonl(
                 self.policy_updates_log_path,
                 {
                     "step": step,
                     "role": "generator",
-                    "reward": float(best["total_reward"]),
-                    "baseline_before": baseline_before,
-                    "baseline_after": self.generator_baseline,
-                    "stats": generator_stats,
-                    "candidate_idx": int(best_idx),
+                    "skipped": True,
+                    "reason": generator_skipped_reason,
+                    "spec_quality": spec_quality,
+                    "min_spec_quality_for_update": self.cfg.min_spec_quality_for_update,
                 },
             )
 
@@ -1572,6 +1687,8 @@ class GenerationSelfEvolvingTrainer:
                 "prompt": spec.prompt,
                 "qa_pairs": [dataclasses.asdict(qa) for qa in spec.qa_pairs],
                 "fallback_used": spec.fallback_used,
+                "spec_quality": spec_quality,
+                "spec_quality_details": spec_quality_details,
                 "raw_output": spec.raw_output,
             },
         )
@@ -1593,6 +1710,8 @@ class GenerationSelfEvolvingTrainer:
                     "cycle_score": cand["cycle_score"],
                     "cycle_caption": cand["cycle_caption"],
                     "diversity_score": cand["diversity_score"],
+                    "base_reward": cand["base_reward"],
+                    "spec_quality": cand["spec_quality"],
                     "total_reward": cand["total_reward"],
                     "qa_logs": qa_logs,
                 },
@@ -1610,6 +1729,8 @@ class GenerationSelfEvolvingTrainer:
                     "diversity_weight": self.cfg.reward_diversity_weight,
                     "contradiction_weight": self.cfg.reward_contradiction_weight,
                 },
+                "spec_quality": spec_quality,
+                "spec_quality_details": spec_quality_details,
                 "candidate_rewards": [float(c["total_reward"]) for c in scored],
                 "best_idx": int(best_idx),
                 "best_reward": float(best["total_reward"]),
@@ -1619,16 +1740,20 @@ class GenerationSelfEvolvingTrainer:
                 "best_contradiction_score": float(best["contradiction_score"]),
                 "generator_baseline": self.generator_baseline,
                 "proposer_baseline": self.proposer_baseline,
+                "generator_skipped_reason": generator_skipped_reason,
             },
         )
 
         return {
             "source_caption": source_caption,
             "spec": spec,
+            "spec_quality": spec_quality,
+            "spec_quality_details": spec_quality_details,
             "scored": scored,
             "best_idx": best_idx,
             "proposer_stats": proposer_stats,
             "generator_stats": generator_stats,
+            "generator_skipped_reason": generator_skipped_reason,
         }
 
     def _solver_synthetic_update_from_best(self, step: int, best: Dict[str, object]):
@@ -1643,16 +1768,18 @@ class GenerationSelfEvolvingTrainer:
 
         qa_logs = best.get("qa_logs", [])
         for qa in qa_logs:
-            solver_blob = qa.get("solver", {}) if isinstance(qa, dict) else {}
-            rollouts = solver_blob.get("rollouts", []) if isinstance(solver_blob, dict) else []
-            if not rollouts:
-                continue
-            completion = str(rollouts[0].get("completion", "")).strip()
-            if not completion:
-                continue
-
             question = str(qa.get("question", "")).strip()
             if not question:
+                continue
+            completion = self._generate(
+                image=image,
+                prompt=build_solver_prompt(question),
+                adapter_name="default" if self.cfg.use_lora else None,
+                max_new_tokens=self.cfg.max_new_tokens_solver,
+                temperature=self.cfg.temp,
+                top_p=self.cfg.top_p,
+            ).strip()
+            if not completion:
                 continue
             reward = float(qa.get("combined_score", 0.0))
 
@@ -1711,6 +1838,7 @@ class GenerationSelfEvolvingTrainer:
                 image, meta = self._sample_image_for_step(step)
                 out = self._generation_step(step=step, image=image, meta=meta)
                 spec: GenerationSpec = out["spec"]
+                spec_quality = float(out["spec_quality"])
                 scored: List[Dict[str, object]] = out["scored"]
                 best_idx = int(out["best_idx"])
 
@@ -1727,6 +1855,7 @@ class GenerationSelfEvolvingTrainer:
                 reward_max_g = self._dist_mean(reward_max)
                 reward_min_g = self._dist_mean(reward_min)
                 step_duration_g = self._dist_mean(step_duration_sec)
+                spec_quality_g = self._dist_mean(spec_quality)
 
                 best = scored[best_idx]
                 best_spec = float(best["spec_score"])
@@ -1755,6 +1884,8 @@ class GenerationSelfEvolvingTrainer:
                         "prompt": spec.prompt,
                         "qa_pairs": [dataclasses.asdict(qa) for qa in spec.qa_pairs],
                         "fallback_used": spec.fallback_used,
+                        "spec_quality": spec_quality,
+                        "spec_quality_details": out.get("spec_quality_details"),
                         "candidate_rewards": rewards,
                         "best_idx": best_idx,
                         "best_metrics": {
@@ -1770,6 +1901,7 @@ class GenerationSelfEvolvingTrainer:
                         "generator_kl_coef": self.generator_updater.kl_coef,
                         "proposer_kl_coef": self.proposer_updater.kl_coef,
                         "solver_kl_coef": self.solver_updater.kl_coef if self.solver_updater is not None else None,
+                        "generator_skipped_reason": out.get("generator_skipped_reason"),
                         "step_duration_sec": step_duration_sec,
                     },
                 )
@@ -1781,6 +1913,15 @@ class GenerationSelfEvolvingTrainer:
                     spec=spec,
                     scored=scored,
                     best_idx=best_idx,
+                    spec_quality=spec_quality_g,
+                    reward_mean_global=reward_mean_g,
+                    reward_max_global=reward_max_g,
+                    reward_min_global=reward_min_g,
+                    best_spec_global=best_spec_g,
+                    best_cycle_global=best_cycle_g,
+                    best_diversity_global=best_div_g,
+                    best_contradiction_global=best_contra_g,
+                    generator_skipped_reason=out.get("generator_skipped_reason"),
                     proposer_stats=out["proposer_stats"],
                     generator_stats=out["generator_stats"],
                 )
@@ -1792,6 +1933,7 @@ class GenerationSelfEvolvingTrainer:
                 self._update_metric("best_cycle_score", best_cycle_g)
                 self._update_metric("best_diversity_score", best_div_g)
                 self._update_metric("best_contradiction_score", best_contra_g)
+                self._update_metric("spec_quality", spec_quality_g)
                 self._update_metric("generator_kl_coef", float(self.generator_updater.kl_coef))
                 self._update_metric("proposer_kl_coef", float(self.proposer_updater.kl_coef))
                 self._update_metric("step_duration_sec", step_duration_g)
@@ -1901,9 +2043,7 @@ class UnifiedSelfEvolvingConfig(GenerationSelfEvolvingConfig):
 
 class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
     def __init__(self, config: UnifiedSelfEvolvingConfig):
-        if config.enable_solver_updates is False:
-            config.enable_solver_updates = True
-        if config.solver_update_freq <= 0:
+        if config.enable_solver_updates and config.solver_update_freq <= 0:
             config.solver_update_freq = max(1, config.synthetic_solver_update_freq)
         super().__init__(config)
         self.ucfg = config

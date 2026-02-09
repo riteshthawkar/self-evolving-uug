@@ -9,8 +9,6 @@ Build a shared 50k image pool for cross-experiment comparability.
 - Emits reproducible manifests and train/val/test splits.
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import io

@@ -10,8 +10,6 @@ For low-resource sources, it oversamples with replacement and creates hardlinks
 (to avoid disk duplication). If hardlink fails, it falls back to copy.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import math

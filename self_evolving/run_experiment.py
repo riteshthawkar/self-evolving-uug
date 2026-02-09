@@ -11,8 +11,6 @@ Planned:
 - rl_no_self_evolving
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 import sys
@@ -81,6 +79,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max_new_tokens_caption", type=int, default=96)
     p.add_argument("--max_new_tokens_generator", type=int, default=768)
     p.add_argument("--num_solver_samples", type=int, default=5)
+    p.add_argument("--num_solver_samples_spec", type=int, default=3)
     p.add_argument("--num_generations", type=int, default=4)
 
     # Reward shaping
@@ -128,12 +127,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--generation_guidance_scale", type=float, default=2.0)
     p.add_argument("--generation_height", type=int, default=1024)
     p.add_argument("--generation_width", type=int, default=1024)
-    p.add_argument("--strict_require_generation_tokens", action="store_true", default=False)
+    p.add_argument("--strict_require_generation_tokens", dest="strict_require_generation_tokens", action="store_true")
+    p.add_argument(
+        "--allow_missing_generation_tokens",
+        dest="strict_require_generation_tokens",
+        action="store_false",
+    )
+    p.set_defaults(strict_require_generation_tokens=True)
+    p.add_argument("--verification_use_reference_solver", action="store_true", default=True)
+    p.add_argument("--verification_use_trainable_solver", dest="verification_use_reference_solver", action="store_false")
 
     # Unified scheduler
     p.add_argument("--understanding_steps_per_cycle", type=int, default=3)
     p.add_argument("--generation_steps_per_cycle", type=int, default=2)
     p.add_argument("--synthetic_solver_update_freq", type=int, default=1)
+    p.add_argument("--min_spec_quality_for_update", type=float, default=0.35)
+    p.add_argument("--min_spec_qa_pairs", type=int, default=2)
+    p.add_argument("--max_expected_words", type=int, default=8)
+    p.add_argument("--max_question_words", type=int, default=24)
 
     # W&B
     p.add_argument(
@@ -247,12 +258,14 @@ def run_generation_self_evolving(args: argparse.Namespace):
         max_new_tokens_caption=args.max_new_tokens_caption,
         max_new_tokens_generator=args.max_new_tokens_generator,
         num_solver_samples=args.num_solver_samples,
+        num_solver_samples_spec=args.num_solver_samples_spec,
         num_generations=args.num_generations,
         generation_num_inference_steps=args.generation_num_inference_steps,
         generation_guidance_scale=args.generation_guidance_scale,
         generation_height=args.generation_height,
         generation_width=args.generation_width,
         strict_require_generation_tokens=args.strict_require_generation_tokens,
+        verification_use_reference_solver=args.verification_use_reference_solver,
         solver_soft_gamma=args.solver_soft_gamma,
         len_penalty_weight=args.len_penalty_weight,
         len_penalty_target_words=args.len_penalty_target_words,
@@ -262,6 +275,10 @@ def run_generation_self_evolving(args: argparse.Namespace):
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
         reward_contradiction_weight=args.reward_contradiction_weight,
+        min_spec_quality_for_update=args.min_spec_quality_for_update,
+        min_spec_qa_pairs=args.min_spec_qa_pairs,
+        max_expected_words=args.max_expected_words,
+        max_question_words=args.max_question_words,
         kl_coef=args.kl_coef,
         kl_target=args.kl_target,
         kl_adapt_rate=args.kl_adapt_rate,
@@ -317,7 +334,7 @@ def run_unified_self_evolving(args: argparse.Namespace):
         grad_clip=args.grad_clip,
         proposer_update_freq=args.proposer_update_freq,
         generator_update_freq=args.generator_update_freq,
-        enable_solver_updates=True if not args.enable_solver_updates else args.enable_solver_updates,
+        enable_solver_updates=args.enable_solver_updates,
         solver_update_freq=max(1, args.solver_update_freq) if args.solver_update_freq > 0 else args.synthetic_solver_update_freq,
         temp=args.temp,
         top_p=args.top_p,
@@ -326,12 +343,14 @@ def run_unified_self_evolving(args: argparse.Namespace):
         max_new_tokens_caption=args.max_new_tokens_caption,
         max_new_tokens_generator=args.max_new_tokens_generator,
         num_solver_samples=args.num_solver_samples,
+        num_solver_samples_spec=args.num_solver_samples_spec,
         num_generations=args.num_generations,
         generation_num_inference_steps=args.generation_num_inference_steps,
         generation_guidance_scale=args.generation_guidance_scale,
         generation_height=args.generation_height,
         generation_width=args.generation_width,
         strict_require_generation_tokens=args.strict_require_generation_tokens,
+        verification_use_reference_solver=args.verification_use_reference_solver,
         solver_soft_gamma=args.solver_soft_gamma,
         len_penalty_weight=args.len_penalty_weight,
         len_penalty_target_words=args.len_penalty_target_words,
@@ -341,6 +360,10 @@ def run_unified_self_evolving(args: argparse.Namespace):
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
         reward_contradiction_weight=args.reward_contradiction_weight,
+        min_spec_quality_for_update=args.min_spec_quality_for_update,
+        min_spec_qa_pairs=args.min_spec_qa_pairs,
+        max_expected_words=args.max_expected_words,
+        max_question_words=args.max_question_words,
         kl_coef=args.kl_coef,
         kl_target=args.kl_target,
         kl_adapt_rate=args.kl_adapt_rate,

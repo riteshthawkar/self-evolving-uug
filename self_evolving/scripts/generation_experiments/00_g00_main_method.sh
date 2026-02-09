@@ -43,7 +43,7 @@ export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 
 mkdir -p "$OUTPUT_ROOT"
 
-torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
+"$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment generation_self_evolving \
   --data_dir "$DATA_DIR" \
   --data_split all \
@@ -76,13 +76,20 @@ torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_
   --max_new_tokens_caption 96 \
   --max_new_tokens_generator 768 \
   --num_solver_samples 5 \
+  --num_solver_samples_spec 3 \
   --num_generations 4 \
   --generation_num_inference_steps 30 \
   --generation_guidance_scale 2.0 \
+  --strict_require_generation_tokens \
+  --verification_use_reference_solver \
   --reward_spec_weight 0.65 \
   --reward_cycle_weight 0.20 \
   --reward_diversity_weight 0.10 \
   --reward_contradiction_weight 0.20 \
+  --min_spec_quality_for_update 0.35 \
+  --min_spec_qa_pairs 2 \
+  --max_expected_words 8 \
+  --max_question_words 24 \
   --solver_soft_gamma 0.7 \
   --len_penalty_weight 0.10 \
   --len_penalty_target_words 6 \
