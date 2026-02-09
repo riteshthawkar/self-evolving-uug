@@ -346,6 +346,37 @@ def _parse_unused_model_kwargs_from_error(exc: Exception) -> List[str]:
     return [p for p in parts if p]
 
 
+def _collect_image_token_ids(model) -> List[int]:
+    ids: List[int] = []
+
+    def _collect_from_cfg(cfg):
+        if cfg is None:
+            return
+        for name in ("image_token_id", "image_token_index", "vision_token_id"):
+            value = getattr(cfg, name, None)
+            if isinstance(value, int):
+                ids.append(int(value))
+            elif isinstance(value, (list, tuple)):
+                for v in value:
+                    if isinstance(v, int):
+                        ids.append(int(v))
+
+    model_ref = _unwrap_model(model)
+    cfg = getattr(model_ref, "config", None)
+    _collect_from_cfg(cfg)
+    _collect_from_cfg(getattr(cfg, "text_config", None) if cfg is not None else None)
+    return sorted(set(ids))
+
+
+def _count_image_tokens_in_inputs(input_ids: torch.Tensor, image_token_ids: List[int]) -> int:
+    if input_ids is None or not torch.is_tensor(input_ids) or not image_token_ids:
+        return 0
+    total = 0
+    for tok_id in image_token_ids:
+        total += int((input_ids == int(tok_id)).sum().item())
+    return int(total)
+
+
 def _is_original_blip3o_model_name(model_name: str) -> bool:
     name = (model_name or "").strip().lower()
     return "blip3o-model" in name and "next" not in name
@@ -745,18 +776,27 @@ class _Blip3oProcessorShim:
         tokenizer,
         image_processor=None,
         model_name: str = "",
+        multimodal_processor=None,
         tokenizer_image_token_fn: Optional[Callable[..., torch.Tensor]] = None,
     ):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.model_name = str(model_name or "")
+        self.multimodal_processor = multimodal_processor
         self._tokenizer_image_token_fn = tokenizer_image_token_fn
         # Some generic paths look for these attributes.
         self.chat_template = getattr(tokenizer, "chat_template", None)
+        if self.chat_template is None and self.multimodal_processor is not None:
+            self.chat_template = getattr(self.multimodal_processor, "chat_template", None)
 
     def _ensure_image_processor(self):
         if self.image_processor is not None:
             return self.image_processor
+        if self.multimodal_processor is not None:
+            ip = getattr(self.multimodal_processor, "image_processor", None)
+            if ip is not None:
+                self.image_processor = ip
+                return self.image_processor
         self.image_processor = _load_blip3o_image_processor_from_candidates(
             model_name=self.model_name
         )
@@ -765,8 +805,45 @@ class _Blip3oProcessorShim:
     def decode(self, *args, **kwargs):
         return self.tokenizer.decode(*args, **kwargs)
 
-    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
-        normalized = []
+    def _image_text_placeholder(self) -> str:
+        """
+        Choose a textual image placeholder compatible with the underlying tokenizer.
+        """
+        try:
+            to_id = getattr(self.tokenizer, "convert_tokens_to_ids", None)
+            if callable(to_id):
+                img_pad_id = to_id("<|image_pad|>")
+                unk_id = getattr(self.tokenizer, "unk_token_id", None)
+                if isinstance(img_pad_id, int) and img_pad_id >= 0 and (unk_id is None or img_pad_id != unk_id):
+                    return "<|vision_start|><|image_pad|><|vision_end|>"
+        except Exception:
+            pass
+        return "<image>"
+
+    def _normalize_messages_multimodal(self, messages) -> List[Dict[str, object]]:
+        normalized: List[Dict[str, object]] = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                parts: List[Dict[str, str]] = []
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    typ = item.get("type")
+                    if typ == "image":
+                        # Keep multimodal structure but drop raw image payload.
+                        parts.append({"type": "image"})
+                    elif typ == "text":
+                        parts.append({"type": "text", "text": str(item.get("text", ""))})
+                normalized.append({"role": role, "content": parts})
+            else:
+                normalized.append({"role": role, "content": str(content)})
+        return normalized
+
+    def _normalize_messages_text(self, messages) -> List[Dict[str, str]]:
+        normalized: List[Dict[str, str]] = []
+        image_token = self._image_text_placeholder()
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
@@ -777,18 +854,45 @@ class _Blip3oProcessorShim:
                         continue
                     typ = item.get("type")
                     if typ == "image":
-                        parts.append("<image>")
+                        parts.append(image_token)
                     elif typ == "text":
                         parts.append(str(item.get("text", "")))
                 content = "\n".join([p for p in parts if p]).strip()
             normalized.append({"role": role, "content": str(content)})
+        return normalized
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+        if hasattr(self.multimodal_processor, "apply_chat_template"):
+            try:
+                normalized_mm = self._normalize_messages_multimodal(messages)
+                return self.multimodal_processor.apply_chat_template(
+                    normalized_mm,
+                    tokenize=tokenize,
+                    add_generation_prompt=add_generation_prompt,
+                )
+            except Exception:
+                pass
 
         if hasattr(self.tokenizer, "apply_chat_template"):
+            # First try multimodal message structure so Qwen-VL inserts image tokens.
+            try:
+                normalized_mm = self._normalize_messages_multimodal(messages)
+                return self.tokenizer.apply_chat_template(
+                    normalized_mm,
+                    tokenize=tokenize,
+                    add_generation_prompt=add_generation_prompt,
+                )
+            except Exception:
+                pass
+            # Fall back to text-only template with explicit image placeholder token.
+            normalized_text = self._normalize_messages_text(messages)
             return self.tokenizer.apply_chat_template(
-                normalized,
+                normalized_text,
                 tokenize=tokenize,
                 add_generation_prompt=add_generation_prompt,
             )
+
+        normalized = self._normalize_messages_text(messages)
 
         text = ""
         for msg in normalized:
@@ -829,6 +933,20 @@ class _Blip3oProcessorShim:
         from transformers import BatchEncoding
 
         text_list = text if isinstance(text, list) else [str(text or "")]
+
+        if images is not None and self.multimodal_processor is not None:
+            img_list = images if isinstance(images, list) else [images]
+            try:
+                return self.multimodal_processor(
+                    text=text_list,
+                    images=img_list,
+                    return_tensors=return_tensors,
+                    padding=padding,
+                    **kwargs,
+                )
+            except Exception:
+                # Fall through to lightweight shim path.
+                pass
 
         use_image_placeholder = any("<image>" in t for t in text_list)
         if use_image_placeholder:
@@ -871,11 +989,7 @@ class _Blip3oProcessorShim:
         return BatchEncoding(data=data, tensor_type=return_tensors)
 
 
-def _load_blip3o_image_processor_from_candidates(model_name: str = ""):
-    # BLIP3o main codebase typically uses a Qwen2.5-VL image processor.
-    from transformers import AutoProcessor
-
-    # Explicit override for cluster/container environments.
+def _blip3o_processor_repo_candidates(model_name: str = "") -> List[str]:
     override = os.environ.get("BLIP3O_IMAGE_PROCESSOR_ID", "").strip()
     candidates = []
     if override:
@@ -883,9 +997,14 @@ def _load_blip3o_image_processor_from_candidates(model_name: str = ""):
     if model_name:
         candidates.append(model_name)
     candidates.append("Qwen/Qwen2.5-VL-7B-Instruct")
+    return candidates
+
+
+def _load_blip3o_multimodal_processor_from_candidates(model_name: str = ""):
+    from transformers import AutoProcessor
 
     seen = set()
-    for repo_id in candidates:
+    for repo_id in _blip3o_processor_repo_candidates(model_name=model_name):
         repo_id = (repo_id or "").strip()
         if not repo_id or repo_id in seen:
             continue
@@ -897,6 +1016,14 @@ def _load_blip3o_image_processor_from_candidates(model_name: str = ""):
                 proc = AutoProcessor.from_pretrained(repo_id)
             except Exception:
                 continue
+        if getattr(proc, "image_processor", None) is not None:
+            return proc
+    return None
+
+
+def _load_blip3o_image_processor_from_candidates(model_name: str = ""):
+    proc = _load_blip3o_multimodal_processor_from_candidates(model_name=model_name)
+    if proc is not None:
         ip = getattr(proc, "image_processor", None)
         if ip is not None:
             return ip
@@ -932,10 +1059,12 @@ def _resolve_blip3o_image_processor(model, model_name: str = ""):
 
 def _build_blip3o_processor(tokenizer, model, model_name: str = "", tokenizer_image_token_fn=None):
     image_processor = _resolve_blip3o_image_processor(model=model, model_name=model_name)
+    multimodal_processor = _load_blip3o_multimodal_processor_from_candidates(model_name=model_name)
     return _Blip3oProcessorShim(
         tokenizer=tokenizer,
         image_processor=image_processor,
         model_name=model_name,
+        multimodal_processor=multimodal_processor,
         tokenizer_image_token_fn=tokenizer_image_token_fn,
     )
 
@@ -2086,6 +2215,12 @@ class GenerationSelfEvolvingTrainer:
                     model_name=self.cfg.model_name,
                     tokenizer_image_token_fn=mm_utils.get("tokenizer_image_token"),
                 )
+                if self.is_main_process and isinstance(processor, _Blip3oProcessorShim):
+                    has_mm = getattr(processor, "multimodal_processor", None) is not None
+                    print(
+                        "[Generation] BLIP3o processor shim multimodal backend: "
+                        f"{'enabled' if has_mm else 'disabled'}"
+                    )
                 loader_used = f"{loader_used}+blip3o_shim"
         elif "blip3o" in model_name_lower and self.is_main_process:
             print(
@@ -2254,6 +2389,12 @@ class GenerationSelfEvolvingTrainer:
                     model_name=self.cfg.model_name,
                     tokenizer_image_token_fn=mm_utils.get("tokenizer_image_token"),
                 )
+                if self.is_main_process and isinstance(processor, _Blip3oProcessorShim):
+                    has_mm = getattr(processor, "multimodal_processor", None) is not None
+                    print(
+                        "[Generation] BLIP3o processor shim multimodal backend: "
+                        f"{'enabled' if has_mm else 'disabled'}"
+                    )
                 loader_used = f"{loader_used}+tokenizer_shim"
             if processor is None:
                 processor = AutoProcessor.from_pretrained(self.cfg.model_name, trust_remote_code=True)
@@ -2339,6 +2480,40 @@ class GenerationSelfEvolvingTrainer:
     ) -> str:
         chat_text = _build_chat_text(self.processor, image, prompt)
         inputs = _prepare_mm_inputs(self.processor, self.device, image, chat_text)
+
+        # Guard against BLIP3o/Qwen processor mismatches where image features are present
+        # but no image tokens were inserted in input_ids.
+        has_image_feats = ("pixel_values" in inputs) or ("images" in inputs)
+        if has_image_feats and "input_ids" in inputs:
+            image_token_ids = _collect_image_token_ids(self.model)
+            token_count = _count_image_tokens_in_inputs(inputs["input_ids"], image_token_ids)
+            if token_count == 0:
+                mm_proc = getattr(self.processor, "multimodal_processor", None)
+                if mm_proc is not None and hasattr(mm_proc, "apply_chat_template"):
+                    try:
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "image"},
+                                    {"type": "text", "text": prompt},
+                                ],
+                            }
+                        ]
+                        chat_text_mm = mm_proc.apply_chat_template(
+                            messages,
+                            tokenize=False,
+                            add_generation_prompt=True,
+                        )
+                        inputs = mm_proc(
+                            text=[chat_text_mm],
+                            images=[image],
+                            return_tensors="pt",
+                            padding=True,
+                        ).to(self.device)
+                    except Exception:
+                        pass
+
         gen_inputs = _adapt_mm_generate_inputs(self.model, dict(inputs))
 
         def _run_generate(curr_inputs: Dict[str, torch.Tensor]):
