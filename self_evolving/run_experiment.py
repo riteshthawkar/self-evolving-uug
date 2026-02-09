@@ -238,11 +238,20 @@ def run_generation_self_evolving(args: argparse.Namespace):
     )
 
     model_name_lower = (args.model_name or "").lower()
+    blip3o_repo_env = os.environ.get("BLIP3O_REPO", "").strip()
     if "qwen2.5-vl" in model_name_lower:
         raise ValueError(
             "generation_self_evolving requires a generation-capable model checkpoint. "
             f"Got model_name='{args.model_name}', which is understanding-only in this pipeline. "
             "Use a BLIP3o generation model id or a local BLIP3o checkpoint path."
+        )
+    if "blip3o-model" in model_name_lower and not blip3o_repo_env:
+        raise ValueError(
+            "Requested original checkpoint without explicit original BLIP3o code path.\n"
+            "This codebase's bundled `BLIP3o/` is main-branch BLIP3o-NEXT.\n"
+            "Either:\n"
+            "1) switch model_name to a BLIP3o-NEXT checkpoint (recommended for main-only usage), or\n"
+            "2) set BLIP3O_REPO to an external original BLIP3o main checkout and BLIP3O_USE_LOCAL_CLASSES=1."
         )
     if "blip3o-model" in model_name_lower and args.strict_require_generation_tokens:
         print(
@@ -338,11 +347,20 @@ def run_unified_self_evolving(args: argparse.Namespace):
     )
 
     model_name_lower = (args.model_name or "").lower()
+    blip3o_repo_env = os.environ.get("BLIP3O_REPO", "").strip()
     if "qwen2.5-vl" in model_name_lower:
         raise ValueError(
             "unified_self_evolving requires a generation-capable model checkpoint. "
             f"Got model_name='{args.model_name}', which is understanding-only in this pipeline. "
             "Use a BLIP3o generation model id or a local BLIP3o checkpoint path."
+        )
+    if "blip3o-model" in model_name_lower and not blip3o_repo_env:
+        raise ValueError(
+            "Requested original checkpoint without explicit original BLIP3o code path.\n"
+            "This codebase's bundled `BLIP3o/` is main-branch BLIP3o-NEXT.\n"
+            "Either:\n"
+            "1) switch model_name to a BLIP3o-NEXT checkpoint (recommended for main-only usage), or\n"
+            "2) set BLIP3O_REPO to an external original BLIP3o main checkout and BLIP3O_USE_LOCAL_CLASSES=1."
         )
     if "blip3o-model" in model_name_lower and args.strict_require_generation_tokens:
         print(
