@@ -1,6 +1,7 @@
 # Unified Self-Evolving Experiments
 
 - `00_x00_main_method.sh`: alternating understanding + generation co-evolution run.
+- `01_x01_dpo_style.sh`: same unified loop, but generator update uses DPO-style pairwise preference optimization.
 - Defaults:
 - model: `BLIP3o/BLIP3o-Model-8B`
 - loader: `BLIP3O_REPO=$REPO_ROOT/BLIP3o`, `BLIP3O_USE_LOCAL_CLASSES=1`
@@ -13,4 +14,5 @@ Logs/checkpoints are written under:
 - `logs/generation_candidates.jsonl`
 - `logs/rewards.jsonl`
 - `logs/policy_updates.jsonl`
+- `logs/dpo_pairs.jsonl` (for DPO-style runs)
 - `iter_log.jsonl`

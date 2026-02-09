@@ -43,6 +43,7 @@ Each run stores:
 - `iter_log.jsonl` (per-step records)
 - `logs/rewards.jsonl` (step-level reward decomposition + baselines)
 - `logs/policy_updates.jsonl` (per-update RL stats for role adapters)
+- `logs/dpo_pairs.jsonl` (pair records for DPO-style generator updates)
 - `ablation_summary.json` (run-level aggregated metrics for ablations)
 - `step_XXXXX/` checkpoints (solver/proposer/generator adapters + trainer state)
 
@@ -124,6 +125,11 @@ Generation-only launcher:
 Unified (understanding + generation) launcher:
 
 - `self_evolving/scripts/unified_experiments/00_x00_main_method.sh`
+- `self_evolving/scripts/unified_experiments/01_x01_dpo_style.sh`
+
+Generator update objective can be selected with:
+- `--generator_update_rule reinforce` (default/current)
+- `--generator_update_rule dpo` (pairwise preference update)
 
 Example:
 
