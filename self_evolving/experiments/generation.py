@@ -14,6 +14,7 @@ Design goals:
 import dataclasses
 import datetime as dt
 import gc
+import importlib
 import json
 import math
 import os
@@ -21,6 +22,7 @@ import pathlib
 import random
 import re
 import shutil
+import sys
 import time
 import traceback
 from dataclasses import dataclass
@@ -272,6 +274,123 @@ def _parse_generation_spec(raw_text: str) -> GenerationSpec:
 def _prepare_text_inputs(processor, device: torch.device, text: str):
     inputs = processor(text=[text], return_tensors="pt", padding=True)
     return inputs.to(device)
+
+
+def _maybe_add_local_blip3o_path() -> Optional[str]:
+    """
+    Add a local BLIP3o source tree to sys.path if present.
+    """
+    candidates: List[pathlib.Path] = []
+    env_repo = os.environ.get("BLIP3O_REPO", "").strip()
+    if env_repo:
+        candidates.append(pathlib.Path(env_repo).expanduser())
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    candidates.append(repo_root / "BLIP3o")
+
+    for cand in candidates:
+        try:
+            cand_resolved = cand.resolve()
+        except Exception:
+            continue
+        if not (cand_resolved / "blip3o").is_dir():
+            continue
+        cand_str = str(cand_resolved)
+        if cand_str not in sys.path:
+            sys.path.insert(0, cand_str)
+        return cand_str
+    return None
+
+
+def _import_blip3o_classes():
+    """
+    Import BLIP3o model classes (inference/grpo/causal) if available.
+    Returns (classes_dict, error_or_none, added_path_or_none).
+    """
+    last_exc = None
+    added_path = None
+    for _ in range(2):
+        try:
+            module = importlib.import_module("blip3o.model")
+            return (
+                {
+                    "inference": getattr(module, "blip3oQwenForInferenceLM", None),
+                    "grpo": getattr(module, "blip3oQwenForGRPOLM", None),
+                    "causal": getattr(module, "blip3oQwenForCausalLM", None),
+                },
+                None,
+                added_path,
+            )
+        except Exception as exc:
+            last_exc = exc
+            added_path = _maybe_add_local_blip3o_path()
+    return {}, last_exc, added_path
+
+
+def _load_from_explicit_class(
+    cls,
+    model_name: str,
+    *,
+    torch_dtype: torch.dtype,
+    device_map,
+    attn_implementation: Optional[str],
+):
+    errors: List[str] = []
+    attempts: List[Dict[str, object]] = []
+    base_kwargs = {
+        "torch_dtype": torch_dtype,
+        "device_map": device_map,
+        "low_cpu_mem_usage": True,
+    }
+    if attn_implementation:
+        attempts.append({**base_kwargs, "attn_implementation": attn_implementation})
+    attempts.append(base_kwargs)
+    for kwargs in attempts:
+        try:
+            return cls.from_pretrained(model_name, **kwargs)
+        except Exception as exc:
+            errors.append(f"{cls.__name__}({kwargs}): {repr(exc)}")
+    raise RuntimeError(" | ".join(errors))
+
+
+def _iter_wrapper_objects(root_obj) -> List[Tuple[str, object]]:
+    """
+    Return model wrapper chain candidates where custom generation APIs may live.
+
+    This handles DDP/PEFT/base-model nesting patterns.
+    """
+    results: List[Tuple[str, object]] = []
+    queue: List[Tuple[str, object]] = [("model", root_obj)]
+    seen = set()
+    attrs = ("module", "base_model", "model", "language_model", "backbone")
+
+    while queue:
+        path, obj = queue.pop(0)
+        if obj is None:
+            continue
+        oid = id(obj)
+        if oid in seen:
+            continue
+        seen.add(oid)
+        results.append((path, obj))
+        for attr in attrs:
+            child = getattr(obj, attr, None)
+            if child is not None and child is not obj:
+                queue.append((f"{path}.{attr}", child))
+    return results
+
+
+def _find_generation_callable(root_obj) -> Tuple[Optional[str], Optional[object], Optional[str], List[str]]:
+    """
+    Find `generate_images`/`generate_image` across nested wrapper objects.
+    """
+    inspected: List[str] = []
+    for path, obj in _iter_wrapper_objects(root_obj):
+        inspected.append(f"{path}:{type(obj).__name__}")
+        for name in ("generate_images", "generate_image"):
+            fn = getattr(obj, name, None)
+            if callable(fn):
+                return name, obj, path, inspected
+    return None, None, None, inspected
 
 
 class TextPolicyUpdater:
@@ -594,6 +713,24 @@ class GenerationSelfEvolvingTrainer:
         self.model, self.processor = self._load_model()
         fallback_dev = self.local_rank if self.distributed else config.cuda_device
         self.device = _infer_primary_device(self.model, fallback_cuda_device=fallback_dev)
+        self._generation_api_name, self._generation_api_obj, self._generation_api_path, inspected = (
+            _find_generation_callable(_unwrap_model(self.model))
+        )
+        if self._generation_api_name is None:
+            inspected_text = "; ".join(inspected[:10]) if inspected else "none"
+            raise RuntimeError(
+                "Loaded model does not expose a supported image generation API for "
+                f"`{config.experiment_name}`.\n"
+                f"model_name={config.model_name}\n"
+                f"inspected_wrappers={inspected_text}\n"
+                "Expected one of: generate_images(...), generate_image(...).\n"
+                "Use a generation-capable model (e.g., BLIP3o family) for generation/unified experiments."
+            )
+        if self.is_main_process:
+            print(
+                f"[Generation] Using generation backend `{self._generation_api_name}` "
+                f"from `{self._generation_api_path}` ({type(self._generation_api_obj).__name__})"
+            )
 
         pool_cfg = ImagePoolConfig(
             data_dir=config.data_dir,
@@ -953,18 +1090,56 @@ class GenerationSelfEvolvingTrainer:
         from transformers import AutoProcessor
 
         processor = AutoProcessor.from_pretrained(self.cfg.model_name, trust_remote_code=True)
-        model = _load_model_with_fallback(
-            self.cfg.model_name,
-            torch_dtype=dtype,
-            device_map=device_map,
-            trust_remote_code=True,
-            attn_implementation=attn_impl,
-        )
+        model = None
+        loader_used = "auto_fallback"
+
+        model_name_lower = (self.cfg.model_name or "").lower()
+        if "blip3o" in model_name_lower:
+            classes, import_err, added_path = _import_blip3o_classes()
+            if self.is_main_process:
+                if added_path:
+                    print(f"[Generation] Added local BLIP3o path: {added_path}")
+                if import_err is not None:
+                    print(f"[Generation] BLIP3o import warning: {repr(import_err)}")
+
+            explicit_errors: List[str] = []
+            for key in ("inference", "grpo"):
+                cls = classes.get(key)
+                if cls is None:
+                    continue
+                try:
+                    model = _load_from_explicit_class(
+                        cls,
+                        self.cfg.model_name,
+                        torch_dtype=dtype,
+                        device_map=device_map,
+                        attn_implementation=attn_impl,
+                    )
+                    loader_used = f"explicit:{cls.__name__}"
+                    break
+                except Exception as exc:
+                    explicit_errors.append(f"{cls.__name__}: {exc}")
+            if self.is_main_process and explicit_errors:
+                print(
+                    "[Generation] BLIP3o explicit class loading attempts failed; "
+                    "falling back to AutoModel loader."
+                )
+                for err in explicit_errors:
+                    print(f"  - {err}")
+
+        if model is None:
+            model = _load_model_with_fallback(
+                self.cfg.model_name,
+                torch_dtype=dtype,
+                device_map=device_map,
+                trust_remote_code=True,
+                attn_implementation=attn_impl,
+            )
 
         if self.is_main_process:
             print(
                 f"[Generation] Load options: dtype={dtype}, device_map={device_map}, "
-                f"attn_implementation={attn_impl or 'default'}"
+                f"attn_implementation={attn_impl or 'default'}, loader={loader_used}"
             )
 
         if self.cfg.use_lora:
@@ -1116,24 +1291,43 @@ class GenerationSelfEvolvingTrainer:
         return sanitized, quality, details
 
     def _generate_image_candidate(self, prompt: str) -> Dict[str, object]:
-        model_ref = _unwrap_model(self.model)
+        api_name, api_obj, _api_path, inspected = _find_generation_callable(_unwrap_model(self.model))
+        if api_name is None or api_obj is None:
+            inspected_text = "; ".join(inspected[:10]) if inspected else "none"
+            raise RuntimeError(
+                "Model does not expose a supported image generation API. "
+                f"model_name={self.cfg.model_name} inspected_wrappers={inspected_text}. "
+                "Expected `generate_images(...)` or `generate_image(...)`."
+            )
 
-        # Path 1: BLIP3o style API with token trace.
-        if hasattr(model_ref, "generate_images"):
+        # Path 1: BLIP3o-style API with token trace.
+        if api_name == "generate_images":
             text_inputs = _prepare_text_inputs(self.processor, self.device, prompt)
             with torch.no_grad():
                 with use_adapter(self.model, "generator" if self.cfg.use_lora else None):
-                    out = model_ref.generate_images(
-                        input_ids=text_inputs.get("input_ids"),
-                        attention_mask=text_inputs.get("attention_mask"),
-                        max_new_tokens=self.cfg.max_new_tokens_generator,
-                        temperature=self.cfg.temp,
-                        top_p=self.cfg.top_p,
-                        num_inference_steps=self.cfg.generation_num_inference_steps,
-                        guidance_scale=self.cfg.generation_guidance_scale,
-                        return_tensor=False,
-                        enable_progress_bar=False,
-                    )
+                    gen_fn = getattr(api_obj, "generate_images")
+                    try:
+                        out = gen_fn(
+                            input_ids=text_inputs.get("input_ids"),
+                            attention_mask=text_inputs.get("attention_mask"),
+                            max_new_tokens=self.cfg.max_new_tokens_generator,
+                            temperature=self.cfg.temp,
+                            top_p=self.cfg.top_p,
+                            num_inference_steps=self.cfg.generation_num_inference_steps,
+                            guidance_scale=self.cfg.generation_guidance_scale,
+                            return_tensor=False,
+                            enable_progress_bar=False,
+                        )
+                    except TypeError:
+                        # Fallback for alternate custom signatures.
+                        out = gen_fn(
+                            prompt=prompt,
+                            max_new_tokens=self.cfg.max_new_tokens_generator,
+                            temperature=self.cfg.temp,
+                            top_p=self.cfg.top_p,
+                            num_inference_steps=self.cfg.generation_num_inference_steps,
+                            guidance_scale=self.cfg.generation_guidance_scale,
+                        )
 
             token_completion = ""
             image_out = None
@@ -1170,16 +1364,20 @@ class GenerationSelfEvolvingTrainer:
             }
 
         # Path 2: generic single-image API.
-        if hasattr(model_ref, "generate_image"):
+        if api_name == "generate_image":
             with torch.no_grad():
                 with use_adapter(self.model, "generator" if self.cfg.use_lora else None):
-                    image_out = model_ref.generate_image(
-                        prompt=prompt,
-                        num_inference_steps=self.cfg.generation_num_inference_steps,
-                        guidance_scale=self.cfg.generation_guidance_scale,
-                        height=self.cfg.generation_height,
-                        width=self.cfg.generation_width,
-                    )
+                    gen_fn = getattr(api_obj, "generate_image")
+                    try:
+                        image_out = gen_fn(
+                            prompt=prompt,
+                            num_inference_steps=self.cfg.generation_num_inference_steps,
+                            guidance_scale=self.cfg.generation_guidance_scale,
+                            height=self.cfg.generation_height,
+                            width=self.cfg.generation_width,
+                        )
+                    except TypeError:
+                        image_out = gen_fn(prompt)
             return {
                 "image": _ensure_pil_image(image_out),
                 "policy_prompt": prompt,
@@ -1187,10 +1385,7 @@ class GenerationSelfEvolvingTrainer:
                 "backend": "generate_image",
             }
 
-        raise RuntimeError(
-            "Model does not expose a supported image generation API. "
-            "Expected `generate_images(...)` or `generate_image(...)`."
-        )
+        raise RuntimeError(f"Unsupported generation API mode resolved: {api_name}")
 
     def _solve_question_with_rollouts(self, image: Image.Image, question: str) -> Dict[str, object]:
         solver_prompt = build_solver_prompt(question)
