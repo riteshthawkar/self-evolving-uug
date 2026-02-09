@@ -28,7 +28,7 @@ export WANDB_LOG_IMAGES_EVERY="${WANDB_LOG_IMAGES_EVERY:-0}"
 
 # Run defaults (override via environment)
 export DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/shared_uug_50k_balanced/images}"
-export MODEL_NAME="${MODEL_NAME:-BLIP3o/BLIP3o-NEXT-SFT}"
+export MODEL_NAME="${MODEL_NAME:-BLIP3o/BLIP3o-Model-8B}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/runs/generation_experiments}"
 export TOTAL_STEPS="${TOTAL_STEPS:-6000}"
 export SAVE_EVERY="${SAVE_EVERY:-200}"
@@ -39,7 +39,7 @@ export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 export MASTER_PORT="${MASTER_PORT:-29510}"
 export ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-auto}"
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
-# Strict main-only mode: use bundled BLIP3o main (BLIP3o-NEXT) local classes.
+# Use local original BLIP3o classes from bundled checkout.
 export BLIP3O_REPO="${BLIP3O_REPO:-$REPO_ROOT/BLIP3o}"
 export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-1}"
 

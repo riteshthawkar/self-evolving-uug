@@ -351,10 +351,51 @@ def _import_blip3o_classes(*, allow_implicit_repo: bool = False):
     Returns (classes_dict, error_or_none, added_path_or_none).
     """
     last_exc = None
-    added_path = None
+    added_path = _maybe_add_local_blip3o_path(allow_implicit_repo=allow_implicit_repo)
+    explicit_repo = os.environ.get("BLIP3O_REPO", "").strip()
+    explicit_repo_resolved: Optional[pathlib.Path] = None
+    if explicit_repo:
+        try:
+            explicit_repo_resolved = pathlib.Path(explicit_repo).expanduser().resolve()
+        except Exception:
+            explicit_repo_resolved = None
+
+    def _purge_blip3o_modules():
+        for key in list(sys.modules.keys()):
+            if key == "blip3o" or key.startswith("blip3o."):
+                sys.modules.pop(key, None)
+
+    def _module_matches_explicit_repo(module) -> bool:
+        if explicit_repo_resolved is None:
+            return True
+        module_file = getattr(module, "__file__", None)
+        if not module_file:
+            return False
+        try:
+            resolved = pathlib.Path(module_file).resolve()
+            resolved_str = str(resolved)
+            repo_str = str(explicit_repo_resolved)
+            return resolved_str == repo_str or resolved_str.startswith(repo_str + os.sep)
+        except Exception:
+            return False
+
+    if explicit_repo_resolved is not None:
+        # Avoid stale pre-imported `blip3o` modules from another location (e.g. site-packages).
+        _purge_blip3o_modules()
+
     for _ in range(2):
         try:
             module = importlib.import_module("blip3o.model")
+            if not _module_matches_explicit_repo(module):
+                _purge_blip3o_modules()
+                added_path = _maybe_add_local_blip3o_path(allow_implicit_repo=allow_implicit_repo)
+                module = importlib.import_module("blip3o.model")
+                if not _module_matches_explicit_repo(module):
+                    module_path = getattr(module, "__file__", "unknown")
+                    raise RuntimeError(
+                        "Imported `blip3o.model` from an unexpected location while BLIP3O_REPO is set. "
+                        f"BLIP3O_REPO={explicit_repo_resolved}, imported_from={module_path}"
+                    )
             return (
                 {
                     "inference": getattr(module, "blip3oQwenForInferenceLM", None),
@@ -401,10 +442,50 @@ def _import_blip3o_mm_utils(*, allow_implicit_repo: bool = False):
     Import BLIP3o multimodal helpers if available.
     """
     last_exc = None
-    added_path = None
+    added_path = _maybe_add_local_blip3o_path(allow_implicit_repo=allow_implicit_repo)
+    explicit_repo = os.environ.get("BLIP3O_REPO", "").strip()
+    explicit_repo_resolved: Optional[pathlib.Path] = None
+    if explicit_repo:
+        try:
+            explicit_repo_resolved = pathlib.Path(explicit_repo).expanduser().resolve()
+        except Exception:
+            explicit_repo_resolved = None
+
+    def _purge_blip3o_modules():
+        for key in list(sys.modules.keys()):
+            if key == "blip3o" or key.startswith("blip3o."):
+                sys.modules.pop(key, None)
+
+    def _module_matches_explicit_repo(module) -> bool:
+        if explicit_repo_resolved is None:
+            return True
+        module_file = getattr(module, "__file__", None)
+        if not module_file:
+            return False
+        try:
+            resolved = pathlib.Path(module_file).resolve()
+            resolved_str = str(resolved)
+            repo_str = str(explicit_repo_resolved)
+            return resolved_str == repo_str or resolved_str.startswith(repo_str + os.sep)
+        except Exception:
+            return False
+
+    if explicit_repo_resolved is not None:
+        _purge_blip3o_modules()
+
     for _ in range(2):
         try:
             module = importlib.import_module("blip3o.mm_utils")
+            if not _module_matches_explicit_repo(module):
+                _purge_blip3o_modules()
+                added_path = _maybe_add_local_blip3o_path(allow_implicit_repo=allow_implicit_repo)
+                module = importlib.import_module("blip3o.mm_utils")
+                if not _module_matches_explicit_repo(module):
+                    module_path = getattr(module, "__file__", "unknown")
+                    raise RuntimeError(
+                        "Imported `blip3o.mm_utils` from an unexpected location while BLIP3O_REPO is set. "
+                        f"BLIP3O_REPO={explicit_repo_resolved}, imported_from={module_path}"
+                    )
             return (
                 {
                     "tokenizer_image_token": getattr(module, "tokenizer_image_token", None),
