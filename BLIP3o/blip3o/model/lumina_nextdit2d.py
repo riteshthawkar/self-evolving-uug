@@ -281,9 +281,21 @@ class LuminaNextDiT2DModel(ModelMixin, ConfigMixin):
 
         assert (hidden_size // num_attention_heads) % 4 == 0, "2d rope needs head dim to be divisible by 4"
 
-    def _set_gradient_checkpointing(self, module, value=False):
+    def _set_gradient_checkpointing(self, module=None, value=False, enable=None):
+        """
+        Compatibility shim for different HF/diffusers call signatures.
+
+        Older callers use: _set_gradient_checkpointing(module, value=False)
+        Newer callers use: _set_gradient_checkpointing(enable=True)
+        """
+        if enable is not None:
+            value = bool(enable)
+
+        if module is None:
+            module = self
+
         if hasattr(module, "gradient_checkpointing"):
-            module.gradient_checkpointing = value
+            module.gradient_checkpointing = bool(value)
 
     def forward(
         self,
