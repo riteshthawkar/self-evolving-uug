@@ -12,8 +12,6 @@ Output layout:
 It links images by default (hardlink), falling back to copy if linking fails.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import shutil

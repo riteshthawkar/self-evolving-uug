@@ -9,8 +9,6 @@ unified self_evolving codebase:
 - Both roles are optimized via KL-regularized REINFORCE with adaptive beta
 """
 
-from __future__ import annotations
-
 import contextlib
 import dataclasses
 import datetime as dt
