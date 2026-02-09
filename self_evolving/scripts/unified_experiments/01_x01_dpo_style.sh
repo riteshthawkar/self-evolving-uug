@@ -33,6 +33,10 @@ export OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/runs/unified_experiments}"
 export TOTAL_STEPS="${TOTAL_STEPS:-10000}"
 export SAVE_EVERY="${SAVE_EVERY:-200}"
 export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-3}"
+export SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-500}"
+export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
+export NUM_SOLVER_SAMPLES_SPEC="${NUM_SOLVER_SAMPLES_SPEC:-3}"
+export GENERATION_NUM_INFERENCE_STEPS="${GENERATION_NUM_INFERENCE_STEPS:-30}"
 export CUDA_DEVICE="${CUDA_DEVICE:-0}"
 export PYTHON_BIN="${PYTHON_BIN:-python3}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
@@ -42,6 +46,8 @@ export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 # Use local original BLIP3o classes from bundled checkout.
 export BLIP3O_REPO="${BLIP3O_REPO:-$REPO_ROOT/BLIP3o}"
 export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-1}"
+# Decoder fallback source for BLIP3o-Model-8B latent->image decoding.
+export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
 
 "$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment unified_self_evolving \
@@ -58,6 +64,7 @@ export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-1}"
   --save_every "$SAVE_EVERY" \
   --log_every 1 \
   --max_checkpoints "$MAX_CHECKPOINTS" \
+  --save_generated_images_every "$SAVE_GENERATED_IMAGES_EVERY" \
   --deterministic \
   --use_lora \
   --lora_r 16 \
@@ -82,9 +89,9 @@ export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-1}"
   --max_new_tokens_caption 96 \
   --max_new_tokens_generator 768 \
   --num_solver_samples 5 \
-  --num_solver_samples_spec 3 \
-  --num_generations 4 \
-  --generation_num_inference_steps 30 \
+  --num_solver_samples_spec "$NUM_SOLVER_SAMPLES_SPEC" \
+  --num_generations "$NUM_GENERATIONS" \
+  --generation_num_inference_steps "$GENERATION_NUM_INFERENCE_STEPS" \
   --generation_guidance_scale 2.0 \
   --allow_missing_generation_tokens \
   --generator_missing_trace_strategy proxy \

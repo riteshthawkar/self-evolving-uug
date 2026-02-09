@@ -157,6 +157,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--generation_guidance_scale", type=float, default=2.0)
     p.add_argument("--generation_height", type=int, default=1024)
     p.add_argument("--generation_width", type=int, default=1024)
+    p.add_argument(
+        "--require_decoder_for_blip3o",
+        action="store_true",
+        default=True,
+        help="Require diffusion decoder for original BLIP3o runs (recommended/scientific default).",
+    )
+    p.add_argument(
+        "--allow_missing_decoder_for_blip3o",
+        dest="require_decoder_for_blip3o",
+        action="store_false",
+        help="Allow running without BLIP3o diffusion decoder (debug only).",
+    )
+    p.add_argument(
+        "--allow_latent_visualization_fallback",
+        action="store_true",
+        default=False,
+        help="Allow latent tensor pseudo-image fallback when decoder is unavailable (debug only).",
+    )
     p.add_argument("--strict_require_generation_tokens", dest="strict_require_generation_tokens", action="store_true")
     p.add_argument(
         "--allow_missing_generation_tokens",
@@ -341,6 +359,8 @@ def run_generation_self_evolving(args: argparse.Namespace):
         generation_guidance_scale=args.generation_guidance_scale,
         generation_height=args.generation_height,
         generation_width=args.generation_width,
+        require_decoder_for_blip3o=args.require_decoder_for_blip3o,
+        allow_latent_visualization_fallback=args.allow_latent_visualization_fallback,
         strict_require_generation_tokens=args.strict_require_generation_tokens,
         generator_missing_trace_strategy=args.generator_missing_trace_strategy,
         verification_use_reference_solver=args.verification_use_reference_solver,
@@ -446,6 +466,8 @@ def run_unified_self_evolving(args: argparse.Namespace):
         generation_guidance_scale=args.generation_guidance_scale,
         generation_height=args.generation_height,
         generation_width=args.generation_width,
+        require_decoder_for_blip3o=args.require_decoder_for_blip3o,
+        allow_latent_visualization_fallback=args.allow_latent_visualization_fallback,
         strict_require_generation_tokens=args.strict_require_generation_tokens,
         generator_missing_trace_strategy=args.generator_missing_trace_strategy,
         verification_use_reference_solver=args.verification_use_reference_solver,
