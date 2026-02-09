@@ -485,12 +485,16 @@ class RolePolicyUpdater:
         self.model.train(True)
         policy_inputs = dict(inputs_full)
         policy_inputs["labels"] = labels
+        # Avoid allocating KV cache during training forwards; this materially lowers
+        # memory usage for long multimodal sequences.
+        policy_inputs["use_cache"] = False
         with use_adapter(self.model, self.adapter_name):
             out_pi = self.model(**policy_inputs)
         ce_loss = out_pi.loss
         logp_pi = F.log_softmax(out_pi.logits, dim=-1)
 
         ref_inputs = dict(inputs_full)
+        ref_inputs["use_cache"] = False
         if self.reference_model is not None:
             with torch.no_grad():
                 out_ref = self.reference_model(**ref_inputs)

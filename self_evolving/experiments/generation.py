@@ -1385,7 +1385,17 @@ def _extract_tokenizer_from_processor(processor):
 
 def _decode_blip3o_generate_image_output(api_obj, image_out):
     decode_fn = getattr(api_obj, "decode_latents", None)
+    if not callable(decode_fn):
+        decode_owner, _ = _find_callable_object(api_obj, "decode_latents")
+        if decode_owner is not None:
+            api_obj = decode_owner
+            decode_fn = getattr(api_obj, "decode_latents", None)
+
     model_obj_fn = getattr(api_obj, "get_model", None)
+    if not callable(model_obj_fn):
+        model_owner, _ = _find_callable_object(api_obj, "get_model")
+        if model_owner is not None:
+            model_obj_fn = getattr(model_owner, "get_model", None)
     model_obj = None
     if callable(model_obj_fn):
         try:
@@ -1435,9 +1445,9 @@ def _decode_blip3o_generate_image_output(api_obj, image_out):
                     candidates.append(latents.contiguous().view(bsz, n, s2, s2))
 
                 # Config-driven reshape when available.
-                model_obj = getattr(api_obj, "get_model", None)
-                if callable(model_obj):
-                    m = model_obj()
+                model_obj_getter = getattr(api_obj, "get_model", None)
+                if callable(model_obj_getter):
+                    m = model_obj_getter()
                     dit = getattr(m, "dit", None)
                     cfg = getattr(dit, "config", None) if dit is not None else None
                     in_channels = int(getattr(cfg, "in_channels", 0) or 0)
@@ -1449,6 +1459,22 @@ def _decode_blip3o_generate_image_output(api_obj, image_out):
                                 bsz, in_channels, input_size, input_size
                             )
                         )
+
+                # Heuristic fallback for original BLIP3o flattened outputs where
+                # shape is [B, N_query, D_flat] (e.g., [1, 64, 1792]).
+                total = n * c
+                for side in (64, 56, 48, 40, 32, 24, 16, 8):
+                    area = side * side
+                    if total % area != 0:
+                        continue
+                    channels = total // area
+                    if channels <= 0 or channels > 128:
+                        continue
+                    candidates.append(
+                        latents.permute(0, 2, 1).contiguous().view(
+                            bsz, channels, side, side
+                        )
+                    )
         except Exception:
             pass
 
@@ -1596,12 +1622,15 @@ class TextPolicyUpdater:
         self.model.train(True)
         policy_inputs = dict(inputs_full)
         policy_inputs["labels"] = labels
+        # Disable KV cache during training forwards to reduce memory pressure.
+        policy_inputs["use_cache"] = False
         with use_adapter(self.model, self.adapter_name):
             out_pi = self.model(**policy_inputs)
         ce_loss = out_pi.loss
         logp_pi = F.log_softmax(out_pi.logits, dim=-1)
 
         ref_inputs = dict(inputs_full)
+        ref_inputs["use_cache"] = False
         if self.reference_model is not None:
             with torch.no_grad():
                 out_ref = self.reference_model(**ref_inputs)
@@ -1795,12 +1824,14 @@ class TextPreferenceDPOUpdater:
     ) -> Tuple[torch.Tensor, int]:
         context = torch.no_grad() if no_grad else torch.enable_grad()
         with context:
+            forward_inputs = dict(inputs_full)
+            forward_inputs["use_cache"] = False
             with use_adapter(model, adapter_name):
-                out = model(**inputs_full)
+                out = model(**forward_inputs)
             prompt_len = int(inputs_prompt["input_ids"].shape[1])
             seq_logp, token_count = self._sequence_logp_from_logits(
                 logits=out.logits,
-                input_ids=inputs_full["input_ids"],
+                input_ids=forward_inputs["input_ids"],
                 prompt_len=prompt_len,
             )
         return seq_logp, token_count
@@ -4609,7 +4640,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_reward = gaussian_reward(entropy_nats, self.cfg.prop_entropy_mu, self.cfg.prop_entropy_sigma)
 
         solver_stats_list = []
-        if self.solver_updater is not None:
+        solver_update_applied = (
+            self.solver_updater is not None
+            and self.cfg.solver_update_freq > 0
+            and (step % self.cfg.solver_update_freq == 0)
+        )
+        if solver_update_applied:
             for completion, reward in zip(solver_outputs, solver_rewards_soft):
                 baseline_before = self.solver_baseline
                 stats = self.solver_updater.step(
@@ -4657,6 +4693,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_reward": proposer_reward,
             "solver_baseline": self.solver_baseline,
             "proposer_baseline": self.proposer_baseline,
+            "solver_update_applied": solver_update_applied,
             "solver_stats": solver_stats_list,
             "proposer_stats": proposer_stats,
         }
