@@ -3114,7 +3114,8 @@ class GenerationSelfEvolvingTrainer:
         }
         return sanitized, quality, details
 
-    def _generate_image_candidate(self, prompt: str) -> Dict[str, object]:
+    def _generate_image_candidate(self, inputs: str, **kwargs) -> Dict[str, Any]:
+        prompt = inputs
         api_name = self._generation_api_name
         api_obj = self._generation_api_obj
         if api_name is None or api_obj is None:
@@ -3265,13 +3266,13 @@ class GenerationSelfEvolvingTrainer:
             if self._blip3o_diffusion_pipe is not None:
                 with torch.no_grad():
                     with use_adapter(self.model, "generator" if self.cfg.use_lora else None):
-                        pipe_out = self._blip3o_diffusion_pipe(
-                            prompt=prompt,
-                            guidance_scale=self.cfg.generation_guidance_scale,
-                            num_inference_steps=self.cfg.generation_num_inference_steps,
-                            height=self.cfg.generation_height,
-                            width=self.cfg.generation_width,
-                        )
+                            pipe_out = self._blip3o_diffusion_pipe(
+                                inputs=prompt,
+                                guidance_scale=self.cfg.generation_guidance_scale,
+                                num_inference_steps=self.cfg.generation_num_inference_steps,
+                                height=self.cfg.generation_height,
+                                width=self.cfg.generation_width,
+                            )
                 images = getattr(pipe_out, "images", None)
                 if not images:
                     raise RuntimeError("BLIP3o diffusion pipeline returned no images.")
@@ -3863,7 +3864,7 @@ class GenerationSelfEvolvingTrainer:
                 print(
                     f"[Step {step:05d}][G] generating candidate {cand_idx + 1}/{self.cfg.num_generations}"
                 )
-            cand = self._generate_image_candidate(spec.prompt)
+            cand = self._generate_image_candidate(inputs=spec.prompt)
             candidates.append(cand)
             if verbose:
                 backend = str(cand.get("backend", "unknown"))
