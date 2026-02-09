@@ -4,7 +4,7 @@
 # Understanding-only self-evolving with different proposer update cadences.
 # Changing values: proposer_update_freq in {1, 3, 5, 10}; seed fixed at 42
 
-export REPO_ROOT="/Users/ritesh.thawkar/Ritesh/self-evolving-uug"
+export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
 
 # Cache locations
@@ -30,7 +30,7 @@ export WANDB_BASE_URL="${WANDB_BASE_URL:-https://api.wandb.ai}"
 export WANDB_LOG_IMAGES_EVERY="${WANDB_LOG_IMAGES_EVERY:-0}"
 
 # Run defaults (override via environment)
-export DATA_DIR="${DATA_DIR:-/path/to/images/train}"
+export DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/shared_uug_50k_balanced/images}"
 export MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-VL-3B-Instruct}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/runs/understanding_experiments}"
 export TOTAL_STEPS="${TOTAL_STEPS:-6000}"
@@ -38,19 +38,24 @@ export SAVE_EVERY="${SAVE_EVERY:-200}"
 export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-3}"
 export CUDA_DEVICE="${CUDA_DEVICE:-0}"
 export PYTHON_BIN="${PYTHON_BIN:-python3}"
+export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+export MASTER_PORT="${MASTER_PORT:-29500}"
+export ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-auto}"
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 
 mkdir -p "$OUTPUT_ROOT"
 
 # Run: u03_propfreq_1_s42
 # Changes proposer_update_freq to 1.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_1_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -94,13 +99,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u03_propfreq_3_s42
 # Changes proposer_update_freq to 3.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_3_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -144,13 +151,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u03_propfreq_5_s42
 # Changes proposer_update_freq to 5.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_5_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -194,13 +203,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u03_propfreq_10_s42
 # Changes proposer_update_freq to 10.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_10_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \

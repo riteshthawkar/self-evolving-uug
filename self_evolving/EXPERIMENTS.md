@@ -29,8 +29,8 @@ python self_evolving/run_experiment.py \
 ## Modes
 
 - `understanding_self_evolving`: Implemented in `self_evolving/experiments/understanding.py`
-- `generation_self_evolving`: Reserved
-- `unified_self_evolving`: Reserved
+- `generation_self_evolving`: Implemented in `self_evolving/experiments/generation.py`
+- `unified_self_evolving`: Implemented in `self_evolving/experiments/generation.py`
 - `rl_no_self_evolving`: Reserved
 
 ## Reproducibility artifacts
@@ -41,12 +41,19 @@ Each run stores:
 - `git_info.json` (commit/branch/dirty)
 - `environment.json` (runtime package/device info)
 - `iter_log.jsonl` (per-step records)
-- `logs/questions.jsonl` (proposer prompt/output/question parsing)
-- `logs/solver_rollouts.jsonl` (all solver samples and per-sample rewards)
 - `logs/rewards.jsonl` (step-level reward decomposition + baselines)
-- `logs/policy_updates.jsonl` (per-update RL stats for solver/proposer)
+- `logs/policy_updates.jsonl` (per-update RL stats for role adapters)
 - `ablation_summary.json` (run-level aggregated metrics for ablations)
-- `step_XXXXX/` checkpoints (solver/proposer adapters + trainer state)
+- `step_XXXXX/` checkpoints (solver/proposer/generator adapters + trainer state)
+
+Mode-specific logs:
+
+- Understanding mode:
+  - `logs/questions.jsonl`
+  - `logs/solver_rollouts.jsonl`
+- Generation/unified modes:
+  - `logs/proposer_prompts.jsonl`
+  - `logs/generation_candidates.jsonl`
 
 ## Understanding Experiment Matrix
 
@@ -106,6 +113,24 @@ Example (full matrix):
 export DATA_DIR="/path/to/images/train"
 export OUTPUT_ROOT="./runs/understanding_experiments"
 bash self_evolving/scripts/understanding_experiments/90_run_all_understanding.sh
+```
+
+## Generation and Unified Launchers
+
+Generation-only launcher:
+
+- `self_evolving/scripts/generation_experiments/00_g00_main_method.sh`
+
+Unified (understanding + generation) launcher:
+
+- `self_evolving/scripts/unified_experiments/00_x00_main_method.sh`
+
+Example:
+
+```bash
+export DATA_DIR="/path/to/images"
+export OUTPUT_ROOT="./runs/generation_experiments"
+bash self_evolving/scripts/generation_experiments/00_g00_main_method.sh
 ```
 
 ## Log and Naming Layout
