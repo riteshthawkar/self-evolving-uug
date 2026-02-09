@@ -15,6 +15,7 @@ import dataclasses
 import datetime as dt
 import gc
 import importlib
+import inspect
 import json
 import math
 import os
@@ -26,7 +27,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -276,6 +277,16 @@ def _prepare_text_inputs(processor, device: torch.device, text: str):
     return inputs.to(device)
 
 
+def _is_original_blip3o_model_name(model_name: str) -> bool:
+    name = (model_name or "").strip().lower()
+    return "blip3o-model" in name and "next" not in name
+
+
+def _is_blip3o_next_model_name(model_name: str) -> bool:
+    name = (model_name or "").strip().lower()
+    return "blip3o-next" in name
+
+
 def _maybe_add_local_blip3o_path() -> Optional[str]:
     """
     Add a local BLIP3o source tree to sys.path if present.
@@ -284,8 +295,14 @@ def _maybe_add_local_blip3o_path() -> Optional[str]:
     env_repo = os.environ.get("BLIP3O_REPO", "").strip()
     if env_repo:
         candidates.append(pathlib.Path(env_repo).expanduser())
-    repo_root = pathlib.Path(__file__).resolve().parents[2]
-    candidates.append(repo_root / "BLIP3o")
+    # Common in-repo locations.
+    try:
+        here = pathlib.Path(__file__).resolve()
+        repo_root = here.parents[2]
+        candidates.append(repo_root / "BLIP3o")
+    except Exception:
+        pass
+    candidates.append(pathlib.Path.cwd() / "BLIP3o")
 
     for cand in candidates:
         try:
@@ -350,6 +367,242 @@ def _load_from_explicit_class(
         except Exception as exc:
             errors.append(f"{cls.__name__}({kwargs}): {repr(exc)}")
     raise RuntimeError(" | ".join(errors))
+
+
+def _import_blip3o_mm_utils():
+    """
+    Import BLIP3o multimodal helpers if available.
+    """
+    last_exc = None
+    added_path = None
+    for _ in range(2):
+        try:
+            module = importlib.import_module("blip3o.mm_utils")
+            return (
+                {
+                    "tokenizer_image_token": getattr(module, "tokenizer_image_token", None),
+                },
+                None,
+                added_path,
+            )
+        except Exception as exc:
+            last_exc = exc
+            added_path = _maybe_add_local_blip3o_path()
+    return {}, last_exc, added_path
+
+
+def _build_original_blip3o_diffusion_pipeline(
+    model_name: str,
+    *,
+    multimodal_encoder,
+    processor,
+    torch_dtype: torch.dtype,
+    device: torch.device,
+):
+    """
+    Build original BLIP3o diffusion decoder pipeline from HF model repo.
+
+    Original BLIP3o (`BLIP3o/BLIP3o-Model-8B`) uses a diffusion-decoder
+    subfolder with custom pipelines (e.g. `pipeline_llava_gen.py`).
+    """
+    try:
+        from diffusers import DiffusionPipeline
+    except Exception as exc:
+        raise RuntimeError(
+            "diffusers is required for original BLIP3o diffusion-decoder backend."
+        ) from exc
+
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is None and hasattr(processor, "tokenizer_image_token"):
+        tokenizer = processor
+    if tokenizer is None:
+        raise RuntimeError("Processor does not expose tokenizer required by BLIP3o diffusion pipeline.")
+
+    attempts = (
+        "pipeline_llava_gen",
+        "pipeline_ar_gen",
+    )
+    errors: List[str] = []
+    pipe = None
+    for custom_pipeline in attempts:
+        try:
+            try:
+                pipe = DiffusionPipeline.from_pretrained(
+                    model_name,
+                    custom_pipeline=custom_pipeline,
+                    subfolder="diffusion-decoder",
+                    tokenizer=tokenizer,
+                    multimodal_encoder=multimodal_encoder,
+                    safety_checker=None,
+                    trust_remote_code=True,
+                    torch_dtype=torch_dtype,
+                )
+            except TypeError:
+                pipe = DiffusionPipeline.from_pretrained(
+                    model_name,
+                    custom_pipeline=custom_pipeline,
+                    subfolder="diffusion-decoder",
+                    tokenizer=tokenizer,
+                    multimodal_encoder=multimodal_encoder,
+                    safety_checker=None,
+                    torch_dtype=torch_dtype,
+                )
+            break
+        except Exception as exc:
+            errors.append(f"{custom_pipeline}: {repr(exc)}")
+
+    if pipe is None:
+        detail = " | ".join(errors)
+        raise RuntimeError(f"Failed to build BLIP3o diffusion pipeline. {detail}")
+
+    try:
+        pipe = pipe.to(device)
+    except Exception:
+        # Some pipeline objects are partially device-managed internally.
+        pass
+    return pipe
+
+
+def _resolve_multimodal_encoder_for_pipeline(model):
+    """
+    Select the object that exposes `generate_image` for original BLIP3o pipelines.
+    """
+    try:
+        for _, obj in _iter_wrapper_objects(model):
+            if callable(getattr(obj, "generate_image", None)):
+                return obj
+    except Exception:
+        pass
+    return model
+
+
+class _Blip3oProcessorShim:
+    """
+    Minimal processor shim for BLIP3o checkpoints that expose tokenizer + image processor separately.
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        image_processor=None,
+        tokenizer_image_token_fn: Optional[Callable[..., torch.Tensor]] = None,
+    ):
+        self.tokenizer = tokenizer
+        self.image_processor = image_processor
+        self._tokenizer_image_token_fn = tokenizer_image_token_fn
+        # Some generic paths look for these attributes.
+        self.chat_template = getattr(tokenizer, "chat_template", None)
+
+    def decode(self, *args, **kwargs):
+        return self.tokenizer.decode(*args, **kwargs)
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+        normalized = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    typ = item.get("type")
+                    if typ == "image":
+                        parts.append("<image>")
+                    elif typ == "text":
+                        parts.append(str(item.get("text", "")))
+                content = "\n".join([p for p in parts if p]).strip()
+            normalized.append({"role": role, "content": str(content)})
+
+        if hasattr(self.tokenizer, "apply_chat_template"):
+            return self.tokenizer.apply_chat_template(
+                normalized,
+                tokenize=tokenize,
+                add_generation_prompt=add_generation_prompt,
+            )
+
+        text = ""
+        for msg in normalized:
+            text += f"{msg['role']}\n{msg['content']}\n"
+        if add_generation_prompt:
+            text += "assistant\n"
+        if tokenize:
+            return self.tokenizer(text).input_ids
+        return text
+
+    def _tokenize_with_image_placeholder(self, text_list: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
+        fn = self._tokenizer_image_token_fn
+        if fn is None:
+            batch = self.tokenizer(text_list, return_tensors="pt", padding=True)
+            return batch["input_ids"], batch["attention_mask"]
+
+        ids_list = []
+        for txt in text_list:
+            ids = fn(txt, self.tokenizer, return_tensors="pt")
+            if ids.ndim == 1:
+                ids_list.append(ids)
+            else:
+                ids_list.append(ids.squeeze(0))
+
+        pad_id = getattr(self.tokenizer, "pad_token_id", None)
+        if pad_id is None:
+            pad_id = getattr(self.tokenizer, "eos_token_id", 0)
+        max_len = max(int(x.numel()) for x in ids_list)
+        input_ids = torch.full((len(ids_list), max_len), int(pad_id), dtype=torch.long)
+        attention_mask = torch.zeros((len(ids_list), max_len), dtype=torch.long)
+        for i, ids in enumerate(ids_list):
+            ln = int(ids.numel())
+            input_ids[i, :ln] = ids
+            attention_mask[i, :ln] = 1
+        return input_ids, attention_mask
+
+    def __call__(self, text=None, images=None, return_tensors="pt", padding=True, **kwargs):
+        from transformers import BatchEncoding
+
+        text_list = text if isinstance(text, list) else [str(text or "")]
+
+        use_image_placeholder = any("<image>" in t for t in text_list)
+        if use_image_placeholder:
+            input_ids, attention_mask = self._tokenize_with_image_placeholder(text_list)
+            data: Dict[str, torch.Tensor] = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+            }
+        else:
+            tok = self.tokenizer(text_list, return_tensors=return_tensors, padding=padding, **kwargs)
+            data = {
+                "input_ids": tok["input_ids"],
+                "attention_mask": tok["attention_mask"],
+            }
+
+        if images is not None:
+            if self.image_processor is None:
+                raise RuntimeError(
+                    "BLIP3o processor shim missing image_processor; cannot prepare multimodal inputs."
+                )
+            img_list = images if isinstance(images, list) else [images]
+            pix = self.image_processor.preprocess(img_list, return_tensors="pt")["pixel_values"]
+            data["images"] = pix
+
+        return BatchEncoding(data=data, tensor_type=return_tensors)
+
+
+def _build_blip3o_processor(tokenizer, model, tokenizer_image_token_fn=None):
+    image_processor = None
+    if model is not None:
+        model_ref = _unwrap_model(model)
+        get_vt = getattr(model_ref, "get_vision_tower", None)
+        if callable(get_vt):
+            try:
+                vt = get_vt()
+                image_processor = getattr(vt, "image_processor", None)
+            except Exception:
+                image_processor = None
+    return _Blip3oProcessorShim(
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        tokenizer_image_token_fn=tokenizer_image_token_fn,
+    )
 
 
 def _iter_wrapper_objects(root_obj) -> List[Tuple[str, object]]:
@@ -550,7 +803,7 @@ class GenerationSelfEvolvingConfig:
     max_images: Optional[int] = None
 
     # Model
-    model_name: str = "BLIP3o/BLIP3o-NEXT-4B"
+    model_name: str = "BLIP3o/BLIP3o-Model-8B"
     dtype: str = "bfloat16"
     cuda_device: int = 0
     device_map: str = "single"
@@ -710,27 +963,38 @@ class GenerationSelfEvolvingTrainer:
         self.summary_path = self.run_dir / "ablation_summary.json"
         self._save_run_metadata()
 
+        self._blip3o_diffusion_pipe = None
+        self._generation_api_name = None
+        self._generation_api_obj = None
+        self._generation_api_path = None
         self.model, self.processor = self._load_model()
         fallback_dev = self.local_rank if self.distributed else config.cuda_device
         self.device = _infer_primary_device(self.model, fallback_cuda_device=fallback_dev)
-        self._generation_api_name, self._generation_api_obj, self._generation_api_path, inspected = (
-            _find_generation_callable(_unwrap_model(self.model))
+        self._generation_api_name, self._generation_api_obj, self._generation_api_path, inspected = _find_generation_callable(
+            _unwrap_model(self.model)
         )
-        if self._generation_api_name is None:
+        if self._generation_api_name is None and self._blip3o_diffusion_pipe is None:
             inspected_text = "; ".join(inspected[:10]) if inspected else "none"
             raise RuntimeError(
                 "Loaded model does not expose a supported image generation API for "
                 f"`{config.experiment_name}`.\n"
                 f"model_name={config.model_name}\n"
                 f"inspected_wrappers={inspected_text}\n"
-                "Expected one of: generate_images(...), generate_image(...).\n"
+                "Expected one of: generate_images(...), generate_image(...), or a BLIP3o diffusion-decoder pipeline.\n"
                 "Use a generation-capable model (e.g., BLIP3o family) for generation/unified experiments."
             )
-        if self.is_main_process:
+        if self._generation_api_name is not None and self.is_main_process:
             print(
                 f"[Generation] Using generation backend `{self._generation_api_name}` "
                 f"from `{self._generation_api_path}` ({type(self._generation_api_obj).__name__})"
             )
+        elif self._blip3o_diffusion_pipe is not None and self.is_main_process:
+            print("[Generation] Using generation backend `diffusion_pipeline` (original BLIP3o decoder).")
+            if not self.cfg.strict_require_generation_tokens:
+                print(
+                    "[Generation] Note: token traces may be unavailable with diffusion pipeline backend; "
+                    "generator updates can be skipped when no completion trace is returned."
+                )
 
         pool_cfg = ImagePoolConfig(
             data_dir=config.data_dir,
@@ -1087,20 +1351,44 @@ class GenerationSelfEvolvingTrainer:
         else:
             device_map = "auto"
 
-        from transformers import AutoProcessor
+        from transformers import AutoModel, AutoProcessor, AutoTokenizer
 
-        processor = AutoProcessor.from_pretrained(self.cfg.model_name, trust_remote_code=True)
+        processor = None
         model = None
         loader_used = "auto_fallback"
-
+        mm_utils: Dict[str, Any] = {}
         model_name_lower = (self.cfg.model_name or "").lower()
-        if "blip3o" in model_name_lower:
+        is_original_blip3o = _is_original_blip3o_model_name(self.cfg.model_name)
+        is_blip3o_next = _is_blip3o_next_model_name(self.cfg.model_name)
+        local_classes_mode = os.environ.get("BLIP3O_USE_LOCAL_CLASSES", "auto").strip().lower()
+        if local_classes_mode in {"1", "true", "yes", "on"}:
+            use_local_blip3o_classes = True
+        elif local_classes_mode in {"0", "false", "no", "off"}:
+            use_local_blip3o_classes = False
+        else:
+            # Local in-repo classes are BLIP3o-NEXT style; default to local only for NEXT.
+            use_local_blip3o_classes = is_blip3o_next
+        if os.environ.get("BLIP3O_REPO", "").strip():
+            use_local_blip3o_classes = True
+
+        if is_original_blip3o and use_local_blip3o_classes and self.is_main_process:
+            print(
+                "[Generation] WARNING: local BLIP3o classes are typically BLIP3o-NEXT style "
+                "(Qwen3 + SANA) and may not match original BLIP3o-Model-8B."
+            )
+
+        if "blip3o" in model_name_lower and use_local_blip3o_classes:
             classes, import_err, added_path = _import_blip3o_classes()
+            mm_utils, mm_import_err, mm_added_path = _import_blip3o_mm_utils()
             if self.is_main_process:
                 if added_path:
                     print(f"[Generation] Added local BLIP3o path: {added_path}")
                 if import_err is not None:
                     print(f"[Generation] BLIP3o import warning: {repr(import_err)}")
+                if mm_added_path and mm_added_path != added_path:
+                    print(f"[Generation] Added local BLIP3o mm_utils path: {mm_added_path}")
+                if mm_import_err is not None:
+                    print(f"[Generation] BLIP3o mm_utils import warning: {repr(mm_import_err)}")
 
             explicit_errors: List[str] = []
             for key in ("inference", "grpo"):
@@ -1127,14 +1415,95 @@ class GenerationSelfEvolvingTrainer:
                 for err in explicit_errors:
                     print(f"  - {err}")
 
-        if model is None:
-            model = _load_model_with_fallback(
-                self.cfg.model_name,
-                torch_dtype=dtype,
-                device_map=device_map,
-                trust_remote_code=True,
-                attn_implementation=attn_impl,
+            if model is not None:
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained(self.cfg.model_name, trust_remote_code=True)
+                except Exception:
+                    tokenizer = AutoTokenizer.from_pretrained(self.cfg.model_name)
+                processor = _build_blip3o_processor(
+                    tokenizer=tokenizer,
+                    model=model,
+                    tokenizer_image_token_fn=mm_utils.get("tokenizer_image_token"),
+                )
+                loader_used = f"{loader_used}+blip3o_shim"
+        elif "blip3o" in model_name_lower and self.is_main_process:
+            print(
+                "[Generation] Using remote/original BLIP3o loading path "
+                "(without forcing local BLIP3o classes)."
             )
+
+        if model is None:
+            tokenizer_for_fallback = None
+            try:
+                processor = AutoProcessor.from_pretrained(self.cfg.model_name, trust_remote_code=True)
+            except Exception as proc_exc:
+                if self.is_main_process:
+                    print(
+                        f"[Generation] AutoProcessor load warning for '{self.cfg.model_name}': {repr(proc_exc)}. "
+                        "Attempting tokenizer fallback."
+                    )
+                try:
+                    tokenizer_for_fallback = AutoTokenizer.from_pretrained(
+                        self.cfg.model_name,
+                        trust_remote_code=True,
+                    )
+                except Exception:
+                    tokenizer_for_fallback = AutoTokenizer.from_pretrained(self.cfg.model_name)
+
+            if is_original_blip3o:
+                # Original BLIP3o model card loads via AutoModel + custom diffusion pipeline.
+                auto_model_kwargs = {
+                    "device_map": device_map,
+                    "trust_remote_code": True,
+                    "low_cpu_mem_usage": True,
+                }
+                if attn_impl:
+                    auto_model_kwargs["attn_implementation"] = attn_impl
+                try:
+                    model = AutoModel.from_pretrained(
+                        self.cfg.model_name,
+                        dtype=dtype,
+                        **auto_model_kwargs,
+                    )
+                    loader_used = "AutoModel(original_blip3o)"
+                except TypeError:
+                    model = AutoModel.from_pretrained(
+                        self.cfg.model_name,
+                        torch_dtype=dtype,
+                        **auto_model_kwargs,
+                    )
+                    loader_used = "AutoModel(original_blip3o)"
+                except Exception as auto_exc:
+                    if self.is_main_process:
+                        print(
+                            f"[Generation] AutoModel load failed for original BLIP3o: {repr(auto_exc)}. "
+                            "Falling back to generic loaders."
+                        )
+                if model is not None and not hasattr(model, "generate"):
+                    if self.is_main_process:
+                        print(
+                            "[Generation] AutoModel object has no `.generate`; "
+                            "falling back to CausalLM-compatible loaders."
+                        )
+                    model = None
+
+            if model is None:
+                model = _load_model_with_fallback(
+                    self.cfg.model_name,
+                    torch_dtype=dtype,
+                    device_map=device_map,
+                    trust_remote_code=True,
+                    attn_implementation=attn_impl,
+                )
+            if processor is None and tokenizer_for_fallback is not None:
+                processor = _build_blip3o_processor(
+                    tokenizer=tokenizer_for_fallback,
+                    model=model,
+                    tokenizer_image_token_fn=mm_utils.get("tokenizer_image_token"),
+                )
+                loader_used = f"{loader_used}+tokenizer_shim"
+            if processor is None:
+                processor = AutoProcessor.from_pretrained(self.cfg.model_name, trust_remote_code=True)
 
         if self.is_main_process:
             print(
@@ -1171,6 +1540,29 @@ class GenerationSelfEvolvingTrainer:
                     param.requires_grad_(False)
 
             model.print_trainable_parameters()
+
+        if is_original_blip3o:
+            try:
+                pipeline_device = (
+                    torch.device(f"cuda:{self.local_rank if self.distributed else self.cfg.cuda_device}")
+                    if torch.cuda.is_available()
+                    else torch.device("cpu")
+                )
+                pipe_encoder = _resolve_multimodal_encoder_for_pipeline(model)
+                self._blip3o_diffusion_pipe = _build_original_blip3o_diffusion_pipeline(
+                    self.cfg.model_name,
+                    multimodal_encoder=pipe_encoder,
+                    processor=processor,
+                    torch_dtype=dtype,
+                    device=pipeline_device,
+                )
+                loader_used = f"{loader_used}+diffusion_decoder"
+            except Exception as exc:
+                if self.is_main_process:
+                    print(
+                        "[Generation] WARNING: failed to initialize original BLIP3o diffusion "
+                        f"decoder pipeline: {repr(exc)}"
+                    )
 
         model.eval()
         return model, processor
@@ -1291,14 +1683,40 @@ class GenerationSelfEvolvingTrainer:
         return sanitized, quality, details
 
     def _generate_image_candidate(self, prompt: str) -> Dict[str, object]:
-        api_name, api_obj, _api_path, inspected = _find_generation_callable(_unwrap_model(self.model))
+        api_name = self._generation_api_name
+        api_obj = self._generation_api_obj
         if api_name is None or api_obj is None:
-            inspected_text = "; ".join(inspected[:10]) if inspected else "none"
-            raise RuntimeError(
-                "Model does not expose a supported image generation API. "
-                f"model_name={self.cfg.model_name} inspected_wrappers={inspected_text}. "
-                "Expected `generate_images(...)` or `generate_image(...)`."
-            )
+            api_name, api_obj, _api_path, inspected = _find_generation_callable(_unwrap_model(self.model))
+            self._generation_api_name = api_name
+            self._generation_api_obj = api_obj
+            self._generation_api_path = _api_path
+            if (api_name is None or api_obj is None) and self._blip3o_diffusion_pipe is None:
+                inspected_text = "; ".join(inspected[:10]) if inspected else "none"
+                raise RuntimeError(
+                    "Model does not expose a supported image generation API. "
+                    f"model_name={self.cfg.model_name} inspected_wrappers={inspected_text}. "
+                    "Expected `generate_images(...)`, `generate_image(...)`, or BLIP3o diffusion pipeline."
+                )
+
+        if (api_name is None or api_obj is None) and self._blip3o_diffusion_pipe is not None:
+            with torch.no_grad():
+                with use_adapter(self.model, "generator" if self.cfg.use_lora else None):
+                    out = self._blip3o_diffusion_pipe(
+                        prompt=prompt,
+                        guidance_scale=self.cfg.generation_guidance_scale,
+                        num_inference_steps=self.cfg.generation_num_inference_steps,
+                        height=self.cfg.generation_height,
+                        width=self.cfg.generation_width,
+                    )
+            images = getattr(out, "images", None)
+            if not images:
+                raise RuntimeError("BLIP3o diffusion pipeline returned no images.")
+            return {
+                "image": _ensure_pil_image(images[0]),
+                "policy_prompt": prompt,
+                "policy_completion": "",
+                "backend": "diffusion_pipeline",
+            }
 
         # Path 1: BLIP3o-style API with token trace.
         if api_name == "generate_images":
@@ -1307,8 +1725,13 @@ class GenerationSelfEvolvingTrainer:
                 with use_adapter(self.model, "generator" if self.cfg.use_lora else None):
                     gen_fn = getattr(api_obj, "generate_images")
                     try:
+                        first_param = next(iter(inspect.signature(gen_fn).parameters.values()), None)
+                        first_name = first_param.name if first_param is not None else ""
+                    except Exception:
+                        first_name = ""
+                    try:
                         out = gen_fn(
-                            input_ids=text_inputs.get("input_ids"),
+                            text_inputs.get("input_ids"),
                             attention_mask=text_inputs.get("attention_mask"),
                             max_new_tokens=self.cfg.max_new_tokens_generator,
                             temperature=self.cfg.temp,
@@ -1320,14 +1743,25 @@ class GenerationSelfEvolvingTrainer:
                         )
                     except TypeError:
                         # Fallback for alternate custom signatures.
-                        out = gen_fn(
-                            prompt=prompt,
-                            max_new_tokens=self.cfg.max_new_tokens_generator,
-                            temperature=self.cfg.temp,
-                            top_p=self.cfg.top_p,
-                            num_inference_steps=self.cfg.generation_num_inference_steps,
-                            guidance_scale=self.cfg.generation_guidance_scale,
-                        )
+                        if first_name in {"inputs", "input_ids"}:
+                            out = gen_fn(
+                                text_inputs.get("input_ids"),
+                                text_inputs.get("attention_mask"),
+                                max_new_tokens=self.cfg.max_new_tokens_generator,
+                                temperature=self.cfg.temp,
+                                top_p=self.cfg.top_p,
+                                num_inference_steps=self.cfg.generation_num_inference_steps,
+                                guidance_scale=self.cfg.generation_guidance_scale,
+                            )
+                        else:
+                            out = gen_fn(
+                                prompt=prompt,
+                                max_new_tokens=self.cfg.max_new_tokens_generator,
+                                temperature=self.cfg.temp,
+                                top_p=self.cfg.top_p,
+                                num_inference_steps=self.cfg.generation_num_inference_steps,
+                                guidance_scale=self.cfg.generation_guidance_scale,
+                            )
 
             token_completion = ""
             image_out = None
@@ -1378,8 +1812,28 @@ class GenerationSelfEvolvingTrainer:
                         )
                     except TypeError:
                         image_out = gen_fn(prompt)
+            if self._blip3o_diffusion_pipe is not None:
+                # Original BLIP3o API may return latent embeddings instead of final image.
+                try:
+                    pil_image = _ensure_pil_image(image_out)
+                except Exception:
+                    with torch.no_grad():
+                        with use_adapter(self.model, "generator" if self.cfg.use_lora else None):
+                            pipe_out = self._blip3o_diffusion_pipe(
+                                prompt=prompt,
+                                guidance_scale=self.cfg.generation_guidance_scale,
+                                num_inference_steps=self.cfg.generation_num_inference_steps,
+                                height=self.cfg.generation_height,
+                                width=self.cfg.generation_width,
+                            )
+                    images = getattr(pipe_out, "images", None)
+                    if not images:
+                        raise RuntimeError("BLIP3o diffusion pipeline returned no images.")
+                    pil_image = _ensure_pil_image(images[0])
+            else:
+                pil_image = _ensure_pil_image(image_out)
             return {
-                "image": _ensure_pil_image(image_out),
+                "image": pil_image,
                 "policy_prompt": prompt,
                 "policy_completion": "",
                 "backend": "generate_image",

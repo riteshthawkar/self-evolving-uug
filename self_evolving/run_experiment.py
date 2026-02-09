@@ -43,7 +43,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data_split", type=str, default="all", choices=["train", "val", "test", "all"])
     p.add_argument("--output_dir", type=str, default="./runs")
     p.add_argument("--run_name", type=str, default=None)
-    p.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct")
+    p.add_argument("--model_name", type=str, default="BLIP3o/BLIP3o-Model-8B")
     p.add_argument("--include_subfolders", type=str, default=None)
     p.add_argument("--max_images", type=int, default=None)
     p.add_argument("--seed", type=int, default=42)
@@ -230,6 +230,20 @@ def run_generation_self_evolving(args: argparse.Namespace):
         GenerationSelfEvolvingTrainer,
     )
 
+    model_name_lower = (args.model_name or "").lower()
+    if "qwen2.5-vl" in model_name_lower:
+        raise ValueError(
+            "generation_self_evolving requires a generation-capable model checkpoint. "
+            f"Got model_name='{args.model_name}', which is understanding-only in this pipeline. "
+            "Use a BLIP3o generation model id or a local BLIP3o checkpoint path."
+        )
+    if "blip3o-model" in model_name_lower and args.strict_require_generation_tokens:
+        print(
+            "[run_experiment] BLIP3o-Model uses diffusion decoder and may not expose token traces; "
+            "switching to --allow_missing_generation_tokens."
+        )
+        args.strict_require_generation_tokens = False
+
     lora_targets = tuple(x.strip() for x in args.lora_targets.split(",") if x.strip())
     cfg = GenerationSelfEvolvingConfig(
         run_name=args.run_name,
@@ -314,6 +328,20 @@ def run_unified_self_evolving(args: argparse.Namespace):
         UnifiedSelfEvolvingConfig,
         UnifiedSelfEvolvingTrainer,
     )
+
+    model_name_lower = (args.model_name or "").lower()
+    if "qwen2.5-vl" in model_name_lower:
+        raise ValueError(
+            "unified_self_evolving requires a generation-capable model checkpoint. "
+            f"Got model_name='{args.model_name}', which is understanding-only in this pipeline. "
+            "Use a BLIP3o generation model id or a local BLIP3o checkpoint path."
+        )
+    if "blip3o-model" in model_name_lower and args.strict_require_generation_tokens:
+        print(
+            "[run_experiment] BLIP3o-Model uses diffusion decoder and may not expose token traces; "
+            "switching to --allow_missing_generation_tokens."
+        )
+        args.strict_require_generation_tokens = False
 
     lora_targets = tuple(x.strip() for x in args.lora_targets.split(",") if x.strip())
     cfg = UnifiedSelfEvolvingConfig(

@@ -1,10 +1,10 @@
 """
-Benchmark validation script for self-evolving BLIP3o-NEXT.
+Benchmark validation script for self-evolving BLIP3o-family models.
 Evaluates trained models on standard understanding and generation benchmarks.
 
 Benchmarks:
 - Understanding: ChartQA, MathVista, DocVQA (EvoLMM suite)
-- Generation: GenEval, prompt-following tests (BLIP3o-NEXT suite)
+- Generation: GenEval, prompt-following tests (BLIP3o-family suite)
 """
 
 import os
@@ -26,7 +26,7 @@ class BenchmarkConfig:
     """Configuration for benchmark evaluation."""
     # Model
     model_path: str = ""
-    base_model: str = "BLIP3o/BLIP3o-NEXT-4B"
+    base_model: str = "BLIP3o/BLIP3o-Model-8B"
     
     # Benchmarks to run
     run_understanding: bool = True
@@ -366,7 +366,7 @@ def create_synthetic_generation_benchmark(n_samples: int = 50) -> List[Dict]:
 
 def run_evaluation(config: BenchmarkConfig):
     """Run full benchmark evaluation."""
-    from transformers import AutoProcessor, AutoModelForCausalLM
+    from transformers import AutoModel, AutoModelForCausalLM, AutoProcessor
     from peft import PeftModel
     
     os.makedirs(config.output_dir, exist_ok=True)
@@ -378,12 +378,22 @@ def run_evaluation(config: BenchmarkConfig):
     
     processor = AutoProcessor.from_pretrained(config.base_model, trust_remote_code=True)
     
-    model = AutoModelForCausalLM.from_pretrained(
-        config.base_model,
-        torch_dtype=torch.bfloat16,
-        device_map={"": config.cuda_device},
-        trust_remote_code=True,
-    )
+    try:
+        model = AutoModel.from_pretrained(
+            config.base_model,
+            torch_dtype=torch.bfloat16,
+            device_map={"": config.cuda_device},
+            trust_remote_code=True,
+        )
+        if not hasattr(model, "generate"):
+            raise RuntimeError("AutoModel result has no `.generate` method")
+    except Exception:
+        model = AutoModelForCausalLM.from_pretrained(
+            config.base_model,
+            torch_dtype=torch.bfloat16,
+            device_map={"": config.cuda_device},
+            trust_remote_code=True,
+        )
     
     # Load LoRA weights if provided
     if config.model_path and os.path.exists(config.model_path):
@@ -463,9 +473,9 @@ def run_evaluation(config: BenchmarkConfig):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark evaluation for self-evolving BLIP3o-NEXT")
+    parser = argparse.ArgumentParser(description="Benchmark evaluation for self-evolving BLIP3o-family models")
     parser.add_argument("--model_path", type=str, default="", help="Path to trained LoRA weights")
-    parser.add_argument("--base_model", type=str, default="BLIP3o/BLIP3o-NEXT-4B")
+    parser.add_argument("--base_model", type=str, default="BLIP3o/BLIP3o-Model-8B")
     parser.add_argument("--output_dir", type=str, default="./eval_results")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--cuda_device", type=int, default=0)

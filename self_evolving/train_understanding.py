@@ -1,6 +1,6 @@
 """
 Training script for understanding-only self-evolution.
-Validates EvoLMM loop on BLIP3o-NEXT backbone.
+Validates EvoLMM loop on BLIP3o-compatible backbone.
 Phase 1 validation: Proposer + Solver with self-consistency reward.
 """
 
@@ -29,7 +29,7 @@ class TrainingConfig:
     batch_size: int = 4
     
     # Model
-    model_name: str = "BLIP3o/BLIP3o-NEXT-4B"
+    model_name: str = "BLIP3o/BLIP3o-Model-8B"
     use_lora: bool = True
     lora_r: int = 16
     lora_alpha: int = 32
@@ -63,8 +63,8 @@ class TrainingConfig:
 
 
 def setup_model(config: TrainingConfig):
-    """Load BLIP3o-NEXT model with LoRA adapters."""
-    from transformers import AutoProcessor, AutoModelForCausalLM
+    """Load BLIP3o-compatible model with LoRA adapters."""
+    from transformers import AutoModel, AutoModelForCausalLM, AutoProcessor
     from peft import LoraConfig, get_peft_model, TaskType
     
     print(f"Loading model: {config.model_name}")
@@ -72,13 +72,23 @@ def setup_model(config: TrainingConfig):
     # Load processor
     processor = AutoProcessor.from_pretrained(config.model_name, trust_remote_code=True)
     
-    # Load model
-    model = AutoModelForCausalLM.from_pretrained(
-        config.model_name,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        trust_remote_code=True,
-    )
+    # Load model (original BLIP3o prefers AutoModel path).
+    try:
+        model = AutoModel.from_pretrained(
+            config.model_name,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+        if not hasattr(model, "generate"):
+            raise RuntimeError("AutoModel result has no `.generate` method")
+    except Exception:
+        model = AutoModelForCausalLM.from_pretrained(
+            config.model_name,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True,
+        )
     
     if config.use_lora:
         # Setup LoRA for proposer and solver
@@ -248,7 +258,7 @@ def train_understanding_loop(config: TrainingConfig):
 def main():
     parser = argparse.ArgumentParser(description="Self-evolving understanding training")
     parser.add_argument("--data_dir", type=str, required=True, help="Directory with training images")
-    parser.add_argument("--model_name", type=str, default="BLIP3o/BLIP3o-NEXT-4B")
+    parser.add_argument("--model_name", type=str, default="BLIP3o/BLIP3o-Model-8B")
     parser.add_argument("--output_dir", type=str, default="./outputs_understanding")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_epochs", type=int, default=1)

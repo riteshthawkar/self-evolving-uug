@@ -29,7 +29,7 @@ export WANDB_LOG_IMAGES_EVERY="${WANDB_LOG_IMAGES_EVERY:-0}"
 
 # Run defaults (override via environment)
 export DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/shared_uug_50k_balanced/images}"
-export MODEL_NAME="BLIP3o/BLIP3o-NEXT-4B"
+export MODEL_NAME="${MODEL_NAME:-BLIP3o/BLIP3o-Model-8B}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/runs/unified_experiments}"
 export TOTAL_STEPS="${TOTAL_STEPS:-10000}"
 export SAVE_EVERY="${SAVE_EVERY:-200}"
@@ -40,6 +40,8 @@ export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 export MASTER_PORT="${MASTER_PORT:-29520}"
 export ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-auto}"
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+export BLIP3O_REPO="${BLIP3O_REPO:-}"
+export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-auto}"
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -82,7 +84,7 @@ mkdir -p "$OUTPUT_ROOT"
   --num_generations 4 \
   --generation_num_inference_steps 30 \
   --generation_guidance_scale 2.0 \
-  --strict_require_generation_tokens \
+  --allow_missing_generation_tokens \
   --verification_use_reference_solver \
   --reward_spec_weight 0.65 \
   --reward_cycle_weight 0.20 \
