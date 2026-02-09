@@ -211,20 +211,109 @@ def _ensure_pil_image(image_obj) -> Image.Image:
         return image_obj
     if HAS_NUMPY and isinstance(image_obj, np.ndarray):
         arr = image_obj
+        if arr.ndim == 4:
+            arr = arr[0]
         if arr.ndim == 3 and arr.shape[-1] in (1, 3, 4):
+            h, w = int(arr.shape[0]), int(arr.shape[1])
+            ratio = max(h, w) / float(max(1, min(h, w)))
+            if ratio > 6.0:
+                raise TypeError(f"Array has implausible image aspect ratio for direct conversion: shape={arr.shape}")
             if arr.dtype != np.uint8:
                 arr = np.clip(arr * 255.0, 0.0, 255.0).astype(np.uint8)
             return Image.fromarray(arr)
     if torch.is_tensor(image_obj):
         tensor = image_obj.detach().cpu()
+        if tensor.ndim == 4:
+            tensor = tensor[0]
         if tensor.ndim == 3:
             if tensor.shape[0] in (1, 3, 4):
+                h, w = int(tensor.shape[1]), int(tensor.shape[2])
+                ratio = max(h, w) / float(max(1, min(h, w)))
+                if ratio > 6.0:
+                    raise TypeError(
+                        f"Tensor looks like latent/features, not an image (shape={tuple(tensor.shape)})."
+                    )
                 tensor = tensor.permute(1, 2, 0)
+            elif tensor.shape[-1] in (1, 3, 4):
+                h, w = int(tensor.shape[0]), int(tensor.shape[1])
+                ratio = max(h, w) / float(max(1, min(h, w)))
+                if ratio > 6.0:
+                    raise TypeError(
+                        f"Tensor looks like latent/features, not an image (shape={tuple(tensor.shape)})."
+                    )
+            else:
+                raise TypeError(f"Tensor does not have image-like channel layout: shape={tuple(tensor.shape)}")
+            if tensor.dtype in (torch.bfloat16, torch.float16):
+                tensor = tensor.to(torch.float32)
             arr = tensor.numpy()
             if arr.dtype != np.uint8:
                 arr = np.clip(arr * 255.0, 0.0, 255.0).astype(np.uint8)
             return Image.fromarray(arr)
     raise TypeError(f"Unsupported generated image type: {type(image_obj)}")
+
+
+def _latent_tensor_to_pil(image_obj, target_size: Optional[Tuple[int, int]] = None) -> Optional[Image.Image]:
+    """
+    Deterministic fallback visualization for latent tensors when a decoder pipeline is unavailable.
+    This keeps training/evaluation loops running instead of hard-failing.
+    """
+    if not (HAS_NUMPY and torch.is_tensor(image_obj)):
+        return None
+
+    t = image_obj.detach().to(torch.float32).cpu()
+    if t.ndim == 4:
+        t = t[0]
+    if t.ndim == 3 and t.shape[0] == 1:
+        t = t[0]
+
+    arr_t: Optional[torch.Tensor] = None
+
+    # Case A: token-latent layout [N, C], e.g. [64, 1792]
+    if t.ndim == 2:
+        n, c = int(t.shape[0]), int(t.shape[1])
+        s = int(round(math.sqrt(float(n))))
+        if s * s == n:
+            arr_t = t.view(s, s, c)
+        else:
+            arr_t = t.view(n, 1, c)
+    # Case B: channel-first latent [C, H, W]
+    elif t.ndim == 3:
+        if t.shape[0] in (1, 3, 4):
+            arr_t = t.permute(1, 2, 0).contiguous()
+        elif t.shape[-1] in (1, 3, 4):
+            arr_t = t.contiguous()
+        else:
+            # Treat as [C, H, W] latent map.
+            arr_t = t.permute(1, 2, 0).contiguous()
+    else:
+        return None
+
+    c = int(arr_t.shape[-1])
+    if c == 1:
+        arr_t = arr_t.repeat(1, 1, 3)
+    elif c == 2:
+        arr_t = torch.cat([arr_t, arr_t[..., :1]], dim=-1)
+    elif c > 3:
+        chunks = torch.chunk(arr_t, 3, dim=-1)
+        arr_t = torch.stack([ch.mean(dim=-1) for ch in chunks], dim=-1)
+
+    mn = float(arr_t.min().item())
+    mx = float(arr_t.max().item())
+    if mx <= mn:
+        arr_t = torch.zeros_like(arr_t)
+    else:
+        arr_t = (arr_t - mn) / (mx - mn)
+
+    arr = np.clip(arr_t.numpy() * 255.0, 0.0, 255.0).astype(np.uint8)
+    img = Image.fromarray(arr)
+    if target_size is not None:
+        try:
+            tw, th = int(target_size[0]), int(target_size[1])
+            if tw > 0 and th > 0:
+                img = img.resize((tw, th), Image.BILINEAR)
+        except Exception:
+            pass
+    return img
 
 
 def _parse_generation_spec(raw_text: str) -> GenerationSpec:
@@ -726,6 +815,8 @@ def _build_original_blip3o_diffusion_pipeline(
                     safety_checker=None,
                     trust_remote_code=True,
                     torch_dtype=torch_dtype,
+                    use_safetensors=True,
+                    variant="bf16",
                 )
             except TypeError:
                 pipe = DiffusionPipeline.from_pretrained(
@@ -736,10 +827,71 @@ def _build_original_blip3o_diffusion_pipeline(
                     multimodal_encoder=multimodal_encoder,
                     safety_checker=None,
                     torch_dtype=torch_dtype,
+                    use_safetensors=True,
+                    variant="bf16",
                 )
             break
         except Exception as exc:
             errors.append(f"{custom_pipeline}: {repr(exc)}")
+
+    # Fallback: older diffusers versions can incorrectly resolve `model_index.json`
+    # at repo root even when `subfolder` is provided. Mirror BLIP3o official usage by
+    # resolving a local `diffusion-decoder` path, then loading from that directory.
+    if pipe is None:
+        try:
+            from huggingface_hub import snapshot_download
+
+            local_repo = pathlib.Path(
+                snapshot_download(
+                    repo_id=model_name,
+                    allow_patterns=[
+                        "diffusion-decoder/**",
+                        "pipeline_llava_gen.py",
+                        "pipeline_ar_gen.py",
+                    ],
+                )
+            )
+            diff_dir = local_repo / "diffusion-decoder"
+            if diff_dir.is_dir():
+                for custom_pipeline in attempts:
+                    cp_arg: object = custom_pipeline
+                    root_cp = local_repo / f"{custom_pipeline}.py"
+                    sub_cp = diff_dir / f"{custom_pipeline}.py"
+                    if root_cp.is_file():
+                        cp_arg = str(root_cp)
+                    elif sub_cp.is_file():
+                        cp_arg = str(sub_cp)
+                    try:
+                        try:
+                            pipe = DiffusionPipeline.from_pretrained(
+                                str(diff_dir),
+                                custom_pipeline=cp_arg,
+                                tokenizer=tokenizer,
+                                multimodal_encoder=multimodal_encoder,
+                                safety_checker=None,
+                                trust_remote_code=True,
+                                torch_dtype=torch_dtype,
+                                use_safetensors=True,
+                                variant="bf16",
+                            )
+                        except TypeError:
+                            pipe = DiffusionPipeline.from_pretrained(
+                                str(diff_dir),
+                                custom_pipeline=cp_arg,
+                                tokenizer=tokenizer,
+                                multimodal_encoder=multimodal_encoder,
+                                safety_checker=None,
+                                torch_dtype=torch_dtype,
+                                use_safetensors=True,
+                                variant="bf16",
+                            )
+                        break
+                    except Exception as exc:
+                        errors.append(f"local_snapshot:{custom_pipeline}: {repr(exc)}")
+            else:
+                errors.append(f"local_snapshot: missing diffusion-decoder dir under {local_repo}")
+        except Exception as exc:
+            errors.append(f"local_snapshot: {repr(exc)}")
 
     if pipe is None:
         detail = " | ".join(errors)
@@ -1108,6 +1260,143 @@ def _find_generation_callable(root_obj) -> Tuple[Optional[str], Optional[object]
             if callable(fn):
                 return name, obj, path, inspected
     return None, None, None, inspected
+
+
+def _find_callable_object(root_obj, callable_name: str) -> Tuple[Optional[object], Optional[str]]:
+    try:
+        wrappers = _iter_wrapper_objects(root_obj)
+    except Exception:
+        wrappers = [("model", root_obj)]
+    for path, obj in wrappers:
+        fn = getattr(obj, callable_name, None)
+        if callable(fn):
+            return obj, path
+    return None, None
+
+
+def _extract_tokenizer_from_processor(processor):
+    tok = getattr(processor, "tokenizer", None)
+    if tok is not None:
+        return tok
+    mm_proc = getattr(processor, "multimodal_processor", None)
+    if mm_proc is not None:
+        tok = getattr(mm_proc, "tokenizer", None)
+        if tok is not None:
+            return tok
+    return None
+
+
+def _decode_blip3o_generate_image_output(api_obj, image_out):
+    decode_fn = getattr(api_obj, "decode_latents", None)
+    model_obj_fn = getattr(api_obj, "get_model", None)
+    model_obj = None
+    if callable(model_obj_fn):
+        try:
+            model_obj = model_obj_fn()
+        except Exception:
+            model_obj = None
+    vae_obj = None
+    if model_obj is not None:
+        vae_obj = getattr(model_obj, "vae", None)
+        if vae_obj is None:
+            vae_obj = getattr(model_obj, "sana_vae", None)
+    if not callable(decode_fn) and vae_obj is None:
+        return None
+
+    latents = image_out
+    if torch.is_tensor(latents) and latents.dtype in (torch.bfloat16, torch.float16):
+        latents = latents.to(torch.float32)
+
+    decode_device = None
+    decode_dtype = None
+    if vae_obj is not None:
+        try:
+            p = next(vae_obj.parameters())
+            decode_device = p.device
+            decode_dtype = p.dtype
+        except Exception:
+            pass
+
+    candidates: List[torch.Tensor] = []
+    if torch.is_tensor(latents):
+        candidates.append(latents)
+        try:
+            # BLIP3o `generate_image` often returns reshaped latents [B, N, 1792].
+            if latents.ndim == 3:
+                bsz = int(latents.shape[0])
+                n = int(latents.shape[1])
+                c = int(latents.shape[2])
+
+                # Generic square-token reshape [B, S^2, C] -> [B, C, S, S]
+                s = int(round(math.sqrt(float(n))))
+                if s * s == n:
+                    candidates.append(latents.permute(0, 2, 1).contiguous().view(bsz, c, s, s))
+
+                # Reverse-layout variant [B, C, S^2] -> [B, C, S, S]
+                s2 = int(round(math.sqrt(float(c))))
+                if s2 * s2 == c:
+                    candidates.append(latents.contiguous().view(bsz, n, s2, s2))
+
+                # Config-driven reshape when available.
+                model_obj = getattr(api_obj, "get_model", None)
+                if callable(model_obj):
+                    m = model_obj()
+                    dit = getattr(m, "dit", None)
+                    cfg = getattr(dit, "config", None) if dit is not None else None
+                    in_channels = int(getattr(cfg, "in_channels", 0) or 0)
+                    input_size = int(getattr(cfg, "input_size", 0) or 0)
+                    target = in_channels * input_size * input_size
+                    if bsz > 0 and target > 0 and int(latents[0].numel()) == target:
+                        candidates.append(
+                            latents.permute(0, 2, 1).contiguous().view(
+                                bsz, in_channels, input_size, input_size
+                            )
+                        )
+        except Exception:
+            pass
+
+    for cand in candidates:
+        cand_for_decode = cand
+        if torch.is_tensor(cand_for_decode):
+            try:
+                if decode_device is not None:
+                    tgt_dtype = decode_dtype if decode_dtype is not None else cand_for_decode.dtype
+                    if tgt_dtype in (torch.float16, torch.bfloat16):
+                        # VAE decode is more stable in fp32.
+                        tgt_dtype = torch.float32
+                    cand_for_decode = cand_for_decode.to(device=decode_device, dtype=tgt_dtype)
+            except Exception:
+                cand_for_decode = cand
+
+        try:
+            if callable(decode_fn):
+                decoded = decode_fn(cand_for_decode, return_tensor=False)
+            elif vae_obj is not None:
+                lat_for_vae = cand_for_decode
+                cfg = getattr(vae_obj, "config", None)
+                scaling = getattr(cfg, "scaling_factor", None) if cfg is not None else None
+                shift = getattr(cfg, "shift_factor", None) if cfg is not None else None
+                if scaling is not None:
+                    lat_for_vae = lat_for_vae / float(scaling)
+                if shift is not None:
+                    lat_for_vae = lat_for_vae + float(shift)
+                sample = vae_obj.decode(lat_for_vae)
+                decoded = sample.sample if hasattr(sample, "sample") else sample
+                decoded = (decoded / 2 + 0.5).clamp(0, 1)
+                decoded = decoded.cpu().permute(0, 2, 3, 1).float().numpy()
+                decoded = [Image.fromarray(np.clip(x * 255.0, 0.0, 255.0).astype(np.uint8)) for x in decoded]
+            else:
+                continue
+        except Exception:
+            # Try next candidate reshape.
+            continue
+        try:
+            if isinstance(decoded, list) and decoded:
+                return _ensure_pil_image(decoded[0])
+            return _ensure_pil_image(decoded)
+        except Exception:
+            continue
+    return None
 
 
 class TextPolicyUpdater:
@@ -1730,6 +2019,7 @@ class GenerationSelfEvolvingTrainer:
         self._generation_api_name = None
         self._generation_api_obj = None
         self._generation_api_path = None
+        self._warned_latent_fallback = False
         self.model, self.processor = self._load_model()
         fallback_dev = self.local_rank if self.distributed else config.cuda_device
         self.device = _infer_primary_device(self.model, fallback_cuda_device=fallback_dev)
@@ -2748,49 +3038,132 @@ class GenerationSelfEvolvingTrainer:
             if image_out is None:
                 raise RuntimeError("generate_images returned no image output.")
 
+            backend_name = "generate_images"
+            try:
+                pil_img = _ensure_pil_image(image_out)
+            except Exception:
+                pil_img = _latent_tensor_to_pil(
+                    image_out,
+                    target_size=(self.cfg.generation_width, self.cfg.generation_height),
+                )
+                if pil_img is None:
+                    raise
+                backend_name = "generate_images_latent_vis"
+                if self.is_main_process and not self._warned_latent_fallback:
+                    print(
+                        "[Generation] WARNING: using latent-visualization fallback for generated outputs "
+                        "(decoder pipeline unavailable)."
+                    )
+                    self._warned_latent_fallback = True
+
             return {
-                "image": _ensure_pil_image(image_out),
+                "image": pil_img,
                 "policy_prompt": prompt,
                 "policy_completion": token_completion,
                 "policy_completion_ids": token_completion_ids,
-                "backend": "generate_images",
+                "backend": backend_name,
             }
 
         # Path 2: generic single-image API.
         if api_name == "generate_image":
-            with torch.no_grad():
-                with use_adapter(self.model, "generator" if self.cfg.use_lora else None):
-                    gen_fn = getattr(api_obj, "generate_image")
-                    try:
-                        image_out = gen_fn(
+            if self._blip3o_diffusion_pipe is not None:
+                with torch.no_grad():
+                    with use_adapter(self.model, "generator" if self.cfg.use_lora else None):
+                        pipe_out = self._blip3o_diffusion_pipe(
                             prompt=prompt,
-                            num_inference_steps=self.cfg.generation_num_inference_steps,
                             guidance_scale=self.cfg.generation_guidance_scale,
+                            num_inference_steps=self.cfg.generation_num_inference_steps,
                             height=self.cfg.generation_height,
                             width=self.cfg.generation_width,
                         )
-                    except TypeError:
-                        image_out = gen_fn(prompt)
-            if self._blip3o_diffusion_pipe is not None:
-                # Original BLIP3o API may return latent embeddings instead of final image.
-                try:
-                    pil_image = _ensure_pil_image(image_out)
-                except Exception:
-                    with torch.no_grad():
-                        with use_adapter(self.model, "generator" if self.cfg.use_lora else None):
-                            pipe_out = self._blip3o_diffusion_pipe(
+                images = getattr(pipe_out, "images", None)
+                if not images:
+                    raise RuntimeError("BLIP3o diffusion pipeline returned no images.")
+                return {
+                    "image": _ensure_pil_image(images[0]),
+                    "policy_prompt": prompt,
+                    "policy_completion": "",
+                    "policy_completion_ids": None,
+                    "backend": "diffusion_pipeline",
+                }
+
+            with torch.no_grad():
+                with use_adapter(self.model, "generator" if self.cfg.use_lora else None):
+                    gen_fn = getattr(api_obj, "generate_image")
+                    fn_sig = None
+                    fn_params = set()
+                    has_var_kw = False
+                    try:
+                        fn_sig = inspect.signature(gen_fn)
+                        for p in fn_sig.parameters.values():
+                            if p.kind == inspect.Parameter.VAR_KEYWORD:
+                                has_var_kw = True
+                            else:
+                                fn_params.add(p.name)
+                    except Exception:
+                        fn_sig = None
+
+                    tokenizer = _extract_tokenizer_from_processor(self.processor)
+                    try:
+                        if (("text" in fn_params) or (fn_sig is None)) and tokenizer is not None:
+                            call_kwargs = {"text": [prompt], "tokenizer": tokenizer}
+                            if "pixel_values" in fn_params or has_var_kw:
+                                call_kwargs["pixel_values"] = None
+                            if "image_grid_thw" in fn_params or has_var_kw:
+                                call_kwargs["image_grid_thw"] = None
+                            image_out = gen_fn(**call_kwargs)
+                        elif "prompt" in fn_params or has_var_kw:
+                            image_out = gen_fn(
                                 prompt=prompt,
-                                guidance_scale=self.cfg.generation_guidance_scale,
                                 num_inference_steps=self.cfg.generation_num_inference_steps,
+                                guidance_scale=self.cfg.generation_guidance_scale,
                                 height=self.cfg.generation_height,
                                 width=self.cfg.generation_width,
                             )
-                    images = getattr(pipe_out, "images", None)
-                    if not images:
-                        raise RuntimeError("BLIP3o diffusion pipeline returned no images.")
-                    pil_image = _ensure_pil_image(images[0])
-            else:
+                        elif tokenizer is not None:
+                            image_out = gen_fn([prompt], tokenizer)
+                        else:
+                            image_out = gen_fn(prompt)
+                    except TypeError:
+                        if tokenizer is not None:
+                            try:
+                                image_out = gen_fn(text=[prompt], tokenizer=tokenizer)
+                            except TypeError:
+                                image_out = gen_fn([prompt], tokenizer)
+                        else:
+                            image_out = gen_fn(prompt)
+            try:
                 pil_image = _ensure_pil_image(image_out)
+            except Exception:
+                decode_obj = api_obj
+                if not callable(getattr(decode_obj, "decode_latents", None)):
+                    decode_obj, _ = _find_callable_object(_unwrap_model(self.model), "decode_latents")
+                pil_image = _decode_blip3o_generate_image_output(decode_obj, image_out) if decode_obj is not None else None
+                if pil_image is None:
+                    pil_image = _latent_tensor_to_pil(
+                        image_out,
+                        target_size=(self.cfg.generation_width, self.cfg.generation_height),
+                    )
+                    if pil_image is not None:
+                        if self.is_main_process and not self._warned_latent_fallback:
+                            print(
+                                "[Generation] WARNING: using latent-visualization fallback for generated outputs "
+                                "(decoder pipeline unavailable)."
+                            )
+                            self._warned_latent_fallback = True
+                        return {
+                            "image": pil_image,
+                            "policy_prompt": prompt,
+                            "policy_completion": "",
+                            "policy_completion_ids": None,
+                            "backend": "generate_image_latent_vis",
+                        }
+                    out_shape = tuple(image_out.shape) if torch.is_tensor(image_out) else None
+                    out_dtype = str(image_out.dtype) if torch.is_tensor(image_out) else None
+                    raise RuntimeError(
+                        "generate_image returned a non-image output and no diffusion/latent decode path succeeded. "
+                        f"type={type(image_out).__name__} shape={out_shape} dtype={out_dtype}"
+                    )
             return {
                 "image": pil_image,
                 "policy_prompt": prompt,
