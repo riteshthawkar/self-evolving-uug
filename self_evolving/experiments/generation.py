@@ -1574,27 +1574,27 @@ class GenerationSelfEvolvingTrainer:
                     # Common on clusters with transformers versions that do not recognize
                     # custom BLIP3o model_type unless local classes are imported first.
                     if "blip3o" in model_name_lower and _looks_like_unregistered_blip3o_arch_error(str(generic_exc)):
+                        retry_allow_implicit_repo = allow_implicit_local_repo
                         if is_original_blip3o and not use_local_blip3o_classes:
-                            raise RuntimeError(
-                                "Failed to load original BLIP3o checkpoint due to unregistered architecture in "
-                                "the current transformers stack.\n"
-                                f"checkpoint={self.cfg.model_name}\n"
-                                "To use original BLIP3o, set:\n"
-                                "  BLIP3O_REPO=/absolute/path/to/original/BLIP3o/main\n"
-                                "  BLIP3O_USE_LOCAL_CLASSES=1\n"
-                                "and rerun.\n"
-                                f"Original loader error: {repr(generic_exc)}"
-                            ) from generic_exc
+                            # For original BLIP3o, try a safe implicit local lookup once.
+                            # It succeeds only when local classes are original-compatible;
+                            # NEXT-style classes are filtered out below.
+                            retry_allow_implicit_repo = True
+                            if self.is_main_process:
+                                print(
+                                    "[Generation] Original BLIP3o architecture is unregistered in current "
+                                    "transformers stack. Trying safe implicit local class registration."
+                                )
                         if self.is_main_process:
                             print(
                                 "[Generation] Detected unregistered BLIP3o architecture in transformers. "
                                 "Retrying with local BLIP3o class registration."
                             )
                         classes, import_err, added_path = _import_blip3o_classes(
-                            allow_implicit_repo=allow_implicit_local_repo
+                            allow_implicit_repo=retry_allow_implicit_repo
                         )
                         mm_utils_retry, mm_import_err, _ = _import_blip3o_mm_utils(
-                            allow_implicit_repo=allow_implicit_local_repo
+                            allow_implicit_repo=retry_allow_implicit_repo
                         )
                         if self.is_main_process and added_path:
                             print(f"[Generation] Added local BLIP3o path for retry: {added_path}")
@@ -1630,6 +1630,20 @@ class GenerationSelfEvolvingTrainer:
 
                         if model is None:
                             detail = " | ".join(retry_errors) if retry_errors else "no BLIP3o classes available"
+                            if is_original_blip3o and not explicit_local_repo:
+                                raise RuntimeError(
+                                    "Failed to load original BLIP3o checkpoint due to unregistered architecture in "
+                                    "the current transformers stack.\n"
+                                    f"checkpoint={self.cfg.model_name}\n"
+                                    "Tried safe implicit local class registration but could not load an "
+                                    "original-compatible BLIP3o class.\n"
+                                    "To fix, set:\n"
+                                    "  BLIP3O_REPO=/absolute/path/to/original/BLIP3o/main\n"
+                                    "  BLIP3O_USE_LOCAL_CLASSES=1\n"
+                                    "and rerun.\n"
+                                    f"Original loader error: {repr(generic_exc)}\n"
+                                    f"Retry details: {detail}"
+                                ) from generic_exc
                             if is_original_blip3o and any("BLIP3o-NEXT" in e or "Qwen3" in e for e in retry_errors):
                                 raise RuntimeError(
                                     "Detected incompatible local BLIP3o code for original checkpoint "
