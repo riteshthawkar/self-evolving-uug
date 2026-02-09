@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 # Experiment X00: Unified Self-Evolving Main Run
-# Alternates understanding and generation updates in one shared model.
+# Uses original BLIP3o (`BLIP3o/BLIP3o-Model-8B`) with alternating
+# understanding and generation updates in a single loop.
 
 export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
@@ -18,8 +19,6 @@ export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$CACHE_ROOT/triton}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$CACHE_ROOT/xdg}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export AMDGPU_ASIC_ID_TABLE_PATH="${AMDGPU_ASIC_ID_TABLE_PATH:-/usr/share/libdrm/amdgpu.ids}"
-
-mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" "$HF_METRICS_CACHE" "$TORCH_HOME" "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME"
 
 # Weights & Biases
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
@@ -41,10 +40,10 @@ export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 export MASTER_PORT="${MASTER_PORT:-29520}"
 export ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-auto}"
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+# For older transformers stacks, set BLIP3O_REPO to an original BLIP3o main checkout
+# and set BLIP3O_USE_LOCAL_CLASSES=1.
 export BLIP3O_REPO="${BLIP3O_REPO:-}"
-export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-auto}"
-
-mkdir -p "$OUTPUT_ROOT"
+export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-0}"
 
 "$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment unified_self_evolving \
@@ -86,6 +85,7 @@ mkdir -p "$OUTPUT_ROOT"
   --generation_num_inference_steps 30 \
   --generation_guidance_scale 2.0 \
   --allow_missing_generation_tokens \
+  --generator_missing_trace_strategy proxy \
   --verification_use_reference_solver \
   --reward_spec_weight 0.65 \
   --reward_cycle_weight 0.20 \
