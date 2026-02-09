@@ -18,6 +18,7 @@ export TORCH_HOME="${TORCH_HOME:-$CACHE_ROOT/torch}"
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$CACHE_ROOT/triton}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$CACHE_ROOT/xdg}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export AMDGPU_ASIC_ID_TABLE_PATH="${AMDGPU_ASIC_ID_TABLE_PATH:-/usr/share/libdrm/amdgpu.ids}"
 
 mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" "$HF_METRICS_CACHE" "$TORCH_HOME" "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME"
 
@@ -197,4 +198,3 @@ torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_
   --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
   --wandb_run_name "u00_main_default_s777" \
   --seed 777
-

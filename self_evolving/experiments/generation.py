@@ -287,6 +287,27 @@ def _is_blip3o_next_model_name(model_name: str) -> bool:
     return "blip3o-next" in name
 
 
+def _looks_like_unregistered_blip3o_arch_error(text: str) -> bool:
+    t = (text or "").lower()
+    return ("blip3o_qwen" in t) and ("does not recognize this architecture" in t or "unrecognized" in t)
+
+
+def _is_next_style_blip3o_class(cls) -> bool:
+    """
+    Detect BLIP3o-NEXT style classes (Qwen3-based) that are incompatible with
+    original BLIP3o-Model checkpoints (Qwen2.5-VL based).
+    """
+    try:
+        for base in cls.mro():
+            name = getattr(base, "__name__", "").lower()
+            if "qwen3" in name:
+                return True
+    except Exception:
+        pass
+    module_name = str(getattr(cls, "__module__", "")).lower()
+    return "qwen3" in module_name
+
+
 def _maybe_add_local_blip3o_path() -> Optional[str]:
     """
     Add a local BLIP3o source tree to sys.path if present.
@@ -908,7 +929,14 @@ class GenerationSelfEvolvingTrainer:
             else:
                 backend = "gloo"
             if not dist.is_initialized():
-                dist.init_process_group(backend=backend, init_method="env://")
+                init_kwargs = {"backend": backend, "init_method": "env://"}
+                if backend == "nccl":
+                    init_kwargs["device_id"] = self.local_rank
+                try:
+                    dist.init_process_group(**init_kwargs)
+                except TypeError:
+                    init_kwargs.pop("device_id", None)
+                    dist.init_process_group(**init_kwargs)
             self.is_main_process = dist.get_rank() == 0
             self.rank = dist.get_rank()
             self.world_size = dist.get_world_size()
@@ -1488,13 +1516,76 @@ class GenerationSelfEvolvingTrainer:
                     model = None
 
             if model is None:
-                model = _load_model_with_fallback(
-                    self.cfg.model_name,
-                    torch_dtype=dtype,
-                    device_map=device_map,
-                    trust_remote_code=True,
-                    attn_implementation=attn_impl,
-                )
+                try:
+                    model = _load_model_with_fallback(
+                        self.cfg.model_name,
+                        torch_dtype=dtype,
+                        device_map=device_map,
+                        trust_remote_code=True,
+                        attn_implementation=attn_impl,
+                    )
+                except Exception as generic_exc:
+                    # Common on clusters with transformers versions that do not recognize
+                    # custom BLIP3o model_type unless local classes are imported first.
+                    if "blip3o" in model_name_lower and _looks_like_unregistered_blip3o_arch_error(str(generic_exc)):
+                        if self.is_main_process:
+                            print(
+                                "[Generation] Detected unregistered BLIP3o architecture in transformers. "
+                                "Retrying with local BLIP3o class registration."
+                            )
+                        classes, import_err, added_path = _import_blip3o_classes()
+                        mm_utils_retry, mm_import_err, _ = _import_blip3o_mm_utils()
+                        if self.is_main_process and added_path:
+                            print(f"[Generation] Added local BLIP3o path for retry: {added_path}")
+                        if self.is_main_process and import_err is not None:
+                            print(f"[Generation] BLIP3o local import retry warning: {repr(import_err)}")
+                        if self.is_main_process and mm_import_err is not None:
+                            print(f"[Generation] BLIP3o mm_utils retry warning: {repr(mm_import_err)}")
+
+                        retry_errors: List[str] = []
+                        for key in ("causal", "inference", "grpo"):
+                            cls = classes.get(key)
+                            if cls is None:
+                                continue
+                            if is_original_blip3o and _is_next_style_blip3o_class(cls):
+                                retry_errors.append(
+                                    f"{cls.__name__}: local class is Qwen3/BLIP3o-NEXT style and "
+                                    "is incompatible with original BLIP3o-Model-8B checkpoints"
+                                )
+                                continue
+                            try:
+                                model = _load_from_explicit_class(
+                                    cls,
+                                    self.cfg.model_name,
+                                    torch_dtype=dtype,
+                                    device_map=device_map,
+                                    attn_implementation=attn_impl,
+                                )
+                                loader_used = f"explicit-retry:{cls.__name__}"
+                                mm_utils.update(mm_utils_retry)
+                                break
+                            except Exception as retry_exc:
+                                retry_errors.append(f"{cls.__name__}: {repr(retry_exc)}")
+
+                        if model is None:
+                            detail = " | ".join(retry_errors) if retry_errors else "no BLIP3o classes available"
+                            if is_original_blip3o and any("BLIP3o-NEXT" in e or "Qwen3" in e for e in retry_errors):
+                                raise RuntimeError(
+                                    "Detected incompatible local BLIP3o code for original checkpoint "
+                                    f"'{self.cfg.model_name}'.\n"
+                                    "Your local BLIP3o classes are BLIP3o-NEXT (Qwen3/SANA), while "
+                                    "BLIP3o-Model-8B expects original BLIP3o classes.\n"
+                                    "Options:\n"
+                                    "1) Use a BLIP3o-NEXT checkpoint with current local classes, or\n"
+                                    "2) Point BLIP3O_REPO to original BLIP3o code matching BLIP3o-Model-8B.\n"
+                                    f"Retry details: {detail}"
+                                ) from generic_exc
+                            raise RuntimeError(
+                                "Failed to load BLIP3o after local-class retry. "
+                                f"Original error: {repr(generic_exc)}; retry details: {detail}"
+                            ) from generic_exc
+                    else:
+                        raise
             if processor is None and tokenizer_for_fallback is not None:
                 processor = _build_blip3o_processor(
                     tokenizer=tokenizer_for_fallback,

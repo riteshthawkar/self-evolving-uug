@@ -646,7 +646,14 @@ class UnderstandingSelfEvolvingTrainer:
             else:
                 backend = "gloo"
             if not dist.is_initialized():
-                dist.init_process_group(backend=backend, init_method="env://")
+                init_kwargs = {"backend": backend, "init_method": "env://"}
+                if backend == "nccl":
+                    init_kwargs["device_id"] = self.local_rank
+                try:
+                    dist.init_process_group(**init_kwargs)
+                except TypeError:
+                    init_kwargs.pop("device_id", None)
+                    dist.init_process_group(**init_kwargs)
             self.is_main_process = dist.get_rank() == 0
             self.rank = dist.get_rank()
             self.world_size = dist.get_world_size()
