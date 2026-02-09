@@ -383,13 +383,54 @@ def _import_blip3o_classes(*, allow_implicit_repo: bool = False):
         # Avoid stale pre-imported `blip3o` modules from another location (e.g. site-packages).
         _purge_blip3o_modules()
 
+    def _patch_gradient_checkpointing_compat():
+        try:
+            lumina_mod = importlib.import_module("blip3o.model.lumina_nextdit2d")
+            lumina_cls = getattr(lumina_mod, "LuminaNextDiT2DModel", None)
+            if lumina_cls is None:
+                return
+            fn = getattr(lumina_cls, "_set_gradient_checkpointing", None)
+            if fn is None:
+                return
+            sig = inspect.signature(fn)
+            has_var_kw = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in sig.parameters.values()
+            )
+            has_gcf = "gradient_checkpointing_func" in sig.parameters
+            if has_var_kw and has_gcf:
+                return
+
+            def _compat_set_gradient_checkpointing(
+                self,
+                module=None,
+                value=False,
+                enable=None,
+                gradient_checkpointing_func=None,
+                **kwargs,
+            ):
+                if enable is not None:
+                    value = bool(enable)
+                if module is None:
+                    module = self
+                if hasattr(module, "gradient_checkpointing"):
+                    module.gradient_checkpointing = bool(value)
+                if gradient_checkpointing_func is not None and hasattr(module, "_gradient_checkpointing_func"):
+                    module._gradient_checkpointing_func = gradient_checkpointing_func
+
+            setattr(lumina_cls, "_set_gradient_checkpointing", _compat_set_gradient_checkpointing)
+        except Exception:
+            return
+
     for _ in range(2):
         try:
             module = importlib.import_module("blip3o.model")
+            _patch_gradient_checkpointing_compat()
             if not _module_matches_explicit_repo(module):
                 _purge_blip3o_modules()
                 added_path = _maybe_add_local_blip3o_path(allow_implicit_repo=allow_implicit_repo)
                 module = importlib.import_module("blip3o.model")
+                _patch_gradient_checkpointing_compat()
                 if not _module_matches_explicit_repo(module):
                     module_path = getattr(module, "__file__", "unknown")
                     raise RuntimeError(
