@@ -15,6 +15,7 @@ import contextlib
 import dataclasses
 import datetime as dt
 import gc
+import importlib.util
 import json
 import math
 import os
@@ -30,8 +31,29 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 from PIL import Image
-from transformers import AutoModelForCausalLM, AutoModelForVision2Seq, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoProcessor
+
+try:
+    from transformers import AutoModelForVision2Seq
+except Exception:
+    AutoModelForVision2Seq = None
+
+try:
+    from transformers import AutoModelForImageTextToText
+except Exception:
+    AutoModelForImageTextToText = None
+
+try:
+    from transformers import Qwen2_5_VLForConditionalGeneration
+except Exception:
+    Qwen2_5_VLForConditionalGeneration = None
+
+try:
+    from transformers import Qwen2VLForConditionalGeneration
+except Exception:
+    Qwen2VLForConditionalGeneration = None
 
 from self_evolving.data.image_pool import ImagePool, ImagePoolConfig
 
@@ -68,6 +90,29 @@ def _safe_dtype(dtype: str) -> torch.dtype:
     if dtype == "float16" and torch.cuda.is_available():
         return torch.float16
     return torch.float32
+
+
+def _resolve_attn_implementation(requested: str) -> Optional[str]:
+    choice = (requested or "auto").strip().lower()
+    if choice in {"none", "off", "disable", "disabled"}:
+        return None
+    if choice in {"sdpa", "eager", "flash_attention_2"}:
+        return choice
+    if choice != "auto":
+        return None
+
+    if not torch.cuda.is_available():
+        return None
+    if getattr(torch.version, "hip", None):
+        # On ROCm, SDPA is the most stable default backend.
+        return "sdpa"
+    if importlib.util.find_spec("flash_attn") is not None:
+        return "flash_attention_2"
+    return "sdpa"
+
+
+def _unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    return model.module if hasattr(model, "module") else model
 
 
 def strip_tags(text: str, tag: str) -> Optional[str]:
@@ -197,7 +242,8 @@ def _collect_git_info(repo_root: pathlib.Path) -> Dict[str, Optional[str]]:
 
 
 def _infer_primary_device(model: torch.nn.Module, fallback_cuda_device: int) -> torch.device:
-    hf_device_map = getattr(model, "hf_device_map", None)
+    model_ref = _unwrap_model(model)
+    hf_device_map = getattr(model_ref, "hf_device_map", None)
     if isinstance(hf_device_map, dict):
         cuda_devs = [value for value in hf_device_map.values() if isinstance(value, str) and value.startswith("cuda")]
         if cuda_devs:
@@ -213,20 +259,21 @@ def _infer_primary_device(model: torch.nn.Module, fallback_cuda_device: int) -> 
 
 @contextlib.contextmanager
 def use_adapter(model: torch.nn.Module, adapter_name: Optional[str]):
-    if not hasattr(model, "set_adapter"):
+    model_ref = _unwrap_model(model)
+    if not hasattr(model_ref, "set_adapter"):
         yield
         return
 
-    if adapter_name is None and hasattr(model, "disable_adapter"):
-        with model.disable_adapter():
+    if adapter_name is None and hasattr(model_ref, "disable_adapter"):
+        with model_ref.disable_adapter():
             yield
         return
 
-    prev_adapter = getattr(model, "active_adapter", None)
+    prev_adapter = getattr(model_ref, "active_adapter", None)
     switched = False
     if adapter_name is not None:
         try:
-            model.set_adapter(adapter_name)
+            model_ref.set_adapter(adapter_name)
             switched = True
         except Exception:
             switched = False
@@ -235,7 +282,7 @@ def use_adapter(model: torch.nn.Module, adapter_name: Optional[str]):
     finally:
         if switched and prev_adapter is not None:
             try:
-                model.set_adapter(prev_adapter)
+                model_ref.set_adapter(prev_adapter)
             except Exception:
                 pass
 
@@ -285,18 +332,61 @@ def _load_model_with_fallback(
     torch_dtype: torch.dtype,
     device_map,
     trust_remote_code: bool,
+    attn_implementation: Optional[str] = None,
 ):
     errors: Dict[str, str] = {}
-    for cls in (AutoModelForVision2Seq, AutoModelForCausalLM):
-        try:
-            return cls.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                device_map=device_map,
-                trust_remote_code=trust_remote_code,
-            )
-        except Exception as exc:
-            errors[cls.__name__] = repr(exc)
+
+    model_classes: List[type] = []
+    model_name_lower = (model_name or "").lower()
+
+    # Prefer explicit model classes for Qwen VL where available.
+    if "qwen2.5-vl" in model_name_lower and Qwen2_5_VLForConditionalGeneration is not None:
+        model_classes.append(Qwen2_5_VLForConditionalGeneration)
+    if "qwen2-vl" in model_name_lower and Qwen2VLForConditionalGeneration is not None:
+        model_classes.append(Qwen2VLForConditionalGeneration)
+
+    # Generic multimodal auto classes across transformer versions.
+    for cls in (AutoModelForImageTextToText, AutoModelForVision2Seq, AutoModelForCausalLM):
+        if cls is not None and cls not in model_classes:
+            model_classes.append(cls)
+
+    def _try_load(model_cls):
+        base_kwargs = {
+            "device_map": device_map,
+            "trust_remote_code": trust_remote_code,
+        }
+        attn_attempts = [attn_implementation] if attn_implementation else [None]
+        if attn_implementation is not None:
+            attn_attempts.append(None)
+        seen = set()
+        for attn_value in attn_attempts:
+            key = attn_value or "__none__"
+            if key in seen:
+                continue
+            seen.add(key)
+            kwargs = dict(base_kwargs)
+            if attn_value is not None:
+                kwargs["attn_implementation"] = attn_value
+
+            for dtype_key in ("dtype", "torch_dtype"):
+                try:
+                    return model_cls.from_pretrained(
+                        model_name,
+                        **kwargs,
+                        **{dtype_key: torch_dtype},
+                    )
+                except TypeError:
+                    continue
+                except Exception as exc:
+                    errors[f"{model_cls.__name__}[attn={attn_value or 'none'}|{dtype_key}]"] = repr(exc)
+                    break
+        return None
+
+    for cls in model_classes:
+        loaded = _try_load(cls)
+        if loaded is not None:
+            return loaded
+
     details = "; ".join(f"{name}: {err}" for name, err in errors.items())
     raise RuntimeError(f"Failed to load model '{model_name}' with supported loaders. {details}")
 
@@ -481,6 +571,7 @@ class UnderstandingSelfEvolvingConfig:
     dtype: str = "bfloat16"
     cuda_device: int = 0
     device_map: str = "single"  # single|auto|cpu
+    attn_implementation: str = "auto"  # auto|sdpa|eager|flash_attention_2|none
 
     # Optimization
     total_steps: int = 100
@@ -541,9 +632,56 @@ class UnderstandingSelfEvolvingConfig:
 
 
 class UnderstandingSelfEvolvingTrainer:
+    def _setup_distributed(self):
+        self.rank = int(os.environ.get("RANK", "0"))
+        self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        self.local_rank = int(os.environ.get("LOCAL_RANK", str(self.cfg.cuda_device)))
+        self.distributed = self.world_size > 1
+        self.is_main_process = self.rank == 0
+
+        if self.distributed:
+            if not dist.is_available():
+                raise RuntimeError("torch.distributed is not available in this environment.")
+            if torch.cuda.is_available():
+                torch.cuda.set_device(self.local_rank)
+                backend = "nccl"
+            else:
+                backend = "gloo"
+            if not dist.is_initialized():
+                dist.init_process_group(backend=backend, init_method="env://")
+            self.is_main_process = dist.get_rank() == 0
+            self.rank = dist.get_rank()
+            self.world_size = dist.get_world_size()
+            print(
+                f"[DDP] Initialized rank={self.rank}/{self.world_size} local_rank={self.local_rank} backend={backend}"
+            )
+        elif torch.cuda.is_available():
+            torch.cuda.set_device(self.cfg.cuda_device)
+
+    def _dist_barrier(self):
+        if self.distributed and dist.is_initialized():
+            dist.barrier()
+
+    def _dist_mean(self, value: float) -> float:
+        if not (self.distributed and dist.is_initialized()):
+            return float(value)
+        dev = torch.device(f"cuda:{self.local_rank}") if torch.cuda.is_available() else torch.device("cpu")
+        tensor = torch.tensor([float(value)], dtype=torch.float64, device=dev)
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        return float((tensor / float(self.world_size)).item())
+
+    def _sync_state_scalars(self):
+        if not (self.distributed and dist.is_initialized()):
+            return
+        self.solver_baseline = self._dist_mean(self.solver_baseline)
+        self.proposer_baseline = self._dist_mean(self.proposer_baseline)
+        self.solver_updater.kl_coef = self._dist_mean(self.solver_updater.kl_coef)
+        self.proposer_updater.kl_coef = self._dist_mean(self.proposer_updater.kl_coef)
+
     def __init__(self, config: UnderstandingSelfEvolvingConfig):
         self.cfg = config
-        _set_global_seed(config.seed, deterministic=config.deterministic)
+        self._setup_distributed()
+        _set_global_seed(config.seed + self.rank, deterministic=config.deterministic)
 
         if not config.data_dir:
             raise ValueError("`data_dir` is required for understanding self-evolving training")
@@ -560,7 +698,8 @@ class UnderstandingSelfEvolvingTrainer:
         self._save_run_metadata()
 
         self.model, self.processor = self._load_model()
-        self.device = _infer_primary_device(self.model, fallback_cuda_device=config.cuda_device)
+        fallback_dev = self.local_rank if self.distributed else config.cuda_device
+        self.device = _infer_primary_device(self.model, fallback_cuda_device=fallback_dev)
 
         pool_cfg = ImagePoolConfig(
             data_dir=config.data_dir,
@@ -577,22 +716,31 @@ class UnderstandingSelfEvolvingTrainer:
             reference_model = _load_model_with_fallback(
                 config.model_name,
                 torch_dtype=_safe_dtype(config.dtype),
-                device_map={"": config.cuda_device} if self.device.type == "cuda" else "cpu",
+                device_map={"": fallback_dev} if self.device.type == "cuda" else "cpu",
                 trust_remote_code=True,
+                attn_implementation=_resolve_attn_implementation(config.attn_implementation),
             )
             reference_model.eval()
             for p in reference_model.parameters():
                 p.requires_grad_(False)
 
+        self.train_model = self.model
+        if self.distributed:
+            ddp_kwargs = {"find_unused_parameters": True}
+            if torch.cuda.is_available():
+                ddp_kwargs["device_ids"] = [self.local_rank]
+                ddp_kwargs["output_device"] = self.local_rank
+            self.train_model = torch.nn.parallel.DistributedDataParallel(self.model, **ddp_kwargs)
+
         self.solver_updater = RolePolicyUpdater(
-            model=self.model,
+            model=self.train_model,
             processor=self.processor,
             config=config,
             adapter_name="default" if config.use_lora else None,
             reference_model=reference_model,
         )
         self.proposer_updater = RolePolicyUpdater(
-            model=self.model,
+            model=self.train_model,
             processor=self.processor,
             config=config,
             adapter_name="proposer" if config.use_lora else None,
@@ -612,6 +760,8 @@ class UnderstandingSelfEvolvingTrainer:
             self.start_step = max(self.start_step, int(loaded_resume_step))
 
     def _init_wandb(self):
+        if not self.is_main_process:
+            return None
         mode = (self.cfg.wandb_mode or "disabled").strip().lower()
         if mode == "disabled":
             return None
@@ -645,9 +795,25 @@ class UnderstandingSelfEvolvingTrainer:
             return None
 
     def _build_run_dir(self) -> pathlib.Path:
+        base_dir = pathlib.Path(self.cfg.output_dir).expanduser().resolve()
+        if self.distributed and dist.is_initialized():
+            obj = [None]
+            if self.is_main_process:
+                timestamp = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                run_name = self.cfg.run_name or f"{self.cfg.experiment_name}_{timestamp}"
+                run_dir = base_dir / run_name
+                if run_dir.exists() and any(run_dir.iterdir()) and not self.cfg.resume_from:
+                    run_dir = base_dir / f"{run_name}_{timestamp}"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                obj[0] = str(run_dir)
+            dist.broadcast_object_list(obj, src=0)
+            run_dir = pathlib.Path(obj[0]).resolve()
+            run_dir.mkdir(parents=True, exist_ok=True)
+            self._dist_barrier()
+            return run_dir
+
         timestamp = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         run_name = self.cfg.run_name or f"{self.cfg.experiment_name}_{timestamp}"
-        base_dir = pathlib.Path(self.cfg.output_dir).expanduser().resolve()
         run_dir = base_dir / run_name
         if run_dir.exists() and any(run_dir.iterdir()) and not self.cfg.resume_from:
             run_dir = base_dir / f"{run_name}_{timestamp}"
@@ -655,6 +821,9 @@ class UnderstandingSelfEvolvingTrainer:
         return run_dir
 
     def _save_run_metadata(self):
+        if not self.is_main_process:
+            self._dist_barrier()
+            return
         repo_root = pathlib.Path(__file__).resolve().parents[2]
         _json_dump(self.run_dir / "config.json", dataclasses.asdict(self.cfg))
         _json_dump(self.run_dir / "git_info.json", _collect_git_info(repo_root))
@@ -665,10 +834,16 @@ class UnderstandingSelfEvolvingTrainer:
                 "torch": torch.__version__,
                 "cuda_available": torch.cuda.is_available(),
                 "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+                "rank": self.rank,
+                "world_size": self.world_size,
+                "distributed": self.distributed,
             },
         )
+        self._dist_barrier()
 
     def _append_jsonl(self, path: pathlib.Path, record: Dict):
+        if not self.is_main_process:
+            return
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -772,16 +947,18 @@ class UnderstandingSelfEvolvingTrainer:
                 pass
 
         restored_step = int(state.get("step", 0))
-        print(f"[Understanding] Resumed trainer state from: {state_path} (step={restored_step})")
-        _json_dump(
-            self.run_dir / "resume_info.json",
-            {
-                "resume_from": str(resume_dir),
-                "restored_step": restored_step,
-                "restored_solver_baseline": self.solver_baseline,
-                "restored_proposer_baseline": self.proposer_baseline,
-            },
-        )
+        if self.is_main_process:
+            print(f"[Understanding] Resumed trainer state from: {state_path} (step={restored_step})")
+            _json_dump(
+                self.run_dir / "resume_info.json",
+                {
+                    "resume_from": str(resume_dir),
+                    "restored_step": restored_step,
+                    "restored_solver_baseline": self.solver_baseline,
+                    "restored_proposer_baseline": self.proposer_baseline,
+                },
+            )
+        self._dist_barrier()
         return restored_step
 
     def _trainer_state_dict(self, step: int) -> Dict:
@@ -819,7 +996,11 @@ class UnderstandingSelfEvolvingTrainer:
             raise RuntimeError("PEFT is required for role-specific LoRA adapters")
 
         dtype = _safe_dtype(self.cfg.dtype)
-        if self.cfg.device_map == "single":
+        attn_impl = _resolve_attn_implementation(self.cfg.attn_implementation)
+
+        if self.distributed:
+            device_map = {"": self.local_rank} if torch.cuda.is_available() else "cpu"
+        elif self.cfg.device_map == "single":
             device_map = {"": self.cfg.cuda_device} if torch.cuda.is_available() else "cpu"
         elif self.cfg.device_map == "cpu":
             device_map = "cpu"
@@ -832,7 +1013,13 @@ class UnderstandingSelfEvolvingTrainer:
             torch_dtype=dtype,
             device_map=device_map,
             trust_remote_code=True,
+            attn_implementation=attn_impl,
         )
+        if self.is_main_process:
+            print(
+                f"[Understanding] Load options: dtype={dtype}, device_map={device_map}, "
+                f"attn_implementation={attn_impl or 'default'}"
+            )
 
         if self.cfg.use_lora:
             lcfg = LoraConfig(
@@ -864,7 +1051,11 @@ class UnderstandingSelfEvolvingTrainer:
         return model, processor
 
     def _sample_image_for_step(self, step: int) -> Tuple[Image.Image, Dict]:
-        shuffled_idx = self.pool.indices[(step - 1) % len(self.pool.indices)]
+        if self.distributed:
+            global_offset = (step - 1) * self.world_size + self.rank
+            shuffled_idx = self.pool.indices[global_offset % len(self.pool.indices)]
+        else:
+            shuffled_idx = self.pool.indices[(step - 1) % len(self.pool.indices)]
         return self.pool.get_image(shuffled_idx)
 
     def _generate(
@@ -905,6 +1096,8 @@ class UnderstandingSelfEvolvingTrainer:
         self._append_jsonl(self.iter_log_path, record)
 
     def _save_checkpoint(self, step: int):
+        if not self.is_main_process:
+            return
         step_dir = self.run_dir / f"step_{step:05d}"
         tmp_dir = self.run_dir / f"step_{step:05d}.tmp"
         if tmp_dir.exists():
@@ -962,6 +1155,8 @@ class UnderstandingSelfEvolvingTrainer:
         self._prune_checkpoints()
 
     def _prune_checkpoints(self):
+        if not self.is_main_process:
+            return
         keep = max(1, int(self.cfg.max_checkpoints))
         checkpoints = self._list_complete_checkpoints()
         if len(checkpoints) <= keep:
@@ -977,6 +1172,8 @@ class UnderstandingSelfEvolvingTrainer:
         interrupted_at_step: Optional[int] = None,
         error: Optional[str] = None,
     ):
+        if not self.is_main_process:
+            return
         _json_dump(
             self.summary_path,
             {
@@ -1012,7 +1209,7 @@ class UnderstandingSelfEvolvingTrainer:
         solver_stats_mean: Dict[str, float],
         proposer_stats: Optional[Dict[str, float]],
     ):
-        if self.wandb_run is None:
+        if not self.is_main_process or self.wandb_run is None:
             return
 
         metrics: Dict[str, object] = {
@@ -1077,10 +1274,16 @@ class UnderstandingSelfEvolvingTrainer:
                 f"total_steps ({cfg.total_steps}) must be greater than start_step ({self.start_step})."
             )
 
-        print(f"[Understanding] Starting run at: {self.run_dir}")
-        print(f"[Understanding] Model: {cfg.model_name}")
-        print(f"[Understanding] Images: {len(self.pool)}")
-        print(f"[Understanding] Step range: {self.start_step + 1}..{cfg.total_steps}")
+        if self.is_main_process:
+            print(f"[Understanding] Starting run at: {self.run_dir}")
+            print(f"[Understanding] Model: {cfg.model_name}")
+            print(f"[Understanding] Images: {len(self.pool)}")
+            print(f"[Understanding] Step range: {self.start_step + 1}..{cfg.total_steps}")
+            if self.distributed:
+                print(
+                    f"[Understanding] Distributed mode: world_size={self.world_size}, "
+                    f"effective_batch_per_step={self.world_size}"
+                )
         last_completed_step = self.start_step
         last_attempted_step = self.start_step
         try:
@@ -1172,6 +1375,7 @@ class UnderstandingSelfEvolvingTrainer:
                     solver_step_stats.append(stats)
                     self._policy_update_counts["solver"] += 1
                     self._update_baseline("solver", reward)
+                    self._sync_state_scalars()
                     baseline_after = self.solver_baseline
 
                     self._append_jsonl(
@@ -1229,12 +1433,20 @@ class UnderstandingSelfEvolvingTrainer:
                         },
                     )
                     self._update_baseline("proposer", proposer_reward)
+                    self._sync_state_scalars()
                     proposer_baseline_after_step = self.proposer_baseline
 
                 solver_raw_mean = sum(solver_rewards_raw) / len(solver_rewards_raw)
                 solver_soft_mean = sum(solver_rewards_soft) / len(solver_rewards_soft)
                 pre_words_mean = sum(pre_words) / len(pre_words)
                 step_duration_sec = time.perf_counter() - step_t0
+                solver_raw_mean_global = self._dist_mean(solver_raw_mean)
+                solver_soft_mean_global = self._dist_mean(solver_soft_mean)
+                proposer_reward_global = self._dist_mean(proposer_reward)
+                entropy_nats_global = self._dist_mean(entropy_nats)
+                maj_frac_global = self._dist_mean(maj_frac)
+                pre_words_mean_global = self._dist_mean(pre_words_mean)
+                step_duration_sec_global = self._dist_mean(step_duration_sec)
 
                 solver_ce_mean = sum(s["ce_loss"] for s in solver_step_stats) / max(1, len(solver_step_stats))
                 solver_kl_mean = sum(s["kl_loss"] for s in solver_step_stats) / max(1, len(solver_step_stats))
@@ -1245,13 +1457,13 @@ class UnderstandingSelfEvolvingTrainer:
                     "advantage_mean": solver_adv_mean,
                 }
 
-                if step % cfg.log_every == 0:
+                if self.is_main_process and step % cfg.log_every == 0:
                     print(
                         f"[Step {step:05d}] maj={maj_count}/{cfg.num_solver_samples} "
-                        f"maj_frac={maj_frac:.2f} H={entropy_nats:.3f} "
-                        f"P_R={proposer_reward:.3f} "
-                        f"S_R_raw={solver_raw_mean:.3f} S_R_soft={solver_soft_mean:.3f} "
-                        f"pre_words={pre_words_mean:.2f}"
+                        f"maj_frac={maj_frac_global:.2f} H={entropy_nats_global:.3f} "
+                        f"P_R={proposer_reward_global:.3f} "
+                        f"S_R_raw={solver_raw_mean_global:.3f} S_R_soft={solver_soft_mean_global:.3f} "
+                        f"pre_words={pre_words_mean_global:.2f}"
                     )
                     print(f"  Q: {question}")
                     print(f"  A: [{', '.join(solver_answers_raw)}] | MAJ: {maj_answer}")
@@ -1334,29 +1546,31 @@ class UnderstandingSelfEvolvingTrainer:
                     solver_answers_raw=solver_answers_raw,
                     maj_answer=maj_answer,
                     maj_count=maj_count,
-                    maj_frac=maj_frac,
-                    entropy_nats=entropy_nats,
-                    proposer_reward=proposer_reward,
+                    maj_frac=maj_frac_global,
+                    entropy_nats=entropy_nats_global,
+                    proposer_reward=proposer_reward_global,
                     solver_rewards_raw=solver_rewards_raw,
                     solver_rewards_soft=solver_rewards_soft,
-                    pre_words_mean=pre_words_mean,
+                    pre_words_mean=pre_words_mean_global,
                     solver_stats_mean=solver_stats_mean,
                     proposer_stats=proposer_stats,
                 )
 
-                self._update_metric("solver_reward_raw_mean", solver_raw_mean)
-                self._update_metric("solver_reward_soft_mean", solver_soft_mean)
-                self._update_metric("proposer_reward", proposer_reward)
-                self._update_metric("entropy_nats", entropy_nats)
-                self._update_metric("majority_fraction", maj_frac)
-                self._update_metric("pre_answer_words_mean", pre_words_mean)
+                self._update_metric("solver_reward_raw_mean", solver_raw_mean_global)
+                self._update_metric("solver_reward_soft_mean", solver_soft_mean_global)
+                self._update_metric("proposer_reward", proposer_reward_global)
+                self._update_metric("entropy_nats", entropy_nats_global)
+                self._update_metric("majority_fraction", maj_frac_global)
+                self._update_metric("pre_answer_words_mean", pre_words_mean_global)
                 self._update_metric("solver_kl_coef", float(self.solver_updater.kl_coef))
                 self._update_metric("proposer_kl_coef", float(self.proposer_updater.kl_coef))
-                self._update_metric("step_duration_sec", step_duration_sec)
+                self._update_metric("step_duration_sec", step_duration_sec_global)
                 self._update_metric("fallback_question_used", 1.0 if fallback_used else 0.0)
 
                 if cfg.save_every > 0 and step % cfg.save_every == 0:
+                    self._dist_barrier()
                     self._save_checkpoint(step)
+                    self._dist_barrier()
 
                 if (
                     torch.cuda.is_available()
@@ -1372,46 +1586,54 @@ class UnderstandingSelfEvolvingTrainer:
                 last_completed_step = step
 
             if cfg.save_every <= 0 or (cfg.total_steps % cfg.save_every) != 0:
+                self._dist_barrier()
                 self._save_checkpoint(cfg.total_steps)
+                self._dist_barrier()
             self._write_ablation_summary(cfg.total_steps, status="completed")
-            print(f"[Understanding] Training complete. Final checkpoint at step {cfg.total_steps:05d}.")
+            if self.is_main_process:
+                print(f"[Understanding] Training complete. Final checkpoint at step {cfg.total_steps:05d}.")
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
             interrupted_step = int(last_attempted_step)
             tb = traceback.format_exc()
-            print(f"[Understanding] Training interrupted at step {interrupted_step}: {error_text}")
-            _json_dump(
-                self.run_dir / "interruption.json",
-                {
-                    "status": "interrupted",
-                    "interrupted_at_step": interrupted_step,
-                    "last_completed_step": int(last_completed_step),
-                    "error": error_text,
-                    "traceback": tb,
-                },
-            )
+            if self.is_main_process:
+                print(f"[Understanding] Training interrupted at step {interrupted_step}: {error_text}")
+                _json_dump(
+                    self.run_dir / "interruption.json",
+                    {
+                        "status": "interrupted",
+                        "interrupted_at_step": interrupted_step,
+                        "last_completed_step": int(last_completed_step),
+                        "error": error_text,
+                        "traceback": tb,
+                    },
+                )
 
             emergency_step = max(1, interrupted_step)
             try:
+                self._dist_barrier()
                 self._save_checkpoint(emergency_step)
-                print(f"[Understanding] Emergency checkpoint saved at step {emergency_step:05d}.")
-                _json_dump(
-                    self.run_dir / "resume_hint.json",
-                    {
-                        "resume_from": str(self.run_dir / f"step_{emergency_step:05d}"),
-                        "start_step": emergency_step,
-                        "total_steps": cfg.total_steps,
-                        "command_example": (
-                            "python self_evolving/run_experiment.py "
-                            f"--experiment understanding_self_evolving --data_dir {cfg.data_dir} "
-                            f"--output_dir {cfg.output_dir} --run_name {self.run_dir.name} "
-                            f"--resume_from {self.run_dir / f'step_{emergency_step:05d}'} "
-                            f"--start_step {emergency_step} --total_steps {cfg.total_steps}"
-                        ),
-                    },
-                )
+                self._dist_barrier()
+                if self.is_main_process:
+                    print(f"[Understanding] Emergency checkpoint saved at step {emergency_step:05d}.")
+                    _json_dump(
+                        self.run_dir / "resume_hint.json",
+                        {
+                            "resume_from": str(self.run_dir / f"step_{emergency_step:05d}"),
+                            "start_step": emergency_step,
+                            "total_steps": cfg.total_steps,
+                            "command_example": (
+                                "python self_evolving/run_experiment.py "
+                                f"--experiment understanding_self_evolving --data_dir {cfg.data_dir} "
+                                f"--output_dir {cfg.output_dir} --run_name {self.run_dir.name} "
+                                f"--resume_from {self.run_dir / f'step_{emergency_step:05d}'} "
+                                f"--start_step {emergency_step} --total_steps {cfg.total_steps}"
+                            ),
+                        },
+                    )
             except Exception as save_exc:
-                print(f"[Understanding] Emergency checkpoint failed: {save_exc}")
+                if self.is_main_process:
+                    print(f"[Understanding] Emergency checkpoint failed: {save_exc}")
 
             self._write_ablation_summary(
                 max(last_completed_step, emergency_step),
@@ -1424,5 +1646,14 @@ class UnderstandingSelfEvolvingTrainer:
             if self.wandb_run is not None and HAS_WANDB:
                 try:
                     wandb.finish()
+                except Exception:
+                    pass
+            if self.distributed and dist.is_initialized():
+                try:
+                    dist.barrier()
+                except Exception:
+                    pass
+                try:
+                    dist.destroy_process_group()
                 except Exception:
                     pass

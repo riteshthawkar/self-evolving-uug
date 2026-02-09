@@ -4,7 +4,7 @@
 # Runs the complete U00-U07 understanding-only self-evolving matrix.
 # Changing values: all matrix values across U00-U07
 
-export REPO_ROOT="/Users/ritesh.thawkar/Ritesh/self-evolving-uug"
+export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
 
 # Cache locations
@@ -30,7 +30,7 @@ export WANDB_BASE_URL="${WANDB_BASE_URL:-https://api.wandb.ai}"
 export WANDB_LOG_IMAGES_EVERY="${WANDB_LOG_IMAGES_EVERY:-0}"
 
 # Run defaults (override via environment)
-export DATA_DIR="${DATA_DIR:-/path/to/images/train}"
+export DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/shared_uug_50k_balanced/images}"
 export MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-VL-3B-Instruct}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/runs/understanding_experiments}"
 export TOTAL_STEPS="${TOTAL_STEPS:-6000}"
@@ -38,19 +38,24 @@ export SAVE_EVERY="${SAVE_EVERY:-200}"
 export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-3}"
 export CUDA_DEVICE="${CUDA_DEVICE:-0}"
 export PYTHON_BIN="${PYTHON_BIN:-python3}"
+export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+export MASTER_PORT="${MASTER_PORT:-29500}"
+export ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-auto}"
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 
 mkdir -p "$OUTPUT_ROOT"
 
 # Run: u00_main_default_s42
 # U00 baseline with seed 42.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U00_main_method" \
   --run_name "u00_main_default_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -93,13 +98,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u00_main_default_s123
 # U00 baseline with seed 123.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U00_main_method" \
   --run_name "u00_main_default_s123" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -142,13 +149,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u00_main_default_s777
 # U00 baseline with seed 777.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U00_main_method" \
   --run_name "u00_main_default_s777" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -191,13 +200,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u01_nsamples_3_s42
 # U01 with num_solver_samples=3.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U01_solver_samples" \
   --run_name "u01_nsamples_3_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -241,13 +252,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u01_nsamples_5_s42
 # U01 with num_solver_samples=5.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U01_solver_samples" \
   --run_name "u01_nsamples_5_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -291,13 +304,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u01_nsamples_7_s42
 # U01 with num_solver_samples=7.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U01_solver_samples" \
   --run_name "u01_nsamples_7_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -341,13 +356,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u02_gamma_0p5_s42
 # U02 with solver_soft_gamma=0.5.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U02_solver_gamma" \
   --run_name "u02_gamma_0p5_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -391,13 +408,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u02_gamma_0p7_s42
 # U02 with solver_soft_gamma=0.7.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U02_solver_gamma" \
   --run_name "u02_gamma_0p7_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -441,13 +460,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u02_gamma_1p0_s42
 # U02 with solver_soft_gamma=1.0.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U02_solver_gamma" \
   --run_name "u02_gamma_1p0_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -491,13 +512,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u03_propfreq_1_s42
 # U03 with proposer_update_freq=1.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_1_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -541,13 +564,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u03_propfreq_3_s42
 # U03 with proposer_update_freq=3.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_3_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -591,13 +616,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u03_propfreq_5_s42
 # U03 with proposer_update_freq=5.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_5_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -641,13 +668,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u03_propfreq_10_s42
 # U03 with proposer_update_freq=10.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U03_proposer_update_freq" \
   --run_name "u03_propfreq_10_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -691,13 +720,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u04_mu0p70_sigma0p25_s42
 # U04 with mu=0.70 sigma=0.25.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
   --run_name "u04_mu0p70_sigma0p25_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -742,13 +773,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u04_mu0p70_sigma0p35_s42
 # U04 with mu=0.70 sigma=0.35.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
   --run_name "u04_mu0p70_sigma0p35_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -793,13 +826,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u04_mu0p90_sigma0p25_s42
 # U04 with mu=0.90 sigma=0.25.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
   --run_name "u04_mu0p90_sigma0p25_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -844,13 +879,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u04_mu0p90_sigma0p35_s42
 # U04 with mu=0.90 sigma=0.35.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
   --run_name "u04_mu0p90_sigma0p35_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -895,13 +932,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u04_mu1p10_sigma0p25_s42
 # U04 with mu=1.10 sigma=0.25.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
   --run_name "u04_mu1p10_sigma0p25_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -946,13 +985,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u04_mu1p10_sigma0p35_s42
 # U04 with mu=1.10 sigma=0.35.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U04_entropy_band" \
   --run_name "u04_mu1p10_sigma0p35_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -997,13 +1038,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u05_klcoef2e3_kltarget0p01_s42
 # U05 with kl_coef=2e-3 kl_target=0.01.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U05_kl_sensitivity" \
   --run_name "u05_klcoef2e3_kltarget0p01_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -1048,13 +1091,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u05_klcoef1e3_kltarget0p02_s42
 # U05 with kl_coef=1e-3 kl_target=0.02.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U05_kl_sensitivity" \
   --run_name "u05_klcoef1e3_kltarget0p02_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -1099,13 +1144,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u05_klcoef5e4_kltarget0p05_s42
 # U05 with kl_coef=5e-4 kl_target=0.05.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U05_kl_sensitivity" \
   --run_name "u05_klcoef5e4_kltarget0p05_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -1150,13 +1197,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u06_lorar8_alpha16_s42
 # U06 with lora_r=8 lora_alpha=16.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U06_lora_capacity" \
   --run_name "u06_lorar8_alpha16_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -1201,13 +1250,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u06_lorar16_alpha32_s42
 # U06 with lora_r=16 lora_alpha=32.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U06_lora_capacity" \
   --run_name "u06_lorar16_alpha32_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -1252,13 +1303,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u06_lorar32_alpha64_s42
 # U06 with lora_r=32 lora_alpha=64.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U06_lora_capacity" \
   --run_name "u06_lorar32_alpha64_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
@@ -1303,13 +1356,15 @@ mkdir -p "$OUTPUT_ROOT"
 
 # Run: u07_frozen_proposer_proxy_s42
 # U07 frozen proposer proxy.
-"$PYTHON_BIN" self_evolving/run_experiment.py \
+torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" self_evolving/run_experiment.py \
   --experiment understanding_self_evolving \
   --data_dir "$DATA_DIR" \
+  --data_split all \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/U07_frozen_proposer_proxy" \
   --run_name "u07_frozen_proposer_proxy_s42" \
   --dtype bfloat16 \
+  --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \

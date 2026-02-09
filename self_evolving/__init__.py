@@ -8,6 +8,13 @@ from .roles.generator import GeneratorRole
 from .judge import FrozenJudge
 from .grpo_trainer import SelfEvolvingGRPOTrainer, InternalRewardConfig
 from .rl_controller import RLController, RLControllerConfig, EvoLMMReward
-from .experiments import UnderstandingSelfEvolvingConfig, UnderstandingSelfEvolvingTrainer
+from .experiments import (
+    GenerationSelfEvolvingConfig,
+    GenerationSelfEvolvingTrainer,
+    UnderstandingSelfEvolvingConfig,
+    UnderstandingSelfEvolvingTrainer,
+    UnifiedSelfEvolvingConfig,
+    UnifiedSelfEvolvingTrainer,
+)
 
 __version__ = "0.1.0"
