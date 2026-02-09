@@ -1,5 +1,5 @@
 """
-Unified training script for self-evolving BLIP3o-NEXT.
+Unified training script for self-evolving BLIP3o-compatible models.
 Implements alternating understanding + generation training.
 """
 
@@ -33,7 +33,7 @@ class UnifiedTrainingConfig:
     batch_size: int = 4
     
     # Model
-    model_name: str = "BLIP3o/BLIP3o-NEXT-4B"
+    model_name: str = "BLIP3o/BLIP3o-Model-8B"
     use_lora: bool = True
     lora_r: int = 16
     lora_alpha: int = 32
@@ -94,8 +94,8 @@ class UnifiedTrainingConfig:
 
 
 def setup_model(config: UnifiedTrainingConfig):
-    """Load BLIP3o-NEXT model with LoRA adapters."""
-    from transformers import AutoProcessor, AutoModelForCausalLM
+    """Load BLIP3o-compatible model with LoRA adapters."""
+    from transformers import AutoModel, AutoModelForCausalLM, AutoProcessor
     from peft import LoraConfig, get_peft_model, TaskType
     
     print(f"Loading model: {config.model_name}")
@@ -106,13 +106,23 @@ def setup_model(config: UnifiedTrainingConfig):
     # Load processor
     processor = AutoProcessor.from_pretrained(config.model_name, trust_remote_code=True)
     
-    # Load model
-    model = AutoModelForCausalLM.from_pretrained(
-        config.model_name,
-        torch_dtype=torch.bfloat16,
-        device_map={"": config.cuda_device},
-        trust_remote_code=True,
-    )
+    # Load model (original BLIP3o prefers AutoModel path).
+    try:
+        model = AutoModel.from_pretrained(
+            config.model_name,
+            torch_dtype=torch.bfloat16,
+            device_map={"": config.cuda_device},
+            trust_remote_code=True,
+        )
+        if not hasattr(model, "generate"):
+            raise RuntimeError("AutoModel result has no `.generate` method")
+    except Exception:
+        model = AutoModelForCausalLM.from_pretrained(
+            config.model_name,
+            torch_dtype=torch.bfloat16,
+            device_map={"": config.cuda_device},
+            trust_remote_code=True,
+        )
     
     if config.use_lora:
         lora_config = LoraConfig(
@@ -487,7 +497,7 @@ def train_unified(config: UnifiedTrainingConfig):
 def main():
     parser = argparse.ArgumentParser(description="Unified self-evolving training")
     parser.add_argument("--data_dir", type=str, required=True, help="Directory with training images")
-    parser.add_argument("--model_name", type=str, default="BLIP3o/BLIP3o-NEXT-4B")
+    parser.add_argument("--model_name", type=str, default="BLIP3o/BLIP3o-Model-8B")
     parser.add_argument("--output_dir", type=str, default="./outputs_unified")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_epochs", type=int, default=1)

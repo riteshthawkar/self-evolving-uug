@@ -1,5 +1,5 @@
-# Self-Evolving BLIP3o-NEXT
-# EvoLMM-style fully unsupervised self-evolution on BLIP3o-NEXT
+# Self-Evolving BLIP3o
+# EvoLMM-style fully unsupervised self-evolution for BLIP3o-family models
 
 from .data.image_pool import ImagePool, ImagePoolConfig
 from .roles.proposer import ProposerRole, VerificationSpec

@@ -1,8 +1,8 @@
 """
-GeneratorRole: Generates images via BLIP3o-NEXT's discrete token policy.
-Wraps the 729-token AR generation path with frozen SANA diffusion.
+GeneratorRole: Generates images for BLIP3o-family models.
 """
 
+import os
 import torch
 from typing import List, Optional
 from PIL import Image
@@ -10,14 +10,14 @@ from PIL import Image
 
 class GeneratorRole:
     """
-    Generator produces images via BLIP3o-NEXT's discrete token policy.
+    Generator produces images for BLIP3o-family models.
     
     Key points:
     - AR model generates 729 discrete SigLIP-2 tokens
     - SANA diffusion refines tokens to pixel output
     - For RL, diffusion is frozen; only AR policy is updated
     
-    This class wraps BLIP3o-NEXT's generation path for the self-evolving loop.
+    This class wraps available generation paths for the self-evolving loop.
     """
     
     GENERATION_TEMPLATE = """<|im_start|>system
@@ -42,7 +42,7 @@ Please generate image based on the following caption: {prompt}
         Initialize GeneratorRole.
         
         Args:
-            model: BLIP3o-NEXT model
+            model: BLIP3o-family model
             processor: Processor for tokenization
             diffusion_model: SANA diffusion model (optional, may be part of model)
             lora_adapter_name: Name of the LoRA adapter for generator
@@ -52,6 +52,7 @@ Please generate image based on the following caption: {prompt}
         self.model = model
         self.processor = processor
         self.diffusion_model = diffusion_model
+        self._diffusion_pipe = diffusion_model
         self.lora_adapter_name = lora_adapter_name
         self.device = device
         self.freeze_diffusion = freeze_diffusion
@@ -63,6 +64,63 @@ Please generate image based on the following caption: {prompt}
                 for param in diff.parameters():
                     param.requires_grad = False
                 print("[GeneratorRole] Diffusion model frozen")
+
+    def _infer_model_name(self) -> Optional[str]:
+        env_model = os.environ.get("BLIP3O_MODEL_NAME", "").strip()
+        if env_model:
+            return env_model
+        cfg = getattr(self.model, "config", None)
+        if cfg is not None:
+            name = str(getattr(cfg, "_name_or_path", "") or "").strip()
+            if name:
+                return name
+        name = str(getattr(self.model, "name_or_path", "") or "").strip()
+        return name or None
+
+    def _maybe_init_diffusion_pipe(self):
+        if self._diffusion_pipe is not None:
+            return
+        model_name = self._infer_model_name()
+        if not model_name or ("blip3o-model" not in model_name.lower()):
+            return
+        tokenizer = getattr(self.processor, "tokenizer", None)
+        if tokenizer is None:
+            return
+        try:
+            from diffusers import DiffusionPipeline
+        except Exception:
+            return
+
+        for custom_pipeline in ("pipeline_llava_gen", "pipeline_ar_gen"):
+            try:
+                try:
+                    pipe = DiffusionPipeline.from_pretrained(
+                        model_name,
+                        custom_pipeline=custom_pipeline,
+                        subfolder="diffusion-decoder",
+                        tokenizer=tokenizer,
+                        multimodal_encoder=self.model,
+                        safety_checker=None,
+                        trust_remote_code=True,
+                    )
+                except TypeError:
+                    pipe = DiffusionPipeline.from_pretrained(
+                        model_name,
+                        custom_pipeline=custom_pipeline,
+                        subfolder="diffusion-decoder",
+                        tokenizer=tokenizer,
+                        multimodal_encoder=self.model,
+                        safety_checker=None,
+                    )
+                try:
+                    pipe = pipe.to(self.device)
+                except Exception:
+                    pass
+                self._diffusion_pipe = pipe
+                print(f"[GeneratorRole] Enabled diffusion-decoder backend via {custom_pipeline}")
+                return
+            except Exception:
+                continue
 
     def generate(
         self,
@@ -78,7 +136,7 @@ Please generate image based on the following caption: {prompt}
         """
         Generate images from a text prompt.
         
-        Uses BLIP3o-NEXT's text-to-image generation path:
+        Uses available text-to-image generation path:
         1. Tokenize prompt
         2. AR model generates 729 discrete image tokens
         3. SANA diffusion renders tokens to pixels
@@ -130,15 +188,46 @@ Please generate image based on the following caption: {prompt}
     ) -> Image.Image:
         """Generate a single image."""
         
-        # Use BLIP3o-NEXT's native generation if available
+        self._maybe_init_diffusion_pipe()
+
+        # Use model-native generation if available.
         if hasattr(self.model, 'generate_image'):
-            return self.model.generate_image(
+            image_or_latent = self.model.generate_image(
                 prompt=prompt,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
                 height=height,
                 width=width,
             )
+            if isinstance(image_or_latent, Image.Image):
+                return image_or_latent
+            if isinstance(image_or_latent, list) and image_or_latent and isinstance(image_or_latent[0], Image.Image):
+                return image_or_latent[0]
+
+            # Original BLIP3o may return latent embeddings; decode through diffusion pipeline.
+            if self._diffusion_pipe is not None:
+                out = self._diffusion_pipe(
+                    prompt=prompt,
+                    guidance_scale=guidance_scale,
+                    num_inference_steps=num_inference_steps,
+                    height=height,
+                    width=width,
+                )
+                images = getattr(out, "images", None)
+                if images:
+                    return images[0]
+
+        if self._diffusion_pipe is not None:
+            out = self._diffusion_pipe(
+                prompt=prompt,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                height=height,
+                width=width,
+            )
+            images = getattr(out, "images", None)
+            if images:
+                return images[0]
         
         # Otherwise, use the standard generation path
         formatted_prompt = self.GENERATION_TEMPLATE.format(prompt=prompt)
@@ -171,7 +260,7 @@ Please generate image based on the following caption: {prompt}
                 # Fallback: use the model's full generation pipeline
                 raise NotImplementedError(
                     "Model doesn't have decode_image_tokens method. "
-                    "Use BLIP3o-NEXT's native generate_image method."
+                    "Use a native generate_image backend for this model."
                 )
         
         return image

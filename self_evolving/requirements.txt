@@ -1,5 +1,5 @@
-# Unified requirements for Self-Evolving BLIP3o-NEXT
-# Merges BLIP3o-NEXT and EvoLMM dependencies, resolving version conflicts
+# Unified requirements for Self-Evolving BLIP3o-family experiments
+# Merges BLIP3o and EvoLMM dependencies
 # Uses CUDA (not ROCm)
 
 --extra-index-url https://download.pytorch.org/whl/cu121
@@ -9,7 +9,7 @@ torch==2.3.0
 torchvision==0.18.0
 torchaudio==2.3.0
 
-# Transformers ecosystem (use higher version for Qwen3 support)
+# Transformers ecosystem (BLIP3o custom model support)
 transformers>=4.51.3
 accelerate>=0.28.0
 datasets>=2.16.1
