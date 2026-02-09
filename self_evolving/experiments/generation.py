@@ -679,13 +679,23 @@ class _Blip3oProcessorShim:
         self,
         tokenizer,
         image_processor=None,
+        model_name: str = "",
         tokenizer_image_token_fn: Optional[Callable[..., torch.Tensor]] = None,
     ):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
+        self.model_name = str(model_name or "")
         self._tokenizer_image_token_fn = tokenizer_image_token_fn
         # Some generic paths look for these attributes.
         self.chat_template = getattr(tokenizer, "chat_template", None)
+
+    def _ensure_image_processor(self):
+        if self.image_processor is not None:
+            return self.image_processor
+        self.image_processor = _load_blip3o_image_processor_from_candidates(
+            model_name=self.model_name
+        )
+        return self.image_processor
 
     def decode(self, *args, **kwargs):
         return self.tokenizer.decode(*args, **kwargs)
@@ -771,8 +781,12 @@ class _Blip3oProcessorShim:
 
         if images is not None:
             if self.image_processor is None:
+                self._ensure_image_processor()
+            if self.image_processor is None:
                 raise RuntimeError(
-                    "BLIP3o processor shim missing image_processor; cannot prepare multimodal inputs."
+                    "BLIP3o processor shim missing image_processor; cannot prepare multimodal inputs. "
+                    "Set BLIP3O_IMAGE_PROCESSOR_ID (e.g., Qwen/Qwen2.5-VL-7B-Instruct) or ensure "
+                    "the local BLIP3o vision tower exposes `image_processor`."
                 )
             img_list = images if isinstance(images, list) else [images]
             pix = self.image_processor.preprocess(img_list, return_tensors="pt")["pixel_values"]
@@ -781,7 +795,39 @@ class _Blip3oProcessorShim:
         return BatchEncoding(data=data, tensor_type=return_tensors)
 
 
-def _build_blip3o_processor(tokenizer, model, tokenizer_image_token_fn=None):
+def _load_blip3o_image_processor_from_candidates(model_name: str = ""):
+    # BLIP3o main codebase typically uses a Qwen2.5-VL image processor.
+    from transformers import AutoProcessor
+
+    # Explicit override for cluster/container environments.
+    override = os.environ.get("BLIP3O_IMAGE_PROCESSOR_ID", "").strip()
+    candidates = []
+    if override:
+        candidates.append(override)
+    if model_name:
+        candidates.append(model_name)
+    candidates.append("Qwen/Qwen2.5-VL-7B-Instruct")
+
+    seen = set()
+    for repo_id in candidates:
+        repo_id = (repo_id or "").strip()
+        if not repo_id or repo_id in seen:
+            continue
+        seen.add(repo_id)
+        try:
+            proc = AutoProcessor.from_pretrained(repo_id, trust_remote_code=True)
+        except Exception:
+            try:
+                proc = AutoProcessor.from_pretrained(repo_id)
+            except Exception:
+                continue
+        ip = getattr(proc, "image_processor", None)
+        if ip is not None:
+            return ip
+    return None
+
+
+def _resolve_blip3o_image_processor(model, model_name: str = ""):
     image_processor = None
     if model is not None:
         model_ref = _unwrap_model(model)
@@ -792,9 +838,28 @@ def _build_blip3o_processor(tokenizer, model, tokenizer_image_token_fn=None):
                 image_processor = getattr(vt, "image_processor", None)
             except Exception:
                 image_processor = None
+        if image_processor is None:
+            # Some wrapper chains expose image_processor deeper than get_vision_tower().
+            try:
+                for _, obj in _iter_wrapper_objects(model_ref):
+                    ip = getattr(obj, "image_processor", None)
+                    if ip is not None:
+                        image_processor = ip
+                        break
+            except Exception:
+                pass
+
+    if image_processor is not None:
+        return image_processor
+    return _load_blip3o_image_processor_from_candidates(model_name=model_name)
+
+
+def _build_blip3o_processor(tokenizer, model, model_name: str = "", tokenizer_image_token_fn=None):
+    image_processor = _resolve_blip3o_image_processor(model=model, model_name=model_name)
     return _Blip3oProcessorShim(
         tokenizer=tokenizer,
         image_processor=image_processor,
+        model_name=model_name,
         tokenizer_image_token_fn=tokenizer_image_token_fn,
     )
 
@@ -1942,6 +2007,7 @@ class GenerationSelfEvolvingTrainer:
                 processor = _build_blip3o_processor(
                     tokenizer=tokenizer,
                     model=model,
+                    model_name=self.cfg.model_name,
                     tokenizer_image_token_fn=mm_utils.get("tokenizer_image_token"),
                 )
                 loader_used = f"{loader_used}+blip3o_shim"
@@ -2109,6 +2175,7 @@ class GenerationSelfEvolvingTrainer:
                 processor = _build_blip3o_processor(
                     tokenizer=tokenizer_for_fallback,
                     model=model,
+                    model_name=self.cfg.model_name,
                     tokenizer_image_token_fn=mm_utils.get("tokenizer_image_token"),
                 )
                 loader_used = f"{loader_used}+tokenizer_shim"
