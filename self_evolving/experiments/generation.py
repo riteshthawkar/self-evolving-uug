@@ -1015,10 +1015,10 @@ def _build_original_blip3o_diffusion_pipeline(
                                     use_safetensors=True,
                                     variant="bf16",
                                 )
-                            except Exception as exc:
-                                import traceback
-                                traceback.print_exc()
-                                errors.append(f"local_snapshot:{repo_id}:{custom_pipeline}: {repr(exc)}")
+                        except Exception as exc:
+                            import traceback
+                            traceback.print_exc()
+                            errors.append(f"local_snapshot:{repo_id}:{custom_pipeline}: {repr(exc)}")
                     if pipe is not None:
                         break
                 else:
