@@ -7,9 +7,36 @@ import torch
 from torch import nn
 from einops import rearrange, repeat
 import logging
+import os
 
 from huggingface_hub import snapshot_download
-cache_dir = snapshot_download(repo_id="jiuhai/eva_clip_vision_tower")
+
+
+def _resolve_eva_clip_cache_dir() -> str:
+    """
+    Resolve EVA-CLIP checkpoint directory without forcing network download at import time.
+
+    Priority:
+    1) `EVA_CLIP_VISION_TOWER_DIR` env var (explicit local path)
+    2) Existing local HF cache (`local_files_only=True`)
+    3) Online snapshot download (when needed by runtime)
+    """
+    env_path = os.environ.get("EVA_CLIP_VISION_TOWER_DIR", "").strip()
+    if env_path:
+        if os.path.isdir(env_path):
+            return env_path
+        raise FileNotFoundError(
+            f"EVA_CLIP_VISION_TOWER_DIR is set but not a directory: {env_path}"
+        )
+
+    try:
+        return snapshot_download(
+            repo_id="jiuhai/eva_clip_vision_tower",
+            local_files_only=True,
+        )
+    except Exception:
+        # Fallback to download if local cache is missing.
+        return snapshot_download(repo_id="jiuhai/eva_clip_vision_tower")
 
 
 
@@ -146,7 +173,6 @@ class PatchDropout(nn.Module):
 # Adapted from  https://github.com/microsoft/unilm/tree/master/beit
 # --------------------------------------------------------
 import math
-import os
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -746,6 +772,7 @@ class EVAEncoderWrapper(nn.Module):
     def __init__(self, vision_tower_pretrained, config):
         super(EVAEncoderWrapper, self).__init__()
         self.config = config
+        cache_dir = _resolve_eva_clip_cache_dir()
         self.config["vision_tower_path"] = os.path.join(cache_dir, "pytorch_model.bin")
         self.model = _build_vision_tower(**self.config)
 
