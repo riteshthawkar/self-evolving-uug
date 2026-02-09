@@ -19,6 +19,7 @@ export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$CACHE_ROOT/triton}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$CACHE_ROOT/xdg}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export AMDGPU_ASIC_ID_TABLE_PATH="${AMDGPU_ASIC_ID_TABLE_PATH:-/usr/share/libdrm/amdgpu.ids}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:256}"
 
 # Weights & Biases
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
@@ -35,9 +36,17 @@ export TOTAL_STEPS="${TOTAL_STEPS:-10000}"
 export SAVE_EVERY="${SAVE_EVERY:-200}"
 export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-3}"
 export SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-500}"
-export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
-export NUM_SOLVER_SAMPLES_SPEC="${NUM_SOLVER_SAMPLES_SPEC:-3}"
-export GENERATION_NUM_INFERENCE_STEPS="${GENERATION_NUM_INFERENCE_STEPS:-30}"
+export NUM_GENERATIONS="${NUM_GENERATIONS:-2}"
+export NUM_SOLVER_SAMPLES="${NUM_SOLVER_SAMPLES:-3}"
+export NUM_SOLVER_SAMPLES_SPEC="${NUM_SOLVER_SAMPLES_SPEC:-2}"
+export GENERATION_NUM_INFERENCE_STEPS="${GENERATION_NUM_INFERENCE_STEPS:-20}"
+export SOLVER_UPDATE_FREQ="${SOLVER_UPDATE_FREQ:-2}"
+export SYNTHETIC_SOLVER_UPDATE_FREQ="${SYNTHETIC_SOLVER_UPDATE_FREQ:-2}"
+export MAX_NEW_TOKENS_SOLVER="${MAX_NEW_TOKENS_SOLVER:-96}"
+export MAX_NEW_TOKENS_PROPOSER="${MAX_NEW_TOKENS_PROPOSER:-192}"
+export MAX_NEW_TOKENS_CAPTION="${MAX_NEW_TOKENS_CAPTION:-64}"
+export MAX_NEW_TOKENS_GENERATOR="${MAX_NEW_TOKENS_GENERATOR:-512}"
+export CLEAR_CACHE_EVERY="${CLEAR_CACHE_EVERY:-10}"
 export CUDA_DEVICE="${CUDA_DEVICE:-0}"
 export PYTHON_BIN="${PYTHON_BIN:-python3}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
@@ -59,7 +68,7 @@ export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
   --run_name "x00_main_default_s42" \
   --dtype bfloat16 \
   --attn_implementation "$ATTN_IMPLEMENTATION" \
-  --device_map auto \
+  --device_map single \
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
@@ -67,6 +76,7 @@ export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
   --max_checkpoints "$MAX_CHECKPOINTS" \
   --save_generated_images_every "$SAVE_GENERATED_IMAGES_EVERY" \
   --deterministic \
+  --require_decoder_for_blip3o \
   --use_lora \
   --lora_r 16 \
   --lora_alpha 32 \
@@ -79,14 +89,14 @@ export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
   --generator_update_freq 1 \
   --generator_update_rule reinforce \
   --enable_solver_updates \
-  --solver_update_freq 1 \
+  --solver_update_freq "$SOLVER_UPDATE_FREQ" \
   --temp 1.0 \
   --top_p 1.0 \
-  --max_new_tokens_solver 128 \
-  --max_new_tokens_proposer 256 \
-  --max_new_tokens_caption 96 \
-  --max_new_tokens_generator 768 \
-  --num_solver_samples 5 \
+  --max_new_tokens_solver "$MAX_NEW_TOKENS_SOLVER" \
+  --max_new_tokens_proposer "$MAX_NEW_TOKENS_PROPOSER" \
+  --max_new_tokens_caption "$MAX_NEW_TOKENS_CAPTION" \
+  --max_new_tokens_generator "$MAX_NEW_TOKENS_GENERATOR" \
+  --num_solver_samples "$NUM_SOLVER_SAMPLES" \
   --num_solver_samples_spec "$NUM_SOLVER_SAMPLES_SPEC" \
   --num_generations "$NUM_GENERATIONS" \
   --generation_num_inference_steps "$GENERATION_NUM_INFERENCE_STEPS" \
@@ -109,14 +119,14 @@ export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
   --prop_entropy_sigma 0.35 \
   --understanding_steps_per_cycle 3 \
   --generation_steps_per_cycle 2 \
-  --synthetic_solver_update_freq 1 \
+  --synthetic_solver_update_freq "$SYNTHETIC_SOLVER_UPDATE_FREQ" \
   --kl_coef 1e-3 \
   --kl_target 0.02 \
   --kl_adapt_rate 0.10 \
   --kl_min 1e-8 \
   --kl_max 1e2 \
   --baseline_momentum 0.9 \
-  --clear_cache_every 25 \
+  --clear_cache_every "$CLEAR_CACHE_EVERY" \
   --wandb_mode "$WANDB_MODE" \
   --wandb_project "$WANDB_PROJECT" \
   --wandb_entity "$WANDB_ENTITY" \
