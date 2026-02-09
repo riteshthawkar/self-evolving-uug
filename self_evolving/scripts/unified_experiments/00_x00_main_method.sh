@@ -53,8 +53,8 @@ export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 export MASTER_PORT="${MASTER_PORT:-29520}"
 export ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-auto}"
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
-# Use local original BLIP3o classes from bundled checkout.
-export BLIP3O_REPO="${BLIP3O_REPO:-$REPO_ROOT/BLIP3o}"
+# Use local original BLIP3o classes from official main branch (patched for diffusers compatibility).
+export BLIP3O_REPO="${BLIP3O_REPO:-$REPO_ROOT/BLIP3o-official}"
 export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-1}"
 # Decoder fallback source for BLIP3o-Model-8B latent->image decoding.
 export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
