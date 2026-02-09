@@ -29,7 +29,7 @@ export WANDB_LOG_IMAGES_EVERY="${WANDB_LOG_IMAGES_EVERY:-0}"
 
 # Run defaults (override via environment)
 export DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/shared_uug_50k_balanced/images}"
-export MODEL_NAME="${MODEL_NAME:-BLIP3o/BLIP3o-NEXT-4B}"
+export MODEL_NAME="BLIP3o/BLIP3o-NEXT-4B"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/runs/generation_experiments}"
 export TOTAL_STEPS="${TOTAL_STEPS:-6000}"
 export SAVE_EVERY="${SAVE_EVERY:-200}"
