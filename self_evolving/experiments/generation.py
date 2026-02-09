@@ -281,6 +281,71 @@ def _prepare_text_inputs(processor, device: torch.device, text: str):
     return inputs.to(device)
 
 
+def _signature_param_names(obj, fn_name: str) -> Tuple[set, bool]:
+    fn = getattr(obj, fn_name, None)
+    if not callable(fn):
+        return set(), False
+    try:
+        sig = inspect.signature(fn)
+    except Exception:
+        return set(), False
+    names = set()
+    has_var_kw = False
+    for p in sig.parameters.values():
+        if p.kind == inspect.Parameter.VAR_KEYWORD:
+            has_var_kw = True
+            continue
+        names.add(p.name)
+    return names, has_var_kw
+
+
+def _supports_kwarg_anywhere(model, kwarg_name: str) -> bool:
+    try:
+        wrappers = _iter_wrapper_objects(model)
+    except Exception:
+        wrappers = [("model", model)]
+    for _, obj in wrappers:
+        for fn_name in ("generate", "prepare_inputs_for_generation", "forward"):
+            names, has_var_kw = _signature_param_names(obj, fn_name)
+            if has_var_kw or kwarg_name in names:
+                return True
+    return False
+
+
+def _adapt_mm_generate_inputs(model, inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """
+    Normalize multimodal kwargs across BLIP3o/Qwen wrappers.
+    """
+    out = dict(inputs)
+    supports_images = _supports_kwarg_anywhere(model, "images")
+    supports_pixel_values = _supports_kwarg_anywhere(model, "pixel_values")
+    supports_grid_thw = _supports_kwarg_anywhere(model, "grid_thw")
+    supports_image_grid_thw = _supports_kwarg_anywhere(model, "image_grid_thw")
+
+    if "images" in out and (not supports_images) and supports_pixel_values and "pixel_values" not in out:
+        out["pixel_values"] = out.pop("images")
+    if "pixel_values" in out and (not supports_pixel_values) and supports_images and "images" not in out:
+        out["images"] = out.pop("pixel_values")
+
+    if "image_grid_thw" in out and (not supports_image_grid_thw) and supports_grid_thw and "grid_thw" not in out:
+        out["grid_thw"] = out.pop("image_grid_thw")
+    if "grid_thw" in out and (not supports_grid_thw) and supports_image_grid_thw and "image_grid_thw" not in out:
+        out["image_grid_thw"] = out.pop("grid_thw")
+    return out
+
+
+def _parse_unused_model_kwargs_from_error(exc: Exception) -> List[str]:
+    msg = str(exc)
+    m = re.search(r"model_kwargs` are not used by the model: \[(.*?)\]", msg)
+    if not m:
+        return []
+    raw = m.group(1).strip()
+    if not raw:
+        return []
+    parts = [p.strip().strip("'").strip('"') for p in raw.split(",")]
+    return [p for p in parts if p]
+
+
 def _is_original_blip3o_model_name(model_name: str) -> bool:
     name = (model_name or "").strip().lower()
     return "blip3o-model" in name and "next" not in name
@@ -789,8 +854,19 @@ class _Blip3oProcessorShim:
                     "the local BLIP3o vision tower exposes `image_processor`."
                 )
             img_list = images if isinstance(images, list) else [images]
-            pix = self.image_processor.preprocess(img_list, return_tensors="pt")["pixel_values"]
-            data["images"] = pix
+            prep = self.image_processor.preprocess(img_list, return_tensors="pt")
+            if "pixel_values" in prep:
+                data["pixel_values"] = prep["pixel_values"]
+            elif "images" in prep:
+                data["images"] = prep["images"]
+            else:
+                raise RuntimeError("BLIP3o image_processor preprocess output missing pixel data.")
+            if "image_grid_thw" in prep:
+                data["image_grid_thw"] = prep["image_grid_thw"]
+            if "grid_thw" in prep:
+                data["grid_thw"] = prep["grid_thw"]
+            if "image_sizes" in prep:
+                data["image_sizes"] = prep["image_sizes"]
 
         return BatchEncoding(data=data, tensor_type=return_tensors)
 
@@ -2263,18 +2339,44 @@ class GenerationSelfEvolvingTrainer:
     ) -> str:
         chat_text = _build_chat_text(self.processor, image, prompt)
         inputs = _prepare_mm_inputs(self.processor, self.device, image, chat_text)
+        gen_inputs = _adapt_mm_generate_inputs(self.model, dict(inputs))
+
+        def _run_generate(curr_inputs: Dict[str, torch.Tensor]):
+            return self.model.generate(
+                **curr_inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=temperature,
+                top_p=top_p,
+                pad_token_id=getattr(getattr(self.processor, "tokenizer", None), "eos_token_id", None),
+            )
+
         with torch.no_grad():
             with use_adapter(self.model, adapter_name):
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=True,
-                    temperature=temperature,
-                    top_p=top_p,
-                    pad_token_id=getattr(getattr(self.processor, "tokenizer", None), "eos_token_id", None),
-                )
+                try:
+                    outputs = _run_generate(gen_inputs)
+                except ValueError as exc:
+                    unused = _parse_unused_model_kwargs_from_error(exc)
+                    if not unused:
+                        raise
+                    retry_inputs = dict(gen_inputs)
+                    # BLIP3o/Qwen wrapper mismatch: retry with key translation.
+                    if "images" in unused and "images" in retry_inputs and "pixel_values" not in retry_inputs:
+                        retry_inputs["pixel_values"] = retry_inputs["images"]
+                    if "pixel_values" in unused and "pixel_values" in retry_inputs and "images" not in retry_inputs:
+                        retry_inputs["images"] = retry_inputs["pixel_values"]
+                    if "image_grid_thw" in unused and "image_grid_thw" in retry_inputs and "grid_thw" not in retry_inputs:
+                        retry_inputs["grid_thw"] = retry_inputs["image_grid_thw"]
+                    if "grid_thw" in unused and "grid_thw" in retry_inputs and "image_grid_thw" not in retry_inputs:
+                        retry_inputs["image_grid_thw"] = retry_inputs["grid_thw"]
+                    for key in unused:
+                        retry_inputs.pop(key, None)
+                    if retry_inputs == gen_inputs:
+                        raise
+                    outputs = _run_generate(retry_inputs)
+                    gen_inputs = retry_inputs
 
-        input_len = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
+        input_len = gen_inputs["input_ids"].shape[1] if "input_ids" in gen_inputs else 0
         completion_ids = outputs[0, input_len:]
         text = _decode_tokens(self.processor, completion_ids)
         return text.strip()
