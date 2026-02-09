@@ -429,11 +429,56 @@ def _load_from_explicit_class(
     if attn_implementation:
         attempts.append({**base_kwargs, "attn_implementation": attn_implementation})
     attempts.append(base_kwargs)
+
+    def _maybe_patch_config_hidden_size():
+        """
+        BLIP3o original classes sometimes expect `config.hidden_size` while newer
+        transformers expose size only under `config.text_config.hidden_size`.
+        """
+        try:
+            from transformers import AutoConfig
+        except Exception:
+            return None
+        try:
+            cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+        except Exception:
+            return None
+        if hasattr(cfg, "hidden_size"):
+            return cfg
+
+        text_cfg = getattr(cfg, "text_config", None)
+        hidden_size = None
+        if text_cfg is not None:
+            hidden_size = getattr(text_cfg, "hidden_size", None)
+            if hidden_size is None:
+                hidden_size = getattr(text_cfg, "d_model", None)
+        if hidden_size is None:
+            return None
+
+        try:
+            setattr(cfg, "hidden_size", int(hidden_size))
+            return cfg
+        except Exception:
+            return None
+
     for kwargs in attempts:
         try:
             return cls.from_pretrained(model_name, **kwargs)
         except Exception as exc:
             errors.append(f"{cls.__name__}({kwargs}): {repr(exc)}")
+            msg = str(exc).lower()
+            if ("hidden_size" in msg) and ("attributeerror" in msg or "no attribute" in msg):
+                patched_cfg = _maybe_patch_config_hidden_size()
+                if patched_cfg is None:
+                    continue
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["config"] = patched_cfg
+                try:
+                    return cls.from_pretrained(model_name, **retry_kwargs)
+                except Exception as exc_retry:
+                    errors.append(
+                        f"{cls.__name__}({retry_kwargs}): {repr(exc_retry)}"
+                    )
     raise RuntimeError(" | ".join(errors))
 
 
@@ -920,6 +965,264 @@ class TextPolicyUpdater:
         }
 
 
+class TextPreferenceDPOUpdater:
+    """
+    Pairwise DPO updater for generator role.
+
+    This updater compares chosen vs rejected completions under a policy adapter
+    against a frozen reference policy and optimizes:
+      -log sigma(beta * ((logpi_c - logpi_r) - (logref_c - logref_r)))
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        processor,
+        config,
+        adapter_name: Optional[str],
+        reference_model: Optional[torch.nn.Module] = None,
+    ):
+        self.model = model
+        self.processor = processor
+        self.config = config
+        self.adapter_name = adapter_name
+        self.reference_model = reference_model
+        self.step_id = 0
+        self.kl_coef = 0.0  # Kept for checkpoint/log schema compatibility.
+
+        self.dpo_beta = float(max(1e-6, getattr(config, "dpo_beta", 0.1)))
+        self.dpo_label_smoothing = float(getattr(config, "dpo_label_smoothing", 0.0))
+        if not (0.0 <= self.dpo_label_smoothing < 0.5):
+            raise ValueError("dpo_label_smoothing must satisfy 0.0 <= value < 0.5")
+
+        params = list(_collect_trainable_params(model, adapter_name))
+        if not params:
+            raise RuntimeError(f"No trainable parameters found for adapter={adapter_name!r}")
+        self.params = params
+        self.opt = torch.optim.AdamW(params, lr=config.lr, weight_decay=config.weight_decay)
+
+    def state_dict(self) -> Dict:
+        return {
+            "optimizer": self.opt.state_dict(),
+            "step_id": int(self.step_id),
+            "dpo_beta": float(self.dpo_beta),
+            "dpo_label_smoothing": float(self.dpo_label_smoothing),
+            "kl_coef": float(self.kl_coef),
+        }
+
+    def load_state_dict(self, state: Dict):
+        if not isinstance(state, dict):
+            return
+        if "optimizer" in state:
+            self.opt.load_state_dict(state["optimizer"])
+        if "step_id" in state:
+            self.step_id = int(state["step_id"])
+        if "dpo_beta" in state:
+            self.dpo_beta = float(state["dpo_beta"])
+        if "dpo_label_smoothing" in state:
+            self.dpo_label_smoothing = float(state["dpo_label_smoothing"])
+        if "kl_coef" in state:
+            self.kl_coef = float(state["kl_coef"])
+
+    def _build_inputs(
+        self,
+        *,
+        prompt: str,
+        completion: str,
+        device: torch.device,
+        image: Optional[Image.Image] = None,
+        completion_token_ids: Optional[List[int]] = None,
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+        if not completion or not str(completion).strip():
+            raise ValueError("DPO update requires non-empty completion text.")
+
+        if image is None:
+            text_prompt = prompt
+            use_token_ids = bool(completion_token_ids)
+            if use_token_ids:
+                prompt_inputs = _prepare_text_inputs(self.processor, device, text_prompt)
+                prompt_ids = prompt_inputs["input_ids"]
+                if prompt_ids.ndim != 2 or prompt_ids.shape[0] != 1:
+                    raise RuntimeError("Expected single-example prompt batch for DPO token-trace update.")
+                comp_ids = torch.tensor(completion_token_ids, dtype=torch.long, device=prompt_ids.device).view(1, -1)
+                full_ids = torch.cat([prompt_ids, comp_ids], dim=1)
+                full_mask = torch.ones_like(full_ids, dtype=torch.long)
+                prompt_mask = prompt_inputs.get("attention_mask")
+                if prompt_mask is None:
+                    prompt_mask = torch.ones_like(prompt_ids, dtype=torch.long)
+                inputs_prompt = {"input_ids": prompt_ids, "attention_mask": prompt_mask}
+                inputs_full = {"input_ids": full_ids, "attention_mask": full_mask}
+            else:
+                text_full = prompt + completion
+                inputs_prompt = _prepare_text_inputs(self.processor, device, text_prompt)
+                inputs_full = _prepare_text_inputs(self.processor, device, text_full)
+        else:
+            chat_prompt = _build_chat_text(self.processor, image, prompt)
+            chat_full = chat_prompt + completion
+            inputs_prompt = _prepare_mm_inputs(self.processor, device, image, chat_prompt)
+            inputs_full = _prepare_mm_inputs(self.processor, device, image, chat_full)
+        return inputs_prompt, inputs_full
+
+    def _sequence_logp_from_logits(
+        self,
+        *,
+        logits: torch.Tensor,
+        input_ids: torch.Tensor,
+        prompt_len: int,
+    ) -> Tuple[torch.Tensor, int]:
+        labels = input_ids.clone()
+        labels[:, :prompt_len] = -100
+        shift_labels = labels[:, 1:]
+        valid_mask = shift_labels != -100
+
+        logp = F.log_softmax(logits, dim=-1)
+        shift_logp = logp[:, :-1, :]
+        gathered = shift_logp.gather(-1, shift_labels.clamp_min(0).unsqueeze(-1)).squeeze(-1)
+
+        valid_count = int(valid_mask.sum().item())
+        if valid_count <= 0:
+            seq_logp = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+        else:
+            # Mean token log-prob for length robustness across variable completions.
+            seq_logp = gathered[valid_mask].mean()
+        return seq_logp, valid_count
+
+    def _forward_seq_logp(
+        self,
+        *,
+        model: torch.nn.Module,
+        adapter_name: Optional[str],
+        inputs_prompt: Dict[str, torch.Tensor],
+        inputs_full: Dict[str, torch.Tensor],
+        no_grad: bool,
+    ) -> Tuple[torch.Tensor, int]:
+        context = torch.no_grad() if no_grad else torch.enable_grad()
+        with context:
+            with use_adapter(model, adapter_name):
+                out = model(**inputs_full)
+            prompt_len = int(inputs_prompt["input_ids"].shape[1])
+            seq_logp, token_count = self._sequence_logp_from_logits(
+                logits=out.logits,
+                input_ids=inputs_full["input_ids"],
+                prompt_len=prompt_len,
+            )
+        return seq_logp, token_count
+
+    def step(
+        self,
+        *,
+        prompt: str,
+        chosen_completion: str,
+        rejected_completion: str,
+        device: torch.device,
+        chosen_image: Optional[Image.Image] = None,
+        rejected_image: Optional[Image.Image] = None,
+        chosen_completion_token_ids: Optional[List[int]] = None,
+        rejected_completion_token_ids: Optional[List[int]] = None,
+    ) -> Dict[str, float]:
+        self.step_id += 1
+        self.model.train(True)
+
+        chosen_prompt_inputs, chosen_full_inputs = self._build_inputs(
+            prompt=prompt,
+            completion=chosen_completion,
+            device=device,
+            image=chosen_image,
+            completion_token_ids=chosen_completion_token_ids,
+        )
+        rejected_prompt_inputs, rejected_full_inputs = self._build_inputs(
+            prompt=prompt,
+            completion=rejected_completion,
+            device=device,
+            image=rejected_image,
+            completion_token_ids=rejected_completion_token_ids,
+        )
+
+        pi_logp_chosen, chosen_token_count = self._forward_seq_logp(
+            model=self.model,
+            adapter_name=self.adapter_name,
+            inputs_prompt=chosen_prompt_inputs,
+            inputs_full=chosen_full_inputs,
+            no_grad=False,
+        )
+        pi_logp_rejected, rejected_token_count = self._forward_seq_logp(
+            model=self.model,
+            adapter_name=self.adapter_name,
+            inputs_prompt=rejected_prompt_inputs,
+            inputs_full=rejected_full_inputs,
+            no_grad=False,
+        )
+
+        if self.reference_model is not None:
+            ref_model = self.reference_model
+            ref_adapter_name = None
+        else:
+            ref_model = self.model
+            ref_adapter_name = None
+
+        ref_logp_chosen, _ = self._forward_seq_logp(
+            model=ref_model,
+            adapter_name=ref_adapter_name,
+            inputs_prompt=chosen_prompt_inputs,
+            inputs_full=chosen_full_inputs,
+            no_grad=True,
+        )
+        ref_logp_rejected, _ = self._forward_seq_logp(
+            model=ref_model,
+            adapter_name=ref_adapter_name,
+            inputs_prompt=rejected_prompt_inputs,
+            inputs_full=rejected_full_inputs,
+            no_grad=True,
+        )
+
+        pi_gap = pi_logp_chosen - pi_logp_rejected
+        ref_gap = ref_logp_chosen - ref_logp_rejected
+        preference_margin = pi_gap - ref_gap
+
+        scaled_margin = self.dpo_beta * preference_margin
+        pos_term = -F.logsigmoid(scaled_margin)
+        if self.dpo_label_smoothing > 0.0:
+            neg_term = -F.logsigmoid(-scaled_margin)
+            dpo_loss = (1.0 - self.dpo_label_smoothing) * pos_term + self.dpo_label_smoothing * neg_term
+        else:
+            dpo_loss = pos_term
+
+        self.opt.zero_grad(set_to_none=True)
+        dpo_loss.backward()
+        _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
+        self.opt.step()
+        self.model.train(False)
+
+        if (
+            torch.cuda.is_available()
+            and self.config.clear_cache_every > 0
+            and self.step_id % self.config.clear_cache_every == 0
+        ):
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+            gc.collect()
+
+        return {
+            "dpo_loss": float(dpo_loss.item()),
+            "dpo_beta": float(self.dpo_beta),
+            "label_smoothing": float(self.dpo_label_smoothing),
+            "pi_logp_chosen": float(pi_logp_chosen.detach().item()),
+            "pi_logp_rejected": float(pi_logp_rejected.detach().item()),
+            "ref_logp_chosen": float(ref_logp_chosen.detach().item()),
+            "ref_logp_rejected": float(ref_logp_rejected.detach().item()),
+            "pi_gap": float(pi_gap.detach().item()),
+            "ref_gap": float(ref_gap.detach().item()),
+            "preference_margin": float(preference_margin.detach().item()),
+            "chosen_token_count": float(chosen_token_count),
+            "rejected_token_count": float(rejected_token_count),
+            "kl_coef_before": 0.0,
+            "kl_coef_after": 0.0,
+        }
+
+
 @dataclass
 class GenerationSelfEvolvingConfig:
     experiment_name: str = "generation_self_evolving"
@@ -968,6 +1271,10 @@ class GenerationSelfEvolvingConfig:
     strict_require_generation_tokens: bool = True
     generator_missing_trace_strategy: str = "proxy"  # proxy|skip|error
     verification_use_reference_solver: bool = True
+    generator_update_rule: str = "reinforce"  # reinforce|dpo
+    dpo_beta: float = 0.1
+    dpo_label_smoothing: float = 0.0
+    dpo_min_reward_gap: float = 0.0
 
     # Reward shaping
     solver_soft_gamma: float = 0.7
@@ -1081,6 +1388,12 @@ class GenerationSelfEvolvingTrainer:
 
     def __init__(self, config: GenerationSelfEvolvingConfig):
         self.cfg = config
+        self.cfg.generator_update_rule = str(self.cfg.generator_update_rule or "reinforce").strip().lower()
+        if self.cfg.generator_update_rule not in {"reinforce", "dpo"}:
+            raise ValueError(
+                f"Unsupported generator_update_rule={self.cfg.generator_update_rule!r}. "
+                "Expected one of: reinforce, dpo."
+            )
         self._setup_distributed()
         _set_global_seed(config.seed + self.rank, deterministic=config.deterministic)
 
@@ -1098,6 +1411,7 @@ class GenerationSelfEvolvingTrainer:
         self.candidates_log_path = self.logs_dir / "generation_candidates.jsonl"
         self.rewards_log_path = self.logs_dir / "rewards.jsonl"
         self.policy_updates_log_path = self.logs_dir / "policy_updates.jsonl"
+        self.dpo_pairs_log_path = self.logs_dir / "dpo_pairs.jsonl"
         self.summary_path = self.run_dir / "ablation_summary.json"
         self._save_run_metadata()
 
@@ -1183,13 +1497,22 @@ class GenerationSelfEvolvingTrainer:
             reference_model=reference_model,
         )
 
-        self.generator_updater = TextPolicyUpdater(
-            model=self.train_model,
-            processor=self.processor,
-            config=config,
-            adapter_name="generator" if config.use_lora else None,
-            reference_model=reference_model,
-        )
+        if self.cfg.generator_update_rule == "dpo":
+            self.generator_updater = TextPreferenceDPOUpdater(
+                model=self.train_model,
+                processor=self.processor,
+                config=config,
+                adapter_name="generator" if config.use_lora else None,
+                reference_model=reference_model,
+            )
+        else:
+            self.generator_updater = TextPolicyUpdater(
+                model=self.train_model,
+                processor=self.processor,
+                config=config,
+                adapter_name="generator" if config.use_lora else None,
+                reference_model=reference_model,
+            )
 
         self.generator_baseline = 0.0
         self.proposer_baseline = 0.0
@@ -2272,6 +2595,26 @@ class GenerationSelfEvolvingTrainer:
             except Exception:
                 pass
 
+    def _proxy_generator_completion(self, image: Image.Image) -> str:
+        completion = self._generate(
+            image=image,
+            prompt=GENERATOR_PROXY_CAPTION_PROMPT,
+            adapter_name="generator" if self.cfg.use_lora else None,
+            max_new_tokens=self.cfg.max_new_tokens_caption,
+            temperature=max(0.2, min(self.cfg.temp, 0.8)),
+            top_p=1.0,
+        )
+        return " ".join(completion.split())
+
+    def _select_dpo_pair_indices(self, scored: List[Dict[str, object]], best_idx: int) -> Optional[Tuple[int, int]]:
+        if len(scored) < 2:
+            return None
+        candidate_indices = [i for i in range(len(scored)) if i != best_idx]
+        if not candidate_indices:
+            return None
+        rejected_idx = min(candidate_indices, key=lambda i: float(scored[i]["total_reward"]))
+        return int(best_idx), int(rejected_idx)
+
     def _save_checkpoint(self, step: int):
         if not self.is_main_process:
             return
@@ -2368,6 +2711,7 @@ class GenerationSelfEvolvingTrainer:
             {
                 "experiment": self.cfg.experiment_name,
                 "run_dir": str(self.run_dir),
+                "generator_update_rule": self.cfg.generator_update_rule,
                 "final_step": int(final_step),
                 "start_step": int(self.start_step),
                 "status": status,
@@ -2423,12 +2767,15 @@ class GenerationSelfEvolvingTrainer:
             "train/generator_update_skipped": 1.0 if generator_skipped_reason else 0.0,
             "train/generator_update_mode_token_trace": 1.0 if generator_update_mode == "token_trace" else 0.0,
             "train/generator_update_mode_proxy_caption": 1.0 if generator_update_mode == "proxy_caption" else 0.0,
+            "train/generator_update_rule_reinforce": 1.0 if self.cfg.generator_update_rule == "reinforce" else 0.0,
+            "train/generator_update_rule_dpo": 1.0 if self.cfg.generator_update_rule == "dpo" else 0.0,
             "kl/generator_beta": self.generator_updater.kl_coef,
             "kl/proposer_beta": self.proposer_updater.kl_coef,
             "text/prompt": spec.prompt,
             "text/proposer_raw": spec.raw_output,
             "text/best_cycle_caption": best.get("cycle_caption", ""),
         }
+        metrics["train/generator_update_rule"] = self.cfg.generator_update_rule
         if generator_update_mode:
             metrics["train/generator_update_mode"] = generator_update_mode
         if generator_skipped_reason:
@@ -2446,13 +2793,24 @@ class GenerationSelfEvolvingTrainer:
             )
 
         if generator_stats:
-            metrics.update(
-                {
-                    "generator/ce_loss": generator_stats.get("ce_loss"),
-                    "generator/kl_loss": generator_stats.get("kl_loss"),
-                    "generator/advantage": generator_stats.get("advantage"),
-                }
-            )
+            if "dpo_loss" in generator_stats:
+                metrics.update(
+                    {
+                        "generator/dpo_loss": generator_stats.get("dpo_loss"),
+                        "generator/dpo_margin": generator_stats.get("preference_margin"),
+                        "generator/dpo_pi_gap": generator_stats.get("pi_gap"),
+                        "generator/dpo_ref_gap": generator_stats.get("ref_gap"),
+                        "generator/dpo_beta": generator_stats.get("dpo_beta"),
+                    }
+                )
+            else:
+                metrics.update(
+                    {
+                        "generator/ce_loss": generator_stats.get("ce_loss"),
+                        "generator/kl_loss": generator_stats.get("kl_loss"),
+                        "generator/advantage": generator_stats.get("advantage"),
+                    }
+                )
 
         if (
             self.cfg.wandb_log_images_every > 0
@@ -2500,106 +2858,313 @@ class GenerationSelfEvolvingTrainer:
         if step % self.cfg.generator_update_freq == 0 and spec_quality >= self.cfg.min_spec_quality_for_update:
             baseline_before = self.generator_baseline
             generator_reward = float(best["total_reward"])
-            completion = str(best.get("policy_completion", "")).strip()
-            completion_token_ids = best.get("policy_completion_ids")
-            if not isinstance(completion_token_ids, list):
-                completion_token_ids = None
-            update_prompt = str(best.get("policy_prompt", spec.prompt))
-            update_image: Optional[Image.Image] = None
+            update_rule = self.cfg.generator_update_rule
 
-            if not completion:
-                strategy = (self.cfg.generator_missing_trace_strategy or "proxy").strip().lower()
-                if self.cfg.strict_require_generation_tokens or strategy == "error":
-                    raise RuntimeError(
-                        "No generation token trace was returned by the model backend. "
-                        "Set --strict_require_generation_tokens false and use "
-                        "--generator_missing_trace_strategy proxy|skip, or use a backend exposing token traces."
+            if update_rule == "dpo":
+                pair = self._select_dpo_pair_indices(scored, best_idx)
+                if pair is None:
+                    generator_skipped_reason = "dpo_requires_two_candidates"
+                    self._generator_update_mode_counts["skipped"] = (
+                        self._generator_update_mode_counts.get("skipped", 0) + 1
                     )
-
-                if strategy == "proxy":
-                    best_image = best.get("image")
-                    if isinstance(best_image, Image.Image):
-                        proxy_completion = self._generate(
-                            image=best_image,
-                            prompt=GENERATOR_PROXY_CAPTION_PROMPT,
-                            adapter_name="generator" if self.cfg.use_lora else None,
-                            max_new_tokens=self.cfg.max_new_tokens_caption,
-                            temperature=max(0.2, min(self.cfg.temp, 0.8)),
-                            top_p=1.0,
-                        )
-                        proxy_completion = " ".join(proxy_completion.split())
-                        if proxy_completion:
-                            completion = proxy_completion
-                            completion_token_ids = None
-                            update_prompt = GENERATOR_PROXY_CAPTION_PROMPT
-                            update_image = best_image
-                            generator_update_mode = "proxy_caption"
-                        else:
-                            generator_skipped_reason = "missing_trace_proxy_empty_completion"
-                    else:
-                        generator_skipped_reason = "missing_trace_proxy_missing_image"
-                elif strategy == "skip":
-                    generator_skipped_reason = "missing_generation_token_trace"
+                    self._append_jsonl(
+                        self.policy_updates_log_path,
+                        {
+                            "step": step,
+                            "role": "generator",
+                            "update_rule": "dpo",
+                            "skipped": True,
+                            "reason": generator_skipped_reason,
+                            "candidate_count": len(scored),
+                            "spec_quality": spec_quality,
+                        },
+                    )
+                    self._append_jsonl(
+                        self.dpo_pairs_log_path,
+                        {
+                            "step": step,
+                            "skipped": True,
+                            "reason": generator_skipped_reason,
+                            "candidate_count": len(scored),
+                            "best_idx": int(best_idx),
+                        },
+                    )
                 else:
-                    raise ValueError(
-                        "Unsupported generator_missing_trace_strategy="
-                        f"{self.cfg.generator_missing_trace_strategy!r}. Expected one of: proxy, skip, error."
-                    )
+                    chosen_idx, rejected_idx = pair
+                    chosen = scored[chosen_idx]
+                    rejected = scored[rejected_idx]
+                    chosen_reward = float(chosen["total_reward"])
+                    rejected_reward = float(rejected["total_reward"])
+                    reward_gap = chosen_reward - rejected_reward
 
-            if completion:
-                if generator_update_mode is None:
-                    generator_update_mode = "token_trace"
-                generator_stats = self.generator_updater.step(
-                    prompt=update_prompt,
-                    completion=completion,
-                    reward=generator_reward,
-                    baseline=baseline_before,
-                    device=self.device,
-                    image=update_image,
-                    completion_token_ids=completion_token_ids,
-                )
-                self._policy_update_counts["generator"] += 1
-                self._generator_update_mode_counts[generator_update_mode] = (
-                    self._generator_update_mode_counts.get(generator_update_mode, 0) + 1
-                )
-                self._update_baseline("generator", generator_reward)
-                self._sync_state_scalars()
+                    if reward_gap < float(self.cfg.dpo_min_reward_gap):
+                        generator_skipped_reason = "dpo_reward_gap_too_small"
+                        self._generator_update_mode_counts["skipped"] = (
+                            self._generator_update_mode_counts.get("skipped", 0) + 1
+                        )
+                        self._append_jsonl(
+                            self.policy_updates_log_path,
+                            {
+                                "step": step,
+                                "role": "generator",
+                                "update_rule": "dpo",
+                                "skipped": True,
+                                "reason": generator_skipped_reason,
+                                "chosen_candidate_idx": int(chosen_idx),
+                                "rejected_candidate_idx": int(rejected_idx),
+                                "chosen_reward": chosen_reward,
+                                "rejected_reward": rejected_reward,
+                                "reward_gap": reward_gap,
+                                "min_reward_gap": float(self.cfg.dpo_min_reward_gap),
+                                "spec_quality": spec_quality,
+                            },
+                        )
+                        self._append_jsonl(
+                            self.dpo_pairs_log_path,
+                            {
+                                "step": step,
+                                "skipped": True,
+                                "reason": generator_skipped_reason,
+                                "chosen_candidate_idx": int(chosen_idx),
+                                "rejected_candidate_idx": int(rejected_idx),
+                                "chosen_reward": chosen_reward,
+                                "rejected_reward": rejected_reward,
+                                "reward_gap": reward_gap,
+                                "min_reward_gap": float(self.cfg.dpo_min_reward_gap),
+                            },
+                        )
+                    else:
+                        chosen_completion = str(chosen.get("policy_completion", "")).strip()
+                        rejected_completion = str(rejected.get("policy_completion", "")).strip()
 
-                self._append_jsonl(
-                    self.policy_updates_log_path,
-                    {
-                        "step": step,
-                        "role": "generator",
-                        "reward": generator_reward,
-                        "baseline_before": baseline_before,
-                        "baseline_after": self.generator_baseline,
-                        "stats": generator_stats,
-                        "update_mode": generator_update_mode,
-                        "update_prompt": update_prompt,
-                        "used_image_conditioning": update_image is not None,
-                        "completion_char_len": len(completion),
-                        "completion_token_count": len(completion_token_ids) if completion_token_ids else None,
-                        "candidate_idx": int(best_idx),
-                        "spec_quality": spec_quality,
-                    },
-                )
+                        chosen_token_ids = chosen.get("policy_completion_ids")
+                        if not isinstance(chosen_token_ids, list):
+                            chosen_token_ids = None
+                        rejected_token_ids = rejected.get("policy_completion_ids")
+                        if not isinstance(rejected_token_ids, list):
+                            rejected_token_ids = None
+
+                        update_prompt = str(chosen.get("policy_prompt", spec.prompt))
+                        chosen_image: Optional[Image.Image] = None
+                        rejected_image: Optional[Image.Image] = None
+
+                        if chosen_completion and rejected_completion:
+                            generator_update_mode = "token_trace"
+                        else:
+                            strategy = (self.cfg.generator_missing_trace_strategy or "proxy").strip().lower()
+                            if self.cfg.strict_require_generation_tokens or strategy == "error":
+                                raise RuntimeError(
+                                    "No generation token trace was returned by the model backend. "
+                                    "Set --strict_require_generation_tokens false and use "
+                                    "--generator_missing_trace_strategy proxy|skip, or use a backend exposing token traces."
+                                )
+                            if strategy == "proxy":
+                                chosen_raw_image = chosen.get("image")
+                                rejected_raw_image = rejected.get("image")
+                                if isinstance(chosen_raw_image, Image.Image) and isinstance(rejected_raw_image, Image.Image):
+                                    chosen_proxy = self._proxy_generator_completion(chosen_raw_image)
+                                    rejected_proxy = self._proxy_generator_completion(rejected_raw_image)
+                                    if chosen_proxy and rejected_proxy:
+                                        chosen_completion = chosen_proxy
+                                        rejected_completion = rejected_proxy
+                                        chosen_token_ids = None
+                                        rejected_token_ids = None
+                                        update_prompt = GENERATOR_PROXY_CAPTION_PROMPT
+                                        chosen_image = chosen_raw_image
+                                        rejected_image = rejected_raw_image
+                                        generator_update_mode = "proxy_caption"
+                                    else:
+                                        generator_skipped_reason = "dpo_proxy_empty_completion"
+                                else:
+                                    generator_skipped_reason = "dpo_proxy_missing_image"
+                            elif strategy == "skip":
+                                generator_skipped_reason = "missing_generation_token_trace"
+                            else:
+                                raise ValueError(
+                                    "Unsupported generator_missing_trace_strategy="
+                                    f"{self.cfg.generator_missing_trace_strategy!r}. Expected one of: proxy, skip, error."
+                                )
+
+                        if chosen_completion and rejected_completion and generator_skipped_reason is None:
+                            generator_stats = self.generator_updater.step(
+                                prompt=update_prompt,
+                                chosen_completion=chosen_completion,
+                                rejected_completion=rejected_completion,
+                                device=self.device,
+                                chosen_image=chosen_image,
+                                rejected_image=rejected_image,
+                                chosen_completion_token_ids=chosen_token_ids,
+                                rejected_completion_token_ids=rejected_token_ids,
+                            )
+                            self._policy_update_counts["generator"] += 1
+                            self._generator_update_mode_counts[generator_update_mode] = (
+                                self._generator_update_mode_counts.get(generator_update_mode, 0) + 1
+                            )
+                            self._update_baseline("generator", generator_reward)
+                            self._sync_state_scalars()
+
+                            self._append_jsonl(
+                                self.policy_updates_log_path,
+                                {
+                                    "step": step,
+                                    "role": "generator",
+                                    "update_rule": "dpo",
+                                    "reward": generator_reward,
+                                    "baseline_before": baseline_before,
+                                    "baseline_after": self.generator_baseline,
+                                    "stats": generator_stats,
+                                    "update_mode": generator_update_mode,
+                                    "update_prompt": update_prompt,
+                                    "used_image_conditioning": chosen_image is not None and rejected_image is not None,
+                                    "chosen_candidate_idx": int(chosen_idx),
+                                    "rejected_candidate_idx": int(rejected_idx),
+                                    "chosen_reward": chosen_reward,
+                                    "rejected_reward": rejected_reward,
+                                    "reward_gap": reward_gap,
+                                    "spec_quality": spec_quality,
+                                },
+                            )
+                            self._append_jsonl(
+                                self.dpo_pairs_log_path,
+                                {
+                                    "step": step,
+                                    "chosen_candidate_idx": int(chosen_idx),
+                                    "rejected_candidate_idx": int(rejected_idx),
+                                    "chosen_reward": chosen_reward,
+                                    "rejected_reward": rejected_reward,
+                                    "reward_gap": reward_gap,
+                                    "update_mode": generator_update_mode,
+                                    "prompt": update_prompt,
+                                    "chosen_completion_char_len": len(chosen_completion),
+                                    "rejected_completion_char_len": len(rejected_completion),
+                                    "chosen_completion_token_count": len(chosen_token_ids) if chosen_token_ids else None,
+                                    "rejected_completion_token_count": len(rejected_token_ids) if rejected_token_ids else None,
+                                    "stats": generator_stats,
+                                },
+                            )
+                        else:
+                            if generator_skipped_reason is None:
+                                generator_skipped_reason = "dpo_missing_completion"
+                            self._generator_update_mode_counts["skipped"] = (
+                                self._generator_update_mode_counts.get("skipped", 0) + 1
+                            )
+                            self._append_jsonl(
+                                self.policy_updates_log_path,
+                                {
+                                    "step": step,
+                                    "role": "generator",
+                                    "update_rule": "dpo",
+                                    "skipped": True,
+                                    "reason": generator_skipped_reason,
+                                    "candidate_idx": int(best_idx),
+                                    "spec_quality": spec_quality,
+                                },
+                            )
+                            self._append_jsonl(
+                                self.dpo_pairs_log_path,
+                                {
+                                    "step": step,
+                                    "skipped": True,
+                                    "reason": generator_skipped_reason,
+                                    "candidate_count": len(scored),
+                                    "best_idx": int(best_idx),
+                                },
+                            )
             else:
-                if generator_skipped_reason is None:
-                    generator_skipped_reason = "missing_generation_token_trace"
-                self._generator_update_mode_counts["skipped"] = (
-                    self._generator_update_mode_counts.get("skipped", 0) + 1
-                )
-                self._append_jsonl(
-                    self.policy_updates_log_path,
-                    {
-                        "step": step,
-                        "role": "generator",
-                        "skipped": True,
-                        "reason": generator_skipped_reason,
-                        "candidate_idx": int(best_idx),
-                        "spec_quality": spec_quality,
-                    },
-                )
+                completion = str(best.get("policy_completion", "")).strip()
+                completion_token_ids = best.get("policy_completion_ids")
+                if not isinstance(completion_token_ids, list):
+                    completion_token_ids = None
+                update_prompt = str(best.get("policy_prompt", spec.prompt))
+                update_image: Optional[Image.Image] = None
+
+                if not completion:
+                    strategy = (self.cfg.generator_missing_trace_strategy or "proxy").strip().lower()
+                    if self.cfg.strict_require_generation_tokens or strategy == "error":
+                        raise RuntimeError(
+                            "No generation token trace was returned by the model backend. "
+                            "Set --strict_require_generation_tokens false and use "
+                            "--generator_missing_trace_strategy proxy|skip, or use a backend exposing token traces."
+                        )
+
+                    if strategy == "proxy":
+                        best_image = best.get("image")
+                        if isinstance(best_image, Image.Image):
+                            proxy_completion = self._proxy_generator_completion(best_image)
+                            if proxy_completion:
+                                completion = proxy_completion
+                                completion_token_ids = None
+                                update_prompt = GENERATOR_PROXY_CAPTION_PROMPT
+                                update_image = best_image
+                                generator_update_mode = "proxy_caption"
+                            else:
+                                generator_skipped_reason = "missing_trace_proxy_empty_completion"
+                        else:
+                            generator_skipped_reason = "missing_trace_proxy_missing_image"
+                    elif strategy == "skip":
+                        generator_skipped_reason = "missing_generation_token_trace"
+                    else:
+                        raise ValueError(
+                            "Unsupported generator_missing_trace_strategy="
+                            f"{self.cfg.generator_missing_trace_strategy!r}. Expected one of: proxy, skip, error."
+                        )
+
+                if completion:
+                    if generator_update_mode is None:
+                        generator_update_mode = "token_trace"
+                    generator_stats = self.generator_updater.step(
+                        prompt=update_prompt,
+                        completion=completion,
+                        reward=generator_reward,
+                        baseline=baseline_before,
+                        device=self.device,
+                        image=update_image,
+                        completion_token_ids=completion_token_ids,
+                    )
+                    self._policy_update_counts["generator"] += 1
+                    self._generator_update_mode_counts[generator_update_mode] = (
+                        self._generator_update_mode_counts.get(generator_update_mode, 0) + 1
+                    )
+                    self._update_baseline("generator", generator_reward)
+                    self._sync_state_scalars()
+
+                    self._append_jsonl(
+                        self.policy_updates_log_path,
+                        {
+                            "step": step,
+                            "role": "generator",
+                            "update_rule": "reinforce",
+                            "reward": generator_reward,
+                            "baseline_before": baseline_before,
+                            "baseline_after": self.generator_baseline,
+                            "stats": generator_stats,
+                            "update_mode": generator_update_mode,
+                            "update_prompt": update_prompt,
+                            "used_image_conditioning": update_image is not None,
+                            "completion_char_len": len(completion),
+                            "completion_token_count": len(completion_token_ids) if completion_token_ids else None,
+                            "candidate_idx": int(best_idx),
+                            "spec_quality": spec_quality,
+                        },
+                    )
+                else:
+                    if generator_skipped_reason is None:
+                        generator_skipped_reason = "missing_generation_token_trace"
+                    self._generator_update_mode_counts["skipped"] = (
+                        self._generator_update_mode_counts.get("skipped", 0) + 1
+                    )
+                    self._append_jsonl(
+                        self.policy_updates_log_path,
+                        {
+                            "step": step,
+                            "role": "generator",
+                            "update_rule": "reinforce",
+                            "skipped": True,
+                            "reason": generator_skipped_reason,
+                            "candidate_idx": int(best_idx),
+                            "spec_quality": spec_quality,
+                        },
+                    )
         elif step % self.cfg.generator_update_freq == 0:
             generator_skipped_reason = "low_spec_quality"
             self._generator_update_mode_counts["skipped"] = (
@@ -2610,6 +3175,7 @@ class GenerationSelfEvolvingTrainer:
                 {
                     "step": step,
                     "role": "generator",
+                    "update_rule": self.cfg.generator_update_rule,
                     "skipped": True,
                     "reason": generator_skipped_reason,
                     "spec_quality": spec_quality,
@@ -2708,8 +3274,10 @@ class GenerationSelfEvolvingTrainer:
                 "best_contradiction_score": float(best["contradiction_score"]),
                 "generator_baseline": self.generator_baseline,
                 "proposer_baseline": self.proposer_baseline,
+                "generator_update_rule": self.cfg.generator_update_rule,
                 "generator_skipped_reason": generator_skipped_reason,
                 "generator_update_mode": generator_update_mode,
+                "generator_update_stats": generator_stats,
             },
         )
 
@@ -2722,6 +3290,7 @@ class GenerationSelfEvolvingTrainer:
             "best_idx": best_idx,
             "proposer_stats": proposer_stats,
             "generator_stats": generator_stats,
+            "generator_update_rule": self.cfg.generator_update_rule,
             "generator_skipped_reason": generator_skipped_reason,
             "generator_update_mode": generator_update_mode,
         }
@@ -2790,6 +3359,7 @@ class GenerationSelfEvolvingTrainer:
         if self.is_main_process:
             print(f"[Generation] Starting run at: {self.run_dir}")
             print(f"[Generation] Model: {cfg.model_name}")
+            print(f"[Generation] Generator update rule: {cfg.generator_update_rule}")
             print(f"[Generation] Images: {len(self.pool)}")
             print(f"[Generation] Step range: {self.start_step + 1}..{cfg.total_steps}")
             if self.distributed:
@@ -2868,6 +3438,7 @@ class GenerationSelfEvolvingTrainer:
                         "generator_baseline": self.generator_baseline,
                         "proposer_baseline": self.proposer_baseline,
                         "solver_baseline": self.solver_baseline,
+                        "generator_update_rule": self.cfg.generator_update_rule,
                         "generator_kl_coef": self.generator_updater.kl_coef,
                         "proposer_kl_coef": self.proposer_updater.kl_coef,
                         "solver_kl_coef": self.solver_updater.kl_coef if self.solver_updater is not None else None,
@@ -3164,6 +3735,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if self.is_main_process:
             print(f"[Unified] Starting run at: {self.run_dir}")
             print(f"[Unified] Model: {cfg.model_name}")
+            print(f"[Unified] Generator update rule: {cfg.generator_update_rule}")
             print(f"[Unified] Images: {len(self.pool)}")
             print(f"[Unified] Step range: {self.start_step + 1}..{cfg.total_steps}")
             print(
@@ -3219,6 +3791,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             "best_idx": best_idx,
                             "best_reward": float(scored[best_idx]["total_reward"]),
                             "spec_quality": spec_quality,
+                            "generator_update_rule": self.cfg.generator_update_rule,
                             "generator_update_mode": out.get("generator_update_mode"),
                             "generator_skipped_reason": out.get("generator_skipped_reason"),
                             "generator_baseline": self.generator_baseline,

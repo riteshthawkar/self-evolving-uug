@@ -69,6 +69,7 @@ export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-1}"
   --grad_clip 1.0 \
   --proposer_update_freq 5 \
   --generator_update_freq 1 \
+  --generator_update_rule reinforce \
   --temp 1.0 \
   --top_p 1.0 \
   --max_new_tokens_solver 128 \

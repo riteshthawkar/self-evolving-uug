@@ -173,6 +173,31 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--verification_use_reference_solver", action="store_true", default=True)
     p.add_argument("--verification_use_trainable_solver", dest="verification_use_reference_solver", action="store_false")
+    p.add_argument(
+        "--generator_update_rule",
+        type=str,
+        default="reinforce",
+        choices=["reinforce", "dpo"],
+        help="Generator objective: legacy policy-gradient (`reinforce`) or pairwise preference (`dpo`).",
+    )
+    p.add_argument(
+        "--dpo_beta",
+        type=float,
+        default=0.1,
+        help="DPO temperature scaling for preference margin.",
+    )
+    p.add_argument(
+        "--dpo_label_smoothing",
+        type=float,
+        default=0.0,
+        help="Conservative DPO label smoothing in [0, 0.5).",
+    )
+    p.add_argument(
+        "--dpo_min_reward_gap",
+        type=float,
+        default=0.0,
+        help="Minimum chosen-rejected reward gap required before applying DPO update.",
+    )
 
     # Unified scheduler
     p.add_argument("--understanding_steps_per_cycle", type=int, default=3)
@@ -319,6 +344,10 @@ def run_generation_self_evolving(args: argparse.Namespace):
         strict_require_generation_tokens=args.strict_require_generation_tokens,
         generator_missing_trace_strategy=args.generator_missing_trace_strategy,
         verification_use_reference_solver=args.verification_use_reference_solver,
+        generator_update_rule=args.generator_update_rule,
+        dpo_beta=args.dpo_beta,
+        dpo_label_smoothing=args.dpo_label_smoothing,
+        dpo_min_reward_gap=args.dpo_min_reward_gap,
         solver_soft_gamma=args.solver_soft_gamma,
         len_penalty_weight=args.len_penalty_weight,
         len_penalty_target_words=args.len_penalty_target_words,
@@ -420,6 +449,10 @@ def run_unified_self_evolving(args: argparse.Namespace):
         strict_require_generation_tokens=args.strict_require_generation_tokens,
         generator_missing_trace_strategy=args.generator_missing_trace_strategy,
         verification_use_reference_solver=args.verification_use_reference_solver,
+        generator_update_rule=args.generator_update_rule,
+        dpo_beta=args.dpo_beta,
+        dpo_label_smoothing=args.dpo_label_smoothing,
+        dpo_min_reward_gap=args.dpo_min_reward_gap,
         solver_soft_gamma=args.solver_soft_gamma,
         len_penalty_weight=args.len_penalty_weight,
         len_penalty_target_words=args.len_penalty_target_words,

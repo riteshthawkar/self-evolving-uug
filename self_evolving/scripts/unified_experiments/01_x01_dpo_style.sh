@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 
-# Experiment X00: Unified Self-Evolving Main Run
-# Uses original BLIP3o (`BLIP3o/BLIP3o-Model-8B`) with alternating
-# understanding and generation updates in a single loop.
+# Experiment X01: Unified Self-Evolving with DPO-Style Generator Update
+# Same unified loop as X00, but generator updates use pairwise DPO instead of REINFORCE.
 
 export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
@@ -37,7 +36,7 @@ export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-3}"
 export CUDA_DEVICE="${CUDA_DEVICE:-0}"
 export PYTHON_BIN="${PYTHON_BIN:-python3}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
-export MASTER_PORT="${MASTER_PORT:-29520}"
+export MASTER_PORT="${MASTER_PORT:-29521}"
 export ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-auto}"
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 # Use local original BLIP3o classes from bundled checkout.
@@ -49,8 +48,8 @@ export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-1}"
   --data_dir "$DATA_DIR" \
   --data_split all \
   --model_name "$MODEL_NAME" \
-  --output_dir "$OUTPUT_ROOT/X00_main_method" \
-  --run_name "x00_main_default_s42" \
+  --output_dir "$OUTPUT_ROOT/X01_dpo_style" \
+  --run_name "x01_dpo_style_s42" \
   --dtype bfloat16 \
   --attn_implementation "$ATTN_IMPLEMENTATION" \
   --device_map auto \
@@ -70,7 +69,10 @@ export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-1}"
   --grad_clip 1.0 \
   --proposer_update_freq 5 \
   --generator_update_freq 1 \
-  --generator_update_rule reinforce \
+  --generator_update_rule dpo \
+  --dpo_beta 0.1 \
+  --dpo_label_smoothing 0.05 \
+  --dpo_min_reward_gap 0.02 \
   --enable_solver_updates \
   --solver_update_freq 1 \
   --temp 1.0 \
@@ -114,5 +116,5 @@ export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-1}"
   --wandb_project "$WANDB_PROJECT" \
   --wandb_entity "$WANDB_ENTITY" \
   --wandb_log_images_every "$WANDB_LOG_IMAGES_EVERY" \
-  --wandb_run_name "x00_main_default_s42" \
+  --wandb_run_name "x01_dpo_style_s42" \
   --seed 42
