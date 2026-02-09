@@ -976,7 +976,8 @@ def _build_original_blip3o_diffusion_pipeline(
                             mm_enc_cfg = mi.get("multimodal_encoder")
                             if isinstance(mm_enc_cfg, list) and "transformers_modules" in mm_enc_cfg[0]:
                                 print(f"[Generation] Patching model_index.json: replacing faulty multimodal_encoder config {mm_enc_cfg}")
-                                mi["multimodal_encoder"] = ["transformers", "AutoModelForCausalLM"]
+                                # Use PreTrainedModel as a safe base class for validation
+                                mi["multimodal_encoder"] = ["transformers", "PreTrainedModel"]
                                 with open(model_index_path, "w") as f:
                                     json.dump(mi, f, indent=2)
                         except Exception as patch_exc:
@@ -1002,6 +1003,7 @@ def _build_original_blip3o_diffusion_pipeline(
                                     use_safetensors=True,
                                     variant="bf16",
                                 )
+                                break
                             except TypeError:
                                 pipe = DiffusionPipeline.from_pretrained(
                                     str(diff_dir),
@@ -1013,9 +1015,10 @@ def _build_original_blip3o_diffusion_pipeline(
                                     use_safetensors=True,
                                     variant="bf16",
                                 )
-                            break
-                        except Exception as exc:
-                            errors.append(f"local_snapshot:{repo_id}:{custom_pipeline}: {repr(exc)}")
+                            except Exception as exc:
+                                import traceback
+                                traceback.print_exc()
+                                errors.append(f"local_snapshot:{repo_id}:{custom_pipeline}: {repr(exc)}")
                     if pipe is not None:
                         break
                 else:
