@@ -104,6 +104,10 @@ GEN_CYCLE_CAPTION_PROMPT = (
     "Describe this image in one concise sentence focusing on key visual facts."
 )
 
+GENERATOR_PROXY_CAPTION_PROMPT = (
+    "Describe this image in one concise sentence with key objects, attributes, and relations."
+)
+
 
 @dataclass
 class GenerationQAPair:
@@ -308,7 +312,7 @@ def _is_next_style_blip3o_class(cls) -> bool:
     return "qwen3" in module_name
 
 
-def _maybe_add_local_blip3o_path() -> Optional[str]:
+def _maybe_add_local_blip3o_path(*, allow_implicit_repo: bool = False) -> Optional[str]:
     """
     Add a local BLIP3o source tree to sys.path if present.
     """
@@ -316,14 +320,16 @@ def _maybe_add_local_blip3o_path() -> Optional[str]:
     env_repo = os.environ.get("BLIP3O_REPO", "").strip()
     if env_repo:
         candidates.append(pathlib.Path(env_repo).expanduser())
-    # Common in-repo locations.
-    try:
-        here = pathlib.Path(__file__).resolve()
-        repo_root = here.parents[2]
-        candidates.append(repo_root / "BLIP3o")
-    except Exception:
-        pass
-    candidates.append(pathlib.Path.cwd() / "BLIP3o")
+    if allow_implicit_repo:
+        # Common in-repo locations (disabled by default to avoid accidentally
+        # loading BLIP3o-NEXT local code for original BLIP3o checkpoints).
+        try:
+            here = pathlib.Path(__file__).resolve()
+            repo_root = here.parents[2]
+            candidates.append(repo_root / "BLIP3o")
+        except Exception:
+            pass
+        candidates.append(pathlib.Path.cwd() / "BLIP3o")
 
     for cand in candidates:
         try:
@@ -339,7 +345,7 @@ def _maybe_add_local_blip3o_path() -> Optional[str]:
     return None
 
 
-def _import_blip3o_classes():
+def _import_blip3o_classes(*, allow_implicit_repo: bool = False):
     """
     Import BLIP3o model classes (inference/grpo/causal) if available.
     Returns (classes_dict, error_or_none, added_path_or_none).
@@ -360,7 +366,7 @@ def _import_blip3o_classes():
             )
         except Exception as exc:
             last_exc = exc
-            added_path = _maybe_add_local_blip3o_path()
+            added_path = _maybe_add_local_blip3o_path(allow_implicit_repo=allow_implicit_repo)
     return {}, last_exc, added_path
 
 
@@ -390,7 +396,7 @@ def _load_from_explicit_class(
     raise RuntimeError(" | ".join(errors))
 
 
-def _import_blip3o_mm_utils():
+def _import_blip3o_mm_utils(*, allow_implicit_repo: bool = False):
     """
     Import BLIP3o multimodal helpers if available.
     """
@@ -408,7 +414,7 @@ def _import_blip3o_mm_utils():
             )
         except Exception as exc:
             last_exc = exc
-            added_path = _maybe_add_local_blip3o_path()
+            added_path = _maybe_add_local_blip3o_path(allow_implicit_repo=allow_implicit_repo)
     return {}, last_exc, added_path
 
 
@@ -725,16 +731,38 @@ class TextPolicyUpdater:
         reward: float,
         baseline: float,
         device: torch.device,
+        image: Optional[Image.Image] = None,
+        completion_token_ids: Optional[List[int]] = None,
     ) -> Dict[str, float]:
         if not completion or not str(completion).strip():
             raise ValueError("Generator update requires non-empty token completion trace.")
         self.step_id += 1
 
-        text_prompt = prompt
-        text_full = prompt + completion
-
-        inputs_prompt = _prepare_text_inputs(self.processor, device, text_prompt)
-        inputs_full = _prepare_text_inputs(self.processor, device, text_full)
+        if image is None:
+            text_prompt = prompt
+            use_token_ids = bool(completion_token_ids)
+            if use_token_ids:
+                prompt_inputs = _prepare_text_inputs(self.processor, device, text_prompt)
+                prompt_ids = prompt_inputs["input_ids"]
+                if prompt_ids.ndim != 2 or prompt_ids.shape[0] != 1:
+                    raise RuntimeError("Expected single-example prompt batch for token-trace generator update.")
+                comp_ids = torch.tensor(completion_token_ids, dtype=torch.long, device=prompt_ids.device).view(1, -1)
+                full_ids = torch.cat([prompt_ids, comp_ids], dim=1)
+                full_mask = torch.ones_like(full_ids, dtype=torch.long)
+                prompt_mask = prompt_inputs.get("attention_mask")
+                if prompt_mask is None:
+                    prompt_mask = torch.ones_like(prompt_ids, dtype=torch.long)
+                inputs_prompt = {"input_ids": prompt_ids, "attention_mask": prompt_mask}
+                inputs_full = {"input_ids": full_ids, "attention_mask": full_mask}
+            else:
+                text_full = prompt + completion
+                inputs_prompt = _prepare_text_inputs(self.processor, device, text_prompt)
+                inputs_full = _prepare_text_inputs(self.processor, device, text_full)
+        else:
+            chat_prompt = _build_chat_text(self.processor, image, prompt)
+            chat_full = chat_prompt + completion
+            inputs_prompt = _prepare_mm_inputs(self.processor, device, image, chat_prompt)
+            inputs_full = _prepare_mm_inputs(self.processor, device, image, chat_full)
 
         input_ids = inputs_full["input_ids"]
         labels = input_ids.clone()
@@ -857,6 +885,7 @@ class GenerationSelfEvolvingConfig:
     generation_height: int = 1024
     generation_width: int = 1024
     strict_require_generation_tokens: bool = True
+    generator_missing_trace_strategy: str = "proxy"  # proxy|skip|error
     verification_use_reference_solver: bool = True
 
     # Reward shaping
@@ -1088,6 +1117,11 @@ class GenerationSelfEvolvingTrainer:
 
         self._metric_stats: Dict[str, Dict[str, float]] = {}
         self._policy_update_counts: Dict[str, int] = {"solver": 0, "proposer": 0, "generator": 0}
+        self._generator_update_mode_counts: Dict[str, int] = {
+            "token_trace": 0,
+            "proxy_caption": 0,
+            "skipped": 0,
+        }
         self.wandb_run = self._init_wandb()
 
         loaded_resume_step = self._maybe_resume_state()
@@ -1388,7 +1422,9 @@ class GenerationSelfEvolvingTrainer:
         model_name_lower = (self.cfg.model_name or "").lower()
         is_original_blip3o = _is_original_blip3o_model_name(self.cfg.model_name)
         is_blip3o_next = _is_blip3o_next_model_name(self.cfg.model_name)
-        local_classes_mode = os.environ.get("BLIP3O_USE_LOCAL_CLASSES", "auto").strip().lower()
+        explicit_local_repo = os.environ.get("BLIP3O_REPO", "").strip()
+        default_local_classes_mode = "false" if is_original_blip3o else "auto"
+        local_classes_mode = os.environ.get("BLIP3O_USE_LOCAL_CLASSES", default_local_classes_mode).strip().lower()
         if local_classes_mode in {"1", "true", "yes", "on"}:
             use_local_blip3o_classes = True
         elif local_classes_mode in {"0", "false", "no", "off"}:
@@ -1396,18 +1432,28 @@ class GenerationSelfEvolvingTrainer:
         else:
             # Local in-repo classes are BLIP3o-NEXT style; default to local only for NEXT.
             use_local_blip3o_classes = is_blip3o_next
-        if os.environ.get("BLIP3O_REPO", "").strip():
+        if explicit_local_repo:
             use_local_blip3o_classes = True
 
-        if is_original_blip3o and use_local_blip3o_classes and self.is_main_process:
-            print(
-                "[Generation] WARNING: local BLIP3o classes are typically BLIP3o-NEXT style "
-                "(Qwen3 + SANA) and may not match original BLIP3o-Model-8B."
+        if is_original_blip3o and use_local_blip3o_classes and not explicit_local_repo:
+            raise RuntimeError(
+                "Original BLIP3o checkpoint loading with local classes requires an explicit "
+                "`BLIP3O_REPO` path to the original BLIP3o (main branch) codebase.\n"
+                "This repository includes BLIP3o-NEXT local code which is incompatible with "
+                f"'{self.cfg.model_name}'."
             )
+        allow_implicit_local_repo = (not explicit_local_repo) and (not is_original_blip3o)
+
+        if is_original_blip3o and use_local_blip3o_classes and self.is_main_process:
+            print("[Generation] Using explicit BLIP3O_REPO for original BLIP3o class registration.")
 
         if "blip3o" in model_name_lower and use_local_blip3o_classes:
-            classes, import_err, added_path = _import_blip3o_classes()
-            mm_utils, mm_import_err, mm_added_path = _import_blip3o_mm_utils()
+            classes, import_err, added_path = _import_blip3o_classes(
+                allow_implicit_repo=allow_implicit_local_repo
+            )
+            mm_utils, mm_import_err, mm_added_path = _import_blip3o_mm_utils(
+                allow_implicit_repo=allow_implicit_local_repo
+            )
             if self.is_main_process:
                 if added_path:
                     print(f"[Generation] Added local BLIP3o path: {added_path}")
@@ -1528,13 +1574,28 @@ class GenerationSelfEvolvingTrainer:
                     # Common on clusters with transformers versions that do not recognize
                     # custom BLIP3o model_type unless local classes are imported first.
                     if "blip3o" in model_name_lower and _looks_like_unregistered_blip3o_arch_error(str(generic_exc)):
+                        if is_original_blip3o and not use_local_blip3o_classes:
+                            raise RuntimeError(
+                                "Failed to load original BLIP3o checkpoint due to unregistered architecture in "
+                                "the current transformers stack.\n"
+                                f"checkpoint={self.cfg.model_name}\n"
+                                "To use original BLIP3o, set:\n"
+                                "  BLIP3O_REPO=/absolute/path/to/original/BLIP3o/main\n"
+                                "  BLIP3O_USE_LOCAL_CLASSES=1\n"
+                                "and rerun.\n"
+                                f"Original loader error: {repr(generic_exc)}"
+                            ) from generic_exc
                         if self.is_main_process:
                             print(
                                 "[Generation] Detected unregistered BLIP3o architecture in transformers. "
                                 "Retrying with local BLIP3o class registration."
                             )
-                        classes, import_err, added_path = _import_blip3o_classes()
-                        mm_utils_retry, mm_import_err, _ = _import_blip3o_mm_utils()
+                        classes, import_err, added_path = _import_blip3o_classes(
+                            allow_implicit_repo=allow_implicit_local_repo
+                        )
+                        mm_utils_retry, mm_import_err, _ = _import_blip3o_mm_utils(
+                            allow_implicit_repo=allow_implicit_local_repo
+                        )
                         if self.is_main_process and added_path:
                             print(f"[Generation] Added local BLIP3o path for retry: {added_path}")
                         if self.is_main_process and import_err is not None:
@@ -1573,11 +1634,10 @@ class GenerationSelfEvolvingTrainer:
                                 raise RuntimeError(
                                     "Detected incompatible local BLIP3o code for original checkpoint "
                                     f"'{self.cfg.model_name}'.\n"
-                                    "Your local BLIP3o classes are BLIP3o-NEXT (Qwen3/SANA), while "
+                                    "Discovered local BLIP3o classes are BLIP3o-NEXT (Qwen3/SANA), while "
                                     "BLIP3o-Model-8B expects original BLIP3o classes.\n"
-                                    "Options:\n"
-                                    "1) Use a BLIP3o-NEXT checkpoint with current local classes, or\n"
-                                    "2) Point BLIP3O_REPO to original BLIP3o code matching BLIP3o-Model-8B.\n"
+                                    "Set BLIP3O_REPO to an original BLIP3o main-branch checkout and keep "
+                                    "BLIP3O_USE_LOCAL_CLASSES=1.\n"
                                     f"Retry details: {detail}"
                                 ) from generic_exc
                             raise RuntimeError(
@@ -1806,6 +1866,7 @@ class GenerationSelfEvolvingTrainer:
                 "image": _ensure_pil_image(images[0]),
                 "policy_prompt": prompt,
                 "policy_completion": "",
+                "policy_completion_ids": None,
                 "backend": "diffusion_pipeline",
             }
 
@@ -1855,6 +1916,7 @@ class GenerationSelfEvolvingTrainer:
                             )
 
             token_completion = ""
+            token_completion_ids = None
             image_out = None
 
             if isinstance(out, tuple) and len(out) >= 2:
@@ -1868,9 +1930,11 @@ class GenerationSelfEvolvingTrainer:
                     if isinstance(gen_ids, torch.Tensor) and gen_ids.ndim == 2 and text_inputs.get("input_ids") is not None:
                         prompt_len = text_inputs["input_ids"].shape[1]
                         completion_ids = gen_ids[0, prompt_len:]
+                        token_completion_ids = completion_ids.detach().cpu().tolist()
                         token_completion = _decode_tokens(self.processor, completion_ids).strip()
                 except Exception:
                     token_completion = ""
+                    token_completion_ids = None
             else:
                 images = out
                 if isinstance(images, list) and images:
@@ -1885,6 +1949,7 @@ class GenerationSelfEvolvingTrainer:
                 "image": _ensure_pil_image(image_out),
                 "policy_prompt": prompt,
                 "policy_completion": token_completion,
+                "policy_completion_ids": token_completion_ids,
                 "backend": "generate_images",
             }
 
@@ -1927,6 +1992,7 @@ class GenerationSelfEvolvingTrainer:
                 "image": pil_image,
                 "policy_prompt": prompt,
                 "policy_completion": "",
+                "policy_completion_ids": None,
                 "backend": "generate_image",
             }
 
@@ -2213,6 +2279,7 @@ class GenerationSelfEvolvingTrainer:
                 "interrupted_at_step": interrupted_at_step,
                 "error": error,
                 "policy_update_counts": self._policy_update_counts,
+                "generator_update_mode_counts": self._generator_update_mode_counts,
                 "metrics": self._metrics_summary(),
             },
         )
@@ -2235,6 +2302,7 @@ class GenerationSelfEvolvingTrainer:
         best_diversity_global: float,
         best_contradiction_global: float,
         generator_skipped_reason: Optional[str],
+        generator_update_mode: Optional[str],
         proposer_stats: Optional[Dict[str, float]],
         generator_stats: Optional[Dict[str, float]],
     ):
@@ -2258,12 +2326,16 @@ class GenerationSelfEvolvingTrainer:
             "train/generator_baseline": self.generator_baseline,
             "train/proposer_baseline": self.proposer_baseline,
             "train/generator_update_skipped": 1.0 if generator_skipped_reason else 0.0,
+            "train/generator_update_mode_token_trace": 1.0 if generator_update_mode == "token_trace" else 0.0,
+            "train/generator_update_mode_proxy_caption": 1.0 if generator_update_mode == "proxy_caption" else 0.0,
             "kl/generator_beta": self.generator_updater.kl_coef,
             "kl/proposer_beta": self.proposer_updater.kl_coef,
             "text/prompt": spec.prompt,
             "text/proposer_raw": spec.raw_output,
             "text/best_cycle_caption": best.get("cycle_caption", ""),
         }
+        if generator_update_mode:
+            metrics["train/generator_update_mode"] = generator_update_mode
         if generator_skipped_reason:
             metrics["train/generator_skip_reason"] = generator_skipped_reason
         if image_path:
@@ -2328,25 +2400,74 @@ class GenerationSelfEvolvingTrainer:
         proposer_stats = None
         generator_stats = None
         generator_skipped_reason = None
+        generator_update_mode = None
 
         if step % self.cfg.generator_update_freq == 0 and spec_quality >= self.cfg.min_spec_quality_for_update:
             baseline_before = self.generator_baseline
-            completion = str(best.get("policy_completion", ""))
-            if self.cfg.strict_require_generation_tokens and not completion.strip():
-                raise RuntimeError(
-                    "No generation token trace was returned by the model backend. "
-                    "Set --strict_require_generation_tokens false or use a backend exposing token traces."
-                )
-            if completion.strip():
+            generator_reward = float(best["total_reward"])
+            completion = str(best.get("policy_completion", "")).strip()
+            completion_token_ids = best.get("policy_completion_ids")
+            if not isinstance(completion_token_ids, list):
+                completion_token_ids = None
+            update_prompt = str(best.get("policy_prompt", spec.prompt))
+            update_image: Optional[Image.Image] = None
+
+            if not completion:
+                strategy = (self.cfg.generator_missing_trace_strategy or "proxy").strip().lower()
+                if self.cfg.strict_require_generation_tokens or strategy == "error":
+                    raise RuntimeError(
+                        "No generation token trace was returned by the model backend. "
+                        "Set --strict_require_generation_tokens false and use "
+                        "--generator_missing_trace_strategy proxy|skip, or use a backend exposing token traces."
+                    )
+
+                if strategy == "proxy":
+                    best_image = best.get("image")
+                    if isinstance(best_image, Image.Image):
+                        proxy_completion = self._generate(
+                            image=best_image,
+                            prompt=GENERATOR_PROXY_CAPTION_PROMPT,
+                            adapter_name="generator" if self.cfg.use_lora else None,
+                            max_new_tokens=self.cfg.max_new_tokens_caption,
+                            temperature=max(0.2, min(self.cfg.temp, 0.8)),
+                            top_p=1.0,
+                        )
+                        proxy_completion = " ".join(proxy_completion.split())
+                        if proxy_completion:
+                            completion = proxy_completion
+                            completion_token_ids = None
+                            update_prompt = GENERATOR_PROXY_CAPTION_PROMPT
+                            update_image = best_image
+                            generator_update_mode = "proxy_caption"
+                        else:
+                            generator_skipped_reason = "missing_trace_proxy_empty_completion"
+                    else:
+                        generator_skipped_reason = "missing_trace_proxy_missing_image"
+                elif strategy == "skip":
+                    generator_skipped_reason = "missing_generation_token_trace"
+                else:
+                    raise ValueError(
+                        "Unsupported generator_missing_trace_strategy="
+                        f"{self.cfg.generator_missing_trace_strategy!r}. Expected one of: proxy, skip, error."
+                    )
+
+            if completion:
+                if generator_update_mode is None:
+                    generator_update_mode = "token_trace"
                 generator_stats = self.generator_updater.step(
-                    prompt=str(best.get("policy_prompt", spec.prompt)),
+                    prompt=update_prompt,
                     completion=completion,
-                    reward=float(best["total_reward"]),
+                    reward=generator_reward,
                     baseline=baseline_before,
                     device=self.device,
+                    image=update_image,
+                    completion_token_ids=completion_token_ids,
                 )
                 self._policy_update_counts["generator"] += 1
-                self._update_baseline("generator", float(best["total_reward"]))
+                self._generator_update_mode_counts[generator_update_mode] = (
+                    self._generator_update_mode_counts.get(generator_update_mode, 0) + 1
+                )
+                self._update_baseline("generator", generator_reward)
                 self._sync_state_scalars()
 
                 self._append_jsonl(
@@ -2354,16 +2475,25 @@ class GenerationSelfEvolvingTrainer:
                     {
                         "step": step,
                         "role": "generator",
-                        "reward": float(best["total_reward"]),
+                        "reward": generator_reward,
                         "baseline_before": baseline_before,
                         "baseline_after": self.generator_baseline,
                         "stats": generator_stats,
+                        "update_mode": generator_update_mode,
+                        "update_prompt": update_prompt,
+                        "used_image_conditioning": update_image is not None,
+                        "completion_char_len": len(completion),
+                        "completion_token_count": len(completion_token_ids) if completion_token_ids else None,
                         "candidate_idx": int(best_idx),
                         "spec_quality": spec_quality,
                     },
                 )
             else:
-                generator_skipped_reason = "missing_generation_token_trace"
+                if generator_skipped_reason is None:
+                    generator_skipped_reason = "missing_generation_token_trace"
+                self._generator_update_mode_counts["skipped"] = (
+                    self._generator_update_mode_counts.get("skipped", 0) + 1
+                )
                 self._append_jsonl(
                     self.policy_updates_log_path,
                     {
@@ -2377,6 +2507,9 @@ class GenerationSelfEvolvingTrainer:
                 )
         elif step % self.cfg.generator_update_freq == 0:
             generator_skipped_reason = "low_spec_quality"
+            self._generator_update_mode_counts["skipped"] = (
+                self._generator_update_mode_counts.get("skipped", 0) + 1
+            )
             self._append_jsonl(
                 self.policy_updates_log_path,
                 {
@@ -2481,6 +2614,7 @@ class GenerationSelfEvolvingTrainer:
                 "generator_baseline": self.generator_baseline,
                 "proposer_baseline": self.proposer_baseline,
                 "generator_skipped_reason": generator_skipped_reason,
+                "generator_update_mode": generator_update_mode,
             },
         )
 
@@ -2494,6 +2628,7 @@ class GenerationSelfEvolvingTrainer:
             "proposer_stats": proposer_stats,
             "generator_stats": generator_stats,
             "generator_skipped_reason": generator_skipped_reason,
+            "generator_update_mode": generator_update_mode,
         }
 
     def _solver_synthetic_update_from_best(self, step: int, best: Dict[str, object]):
@@ -2662,6 +2797,7 @@ class GenerationSelfEvolvingTrainer:
                     best_diversity_global=best_div_g,
                     best_contradiction_global=best_contra_g,
                     generator_skipped_reason=out.get("generator_skipped_reason"),
+                    generator_update_mode=out.get("generator_update_mode"),
                     proposer_stats=out["proposer_stats"],
                     generator_stats=out["generator_stats"],
                 )
@@ -2951,11 +3087,32 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     self._understanding_step(step=step, image=image, meta=meta)
                 else:
                     out = self._generation_step(step=step, image=image, meta=meta)
+                    source_caption = str(out.get("source_caption", ""))
                     spec: GenerationSpec = out["spec"]
                     scored: List[Dict[str, object]] = out["scored"]
+                    spec_quality = float(out.get("spec_quality", 0.0))
                     best_idx = int(out["best_idx"])
                     if cfg.synthetic_solver_update_freq > 0 and step % cfg.synthetic_solver_update_freq == 0:
                         self._solver_synthetic_update_from_best(step, scored[best_idx])
+
+                    rewards = [float(c["total_reward"]) for c in scored]
+                    reward_mean = sum(rewards) / max(1, len(rewards))
+                    reward_max = max(rewards) if rewards else 0.0
+                    reward_min = min(rewards) if rewards else 0.0
+                    reward_mean_g = self._dist_mean(reward_mean)
+                    reward_max_g = self._dist_mean(reward_max)
+                    reward_min_g = self._dist_mean(reward_min)
+                    spec_quality_g = self._dist_mean(spec_quality)
+
+                    best = scored[best_idx]
+                    best_spec = float(best["spec_score"])
+                    best_cycle = float(best["cycle_score"])
+                    best_div = float(best["diversity_score"])
+                    best_contra = float(best["contradiction_score"])
+                    best_spec_g = self._dist_mean(best_spec)
+                    best_cycle_g = self._dist_mean(best_cycle)
+                    best_div_g = self._dist_mean(best_div)
+                    best_contra_g = self._dist_mean(best_contra)
 
                     self._append_jsonl(
                         self.iter_log_path,
@@ -2966,10 +3123,34 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             "prompt": spec.prompt,
                             "best_idx": best_idx,
                             "best_reward": float(scored[best_idx]["total_reward"]),
+                            "spec_quality": spec_quality,
+                            "generator_update_mode": out.get("generator_update_mode"),
+                            "generator_skipped_reason": out.get("generator_skipped_reason"),
                             "generator_baseline": self.generator_baseline,
                             "proposer_baseline": self.proposer_baseline,
                             "solver_baseline": self.solver_baseline,
                         },
+                    )
+
+                    self._wandb_log_step(
+                        step=step,
+                        image_path=meta.get("path"),
+                        source_caption=source_caption,
+                        spec=spec,
+                        scored=scored,
+                        best_idx=best_idx,
+                        spec_quality=spec_quality_g,
+                        reward_mean_global=reward_mean_g,
+                        reward_max_global=reward_max_g,
+                        reward_min_global=reward_min_g,
+                        best_spec_global=best_spec_g,
+                        best_cycle_global=best_cycle_g,
+                        best_diversity_global=best_div_g,
+                        best_contradiction_global=best_contra_g,
+                        generator_skipped_reason=out.get("generator_skipped_reason"),
+                        generator_update_mode=out.get("generator_update_mode"),
+                        proposer_stats=out.get("proposer_stats"),
+                        generator_stats=out.get("generator_stats"),
                     )
 
                 if cfg.save_every > 0 and step % cfg.save_every == 0:

@@ -2,8 +2,9 @@
 
 - `00_g00_main_method.sh`: main generation-only self-evolving run.
 - Default model: `BLIP3o/BLIP3o-Model-8B` (original BLIP3o).
-- Default loader mode: auto (`BLIP3O_USE_LOCAL_CLASSES=auto`, `BLIP3O_REPO=""`), which avoids forcing BLIP3o-NEXT local classes for original BLIP3o checkpoints.
-- Script enables `--allow_missing_generation_tokens` because original BLIP3o diffusion decoder may not return token traces in all environments.
+- Default loader mode: original-safe (`BLIP3O_USE_LOCAL_CLASSES=0`, `BLIP3O_REPO=""`).
+- If your transformers stack cannot load `blip3o_qwen` via remote code, set `BLIP3O_REPO` to an original BLIP3o `main` checkout and set `BLIP3O_USE_LOCAL_CLASSES=1`.
+- Script enables `--allow_missing_generation_tokens` and `--generator_missing_trace_strategy proxy` so generator updates can still run via image-conditioned proxy captions when token traces are unavailable.
 
 Logs/checkpoints are written under:
 - `$OUTPUT_ROOT/G00_main_method/<run_name>/`

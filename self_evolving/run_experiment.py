@@ -134,6 +134,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
     p.set_defaults(strict_require_generation_tokens=True)
+    p.add_argument(
+        "--generator_missing_trace_strategy",
+        type=str,
+        default="proxy",
+        choices=["proxy", "skip", "error"],
+        help="Behavior when generation backend does not expose token trace.",
+    )
     p.add_argument("--verification_use_reference_solver", action="store_true", default=True)
     p.add_argument("--verification_use_trainable_solver", dest="verification_use_reference_solver", action="store_false")
 
@@ -279,6 +286,7 @@ def run_generation_self_evolving(args: argparse.Namespace):
         generation_height=args.generation_height,
         generation_width=args.generation_width,
         strict_require_generation_tokens=args.strict_require_generation_tokens,
+        generator_missing_trace_strategy=args.generator_missing_trace_strategy,
         verification_use_reference_solver=args.verification_use_reference_solver,
         solver_soft_gamma=args.solver_soft_gamma,
         len_penalty_weight=args.len_penalty_weight,
@@ -378,6 +386,7 @@ def run_unified_self_evolving(args: argparse.Namespace):
         generation_height=args.generation_height,
         generation_width=args.generation_width,
         strict_require_generation_tokens=args.strict_require_generation_tokens,
+        generator_missing_trace_strategy=args.generator_missing_trace_strategy,
         verification_use_reference_solver=args.verification_use_reference_solver,
         solver_soft_gamma=args.solver_soft_gamma,
         len_penalty_weight=args.len_penalty_weight,
