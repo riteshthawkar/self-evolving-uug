@@ -770,6 +770,71 @@ def _import_blip3o_mm_utils(*, allow_implicit_repo: bool = False):
     return {}, last_exc, added_path
 
 
+def _link_or_copy_file(src: pathlib.Path, dst: pathlib.Path):
+    if dst.exists():
+        return
+    try:
+        os.symlink(str(src), str(dst))
+        return
+    except Exception:
+        pass
+    try:
+        os.link(str(src), str(dst))
+        return
+    except Exception:
+        pass
+    shutil.copy2(str(src), str(dst))
+
+
+def _ensure_diffusers_component_weight_aliases(component_dir: pathlib.Path):
+    """
+    Some BLIP3o diffusion checkpoints can contain model weights under generic names
+    (`pytorch_model.*`) while the installed diffusers loader expects
+    `diffusion_pytorch_model.*`.
+    Create lightweight aliases when needed.
+    """
+    if not component_dir.is_dir():
+        return
+    target_sf = component_dir / "diffusion_pytorch_model.safetensors"
+    target_bin = component_dir / "diffusion_pytorch_model.bin"
+    if target_sf.exists() or target_bin.exists():
+        return
+
+    sf_candidates: List[pathlib.Path] = []
+    bin_candidates: List[pathlib.Path] = []
+
+    preferred_sf = component_dir / "pytorch_model.safetensors"
+    preferred_bin = component_dir / "pytorch_model.bin"
+    if preferred_sf.is_file():
+        sf_candidates.append(preferred_sf)
+    if preferred_bin.is_file():
+        bin_candidates.append(preferred_bin)
+
+    # Fall back to any model-like file in this component directory.
+    for p in sorted(component_dir.glob("*.safetensors")):
+        if p.is_file():
+            sf_candidates.append(p)
+    for p in sorted(component_dir.glob("*.bin")):
+        if p.is_file():
+            bin_candidates.append(p)
+
+    # Deduplicate while preserving order.
+    sf_candidates = list(dict.fromkeys(sf_candidates))
+    bin_candidates = list(dict.fromkeys(bin_candidates))
+
+    if sf_candidates:
+        try:
+            _link_or_copy_file(sf_candidates[0], target_sf)
+            return
+        except Exception:
+            pass
+    if bin_candidates:
+        try:
+            _link_or_copy_file(bin_candidates[0], target_bin)
+        except Exception:
+            pass
+
+
 def _build_original_blip3o_diffusion_pipeline(
     model_name: str,
     *,
@@ -801,38 +866,60 @@ def _build_original_blip3o_diffusion_pipeline(
         "pipeline_llava_gen",
         "pipeline_ar_gen",
     )
+    repo_candidates: List[str] = []
+    primary_repo = str(model_name or "").strip()
+    if primary_repo:
+        repo_candidates.append(primary_repo)
+
+    # Original BLIP3o README notes the diffusion decoder under BLIP3o/BLIP3o-Model.
+    # BLIP3o-Model-8B checkpoints may expose text+vision model weights without this
+    # decoder subtree, so add explicit fallback source.
+    lowered = primary_repo.lower()
+    if "blip3o-model-8b" in lowered:
+        repo_candidates.append("BLIP3o/BLIP3o-Model")
+
+    extra_decoder_repo = os.environ.get("BLIP3O_DIFFUSION_REPO", "").strip()
+    if extra_decoder_repo:
+        repo_candidates.append(extra_decoder_repo)
+
+    # Preserve order while removing duplicates.
+    repo_candidates = list(dict.fromkeys(repo_candidates))
+
     errors: List[str] = []
     pipe = None
-    for custom_pipeline in attempts:
-        try:
+    for repo_id in repo_candidates:
+        for custom_pipeline in attempts:
             try:
-                pipe = DiffusionPipeline.from_pretrained(
-                    model_name,
-                    custom_pipeline=custom_pipeline,
-                    subfolder="diffusion-decoder",
-                    tokenizer=tokenizer,
-                    multimodal_encoder=multimodal_encoder,
-                    safety_checker=None,
-                    trust_remote_code=True,
-                    torch_dtype=torch_dtype,
-                    use_safetensors=True,
-                    variant="bf16",
-                )
-            except TypeError:
-                pipe = DiffusionPipeline.from_pretrained(
-                    model_name,
-                    custom_pipeline=custom_pipeline,
-                    subfolder="diffusion-decoder",
-                    tokenizer=tokenizer,
-                    multimodal_encoder=multimodal_encoder,
-                    safety_checker=None,
-                    torch_dtype=torch_dtype,
-                    use_safetensors=True,
-                    variant="bf16",
-                )
+                try:
+                    pipe = DiffusionPipeline.from_pretrained(
+                        repo_id,
+                        custom_pipeline=custom_pipeline,
+                        subfolder="diffusion-decoder",
+                        tokenizer=tokenizer,
+                        multimodal_encoder=multimodal_encoder,
+                        safety_checker=None,
+                        trust_remote_code=True,
+                        torch_dtype=torch_dtype,
+                        use_safetensors=True,
+                        variant="bf16",
+                    )
+                except TypeError:
+                    pipe = DiffusionPipeline.from_pretrained(
+                        repo_id,
+                        custom_pipeline=custom_pipeline,
+                        subfolder="diffusion-decoder",
+                        tokenizer=tokenizer,
+                        multimodal_encoder=multimodal_encoder,
+                        safety_checker=None,
+                        torch_dtype=torch_dtype,
+                        use_safetensors=True,
+                        variant="bf16",
+                    )
+                break
+            except Exception as exc:
+                errors.append(f"{repo_id}:{custom_pipeline}: {repr(exc)}")
+        if pipe is not None:
             break
-        except Exception as exc:
-            errors.append(f"{custom_pipeline}: {repr(exc)}")
 
     # Fallback: older diffusers versions can incorrectly resolve `model_index.json`
     # at repo root even when `subfolder` is provided. Mirror BLIP3o official usage by
@@ -841,55 +928,65 @@ def _build_original_blip3o_diffusion_pipeline(
         try:
             from huggingface_hub import snapshot_download
 
-            local_repo = pathlib.Path(
-                snapshot_download(
-                    repo_id=model_name,
-                    allow_patterns=[
-                        "diffusion-decoder/**",
-                        "pipeline_llava_gen.py",
-                        "pipeline_ar_gen.py",
-                    ],
+            for repo_id in repo_candidates:
+                local_repo = pathlib.Path(
+                    snapshot_download(
+                        repo_id=repo_id,
+                        allow_patterns=[
+                            "diffusion-decoder/**",
+                            "pipeline_llava_gen.py",
+                            "pipeline_ar_gen.py",
+                        ],
+                    )
                 )
-            )
-            diff_dir = local_repo / "diffusion-decoder"
-            if diff_dir.is_dir():
-                for custom_pipeline in attempts:
-                    cp_arg: object = custom_pipeline
-                    root_cp = local_repo / f"{custom_pipeline}.py"
-                    sub_cp = diff_dir / f"{custom_pipeline}.py"
-                    if root_cp.is_file():
-                        cp_arg = str(root_cp)
-                    elif sub_cp.is_file():
-                        cp_arg = str(sub_cp)
-                    try:
+                diff_dir = local_repo / "diffusion-decoder"
+                if diff_dir.is_dir():
+                    # Normalize component weight filenames for broader diffusers compatibility.
+                    for component in sorted(diff_dir.iterdir()):
+                        if component.is_dir():
+                            _ensure_diffusers_component_weight_aliases(component)
+                    for custom_pipeline in attempts:
+                        cp_arg: object = custom_pipeline
+                        root_cp = local_repo / f"{custom_pipeline}.py"
+                        sub_cp = diff_dir / f"{custom_pipeline}.py"
+                        if root_cp.is_file():
+                            cp_arg = str(root_cp)
+                        elif sub_cp.is_file():
+                            cp_arg = str(sub_cp)
                         try:
-                            pipe = DiffusionPipeline.from_pretrained(
-                                str(diff_dir),
-                                custom_pipeline=cp_arg,
-                                tokenizer=tokenizer,
-                                multimodal_encoder=multimodal_encoder,
-                                safety_checker=None,
-                                trust_remote_code=True,
-                                torch_dtype=torch_dtype,
-                                use_safetensors=True,
-                                variant="bf16",
-                            )
-                        except TypeError:
-                            pipe = DiffusionPipeline.from_pretrained(
-                                str(diff_dir),
-                                custom_pipeline=cp_arg,
-                                tokenizer=tokenizer,
-                                multimodal_encoder=multimodal_encoder,
-                                safety_checker=None,
-                                torch_dtype=torch_dtype,
-                                use_safetensors=True,
-                                variant="bf16",
-                            )
+                            try:
+                                pipe = DiffusionPipeline.from_pretrained(
+                                    str(diff_dir),
+                                    custom_pipeline=cp_arg,
+                                    tokenizer=tokenizer,
+                                    multimodal_encoder=multimodal_encoder,
+                                    safety_checker=None,
+                                    trust_remote_code=True,
+                                    torch_dtype=torch_dtype,
+                                    use_safetensors=True,
+                                    variant="bf16",
+                                )
+                            except TypeError:
+                                pipe = DiffusionPipeline.from_pretrained(
+                                    str(diff_dir),
+                                    custom_pipeline=cp_arg,
+                                    tokenizer=tokenizer,
+                                    multimodal_encoder=multimodal_encoder,
+                                    safety_checker=None,
+                                    torch_dtype=torch_dtype,
+                                    use_safetensors=True,
+                                    variant="bf16",
+                                )
+                            break
+                        except Exception as exc:
+                            errors.append(f"local_snapshot:{repo_id}:{custom_pipeline}: {repr(exc)}")
+                    if pipe is not None:
                         break
-                    except Exception as exc:
-                        errors.append(f"local_snapshot:{custom_pipeline}: {repr(exc)}")
-            else:
-                errors.append(f"local_snapshot: missing diffusion-decoder dir under {local_repo}")
+                else:
+                    errors.append(
+                        f"local_snapshot:{repo_id}: missing diffusion-decoder dir under {local_repo}"
+                    )
+            # end for repo_id
         except Exception as exc:
             errors.append(f"local_snapshot: {repr(exc)}")
 
@@ -1868,6 +1965,8 @@ class GenerationSelfEvolvingConfig:
     generation_guidance_scale: float = 2.0
     generation_height: int = 1024
     generation_width: int = 1024
+    require_decoder_for_blip3o: bool = True
+    allow_latent_visualization_fallback: bool = False
     strict_require_generation_tokens: bool = True
     generator_missing_trace_strategy: str = "proxy"  # proxy|skip|error
     verification_use_reference_solver: bool = True
@@ -2035,6 +2134,20 @@ class GenerationSelfEvolvingTrainer:
                 f"inspected_wrappers={inspected_text}\n"
                 "Expected one of: generate_images(...), generate_image(...), or a BLIP3o diffusion-decoder pipeline.\n"
                 "Use a generation-capable model (e.g., BLIP3o family) for generation/unified experiments."
+            )
+        if (
+            _is_original_blip3o_model_name(config.model_name)
+            and config.require_decoder_for_blip3o
+            and self._blip3o_diffusion_pipe is None
+        ):
+            raise RuntimeError(
+                "Original BLIP3o scientific runs require a working diffusion decoder pipeline, "
+                "but decoder initialization failed.\n"
+                f"model_name={config.model_name}\n"
+                "Set BLIP3O_DIFFUSION_REPO to a checkpoint that contains `diffusion-decoder` "
+                "(e.g., BLIP3o/BLIP3o-Model), ensure enough HF cache disk, and rerun.\n"
+                "If you intentionally want debug-only latent visualization, pass "
+                "`--allow_missing_decoder_for_blip3o --allow_latent_visualization_fallback`."
             )
         if self._generation_api_name is not None and self.is_main_process:
             print(
@@ -3042,6 +3155,14 @@ class GenerationSelfEvolvingTrainer:
             try:
                 pil_img = _ensure_pil_image(image_out)
             except Exception:
+                if not self.cfg.allow_latent_visualization_fallback:
+                    out_shape = tuple(image_out.shape) if torch.is_tensor(image_out) else None
+                    out_dtype = str(image_out.dtype) if torch.is_tensor(image_out) else None
+                    raise RuntimeError(
+                        "Generation backend returned non-image output, and latent visualization fallback is disabled. "
+                        "For scientific runs, this indicates missing decoder integration.\n"
+                        f"type={type(image_out).__name__} shape={out_shape} dtype={out_dtype}"
+                    )
                 pil_img = _latent_tensor_to_pil(
                     image_out,
                     target_size=(self.cfg.generation_width, self.cfg.generation_height),
@@ -3140,6 +3261,14 @@ class GenerationSelfEvolvingTrainer:
                     decode_obj, _ = _find_callable_object(_unwrap_model(self.model), "decode_latents")
                 pil_image = _decode_blip3o_generate_image_output(decode_obj, image_out) if decode_obj is not None else None
                 if pil_image is None:
+                    if not self.cfg.allow_latent_visualization_fallback:
+                        out_shape = tuple(image_out.shape) if torch.is_tensor(image_out) else None
+                        out_dtype = str(image_out.dtype) if torch.is_tensor(image_out) else None
+                        raise RuntimeError(
+                            "generate_image returned non-image output and decoder path failed. "
+                            "Latent visualization fallback is disabled for scientific runs.\n"
+                            f"type={type(image_out).__name__} shape={out_shape} dtype={out_dtype}"
+                        )
                     pil_image = _latent_tensor_to_pil(
                         image_out,
                         target_size=(self.cfg.generation_width, self.cfg.generation_height),
@@ -3227,6 +3356,11 @@ class GenerationSelfEvolvingTrainer:
         self,
         image: Image.Image,
         qa_pairs: Tuple[GenerationQAPair, ...],
+        *,
+        step: Optional[int] = None,
+        candidate_idx: Optional[int] = None,
+        candidate_count: Optional[int] = None,
+        verbose: bool = False,
     ) -> Tuple[float, float, List[Dict[str, object]]]:
         if not qa_pairs:
             return 0.5, 0.0, []
@@ -3235,7 +3369,16 @@ class GenerationSelfEvolvingTrainer:
         score_values = []
         contradiction_values = []
 
-        for qa in qa_pairs:
+        for qa_idx, qa in enumerate(qa_pairs):
+            qa_t0 = time.perf_counter()
+            if verbose and self.is_main_process and step is not None:
+                if candidate_idx is not None and candidate_count is not None:
+                    print(
+                        f"[Step {step:05d}][G] scoring cand {candidate_idx + 1}/{candidate_count} "
+                        f"qa {qa_idx + 1}/{len(qa_pairs)}"
+                    )
+                else:
+                    print(f"[Step {step:05d}][G] scoring qa {qa_idx + 1}/{len(qa_pairs)}")
             solved = self._solve_question_with_rollouts(image=image, question=qa.question)
             mode_answer = str(solved["majority_answer"])
             maj_frac = float(solved["majority_fraction"])
@@ -3262,6 +3405,12 @@ class GenerationSelfEvolvingTrainer:
                     "solver": solved,
                 }
             )
+            if verbose and self.is_main_process and step is not None:
+                qa_dt = time.perf_counter() - qa_t0
+                print(
+                    f"[Step {step:05d}][G]   qa {qa_idx + 1}/{len(qa_pairs)} done in {qa_dt:.1f}s "
+                    f"(maj_frac={maj_frac:.2f}, match={match_score:.2f})"
+                )
 
         spec_score = float(sum(score_values) / max(1, len(score_values)))
         contradiction_score = float(sum(contradiction_values) / max(1, len(contradiction_values)))
@@ -3288,14 +3437,31 @@ class GenerationSelfEvolvingTrainer:
         qa_pairs: Tuple[GenerationQAPair, ...],
         candidates: List[Dict[str, object]],
         spec_quality: float,
+        *,
+        step: Optional[int] = None,
+        verbose: bool = False,
     ) -> List[Dict[str, object]]:
         images = [cand["image"] for cand in candidates]
         diversity = _image_diversity_score(images)
 
         scored: List[Dict[str, object]] = []
         for idx, cand in enumerate(candidates):
+            cand_t0 = time.perf_counter()
+            if verbose and self.is_main_process and step is not None:
+                backend = str(cand.get("backend", "unknown"))
+                print(
+                    f"[Step {step:05d}][G] evaluating candidate {idx + 1}/{len(candidates)} "
+                    f"(backend={backend})"
+                )
             image = cand["image"]
-            spec_score, contradiction_score, qa_logs = self._score_spec(image=image, qa_pairs=qa_pairs)
+            spec_score, contradiction_score, qa_logs = self._score_spec(
+                image=image,
+                qa_pairs=qa_pairs,
+                step=step,
+                candidate_idx=idx,
+                candidate_count=len(candidates),
+                verbose=verbose,
+            )
             cycle_score, cycle_caption = self._cycle_reward(prompt=prompt, image=image)
 
             base_reward = (
@@ -3323,6 +3489,12 @@ class GenerationSelfEvolvingTrainer:
                     "image": image,
                 }
             )
+            if verbose and self.is_main_process and step is not None:
+                cand_dt = time.perf_counter() - cand_t0
+                print(
+                    f"[Step {step:05d}][G] candidate {idx + 1}/{len(candidates)} done in {cand_dt:.1f}s "
+                    f"(spec={spec_score:.3f}, cycle={cycle_score:.3f}, total={total_reward:.3f})"
+                )
         return scored
 
     def _update_baseline(self, which: str, reward: float):
@@ -3586,6 +3758,11 @@ class GenerationSelfEvolvingTrainer:
             print(f"[W&B] log failed at step {step}: {exc}")
 
     def _generation_step(self, step: int, image: Image.Image, meta: Dict) -> Dict[str, object]:
+        verbose = self.is_main_process and (step % self.cfg.log_every == 0)
+        step_t0 = time.perf_counter()
+        if verbose:
+            print(f"[Step {step:05d}][G] generation phase start")
+
         source_caption = self._caption_image(image)
         spec = self._propose_generation_spec(image)
         if spec.fallback_used and source_caption:
@@ -3598,12 +3775,35 @@ class GenerationSelfEvolvingTrainer:
             )
 
         spec, spec_quality, spec_quality_details = self._sanitize_and_score_spec(spec)
-        candidates = [self._generate_image_candidate(spec.prompt) for _ in range(self.cfg.num_generations)]
+        if verbose:
+            print(
+                f"[Step {step:05d}][G] spec ready: qa_pairs={len(spec.qa_pairs)} "
+                f"quality={spec_quality:.3f} fallback={int(spec.fallback_used)}"
+            )
+
+        candidates: List[Dict[str, object]] = []
+        for cand_idx in range(self.cfg.num_generations):
+            cand_t0 = time.perf_counter()
+            if verbose:
+                print(
+                    f"[Step {step:05d}][G] generating candidate {cand_idx + 1}/{self.cfg.num_generations}"
+                )
+            cand = self._generate_image_candidate(spec.prompt)
+            candidates.append(cand)
+            if verbose:
+                backend = str(cand.get("backend", "unknown"))
+                cand_dt = time.perf_counter() - cand_t0
+                print(
+                    f"[Step {step:05d}][G] generated candidate {cand_idx + 1}/{self.cfg.num_generations} "
+                    f"in {cand_dt:.1f}s (backend={backend})"
+                )
         scored = self._score_candidates(
             prompt=spec.prompt,
             qa_pairs=spec.qa_pairs,
             candidates=candidates,
             spec_quality=spec_quality,
+            step=step,
+            verbose=verbose,
         )
         best_idx = max(range(len(scored)), key=lambda i: float(scored[i]["total_reward"]))
         best = scored[best_idx]
@@ -3969,6 +4169,13 @@ class GenerationSelfEvolvingTrainer:
             )
 
         self._save_candidate_images(step=step, scored=scored, best_idx=best_idx)
+
+        if verbose:
+            step_dt = time.perf_counter() - step_t0
+            print(
+                f"[Step {step:05d}][G] generation phase done in {step_dt:.1f}s "
+                f"(best_idx={best_idx}, best_reward={float(best['total_reward']):.3f})"
+            )
 
         self._append_jsonl(
             self.prompts_log_path,
