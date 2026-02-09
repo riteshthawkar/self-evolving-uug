@@ -1008,6 +1008,11 @@ class UnderstandingSelfEvolvingTrainer:
         attn_impl = _resolve_attn_implementation(self.cfg.attn_implementation)
 
         if self.distributed:
+            if self.cfg.device_map == "auto" and self.is_main_process:
+                print(
+                    "[Understanding] Distributed run detected; overriding device_map=auto "
+                    "to per-rank single-device mapping."
+                )
             device_map = {"": self.local_rank} if torch.cuda.is_available() else "cpu"
         elif self.cfg.device_map == "single":
             device_map = {"": self.cfg.cuda_device} if torch.cuda.is_available() else "cpu"

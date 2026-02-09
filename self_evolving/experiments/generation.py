@@ -656,10 +656,13 @@ def _load_from_explicit_class(
         attempts.append({**base_kwargs, "attn_implementation": attn_implementation})
     attempts.append(base_kwargs)
 
-    def _maybe_patch_config_hidden_size():
+    def _build_compat_config():
         """
-        BLIP3o original classes sometimes expect `config.hidden_size` while newer
-        transformers expose size only under `config.text_config.hidden_size`.
+        Build a compatibility config for explicit BLIP3o classes.
+        - Align `model_type` to the target class config type to avoid
+          noisy/inconsistent cross-type initialization warnings.
+        - Ensure `hidden_size` exists for legacy BLIP3o codepaths that expect it
+          at the top level.
         """
         try:
             from transformers import AutoConfig
@@ -669,32 +672,46 @@ def _load_from_explicit_class(
             cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         except Exception:
             return None
-        if hasattr(cfg, "hidden_size"):
-            return cfg
+
+        expected_model_type = getattr(getattr(cls, "config_class", None), "model_type", None)
+        if expected_model_type and getattr(cfg, "model_type", None) != expected_model_type:
+            try:
+                setattr(cfg, "model_type", str(expected_model_type))
+            except Exception:
+                pass
 
         text_cfg = getattr(cfg, "text_config", None)
-        hidden_size = None
-        if text_cfg is not None:
-            hidden_size = getattr(text_cfg, "hidden_size", None)
-            if hidden_size is None:
-                hidden_size = getattr(text_cfg, "d_model", None)
-        if hidden_size is None:
-            return None
+        if not hasattr(cfg, "hidden_size"):
+            hidden_size = None
+            if text_cfg is not None:
+                hidden_size = getattr(text_cfg, "hidden_size", None)
+                if hidden_size is None:
+                    hidden_size = getattr(text_cfg, "d_model", None)
+            if hidden_size is not None:
+                try:
+                    setattr(cfg, "hidden_size", int(hidden_size))
+                except Exception:
+                    pass
+        return cfg
 
-        try:
-            setattr(cfg, "hidden_size", int(hidden_size))
-            return cfg
-        except Exception:
-            return None
+    compat_cfg = _build_compat_config()
 
     for kwargs in attempts:
+        kwargs_with_cfg = dict(kwargs)
+        if compat_cfg is not None:
+            kwargs_with_cfg["config"] = compat_cfg
+        try:
+            return cls.from_pretrained(model_name, **kwargs_with_cfg)
+        except Exception as exc:
+            errors.append(f"{cls.__name__}({kwargs_with_cfg}): {repr(exc)}")
+
         try:
             return cls.from_pretrained(model_name, **kwargs)
         except Exception as exc:
             errors.append(f"{cls.__name__}({kwargs}): {repr(exc)}")
             msg = str(exc).lower()
             if ("hidden_size" in msg) and ("attributeerror" in msg or "no attribute" in msg):
-                patched_cfg = _maybe_patch_config_hidden_size()
+                patched_cfg = _build_compat_config()
                 if patched_cfg is None:
                     continue
                 retry_kwargs = dict(kwargs)
@@ -2554,6 +2571,11 @@ class GenerationSelfEvolvingTrainer:
         attn_impl = _resolve_attn_implementation(self.cfg.attn_implementation)
 
         if self.distributed:
+            if self.cfg.device_map == "auto" and self.is_main_process:
+                print(
+                    "[Generation] Distributed run detected; overriding device_map=auto "
+                    "to per-rank single-device mapping."
+                )
             device_map = {"": self.local_rank} if torch.cuda.is_available() else "cpu"
         elif self.cfg.device_map == "single":
             device_map = {"": self.cfg.cuda_device} if torch.cuda.is_available() else "cpu"
