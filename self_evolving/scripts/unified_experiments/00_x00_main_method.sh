@@ -29,7 +29,7 @@ export WANDB_ENTITY="${WANDB_ENTITY:-}"
 export WANDB_LOG_IMAGES_EVERY="${WANDB_LOG_IMAGES_EVERY:-0}"
 
 # Run defaults (override via environment)
-export DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/shared_uug_50k_balanced/images}"
+export DATA_DIR="$REPO_ROOT/data/shared_uug_50k_balanced/images"
 export MODEL_NAME="${MODEL_NAME:-BLIP3o/BLIP3o-Model-8B}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/runs/unified_experiments}"
 export TOTAL_STEPS="${TOTAL_STEPS:-10000}"
