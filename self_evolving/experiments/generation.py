@@ -962,6 +962,25 @@ def _build_original_blip3o_diffusion_pipeline(
                     for component in sorted(diff_dir.iterdir()):
                         if component.is_dir():
                             _ensure_diffusers_component_weight_aliases(component)
+                    
+                    # [PATCH] Fix model_index.json referring to missing transformers_modules
+                    model_index_path = diff_dir / "model_index.json"
+                    if model_index_path.is_file():
+                        try:
+                            import json
+                            with open(model_index_path, "r") as f:
+                                mi = json.load(f)
+                            # The original model_index.json points to "transformers_modules.multimodal_encoder.modeling_emu"
+                            # which does not exist in the diffusion-decoder subtree. Since we pass the encoder instance explicitly,
+                            # we can relax this requirement to a generic class or None to avoid ImportErrors.
+                            mm_enc_cfg = mi.get("multimodal_encoder")
+                            if isinstance(mm_enc_cfg, list) and "transformers_modules" in mm_enc_cfg[0]:
+                                print(f"[Generation] Patching model_index.json: replacing faulty multimodal_encoder config {mm_enc_cfg}")
+                                mi["multimodal_encoder"] = ["transformers", "AutoModelForCausalLM"]
+                                with open(model_index_path, "w") as f:
+                                    json.dump(mi, f, indent=2)
+                        except Exception as patch_exc:
+                            print(f"[Generation] Warning: failed to patch model_index.json: {patch_exc}")
                     for custom_pipeline in attempts:
                         cp_arg: object = custom_pipeline
                         root_cp = local_repo / f"{custom_pipeline}.py"
