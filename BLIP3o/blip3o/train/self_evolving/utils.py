@@ -282,7 +282,8 @@ def _build_chat_text(
     processor, image: Image.Image, prompt: str
 ) -> str:
     if hasattr(processor, "apply_chat_template"):
-        messages = [
+        # Try Qwen2.5-VL style multi-modal content list first
+        messages_mm = [
             {
                 "role": "user",
                 "content": [
@@ -291,10 +292,26 @@ def _build_chat_text(
                 ],
             }
         ]
-        return processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-    return prompt
+        try:
+            return processor.apply_chat_template(
+                messages_mm, tokenize=False, add_generation_prompt=True
+            )
+        except (TypeError, Exception):
+            pass
+        # Fallback: BLIP3o-style simple string content with <image> placeholder
+        messages_str = [
+            {
+                "role": "user",
+                "content": "<image>\n" + prompt,
+            }
+        ]
+        try:
+            return processor.apply_chat_template(
+                messages_str, tokenize=False, add_generation_prompt=True
+            )
+        except (TypeError, Exception):
+            pass
+    return "<image>\n" + prompt
 
 
 def _prepare_mm_inputs(
