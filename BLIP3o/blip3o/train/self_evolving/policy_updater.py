@@ -126,8 +126,6 @@ class RolePolicyUpdater:
         with use_adapter(self.model, self.adapter_name):
             out_pi = self.model(**policy_inputs)
         ce_loss = out_pi.loss
-        logp_pi = F.log_softmax(out_pi.logits, dim=-1)
-
         ref_inputs = dict(forward_full)
         ref_inputs["use_cache"] = False
         if self.reference_model is not None:
@@ -137,16 +135,27 @@ class RolePolicyUpdater:
             with torch.no_grad():
                 with use_adapter(self.model, None):
                     out_ref = self.model(**ref_inputs)
-        logp_ref = F.log_softmax(out_ref.logits, dim=-1)
-
-        logp_pi_shift = logp_pi[:, :-1, :]
-        logp_ref_shift = logp_ref[:, :-1, :]
-        p_pi_shift = logp_pi_shift.exp()
-        kl_per_tok = (p_pi_shift * (logp_pi_shift - logp_ref_shift)).sum(dim=-1)
         if valid_mask.any():
-            kl_loss = kl_per_tok[valid_mask].mean()
+            vocab = out_pi.logits.shape[-1]
+            pi_shift = out_pi.logits[:, :-1, :].reshape(-1, vocab)
+            ref_shift = out_ref.logits[:, :-1, :].reshape(-1, vocab)
+            valid_pos = valid_mask.reshape(-1).nonzero(as_tuple=False).squeeze(-1)
+
+            # Compute KL only on completion tokens in small chunks to cap peak memory.
+            kl_sum = torch.zeros((), device=ce_loss.device, dtype=torch.float32)
+            chunk_size = 32
+            for chunk in valid_pos.split(chunk_size):
+                pi_chunk = pi_shift.index_select(0, chunk)
+                ref_chunk = ref_shift.index_select(0, chunk)
+                logp_pi_chunk = F.log_softmax(pi_chunk, dim=-1)
+                logp_ref_chunk = F.log_softmax(ref_chunk, dim=-1)
+                kl_chunk = (logp_pi_chunk.exp() * (logp_pi_chunk - logp_ref_chunk)).sum(dim=-1)
+                kl_sum = kl_sum + kl_chunk.float().sum()
+
+            kl_loss = kl_sum / valid_pos.numel()
+            kl_loss = kl_loss.to(dtype=ce_loss.dtype)
         else:
-            kl_loss = torch.tensor(0.0, device=ce_loss.device)
+            kl_loss = torch.tensor(0.0, device=ce_loss.device, dtype=ce_loss.dtype)
 
         advantage = float(reward - baseline)
         beta_before = float(self.kl_coef)
@@ -175,8 +184,13 @@ class RolePolicyUpdater:
 
         try:
             del inputs_prompt, inputs_full, input_ids, labels, policy_inputs
-            del out_pi, out_ref, logp_pi, logp_ref, logp_pi_shift, logp_ref_shift
-            del p_pi_shift, kl_per_tok, valid_mask, total_loss, ce_loss
+            del out_pi, out_ref, valid_mask, total_loss, ce_loss
+            if "pi_shift" in locals():
+                del pi_shift
+            if "ref_shift" in locals():
+                del ref_shift
+            if "valid_pos" in locals():
+                del valid_pos
         except Exception:
             pass
 
