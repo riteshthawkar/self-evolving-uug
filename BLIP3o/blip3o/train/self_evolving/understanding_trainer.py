@@ -540,8 +540,26 @@ class UnderstandingSelfEvolvingTrainer:
         if gc_use_reentrant_env:
             gc_use_reentrant = gc_use_reentrant_env in {"1", "true", "yes", "on"}
         else:
-            # ROCm+bf16 can hit checkpoint metadata mismatches with non-reentrant mode.
-            gc_use_reentrant = bool(getattr(torch.version, "hip", None)) and dtype == torch.bfloat16
+            # Non-reentrant checkpointing is DDP-safe for multi-adapter LoRA training.
+            gc_use_reentrant = False
+        if gc_use_reentrant and (self.distributed or self.cfg.use_lora):
+            # Reentrant checkpointing is incompatible with this trainer's
+            # DDP + multi-adapter LoRA update pattern and can trigger:
+            # - "mark variable ready twice" (DDP reducer error)
+            # - no-grad checkpoint warnings for frozen-base LoRA tuning
+            if self.is_main_process:
+                print(
+                    "[Understanding] Forcing gradient checkpointing use_reentrant=False "
+                    "(DDP/LoRA compatibility)."
+                )
+            gc_use_reentrant = False
+        if self.is_main_process:
+            print(
+                "[Understanding] Gradient checkpointing config: "
+                f"enabled={gc_enabled} env_use_reentrant="
+                f"{gc_use_reentrant_env if gc_use_reentrant_env else '<unset>'} "
+                f"effective_use_reentrant={gc_use_reentrant}"
+            )
         if gc_enabled and hasattr(model, "gradient_checkpointing_enable"):
             try:
                 model.gradient_checkpointing_enable(
@@ -556,11 +574,21 @@ class UnderstandingSelfEvolvingTrainer:
                     )
             except TypeError:
                 # Older transformers versions don't accept gradient_checkpointing_kwargs.
-                model.gradient_checkpointing_enable()
-                if hasattr(model, "enable_input_require_grads"):
-                    model.enable_input_require_grads()
-                if self.is_main_process:
-                    print("[Understanding] Enabled gradient checkpointing.")
+                # In DDP+LoRA, avoid silently enabling unknown/default reentrant mode.
+                if self.distributed or self.cfg.use_lora:
+                    if self.is_main_process:
+                        print(
+                            "[Understanding] Skipping gradient checkpointing: "
+                            "current transformers build does not expose "
+                            "gradient_checkpointing_kwargs (cannot guarantee "
+                            "use_reentrant=False safely under DDP/LoRA)."
+                        )
+                else:
+                    model.gradient_checkpointing_enable()
+                    if hasattr(model, "enable_input_require_grads"):
+                        model.enable_input_require_grads()
+                    if self.is_main_process:
+                        print("[Understanding] Enabled gradient checkpointing.")
             except Exception:
                 pass
         elif self.is_main_process and not gc_enabled:
