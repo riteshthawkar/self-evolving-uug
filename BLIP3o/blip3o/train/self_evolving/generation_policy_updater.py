@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from .generation_helpers import _prepare_text_inputs
-from .utils import (_build_chat_text, _clip_grad_norm_multi_device, _collect_trainable_params, _prepare_mm_inputs, use_adapter)
+from .utils import (_build_chat_text, _clip_grad_norm_multi_device, _collect_trainable_params, _prepare_mm_inputs, _unwrap_model, use_adapter)
 
 
 class TextPolicyUpdater:
@@ -198,7 +198,22 @@ class TextPolicyUpdater:
         scaled_loss = total_loss / self.grad_accum_steps
         if self._accum_count == 0:
             self.opt.zero_grad(set_to_none=True)
-        scaled_loss.backward()
+        restore_adapter = None
+        model_ref = _unwrap_model(self.model)
+        if self.adapter_name is not None and hasattr(model_ref, "set_adapter"):
+            restore_adapter = getattr(model_ref, "active_adapter", None)
+            try:
+                model_ref.set_adapter(self.adapter_name)
+            except Exception:
+                restore_adapter = None
+        try:
+            scaled_loss.backward()
+        finally:
+            if restore_adapter is not None:
+                try:
+                    model_ref.set_adapter(restore_adapter)
+                except Exception:
+                    pass
         self._accum_count += 1
 
         did_step = False
@@ -477,7 +492,22 @@ class TextPreferenceDPOUpdater:
         scaled_loss = dpo_loss / self.grad_accum_steps
         if self._accum_count == 0:
             self.opt.zero_grad(set_to_none=True)
-        scaled_loss.backward()
+        restore_adapter = None
+        model_ref = _unwrap_model(self.model)
+        if self.adapter_name is not None and hasattr(model_ref, "set_adapter"):
+            restore_adapter = getattr(model_ref, "active_adapter", None)
+            try:
+                model_ref.set_adapter(self.adapter_name)
+            except Exception:
+                restore_adapter = None
+        try:
+            scaled_loss.backward()
+        finally:
+            if restore_adapter is not None:
+                try:
+                    model_ref.set_adapter(restore_adapter)
+                except Exception:
+                    pass
         self._accum_count += 1
 
         did_step = False
