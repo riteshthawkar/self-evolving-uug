@@ -2144,6 +2144,22 @@ class GenerationSelfEvolvingTrainer:
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
         return float((tensor / float(self.world_size)).item())
 
+    def _dist_all_bool(self, value: bool) -> bool:
+        if not (self.distributed and dist.is_initialized()):
+            return bool(value)
+        dev = torch.device(f"cuda:{self.local_rank}") if torch.cuda.is_available() else torch.device("cpu")
+        tensor = torch.tensor([1 if value else 0], dtype=torch.int32, device=dev)
+        dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
+        return bool(int(tensor.item()) == 1)
+
+    def _dist_min_int(self, value: int) -> int:
+        if not (self.distributed and dist.is_initialized()):
+            return int(value)
+        dev = torch.device(f"cuda:{self.local_rank}") if torch.cuda.is_available() else torch.device("cpu")
+        tensor = torch.tensor([int(value)], dtype=torch.int64, device=dev)
+        dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
+        return int(tensor.item())
+
     def _sync_state_scalars(self):
         if not (self.distributed and dist.is_initialized()):
             return
@@ -3274,8 +3290,21 @@ class GenerationSelfEvolvingTrainer:
                                 width=self.cfg.generation_width,
                             )
                 images = getattr(pipe_out, "images", None)
-                if not images:
-                    raise RuntimeError("BLIP3o diffusion pipeline returned no images.")
+                if images is None:
+                    # Fallback: check for direct return or .image attribute
+                    if hasattr(pipe_out, "image"):
+                        images = pipe_out.image
+                    else:
+                        images = pipe_out
+                
+                # Ensure images is a list/tuple to support indexing
+                if not isinstance(images, (list, tuple)):
+                    images = [images]
+
+                if not images or not all(isinstance(img, Image.Image) for img in images):
+                     # Double check content if list is not empty
+                     if not images:
+                        raise RuntimeError(f"BLIP3o diffusion pipeline returned no images. Output type: {type(pipe_out)}")
                 return {
                     "image": _ensure_pil_image(images[0]),
                     "policy_prompt": prompt,
@@ -3889,7 +3918,28 @@ class GenerationSelfEvolvingTrainer:
         generator_skipped_reason = None
         generator_update_mode = None
 
-        if step % self.cfg.generator_update_freq == 0 and spec_quality >= self.cfg.min_spec_quality_for_update:
+        def _global_update_ready(
+            local_ready: bool,
+            local_reason: Optional[str],
+            *,
+            peer_reason: str,
+        ) -> Tuple[bool, Optional[str]]:
+            if not (self.distributed and dist.is_initialized()):
+                return bool(local_ready), local_reason
+            all_ready = self._dist_all_bool(bool(local_ready))
+            if all_ready:
+                return True, local_reason
+            if local_reason:
+                return False, local_reason
+            return False, peer_reason
+
+        generator_update_due = self.cfg.generator_update_freq > 0 and (step % self.cfg.generator_update_freq == 0)
+        local_quality_ok = spec_quality >= self.cfg.min_spec_quality_for_update
+        quality_ok_all = local_quality_ok
+        if generator_update_due and self.distributed and dist.is_initialized():
+            quality_ok_all = self._dist_all_bool(local_quality_ok)
+
+        if generator_update_due and quality_ok_all:
             baseline_before = self.generator_baseline
             generator_reward = float(best["total_reward"])
             update_rule = self.cfg.generator_update_rule
@@ -3987,11 +4037,8 @@ class GenerationSelfEvolvingTrainer:
                         else:
                             strategy = (self.cfg.generator_missing_trace_strategy or "proxy").strip().lower()
                             if self.cfg.strict_require_generation_tokens or strategy == "error":
-                                raise RuntimeError(
-                                    "No generation token trace was returned by the model backend. "
-                                    "Set --strict_require_generation_tokens false and use "
-                                    "--generator_missing_trace_strategy proxy|skip, or use a backend exposing token traces."
-                                )
+                                generator_skipped_reason = "missing_generation_token_trace_strict"
+                                strategy = "skip"
                             if strategy == "proxy":
                                 chosen_raw_image = chosen.get("image")
                                 rejected_raw_image = rejected.get("image")
@@ -4019,7 +4066,14 @@ class GenerationSelfEvolvingTrainer:
                                     f"{self.cfg.generator_missing_trace_strategy!r}. Expected one of: proxy, skip, error."
                                 )
 
-                        if chosen_completion and rejected_completion and generator_skipped_reason is None:
+                        local_can_update = bool(chosen_completion and rejected_completion and generator_skipped_reason is None)
+                        can_update, generator_skipped_reason = _global_update_ready(
+                            local_can_update,
+                            generator_skipped_reason,
+                            peer_reason="distributed_peer_skip",
+                        )
+
+                        if can_update:
                             generator_stats = self.generator_updater.step(
                                 prompt=update_prompt,
                                 chosen_completion=chosen_completion,
@@ -4035,7 +4089,7 @@ class GenerationSelfEvolvingTrainer:
                                 self._generator_update_mode_counts.get(generator_update_mode, 0) + 1
                             )
                             self._update_baseline("generator", generator_reward)
-                            self._sync_state_scalars()
+
 
                             self._append_jsonl(
                                 self.policy_updates_log_path,
@@ -4115,11 +4169,8 @@ class GenerationSelfEvolvingTrainer:
                 if not completion:
                     strategy = (self.cfg.generator_missing_trace_strategy or "proxy").strip().lower()
                     if self.cfg.strict_require_generation_tokens or strategy == "error":
-                        raise RuntimeError(
-                            "No generation token trace was returned by the model backend. "
-                            "Set --strict_require_generation_tokens false and use "
-                            "--generator_missing_trace_strategy proxy|skip, or use a backend exposing token traces."
-                        )
+                        generator_skipped_reason = "missing_generation_token_trace_strict"
+                        strategy = "skip"
 
                     if strategy == "proxy":
                         best_image = best.get("image")
@@ -4143,7 +4194,14 @@ class GenerationSelfEvolvingTrainer:
                             f"{self.cfg.generator_missing_trace_strategy!r}. Expected one of: proxy, skip, error."
                         )
 
-                if completion:
+                local_can_update = bool(completion)
+                can_update, generator_skipped_reason = _global_update_ready(
+                    local_can_update,
+                    generator_skipped_reason,
+                    peer_reason="distributed_peer_skip",
+                )
+
+                if can_update:
                     if generator_update_mode is None:
                         generator_update_mode = "token_trace"
                     generator_stats = self.generator_updater.step(
@@ -4160,7 +4218,7 @@ class GenerationSelfEvolvingTrainer:
                         self._generator_update_mode_counts.get(generator_update_mode, 0) + 1
                     )
                     self._update_baseline("generator", generator_reward)
-                    self._sync_state_scalars()
+
 
                     self._append_jsonl(
                         self.policy_updates_log_path,
@@ -4199,8 +4257,12 @@ class GenerationSelfEvolvingTrainer:
                             "spec_quality": spec_quality,
                         },
                     )
-        elif step % self.cfg.generator_update_freq == 0:
-            generator_skipped_reason = "low_spec_quality"
+            self._sync_state_scalars()
+        elif generator_update_due:
+            if local_quality_ok and not quality_ok_all:
+                generator_skipped_reason = "distributed_peer_low_spec_quality"
+            else:
+                generator_skipped_reason = "low_spec_quality"
             self._generator_update_mode_counts["skipped"] = (
                 self._generator_update_mode_counts.get("skipped", 0) + 1
             )
@@ -4216,33 +4278,53 @@ class GenerationSelfEvolvingTrainer:
                     "min_spec_quality_for_update": self.cfg.min_spec_quality_for_update,
                 },
             )
+            self._sync_state_scalars()
 
         proposer_reward = float(sum(float(c["total_reward"]) for c in scored) / max(1, len(scored)))
         if step % self.cfg.proposer_update_freq == 0:
             baseline_before = self.proposer_baseline
-            proposer_stats = self.proposer_updater.step(
-                image=image,
-                prompt=GEN_PROMPT_TEMPLATE,
-                completion=spec.raw_output,
-                reward=proposer_reward,
-                baseline=baseline_before,
-                device=self.device,
+            proposer_completion = str(spec.raw_output or "").strip()
+            local_proposer_can_update = bool(proposer_completion)
+            proposer_can_update, proposer_skip_reason = _global_update_ready(
+                local_proposer_can_update,
+                None if local_proposer_can_update else "proposer_empty_completion",
+                peer_reason="distributed_peer_proposer_skip",
             )
-            self._policy_update_counts["proposer"] += 1
-            self._update_baseline("proposer", proposer_reward)
-            self._sync_state_scalars()
 
-            self._append_jsonl(
-                self.policy_updates_log_path,
-                {
-                    "step": step,
-                    "role": "proposer",
-                    "reward": proposer_reward,
-                    "baseline_before": baseline_before,
-                    "baseline_after": self.proposer_baseline,
-                    "stats": proposer_stats,
-                },
-            )
+            if proposer_can_update:
+                proposer_stats = self.proposer_updater.step(
+                    image=image,
+                    prompt=GEN_PROMPT_TEMPLATE,
+                    completion=proposer_completion,
+                    reward=proposer_reward,
+                    baseline=baseline_before,
+                    device=self.device,
+                )
+                self._policy_update_counts["proposer"] += 1
+                self._update_baseline("proposer", proposer_reward)
+                self._append_jsonl(
+                    self.policy_updates_log_path,
+                    {
+                        "step": step,
+                        "role": "proposer",
+                        "reward": proposer_reward,
+                        "baseline_before": baseline_before,
+                        "baseline_after": self.proposer_baseline,
+                        "stats": proposer_stats,
+                    },
+                )
+            else:
+                self._append_jsonl(
+                    self.policy_updates_log_path,
+                    {
+                        "step": step,
+                        "role": "proposer",
+                        "skipped": True,
+                        "reason": proposer_skip_reason,
+                        "baseline_before": baseline_before,
+                    },
+                )
+            self._sync_state_scalars()
 
         self._save_candidate_images(step=step, scored=scored, best_idx=best_idx)
 
@@ -4347,10 +4429,19 @@ class GenerationSelfEvolvingTrainer:
             return
 
         qa_logs = best.get("qa_logs", [])
+        valid_qas: List[Dict[str, object]] = []
         for qa in qa_logs:
             question = str(qa.get("question", "")).strip()
-            if not question:
-                continue
+            if question:
+                valid_qas.append(qa)
+
+        shared_qa_count = len(valid_qas)
+        if self.distributed and dist.is_initialized():
+            shared_qa_count = self._dist_min_int(shared_qa_count)
+
+        for qa_idx in range(shared_qa_count):
+            qa = valid_qas[qa_idx]
+            question = str(qa.get("question", "")).strip()
             completion = self._generate(
                 image=image,
                 prompt=build_solver_prompt(question),
@@ -4359,7 +4450,21 @@ class GenerationSelfEvolvingTrainer:
                 temperature=self.cfg.temp,
                 top_p=self.cfg.top_p,
             ).strip()
-            if not completion:
+            local_can_update = bool(completion)
+            can_update = self._dist_all_bool(local_can_update)
+            if not can_update:
+                self._append_jsonl(
+                    self.policy_updates_log_path,
+                    {
+                        "step": step,
+                        "role": "solver",
+                        "source": "synthetic_generation",
+                        "skipped": True,
+                        "reason": "distributed_peer_empty_solver_completion",
+                        "qa_idx": int(qa_idx),
+                        "question": question,
+                    },
+                )
                 continue
             reward = float(qa.get("combined_score", 0.0))
 
@@ -4691,7 +4796,22 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             and (step % self.cfg.solver_update_freq == 0)
         )
         if solver_update_applied:
-            for completion, reward in zip(solver_outputs, solver_rewards_soft):
+            for sample_idx, (completion, reward) in enumerate(zip(solver_outputs, solver_rewards_soft)):
+                local_can_solver_update = bool(str(completion).strip())
+                can_solver_update = self._dist_all_bool(local_can_solver_update)
+                if not can_solver_update:
+                    self._append_jsonl(
+                        self.policy_updates_log_path,
+                        {
+                            "step": step,
+                            "role": "solver",
+                            "source": "understanding",
+                            "sample_idx": int(sample_idx),
+                            "skipped": True,
+                            "reason": "distributed_peer_empty_solver_completion",
+                        },
+                    )
+                    continue
                 baseline_before = self.solver_baseline
                 stats = self.solver_updater.step(
                     image=image,
@@ -4709,16 +4829,31 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_stats = None
         if step % self.cfg.proposer_update_freq == 0:
             baseline_before = self.proposer_baseline
-            proposer_stats = self.proposer_updater.step(
-                image=image,
-                prompt=proposer_prompt,
-                completion=proposer_out,
-                reward=proposer_reward,
-                baseline=baseline_before,
-                device=self.device,
-            )
-            self._policy_update_counts["proposer"] += 1
-            self._update_baseline("proposer", proposer_reward)
+            proposer_completion = str(proposer_out or "").strip()
+            local_can_proposer_update = bool(proposer_completion)
+            can_proposer_update = self._dist_all_bool(local_can_proposer_update)
+            if can_proposer_update:
+                proposer_stats = self.proposer_updater.step(
+                    image=image,
+                    prompt=proposer_prompt,
+                    completion=proposer_completion,
+                    reward=proposer_reward,
+                    baseline=baseline_before,
+                    device=self.device,
+                )
+                self._policy_update_counts["proposer"] += 1
+                self._update_baseline("proposer", proposer_reward)
+            else:
+                self._append_jsonl(
+                    self.policy_updates_log_path,
+                    {
+                        "step": step,
+                        "role": "proposer",
+                        "source": "understanding",
+                        "skipped": True,
+                        "reason": "distributed_peer_empty_proposer_completion",
+                    },
+                )
             self._sync_state_scalars()
 
         record = {

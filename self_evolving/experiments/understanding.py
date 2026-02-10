@@ -679,6 +679,14 @@ class UnderstandingSelfEvolvingTrainer:
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
         return float((tensor / float(self.world_size)).item())
 
+    def _dist_all_bool(self, value: bool) -> bool:
+        if not (self.distributed and dist.is_initialized()):
+            return bool(value)
+        dev = torch.device(f"cuda:{self.local_rank}") if torch.cuda.is_available() else torch.device("cpu")
+        tensor = torch.tensor([1 if value else 0], dtype=torch.int32, device=dev)
+        dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
+        return bool(int(tensor.item()) == 1)
+
     def _sync_state_scalars(self):
         if not (self.distributed and dist.is_initialized()):
             return
@@ -1377,6 +1385,20 @@ class UnderstandingSelfEvolvingTrainer:
                     ),
                     start=1,
                 ):
+                    local_can_solver_update = bool(str(completion).strip())
+                    can_solver_update = self._dist_all_bool(local_can_solver_update)
+                    if not can_solver_update:
+                        self._append_jsonl(
+                            self.policy_updates_log_path,
+                            {
+                                "step": step,
+                                "role": "solver",
+                                "sample_idx": sample_idx,
+                                "skipped": True,
+                                "reason": "distributed_peer_empty_solver_completion",
+                            },
+                        )
+                        continue
                     baseline_before = self.solver_baseline
                     stats = self.solver_updater.step(
                         image=image,
@@ -1427,26 +1449,41 @@ class UnderstandingSelfEvolvingTrainer:
                 proposer_baseline_after_step = proposer_baseline_before_step
                 proposer_stats = None
                 if step % cfg.proposer_update_freq == 0:
-                    proposer_stats = self.proposer_updater.step(
-                        image=image,
-                        prompt=proposer_prompt,
-                        completion=proposer_out,
-                        reward=proposer_reward,
-                        baseline=proposer_baseline_before_step,
-                        device=self.device,
-                    )
-                    self._policy_update_counts["proposer"] += 1
-                    self._append_jsonl(
-                        self.policy_updates_log_path,
-                        {
-                            "step": step,
-                            "role": "proposer",
-                            "reward": proposer_reward,
-                            "baseline_before": proposer_baseline_before_step,
-                            "stats": proposer_stats,
-                        },
-                    )
-                    self._update_baseline("proposer", proposer_reward)
+                    proposer_completion = str(proposer_out or "").strip()
+                    local_can_proposer_update = bool(proposer_completion)
+                    can_proposer_update = self._dist_all_bool(local_can_proposer_update)
+                    if can_proposer_update:
+                        proposer_stats = self.proposer_updater.step(
+                            image=image,
+                            prompt=proposer_prompt,
+                            completion=proposer_completion,
+                            reward=proposer_reward,
+                            baseline=proposer_baseline_before_step,
+                            device=self.device,
+                        )
+                        self._policy_update_counts["proposer"] += 1
+                        self._append_jsonl(
+                            self.policy_updates_log_path,
+                            {
+                                "step": step,
+                                "role": "proposer",
+                                "reward": proposer_reward,
+                                "baseline_before": proposer_baseline_before_step,
+                                "stats": proposer_stats,
+                            },
+                        )
+                        self._update_baseline("proposer", proposer_reward)
+                    else:
+                        self._append_jsonl(
+                            self.policy_updates_log_path,
+                            {
+                                "step": step,
+                                "role": "proposer",
+                                "skipped": True,
+                                "reason": "distributed_peer_empty_proposer_completion",
+                                "baseline_before": proposer_baseline_before_step,
+                            },
+                        )
                     self._sync_state_scalars()
                     proposer_baseline_after_step = self.proposer_baseline
 

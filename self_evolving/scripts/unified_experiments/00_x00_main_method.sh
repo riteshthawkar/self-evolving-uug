@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
-# Experiment X00: Unified Self-Evolving Main Run
-# Uses original BLIP3o (`BLIP3o/BLIP3o-Model-8B`) with alternating
-# understanding and generation updates in a single loop.
+# Experiment X00: Unified Self-Evolving Main Run (Fast Profile)
+# Tuned for ~1.5 day wall-clock by reducing expensive generation-phase
+# work while keeping both understanding and generation updates active.
 
 export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
@@ -20,6 +20,7 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$CACHE_ROOT/xdg}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export AMDGPU_ASIC_ID_TABLE_PATH="${AMDGPU_ASIC_ID_TABLE_PATH:-/usr/share/libdrm/amdgpu.ids}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:256}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
 # Weights & Biases
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
@@ -32,24 +33,24 @@ export WANDB_LOG_IMAGES_EVERY="${WANDB_LOG_IMAGES_EVERY:-0}"
 export DATA_DIR="$REPO_ROOT/data/shared_uug_50k_balanced/images"
 export MODEL_NAME="${MODEL_NAME:-BLIP3o/BLIP3o-Model-8B}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/runs/unified_experiments}"
-export TOTAL_STEPS="${TOTAL_STEPS:-10000}"
-export SAVE_EVERY="${SAVE_EVERY:-200}"
+export TOTAL_STEPS="${TOTAL_STEPS:-8000}"
+export SAVE_EVERY="${SAVE_EVERY:-500}"
 export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-3}"
 export SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-500}"
-export NUM_GENERATIONS="${NUM_GENERATIONS:-2}"
-export NUM_SOLVER_SAMPLES="${NUM_SOLVER_SAMPLES:-3}"
-export NUM_SOLVER_SAMPLES_SPEC="${NUM_SOLVER_SAMPLES_SPEC:-2}"
-export GENERATION_NUM_INFERENCE_STEPS="${GENERATION_NUM_INFERENCE_STEPS:-20}"
-export SOLVER_UPDATE_FREQ="${SOLVER_UPDATE_FREQ:-2}"
-export SYNTHETIC_SOLVER_UPDATE_FREQ="${SYNTHETIC_SOLVER_UPDATE_FREQ:-2}"
-export MAX_NEW_TOKENS_SOLVER="${MAX_NEW_TOKENS_SOLVER:-96}"
-export MAX_NEW_TOKENS_PROPOSER="${MAX_NEW_TOKENS_PROPOSER:-192}"
-export MAX_NEW_TOKENS_CAPTION="${MAX_NEW_TOKENS_CAPTION:-64}"
-export MAX_NEW_TOKENS_GENERATOR="${MAX_NEW_TOKENS_GENERATOR:-512}"
-export CLEAR_CACHE_EVERY="${CLEAR_CACHE_EVERY:-10}"
+export NUM_GENERATIONS="${NUM_GENERATIONS:-1}"
+export NUM_SOLVER_SAMPLES="${NUM_SOLVER_SAMPLES:-2}"
+export NUM_SOLVER_SAMPLES_SPEC="${NUM_SOLVER_SAMPLES_SPEC:-1}"
+export GENERATION_NUM_INFERENCE_STEPS="${GENERATION_NUM_INFERENCE_STEPS:-10}"
+export SOLVER_UPDATE_FREQ="${SOLVER_UPDATE_FREQ:-8}"
+export SYNTHETIC_SOLVER_UPDATE_FREQ="${SYNTHETIC_SOLVER_UPDATE_FREQ:-0}"
+export MAX_NEW_TOKENS_SOLVER="${MAX_NEW_TOKENS_SOLVER:-64}"
+export MAX_NEW_TOKENS_PROPOSER="${MAX_NEW_TOKENS_PROPOSER:-96}"
+export MAX_NEW_TOKENS_CAPTION="${MAX_NEW_TOKENS_CAPTION:-48}"
+export MAX_NEW_TOKENS_GENERATOR="${MAX_NEW_TOKENS_GENERATOR:-256}"
+export CLEAR_CACHE_EVERY="${CLEAR_CACHE_EVERY:-20}"
 export CUDA_DEVICE="${CUDA_DEVICE:-0}"
 export PYTHON_BIN="${PYTHON_BIN:-python3}"
-export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+export NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 export MASTER_PORT="${MASTER_PORT:-29520}"
 export ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-auto}"
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
@@ -72,7 +73,7 @@ export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
   --cuda_device "$CUDA_DEVICE" \
   --total_steps "$TOTAL_STEPS" \
   --save_every "$SAVE_EVERY" \
-  --log_every 1 \
+  --log_every 5 \
   --max_checkpoints "$MAX_CHECKPOINTS" \
   --save_generated_images_every "$SAVE_GENERATED_IMAGES_EVERY" \
   --deterministic \
@@ -85,7 +86,7 @@ export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
   --lr 1e-6 \
   --weight_decay 0.01 \
   --grad_clip 1.0 \
-  --proposer_update_freq 5 \
+  --proposer_update_freq 8 \
   --generator_update_freq 1 \
   --generator_update_rule reinforce \
   --enable_solver_updates \
@@ -101,6 +102,8 @@ export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
   --num_generations "$NUM_GENERATIONS" \
   --generation_num_inference_steps "$GENERATION_NUM_INFERENCE_STEPS" \
   --generation_guidance_scale 2.0 \
+  --generation_height 512 \
+  --generation_width 512 \
   --allow_missing_generation_tokens \
   --generator_missing_trace_strategy proxy \
   --verification_use_reference_solver \
@@ -117,8 +120,8 @@ export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
   --len_penalty_target_words 6 \
   --prop_entropy_mu 0.90 \
   --prop_entropy_sigma 0.35 \
-  --understanding_steps_per_cycle 3 \
-  --generation_steps_per_cycle 2 \
+  --understanding_steps_per_cycle 8 \
+  --generation_steps_per_cycle 1 \
   --synthetic_solver_update_freq "$SYNTHETIC_SOLVER_UPDATE_FREQ" \
   --kl_coef 1e-3 \
   --kl_target 0.02 \
