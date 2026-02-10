@@ -117,22 +117,57 @@ class TextPolicyUpdater:
         forward_prompt = {k: v for k, v in inputs_prompt.items()
                           if k not in ("images", "image_sizes")}
 
+        if torch.cuda.is_available() and getattr(self.config, "clear_cache_every", 0) <= 1:
+            torch.cuda.empty_cache()
+            gc.collect()
+
         self.model.train(True)
         policy_inputs = dict(forward_full)
         policy_inputs["labels"] = labels
         policy_inputs["use_cache"] = False
-        with use_adapter(self.model, self.adapter_name):
-            out_pi = self.model(**policy_inputs)
+        def _run_policy_forward():
+            with use_adapter(self.model, self.adapter_name):
+                return self.model(**policy_inputs)
+
+        try:
+            out_pi = _run_policy_forward()
+        except torch.OutOfMemoryError:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
+                out_pi = _run_policy_forward()
+            else:
+                raise
         ce_loss = out_pi.loss
         ref_inputs = dict(forward_full)
         ref_inputs["use_cache"] = False
         if self.reference_model is not None:
-            with torch.no_grad():
-                out_ref = self.reference_model(**ref_inputs)
+            def _run_ref_forward_ref_model():
+                with torch.no_grad():
+                    return self.reference_model(**ref_inputs)
+            try:
+                out_ref = _run_ref_forward_ref_model()
+            except torch.OutOfMemoryError:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    out_ref = _run_ref_forward_ref_model()
+                else:
+                    raise
         else:
-            with torch.no_grad():
-                with use_adapter(self.model, None):
-                    out_ref = self.model(**ref_inputs)
+            def _run_ref_forward_base_adapter():
+                with torch.no_grad():
+                    with use_adapter(self.model, None):
+                        return self.model(**ref_inputs)
+            try:
+                out_ref = _run_ref_forward_base_adapter()
+            except torch.OutOfMemoryError:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    out_ref = _run_ref_forward_base_adapter()
+                else:
+                    raise
         if valid_mask.any():
             vocab = out_pi.logits.shape[-1]
             pi_shift = out_pi.logits[:, :-1, :].reshape(-1, vocab)
