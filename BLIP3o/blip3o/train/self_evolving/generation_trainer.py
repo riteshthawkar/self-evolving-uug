@@ -685,15 +685,20 @@ class GenerationSelfEvolvingTrainer:
             model.print_trainable_parameters()
 
         # Activation checkpointing significantly reduces training-time memory.
-        if hasattr(model, "gradient_checkpointing_enable"):
+        gc_enabled = os.environ.get("SE_USE_GRADIENT_CHECKPOINTING", "1").strip().lower() not in {"0", "false", "no"}
+        if gc_enabled and hasattr(model, "gradient_checkpointing_enable"):
             try:
-                model.gradient_checkpointing_enable()
+                model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
                 if hasattr(model, "enable_input_require_grads"):
                     model.enable_input_require_grads()
                 if self.is_main_process:
-                    print("[Generation] Enabled gradient checkpointing.")
+                    print("[Generation] Enabled gradient checkpointing (use_reentrant=False).")
             except Exception:
                 pass
+        elif self.is_main_process and not gc_enabled:
+            print("[Generation] Gradient checkpointing disabled via SE_USE_GRADIENT_CHECKPOINTING=0.")
 
         is_original_blip3o = _is_original_blip3o_model_name(self.cfg.model_name)
         if is_original_blip3o:
