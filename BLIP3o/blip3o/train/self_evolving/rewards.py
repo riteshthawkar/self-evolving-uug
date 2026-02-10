@@ -11,6 +11,8 @@ from collections import Counter
 from typing import Callable, Dict, List, Optional, Tuple
 from PIL import Image
 
+from .utils import _is_bare_tokenizer, _ensure_blip3o_mm_utils, _build_chat_text
+
 
 # ===================== Cycle Consistency ===================================
 
@@ -141,44 +143,17 @@ class CycleConsistencyReward:
 
     def _caption(self, image: Image.Image) -> str:
         """Generate a caption for an image."""
-        if hasattr(self.processor, "apply_chat_template"):
-            # Try Qwen2.5-VL style multi-modal content list first
-            messages_mm = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": image},
-                        {"type": "text", "text": "Describe this image in detail."},
-                    ],
-                }
-            ]
-            try:
-                text = self.processor.apply_chat_template(
-                    messages_mm, tokenize=False, add_generation_prompt=True
-                )
-            except (TypeError, Exception):
-                # Fallback: BLIP3o-style simple string content with <image> placeholder
-                messages_str = [
-                    {
-                        "role": "user",
-                        "content": "<image>\nDescribe this image in detail.",
-                    }
-                ]
-                text = self.processor.apply_chat_template(
-                    messages_str, tokenize=False, add_generation_prompt=True
-                )
-            inputs = self.processor(
-                text=[text],
-                images=[image],
-                return_tensors="pt",
-                padding=True,
-            ).to(self.model.device)
-        else:
-            inputs = self.processor(
-                text=self.caption_template,
-                images=image,
-                return_tensors="pt",
-            ).to(self.model.device)
+        from .utils import _prepare_mm_inputs
+
+        prompt_text = "Describe this image in detail."
+        chat_text = _build_chat_text(self.processor, image, prompt_text)
+        inputs = _prepare_mm_inputs(
+            self.processor,
+            next(self.model.parameters()).device,
+            image,
+            chat_text,
+            model=self.model,
+        )
 
         with torch.no_grad():
             outputs = self.model.generate(
@@ -188,7 +163,10 @@ class CycleConsistencyReward:
                 do_sample=True,
             )
 
-        text = self.processor.decode(outputs[0], skip_special_tokens=True)
+        # Decode only the generated tokens (skip the prompt portion)
+        input_len = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
+        completion_ids = outputs[0, input_len:]
+        text = self.processor.decode(completion_ids, skip_special_tokens=True)
         if "<|im_start|>assistant" in text:
             text = text.split("<|im_start|>assistant")[-1]
         return text.strip()
@@ -217,19 +195,22 @@ def diversity_reward(
         return 1.0
 
     if vision_encoder is not None and processor is not None:
-        features = []
-        for img in images:
-            feat = _extract_features(img, vision_encoder, processor)
-            features.append(feat)
+        try:
+            features = []
+            for img in images:
+                feat = _extract_features(img, vision_encoder, processor)
+                features.append(feat)
 
-        features = torch.stack(features)  # [N, D]
-        if normalize:
-            features = torch.nn.functional.normalize(features, dim=-1)
+            features = torch.stack(features)  # [N, D]
+            if normalize:
+                features = torch.nn.functional.normalize(features, dim=-1)
 
-        variance = features.var(dim=0).mean().item()
-        pairwise_distances = _pairwise_cosine_distances(features)
-        mean_distance = pairwise_distances.mean().item()
-        return (variance + mean_distance) / 2
+            variance = features.var(dim=0).mean().item()
+            pairwise_distances = _pairwise_cosine_distances(features)
+            mean_distance = pairwise_distances.mean().item()
+            return (variance + mean_distance) / 2
+        except TypeError:
+            pass  # Fall through to pixel-level fallback
 
     # Pixel-level fallback: two-component metric
     return _image_diversity_score_pixel(images)
@@ -237,6 +218,10 @@ def diversity_reward(
 
 def _extract_features(image: Image.Image, vision_encoder, processor) -> torch.Tensor:
     """Extract vision features from an image."""
+    if _is_bare_tokenizer(processor):
+        # For bare tokenizers (BLIP3o), we can't use processor(images=...).
+        # Fall back to pixel-level diversity (caller handles this).
+        raise TypeError("Cannot extract vision features with a bare tokenizer processor.")
     inputs = processor(images=image, return_tensors="pt")
 
     with torch.no_grad():

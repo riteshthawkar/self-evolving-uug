@@ -755,10 +755,13 @@ class GenerationSelfEvolvingTrainer:
         representation that captures the interaction between modalities.
         """
         chat_text = _build_chat_text(self.processor, image, text)
-        inputs = _prepare_mm_inputs(self.processor, self.device, image, chat_text)
+        inputs = _prepare_mm_inputs(self.processor, self.device, image, chat_text, model=self.model)
+        # Filter out generate()-only keys for forward() call
+        forward_inputs = {k: v for k, v in inputs.items()
+                          if k not in ("images", "image_sizes")}
         with use_adapter(self.model, None):
             outputs = self.model(
-                **inputs,
+                **forward_inputs,
                 output_hidden_states=True,
                 use_cache=False,
             )
@@ -801,7 +804,7 @@ class GenerationSelfEvolvingTrainer:
         top_p: float,
     ) -> str:
         chat_text = _build_chat_text(self.processor, image, prompt)
-        inputs = _prepare_mm_inputs(self.processor, self.device, image, chat_text)
+        inputs = _prepare_mm_inputs(self.processor, self.device, image, chat_text, model=self.model)
 
         has_image_feats = ("pixel_values" in inputs) or ("images" in inputs)
         if has_image_feats and "input_ids" in inputs:
@@ -836,6 +839,10 @@ class GenerationSelfEvolvingTrainer:
 
         gen_inputs = _adapt_mm_generate_inputs(self.model, dict(inputs))
 
+        # Extract pad_token_id robustly — processor may BE the tokenizer
+        _tok = _extract_tokenizer_from_processor(self.processor)
+        _pad_id = getattr(_tok, "eos_token_id", None) if _tok is not None else None
+
         def _run_generate(curr_inputs: Dict[str, torch.Tensor]):
             return self.model.generate(
                 **curr_inputs,
@@ -843,7 +850,7 @@ class GenerationSelfEvolvingTrainer:
                 do_sample=True,
                 temperature=temperature,
                 top_p=top_p,
-                pad_token_id=getattr(getattr(self.processor, "tokenizer", None), "eos_token_id", None),
+                pad_token_id=_pad_id,
             )
 
         with torch.no_grad():

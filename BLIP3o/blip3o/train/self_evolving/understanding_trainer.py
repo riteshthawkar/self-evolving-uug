@@ -554,7 +554,12 @@ class UnderstandingSelfEvolvingTrainer:
         top_p: float,
     ) -> str:
         chat_text = _build_chat_text(self.processor, image, prompt)
-        inputs = _prepare_mm_inputs(self.processor, self.device, image, chat_text)
+        inputs = _prepare_mm_inputs(self.processor, self.device, image, chat_text, model=self.model)
+
+        from .model_api import _extract_tokenizer_from_processor
+        _tok = _extract_tokenizer_from_processor(self.processor)
+        _pad_id = getattr(_tok, "eos_token_id", None) if _tok is not None else None
+
         with torch.no_grad():
             with use_adapter(self.model, adapter_name):
                 outputs = self.model.generate(
@@ -563,9 +568,7 @@ class UnderstandingSelfEvolvingTrainer:
                     do_sample=True,
                     temperature=temperature,
                     top_p=top_p,
-                    pad_token_id=getattr(
-                        getattr(self.processor, "tokenizer", None), "eos_token_id", None
-                    ),
+                    pad_token_id=_pad_id,
                 )
 
         input_len = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0

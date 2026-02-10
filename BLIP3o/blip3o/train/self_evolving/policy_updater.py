@@ -100,10 +100,10 @@ class RolePolicyUpdater:
         chat_full = chat_prompt + completion
 
         inputs_prompt = _prepare_mm_inputs(
-            self.processor, device, image, chat_prompt
+            self.processor, device, image, chat_prompt, model=self.model
         )
         inputs_full = _prepare_mm_inputs(
-            self.processor, device, image, chat_full
+            self.processor, device, image, chat_full, model=self.model
         )
 
         input_ids = inputs_full["input_ids"]
@@ -112,8 +112,14 @@ class RolePolicyUpdater:
         labels[:, :prompt_len] = -100
         valid_mask = labels[:, 1:] != -100
 
+        # For BLIP3o, forward() doesn't accept 'images'/'image_sizes' —
+        # those are only for generate().  Filter them out for forward calls.
+        _forward_keys_to_drop = ("images", "image_sizes")
+        forward_full = {k: v for k, v in inputs_full.items()
+                        if k not in _forward_keys_to_drop}
+
         self.model.train(True)
-        policy_inputs = dict(inputs_full)
+        policy_inputs = dict(forward_full)
         policy_inputs["labels"] = labels
         # Avoid allocating KV cache during training forwards
         policy_inputs["use_cache"] = False
@@ -122,7 +128,7 @@ class RolePolicyUpdater:
         ce_loss = out_pi.loss
         logp_pi = F.log_softmax(out_pi.logits, dim=-1)
 
-        ref_inputs = dict(inputs_full)
+        ref_inputs = dict(forward_full)
         ref_inputs["use_cache"] = False
         if self.reference_model is not None:
             with torch.no_grad():

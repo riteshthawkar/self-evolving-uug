@@ -18,6 +18,55 @@ import torch.nn.functional as F
 from PIL import Image
 
 # ---------------------------------------------------------------------------
+# BLIP3o-native helpers — imported lazily to avoid circular deps at module
+# level, but cached after first use.
+# ---------------------------------------------------------------------------
+_BLIP3O_MM_UTILS_LOADED = False
+_tokenizer_image_token = None  # type: ignore
+_process_images_fn = None  # type: ignore
+_conv_templates = None  # type: ignore
+_IMAGE_TOKEN_IDX = None  # type: ignore
+
+
+def _ensure_blip3o_mm_utils():
+    """Lazily import BLIP3o multimodal utilities (tokenizer_image_token, etc.)."""
+    global _BLIP3O_MM_UTILS_LOADED, _tokenizer_image_token, _process_images_fn
+    global _conv_templates, _IMAGE_TOKEN_IDX
+    if _BLIP3O_MM_UTILS_LOADED:
+        return
+    try:
+        from blip3o.mm_utils import tokenizer_image_token as _tit
+        from blip3o.mm_utils import process_images as _pi
+        from blip3o.conversation import conv_templates as _ct
+        from blip3o.constants import IMAGE_TOKEN_IDX as _iti
+        _tokenizer_image_token = _tit
+        _process_images_fn = _pi
+        _conv_templates = _ct
+        _IMAGE_TOKEN_IDX = _iti
+    except ImportError:
+        pass
+    _BLIP3O_MM_UTILS_LOADED = True
+
+
+def _is_bare_tokenizer(processor) -> bool:
+    """Return True when ``processor`` is a plain tokenizer (not a multimodal processor).
+
+    BLIP3o's ``AutoProcessor.from_pretrained(...)`` returns a
+    ``PreTrainedTokenizerFast`` that does NOT accept ``images=`` kwarg.
+    """
+    # A "real" multimodal processor (Qwen2VLProcessor, etc.) wraps a tokenizer
+    # internally and exposes an ``image_processor`` attribute.
+    if hasattr(processor, "image_processor") and processor.image_processor is not None:
+        return False
+    # Check if it has the tokenizer's encode method but NOT the processor's
+    # multi-modal __call__ accepting images=.
+    cls_name = type(processor).__name__
+    if "Tokenizer" in cls_name:
+        return True
+    # Fallback: try calling with images kwarg — if it raises TypeError it's bare.
+    return not hasattr(processor, "image_processor")
+
+# ---------------------------------------------------------------------------
 # Optional dependency flags
 # ---------------------------------------------------------------------------
 try:
@@ -281,6 +330,25 @@ def _decode_tokens(processor, token_ids: torch.Tensor) -> str:
 def _build_chat_text(
     processor, image: Image.Image, prompt: str
 ) -> str:
+    """Build a chat-formatted text string for multimodal generation.
+
+    For BLIP3o (bare tokenizer as processor) we use the official
+    ``conv_templates['qwen']`` conversation template which produces
+    CHATML-style text with ``<image>`` as a string placeholder.
+
+    For true multimodal processors (e.g. Qwen2VLProcessor) we try the
+    multimodal content-list format first, then fall back.
+    """
+    _ensure_blip3o_mm_utils()
+
+    # ---- BLIP3o path: use conv_templates to build prompt ----
+    if _is_bare_tokenizer(processor) and _conv_templates is not None:
+        conv = _conv_templates['qwen'].copy()
+        conv.append_message(conv.roles[0], f"<image>\n{prompt}")
+        conv.append_message(conv.roles[1], None)
+        return conv.get_prompt()
+
+    # ---- Multimodal-processor path (Qwen2.5-VL, etc.) ----
     if hasattr(processor, "apply_chat_template"):
         # Try Qwen2.5-VL style multi-modal content list first
         messages_mm = [
@@ -298,7 +366,7 @@ def _build_chat_text(
             )
         except (TypeError, Exception):
             pass
-        # Fallback: BLIP3o-style simple string content with <image> placeholder
+        # Fallback: simple string content with <image> placeholder
         messages_str = [
             {
                 "role": "user",
@@ -319,7 +387,53 @@ def _prepare_mm_inputs(
     device: torch.device,
     image: Image.Image,
     chat_text: str,
+    model=None,
 ):
+    """Prepare multimodal inputs for model.generate() / model.forward().
+
+    For BLIP3o (bare tokenizer): uses ``tokenizer_image_token()`` to create
+    input_ids with image-token placeholders and ``process_images()`` to
+    produce pixel-value tensors.  The returned dict contains ``input_ids``,
+    ``attention_mask``, and ``images`` — matching the BLIP3o model's
+    ``generate(inputs=..., images=...)`` signature.
+
+    For true multimodal processors: delegates to
+    ``processor(text=..., images=..., ...)``.
+    """
+    _ensure_blip3o_mm_utils()
+
+    if _is_bare_tokenizer(processor) and _tokenizer_image_token is not None:
+        # --- BLIP3o native path ---
+        input_ids = _tokenizer_image_token(
+            chat_text, processor, _IMAGE_TOKEN_IDX, return_tensors="pt"
+        ).unsqueeze(0).to(device)
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+
+        result = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+
+        # Process the image into pixel values if we have the utility +
+        # a vision tower / image_processor from the model.
+        if image is not None and _process_images_fn is not None and model is not None:
+            model_ref = _unwrap_model(model)
+            image_processor = None
+            # Try to get image_processor from the vision tower
+            vision_tower = getattr(model_ref, "get_vision_tower", lambda: None)()
+            if vision_tower is not None:
+                image_processor = getattr(vision_tower, "image_processor", None)
+            if image_processor is not None:
+                model_cfg = getattr(model_ref, "config", None)
+                images_tensor = _process_images_fn([image], image_processor, model_cfg)
+                if isinstance(images_tensor, list):
+                    images_tensor = torch.stack(images_tensor)
+                result["images"] = images_tensor.to(device=device, dtype=torch.float16)
+                result["image_sizes"] = [image.size]
+
+        return result
+
+    # --- Standard multimodal processor path ---
     inputs = processor(
         text=[chat_text], images=[image], return_tensors="pt", padding=True
     )
