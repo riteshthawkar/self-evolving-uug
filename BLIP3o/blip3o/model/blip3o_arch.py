@@ -41,11 +41,32 @@ class blip3oMetaModel:
             self.dit, self.noise_scheduler = build_dit(config)
 
 
-    # def get_vision_tower(self):
-    #     vision_tower = getattr(self, 'vision_tower', None)
-    #     if type(vision_tower) is list:
-    #         vision_tower = vision_tower[0]
-    #     return vision_tower
+    def get_vision_tower(self):
+        """
+        Backward-compatible accessor for the understanding vision tower.
+
+        Different BLIP3o variants expose the tower under different attribute
+        names (`vision_tower` in older wrappers, `visual` in Qwen2.5-VL based
+        wrappers).  Some self-evolving input-prep paths still call this method,
+        so we provide a robust fallback chain here.
+        """
+        candidates = []
+
+        vision_tower = getattr(self, "vision_tower", None)
+        if type(vision_tower) is list:
+            vision_tower = vision_tower[0]
+        candidates.append(vision_tower)
+
+        candidates.append(getattr(self, "visual", None))
+        candidates.append(self.get_gen_vision_tower())
+
+        for cand in candidates:
+            if cand is not None and hasattr(cand, "image_processor"):
+                return cand
+        for cand in candidates:
+            if cand is not None:
+                return cand
+        return None
 
 
     def get_gen_vision_tower(self):
@@ -186,7 +207,40 @@ class blip3oMetaForCausalLM(ABC):
         pass
 
     def get_vision_tower(self):
-        return self.get_model().get_vision_tower()
+        model = self.get_model()
+        candidates = []
+
+        getter = getattr(model, "get_vision_tower", None)
+        if callable(getter):
+            try:
+                candidates.append(getter())
+            except Exception:
+                pass
+
+        candidates.append(getattr(model, "visual", None))
+
+        gen_getter = getattr(model, "get_gen_vision_tower", None)
+        if callable(gen_getter):
+            try:
+                candidates.append(gen_getter())
+            except Exception:
+                pass
+        else:
+            candidates.append(getattr(model, "gen_vision_tower", None))
+
+        normed = []
+        for cand in candidates:
+            if type(cand) is list:
+                cand = cand[0] if cand else None
+            normed.append(cand)
+
+        for cand in normed:
+            if cand is not None and hasattr(cand, "image_processor"):
+                return cand
+        for cand in normed:
+            if cand is not None:
+                return cand
+        return None
 
     def get_gen_vision_tower(self):
         return self.get_model().get_gen_vision_tower()
