@@ -279,8 +279,22 @@ def _build_original_blip3o_diffusion_pipeline(
         ) from exc
 
     tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is None:
+        # BLIP3o processors may nest tokenizer under multimodal_processor
+        mm_proc = getattr(processor, "multimodal_processor", None)
+        if mm_proc is not None:
+            tokenizer = getattr(mm_proc, "tokenizer", None)
     if tokenizer is None and hasattr(processor, "tokenizer_image_token"):
         tokenizer = processor
+    if tokenizer is None:
+        # Last resort: try AutoTokenizer from the same model repo
+        try:
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(
+                str(model_name), trust_remote_code=True,
+            )
+        except Exception:
+            pass
     if tokenizer is None:
         raise RuntimeError("Processor does not expose tokenizer required by BLIP3o diffusion pipeline.")
 
