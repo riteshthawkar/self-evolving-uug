@@ -289,7 +289,11 @@ class GenerationSelfEvolvingTrainer:
 
         self.train_model = self.model
         if self.distributed:
-            ddp_kwargs = {"find_unused_parameters": True}
+            ddp_kwargs = {
+                "find_unused_parameters": True,
+                # Reuse DDP bucket storage for gradients to lower peak memory.
+                "gradient_as_bucket_view": True,
+            }
             if torch.cuda.is_available():
                 ddp_kwargs["device_ids"] = [self.local_rank]
                 ddp_kwargs["output_device"] = self.local_rank
@@ -679,6 +683,17 @@ class GenerationSelfEvolvingTrainer:
                     param.requires_grad_(False)
 
             model.print_trainable_parameters()
+
+        # Activation checkpointing significantly reduces training-time memory.
+        if hasattr(model, "gradient_checkpointing_enable"):
+            try:
+                model.gradient_checkpointing_enable()
+                if hasattr(model, "enable_input_require_grads"):
+                    model.enable_input_require_grads()
+                if self.is_main_process:
+                    print("[Generation] Enabled gradient checkpointing.")
+            except Exception:
+                pass
 
         is_original_blip3o = _is_original_blip3o_model_name(self.cfg.model_name)
         if is_original_blip3o:
