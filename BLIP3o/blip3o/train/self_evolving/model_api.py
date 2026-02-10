@@ -143,6 +143,9 @@ def _extract_tokenizer_from_processor(processor):
         tok = getattr(mm_proc, "tokenizer", None)
         if tok is not None:
             return tok
+    # If the processor IS a tokenizer (BLIP3o case), return it directly.
+    if hasattr(processor, "encode") and hasattr(processor, "decode"):
+        return processor
     return None
 
 

@@ -100,8 +100,8 @@ class TextPolicyUpdater:
         else:
             chat_prompt = _build_chat_text(self.processor, image, prompt)
             chat_full = chat_prompt + completion
-            inputs_prompt = _prepare_mm_inputs(self.processor, device, image, chat_prompt)
-            inputs_full = _prepare_mm_inputs(self.processor, device, image, chat_full)
+            inputs_prompt = _prepare_mm_inputs(self.processor, device, image, chat_prompt, model=self.model)
+            inputs_full = _prepare_mm_inputs(self.processor, device, image, chat_full, model=self.model)
 
         input_ids = inputs_full["input_ids"]
         labels = input_ids.clone()
@@ -109,8 +109,16 @@ class TextPolicyUpdater:
         labels[:, :prompt_len] = -100
         valid_mask = labels[:, 1:] != -100
 
+        # For BLIP3o forward(), we must NOT pass 'images' to model(**inputs)
+        # because the CausalLM forward() doesn't accept it the same way
+        # generate() does.  Extract images for generate() calls only.
+        forward_full = {k: v for k, v in inputs_full.items()
+                        if k not in ("images", "image_sizes")}
+        forward_prompt = {k: v for k, v in inputs_prompt.items()
+                          if k not in ("images", "image_sizes")}
+
         self.model.train(True)
-        policy_inputs = dict(inputs_full)
+        policy_inputs = dict(forward_full)
         policy_inputs["labels"] = labels
         policy_inputs["use_cache"] = False
         with use_adapter(self.model, self.adapter_name):
@@ -118,7 +126,7 @@ class TextPolicyUpdater:
         ce_loss = out_pi.loss
         logp_pi = F.log_softmax(out_pi.logits, dim=-1)
 
-        ref_inputs = dict(inputs_full)
+        ref_inputs = dict(forward_full)
         ref_inputs["use_cache"] = False
         if self.reference_model is not None:
             with torch.no_grad():
@@ -285,8 +293,8 @@ class TextPreferenceDPOUpdater:
         else:
             chat_prompt = _build_chat_text(self.processor, image, prompt)
             chat_full = chat_prompt + completion
-            inputs_prompt = _prepare_mm_inputs(self.processor, device, image, chat_prompt)
-            inputs_full = _prepare_mm_inputs(self.processor, device, image, chat_full)
+            inputs_prompt = _prepare_mm_inputs(self.processor, device, image, chat_prompt, model=self.model)
+            inputs_full = _prepare_mm_inputs(self.processor, device, image, chat_full, model=self.model)
         return inputs_prompt, inputs_full
 
     def _sequence_logp_from_logits(
@@ -323,7 +331,9 @@ class TextPreferenceDPOUpdater:
     ) -> Tuple[torch.Tensor, int]:
         context = torch.no_grad() if no_grad else torch.enable_grad()
         with context:
-            forward_inputs = dict(inputs_full)
+            # Filter out generate()-only keys that forward() doesn't accept
+            forward_inputs = {k: v for k, v in inputs_full.items()
+                              if k not in ("images", "image_sizes")}
             forward_inputs["use_cache"] = False
             with use_adapter(model, adapter_name):
                 out = model(**forward_inputs)
