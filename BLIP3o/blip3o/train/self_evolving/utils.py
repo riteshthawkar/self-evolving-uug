@@ -413,11 +413,10 @@ def _prepare_mm_inputs(
 ):
     """Prepare multimodal inputs for model.generate() / model.forward().
 
-    For BLIP3o (bare tokenizer): uses ``tokenizer_image_token()`` to create
-    input_ids with image-token placeholders and ``process_images()`` to
-    produce pixel-value tensors.  The returned dict contains ``input_ids``,
-    ``attention_mask``, and ``images`` — matching the BLIP3o model's
-    ``generate(inputs=..., images=...)`` signature.
+    For BLIP3o (bare tokenizer): prefers a Qwen2.5-VL chat-template path
+    (``apply_chat_template`` + ``processor(...)``) so image-token expansion
+    matches image features for InferenceLM. If unavailable, falls back to
+    legacy ``tokenizer_image_token()`` text-only placeholders.
 
     For true multimodal processors: delegates to
     ``processor(text=..., images=..., ...)``.
@@ -426,57 +425,56 @@ def _prepare_mm_inputs(
 
     if _is_bare_tokenizer(processor) and _tokenizer_image_token is not None:
         # --- BLIP3o native path ---
-        # The BLIP3o InferenceLM inherits from Qwen2_5_VLForConditionalGeneration.
-        # Its generate()/forward() expects Qwen2.5-VL-format inputs:
-        #   input_ids, attention_mask, pixel_values, image_grid_thw
-        #
-        # We use:
-        #   1. tokenizer_image_token() for input_ids (with <image> token IDs)
-        #   2. Qwen2.5-VL processor for pixel_values + image_grid_thw
-        input_ids = _tokenizer_image_token(
-            chat_text, processor, _IMAGE_TOKEN_IDX, return_tensors="pt"
-        ).unsqueeze(0).to(device)
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
-
-        result = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-        }
-
-        # Use the Qwen2.5-VL processor to get pixel_values and image_grid_thw.
-        # This matches the official inference.py which loads processor from
-        # "Qwen/Qwen2.5-VL-7B-Instruct" separately.
+        # The BLIP3o InferenceLM is Qwen2.5-VL based. To avoid image-token /
+        # image-feature mismatches, we must build multimodal inputs through a
+        # Qwen2.5-VL processor chat-template path (same strategy as official eval).
         if image is not None:
             qwen_proc = _get_qwen_vl_processor()
-            if qwen_proc is not None:
+            if qwen_proc is not None and hasattr(qwen_proc, "apply_chat_template"):
                 try:
+                    prompt_text = chat_text
+                    if "<image>" in prompt_text:
+                        prompt_text = prompt_text.split("<image>", 1)[1]
+                    if "<|im_end|>" in prompt_text:
+                        prompt_text = prompt_text.split("<|im_end|>", 1)[0]
+                    prompt_text = prompt_text.strip() or chat_text
+
                     messages = [
                         {
                             "role": "user",
                             "content": [
                                 {"type": "image", "image": image},
-                                {"type": "text", "text": "placeholder"},
+                                {"type": "text", "text": prompt_text},
                             ],
                         }
                     ]
-                    # Use qwen_vl_utils.process_vision_info if available,
-                    # otherwise fall back to direct processor call.
+                    text_mm = qwen_proc.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
                     try:
                         from qwen_vl_utils import process_vision_info
                         image_inputs, _ = process_vision_info(messages)
                     except ImportError:
                         image_inputs = [image]
-                    img_inputs = qwen_proc.image_processor(
-                        images=image_inputs, return_tensors="pt"
+                    mm_inputs = qwen_proc(
+                        text=[text_mm],
+                        images=image_inputs,
+                        return_tensors="pt",
+                        padding=True,
                     )
-                    if "pixel_values" in img_inputs:
-                        result["pixel_values"] = img_inputs["pixel_values"].to(device)
-                    if "image_grid_thw" in img_inputs:
-                        result["image_grid_thw"] = img_inputs["image_grid_thw"].to(device)
+                    return mm_inputs.to(device)
                 except Exception:
                     pass
 
-        return result
+        # Fallback path (legacy BLIP-style <image> token insertion).
+        input_ids = _tokenizer_image_token(
+            chat_text, processor, _IMAGE_TOKEN_IDX, return_tensors="pt"
+        ).unsqueeze(0).to(device)
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
 
     # --- Standard multimodal processor path ---
     inputs = processor(

@@ -190,13 +190,34 @@ def _is_next_style_blip3o_class(cls) -> bool:
 
 def _resolve_multimodal_encoder_for_pipeline(model):
     """Select the object that exposes ``generate_image`` for original BLIP3o pipelines."""
+    candidates = []
     try:
         for _, obj in _iter_wrapper_objects(model):
             if callable(getattr(obj, "generate_image", None)):
-                return obj
+                candidates.append(obj)
     except Exception:
-        pass
-    return model
+        return model
+
+    if not candidates:
+        return model
+
+    for obj in candidates:
+        mod = str(type(obj).__module__).lower()
+        name = str(type(obj).__name__).lower()
+        if "peft" not in mod and "peft" not in name:
+            return obj
+
+    for obj in candidates:
+        get_base_model = getattr(obj, "get_base_model", None)
+        if callable(get_base_model):
+            try:
+                base_model = get_base_model()
+            except Exception:
+                continue
+            if callable(getattr(base_model, "generate_image", None)):
+                return base_model
+
+    return candidates[0]
 
 
 # ---------------------------------------------------------------------------
