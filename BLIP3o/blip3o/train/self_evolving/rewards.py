@@ -142,7 +142,8 @@ class CycleConsistencyReward:
     def _caption(self, image: Image.Image) -> str:
         """Generate a caption for an image."""
         if hasattr(self.processor, "apply_chat_template"):
-            messages = [
+            # Try Qwen2.5-VL style multi-modal content list first
+            messages_mm = [
                 {
                     "role": "user",
                     "content": [
@@ -151,9 +152,21 @@ class CycleConsistencyReward:
                     ],
                 }
             ]
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+            try:
+                text = self.processor.apply_chat_template(
+                    messages_mm, tokenize=False, add_generation_prompt=True
+                )
+            except (TypeError, Exception):
+                # Fallback: BLIP3o-style simple string content with <image> placeholder
+                messages_str = [
+                    {
+                        "role": "user",
+                        "content": "<image>\nDescribe this image in detail.",
+                    }
+                ]
+                text = self.processor.apply_chat_template(
+                    messages_str, tokenize=False, add_generation_prompt=True
+                )
             inputs = self.processor(
                 text=[text],
                 images=[image],
