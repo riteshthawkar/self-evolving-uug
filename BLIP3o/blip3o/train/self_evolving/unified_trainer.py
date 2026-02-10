@@ -46,6 +46,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self.ucfg = config
 
     def _understanding_step(self, step: int, image: Image.Image, meta: Dict) -> Dict[str, object]:
+        step_t0 = time.perf_counter()
         proposer_prompt = build_proposer_prompt()
         proposer_out = self._generate(
             image=image,
@@ -173,10 +174,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 )
             self._sync_state_scalars()
 
+        step_dt = time.perf_counter() - step_t0
         record = {
             "step": step,
             "phase": "understanding",
             "image_path": meta.get("path"),
+            "step_time_sec": step_dt,
             "question": question,
             "proposer_out": proposer_out,
             "solver_answers_raw": solver_answers_raw,
@@ -213,7 +216,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if self.is_main_process and step % self.cfg.log_every == 0:
             print(
                 f"[Step {step:05d}][U] maj={maj_count}/{self.cfg.num_solver_samples} "
-                f"maj_frac={maj_frac:.2f} H={entropy_nats:.3f} P_R={proposer_reward:.3f}"
+                f"maj_frac={maj_frac:.2f} H={entropy_nats:.3f} P_R={proposer_reward:.3f} "
+                f"dt={step_dt:.1f}s"
             )
             print(f"  Q: {question}")
 
@@ -245,13 +249,16 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         last_attempted_step = self.start_step
         try:
             for step in range(self.start_step + 1, cfg.total_steps + 1):
+                step_t0 = time.perf_counter()
                 last_attempted_step = step
                 image, meta = self._sample_image_for_step(step)
+                phase_tag = "U"
 
                 phase_idx = (step - 1) % cycle
                 if phase_idx < cfg.understanding_steps_per_cycle:
                     self._understanding_step(step=step, image=image, meta=meta)
                 else:
+                    phase_tag = "G"
                     out = self._generation_step(step=step, image=image, meta=meta)
                     source_caption = str(out.get("source_caption", ""))
                     spec: GenerationSpec = out["spec"]
@@ -319,6 +326,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         proposer_stats=out.get("proposer_stats"),
                         generator_stats=out.get("generator_stats"),
                     )
+
+                if self.is_main_process:
+                    step_dt = time.perf_counter() - step_t0
+                    print(f"[Step {step:05d}] phase={phase_tag} total_dt={step_dt:.1f}s")
 
                 if cfg.save_every > 0 and step % cfg.save_every == 0:
                     self._dist_barrier()

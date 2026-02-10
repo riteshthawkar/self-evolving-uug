@@ -84,6 +84,7 @@ from .generation_helpers import (
     _parse_generation_spec,
     _prepare_text_inputs,
     _soft_match,
+    _tokenize_words,
     _yes_no_polarity,
 )
 from .generation_policy_updater import TextPolicyUpdater, TextPreferenceDPOUpdater
