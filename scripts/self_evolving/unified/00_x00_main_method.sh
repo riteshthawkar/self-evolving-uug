@@ -12,7 +12,6 @@ export PYTHONPATH="${REPO_ROOT}/BLIP3o:${PYTHONPATH:-}"
 export CACHE_ROOT="/workspace/self-evolving-uug/cache"
 export HF_HOME="/workspace/self-evolving-uug/cache"
 export HUGGINGFACE_HUB_CACHE="/workspace/self-evolving-uug/cache"
-export TRANSFORMERS_CACHE="/workspace/self-evolving-uug/cache"
 export HF_DATASETS_CACHE="/workspace/self-evolving-uug/cache"
 export HF_METRICS_CACHE="/workspace/self-evolving-uug/cache"
 export TORCH_HOME="/workspace/self-evolving-uug/cache"
@@ -60,6 +59,9 @@ export BLIP3O_REPO="${BLIP3O_REPO:-$REPO_ROOT/BLIP3o}"
 export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-1}"
 # Decoder fallback source for BLIP3o-Model-8B latent->image decoding.
 export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
+# Checkpoint setting: reentrant mode avoids bf16/fp32 metadata mismatches on ROCm.
+export SE_USE_GRADIENT_CHECKPOINTING="${SE_USE_GRADIENT_CHECKPOINTING:-1}"
+export SE_GRADIENT_CHECKPOINT_USE_REENTRANT="${SE_GRADIENT_CHECKPOINT_USE_REENTRANT:-1}"
 
 # Disable host + ROCm GPU core dumps (prevents core* and gpucore.*)
 ulimit -Sc 0

@@ -536,15 +536,31 @@ class UnderstandingSelfEvolvingTrainer:
 
         # Activation checkpointing significantly reduces training-time memory.
         gc_enabled = os.environ.get("SE_USE_GRADIENT_CHECKPOINTING", "1").strip().lower() not in {"0", "false", "no"}
+        gc_use_reentrant_env = os.environ.get("SE_GRADIENT_CHECKPOINT_USE_REENTRANT", "").strip().lower()
+        if gc_use_reentrant_env:
+            gc_use_reentrant = gc_use_reentrant_env in {"1", "true", "yes", "on"}
+        else:
+            # ROCm+bf16 can hit checkpoint metadata mismatches with non-reentrant mode.
+            gc_use_reentrant = bool(getattr(torch.version, "hip", None)) and dtype == torch.bfloat16
         if gc_enabled and hasattr(model, "gradient_checkpointing_enable"):
             try:
                 model.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                    gradient_checkpointing_kwargs={"use_reentrant": gc_use_reentrant}
                 )
                 if hasattr(model, "enable_input_require_grads"):
                     model.enable_input_require_grads()
                 if self.is_main_process:
-                    print("[Understanding] Enabled gradient checkpointing (use_reentrant=False).")
+                    print(
+                        f"[Understanding] Enabled gradient checkpointing "
+                        f"(use_reentrant={gc_use_reentrant})."
+                    )
+            except TypeError:
+                # Older transformers versions don't accept gradient_checkpointing_kwargs.
+                model.gradient_checkpointing_enable()
+                if hasattr(model, "enable_input_require_grads"):
+                    model.enable_input_require_grads()
+                if self.is_main_process:
+                    print("[Understanding] Enabled gradient checkpointing.")
             except Exception:
                 pass
         elif self.is_main_process and not gc_enabled:
