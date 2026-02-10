@@ -1,0 +1,199 @@
+"""
+RolePolicyUpdater: KL-regularized REINFORCE updater for a role adapter.
+Ported from self_evolving/experiments/understanding.py.
+
+This is the core RL update logic — model-agnostic, only needs:
+  model.forward() and use_adapter() context manager.
+"""
+
+import gc
+import math
+from typing import Dict, Iterable, Optional
+
+import torch
+import torch.nn.functional as F
+from PIL import Image
+
+from .utils import (
+    _build_chat_text,
+    _clip_grad_norm_multi_device,
+    _collect_trainable_params,
+    _prepare_mm_inputs,
+    use_adapter,
+)
+
+
+class RolePolicyUpdater:
+    """
+    KL-regularized REINFORCE updater for a role adapter.
+
+    Computes:
+        loss = advantage * CE_loss + beta * KL_loss
+
+    with adaptive beta based on KL target.
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        processor,
+        config,
+        adapter_name: Optional[str],
+        reference_model: Optional[torch.nn.Module] = None,
+    ):
+        self.model = model
+        self.processor = processor
+        self.config = config
+        self.adapter_name = adapter_name
+        self.reference_model = reference_model
+        self.kl_coef = config.kl_coef
+        self.step_id = 0
+        self.grad_accum_steps = max(1, getattr(config, "grad_accum_steps", 1))
+        self._accum_count = 0
+
+        params = list(_collect_trainable_params(model, adapter_name))
+        if not params:
+            raise RuntimeError(
+                f"No trainable parameters found for adapter={adapter_name!r}"
+            )
+        self.params = params
+        self.opt = torch.optim.AdamW(
+            params, lr=config.lr, weight_decay=config.weight_decay
+        )
+
+    def state_dict(self) -> Dict:
+        return {
+            "optimizer": self.opt.state_dict(),
+            "kl_coef": float(self.kl_coef),
+            "step_id": int(self.step_id),
+        }
+
+    def load_state_dict(self, state: Dict):
+        if not isinstance(state, dict):
+            return
+        if "optimizer" in state:
+            self.opt.load_state_dict(state["optimizer"])
+        if "kl_coef" in state:
+            self.kl_coef = float(state["kl_coef"])
+        if "step_id" in state:
+            self.step_id = int(state["step_id"])
+
+    def _adapt_beta(self, kl_val: float):
+        target = max(self.config.kl_target, 1e-8)
+        delta = (kl_val - target) / target
+        beta = self.kl_coef * math.exp(self.config.kl_adapt_rate * delta)
+        beta = max(self.config.kl_min, min(self.config.kl_max, beta))
+        self.kl_coef = float(beta)
+
+    def step(
+        self,
+        image: Image.Image,
+        prompt: str,
+        completion: str,
+        reward: float,
+        baseline: float,
+        device: torch.device,
+    ) -> Dict[str, float]:
+        self.step_id += 1
+
+        chat_prompt = _build_chat_text(self.processor, image, prompt)
+        chat_full = chat_prompt + completion
+
+        inputs_prompt = _prepare_mm_inputs(
+            self.processor, device, image, chat_prompt
+        )
+        inputs_full = _prepare_mm_inputs(
+            self.processor, device, image, chat_full
+        )
+
+        input_ids = inputs_full["input_ids"]
+        labels = input_ids.clone()
+        prompt_len = inputs_prompt["input_ids"].shape[1]
+        labels[:, :prompt_len] = -100
+        valid_mask = labels[:, 1:] != -100
+
+        self.model.train(True)
+        policy_inputs = dict(inputs_full)
+        policy_inputs["labels"] = labels
+        # Avoid allocating KV cache during training forwards
+        policy_inputs["use_cache"] = False
+        with use_adapter(self.model, self.adapter_name):
+            out_pi = self.model(**policy_inputs)
+        ce_loss = out_pi.loss
+        logp_pi = F.log_softmax(out_pi.logits, dim=-1)
+
+        ref_inputs = dict(inputs_full)
+        ref_inputs["use_cache"] = False
+        if self.reference_model is not None:
+            with torch.no_grad():
+                out_ref = self.reference_model(**ref_inputs)
+        else:
+            with torch.no_grad():
+                with use_adapter(self.model, None):
+                    out_ref = self.model(**ref_inputs)
+        logp_ref = F.log_softmax(out_ref.logits, dim=-1)
+
+        logp_pi_shift = logp_pi[:, :-1, :]
+        logp_ref_shift = logp_ref[:, :-1, :]
+        p_pi_shift = logp_pi_shift.exp()
+        kl_per_tok = (p_pi_shift * (logp_pi_shift - logp_ref_shift)).sum(dim=-1)
+        if valid_mask.any():
+            kl_loss = kl_per_tok[valid_mask].mean()
+        else:
+            kl_loss = torch.tensor(0.0, device=ce_loss.device)
+
+        advantage = float(reward - baseline)
+        beta_before = float(self.kl_coef)
+        total_loss = advantage * ce_loss + beta_before * kl_loss
+
+        # Gradient accumulation: scale loss and accumulate
+        scaled_loss = total_loss / self.grad_accum_steps
+        if self._accum_count == 0:
+            self.opt.zero_grad(set_to_none=True)
+        scaled_loss.backward()
+        self._accum_count += 1
+
+        did_step = False
+        if self._accum_count >= self.grad_accum_steps:
+            _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
+            self.opt.step()
+            self._accum_count = 0
+            did_step = True
+        self.model.train(False)
+
+        kl_val = float(kl_loss.item())
+        self._adapt_beta(kl_val)
+
+        ce_loss_val = float(ce_loss.item())
+        total_loss_val = float(total_loss.item())
+
+        try:
+            del inputs_prompt, inputs_full, input_ids, labels, policy_inputs
+            del out_pi, out_ref, logp_pi, logp_ref, logp_pi_shift, logp_ref_shift
+            del p_pi_shift, kl_per_tok, valid_mask, total_loss, ce_loss
+        except Exception:
+            pass
+
+        gc.collect()
+
+        if (
+            torch.cuda.is_available()
+            and self.config.clear_cache_every > 0
+            and self.step_id % self.config.clear_cache_every == 0
+        ):
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+            gc.collect()
+
+        return {
+            "ce_loss": ce_loss_val,
+            "kl_loss": kl_val,
+            "advantage": advantage,
+            "kl_coef_before": beta_before,
+            "kl_coef_after": float(self.kl_coef),
+            "total_loss": total_loss_val,
+            "did_step": did_step,
+        }
