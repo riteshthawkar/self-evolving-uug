@@ -121,6 +121,47 @@ class TextPolicyUpdater:
             torch.cuda.empty_cache()
             gc.collect()
 
+        ref_inputs = dict(forward_full)
+        ref_inputs["use_cache"] = False
+        # IMPORTANT: for self-reference KL (reference_model is None), run the
+        # reference pass BEFORE the trainable policy forward. This avoids
+        # mutating module runtime state between checkpointed forward and
+        # backward recompute.
+        if self.reference_model is not None:
+            def _run_ref_forward_ref_model():
+                with torch.no_grad():
+                    return self.reference_model(**ref_inputs)
+            try:
+                out_ref = _run_ref_forward_ref_model()
+            except torch.OutOfMemoryError:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    out_ref = _run_ref_forward_ref_model()
+                else:
+                    raise
+        else:
+            ref_model = _unwrap_model(self.model)
+            def _run_ref_forward_base_adapter():
+                was_training = bool(getattr(ref_model, "training", False))
+                try:
+                    # Keep reference KL pass outside DDP/checkpoint autograd path.
+                    ref_model.eval()
+                    with torch.no_grad():
+                        with use_adapter(ref_model, None):
+                            return ref_model(**ref_inputs)
+                finally:
+                    if was_training:
+                        ref_model.train(True)
+            try:
+                out_ref = _run_ref_forward_base_adapter()
+            except torch.OutOfMemoryError:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    out_ref = _run_ref_forward_base_adapter()
+                else:
+                    raise
         self.model.train(True)
         policy_inputs = dict(forward_full)
         policy_inputs["labels"] = labels
@@ -139,35 +180,6 @@ class TextPolicyUpdater:
             else:
                 raise
         ce_loss = out_pi.loss
-        ref_inputs = dict(forward_full)
-        ref_inputs["use_cache"] = False
-        if self.reference_model is not None:
-            def _run_ref_forward_ref_model():
-                with torch.no_grad():
-                    return self.reference_model(**ref_inputs)
-            try:
-                out_ref = _run_ref_forward_ref_model()
-            except torch.OutOfMemoryError:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    gc.collect()
-                    out_ref = _run_ref_forward_ref_model()
-                else:
-                    raise
-        else:
-            def _run_ref_forward_base_adapter():
-                with torch.no_grad():
-                    with use_adapter(self.model, None):
-                        return self.model(**ref_inputs)
-            try:
-                out_ref = _run_ref_forward_base_adapter()
-            except torch.OutOfMemoryError:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    gc.collect()
-                    out_ref = _run_ref_forward_base_adapter()
-                else:
-                    raise
         if valid_mask.any():
             vocab = out_pi.logits.shape[-1]
             pi_shift = out_pi.logits[:, :-1, :].reshape(-1, vocab)
@@ -393,20 +405,31 @@ class TextPreferenceDPOUpdater:
         inputs_full: Dict[str, torch.Tensor],
         no_grad: bool,
     ) -> Tuple[torch.Tensor, int]:
+        run_model = _unwrap_model(model) if no_grad else model
         context = torch.no_grad() if no_grad else torch.enable_grad()
-        with context:
-            # Filter out generate()-only keys that forward() doesn't accept
-            forward_inputs = {k: v for k, v in inputs_full.items()
-                              if k not in ("images", "image_sizes")}
-            forward_inputs["use_cache"] = False
-            with use_adapter(model, adapter_name):
-                out = model(**forward_inputs)
-            prompt_len = int(inputs_prompt["input_ids"].shape[1])
-            seq_logp, token_count = self._sequence_logp_from_logits(
-                logits=out.logits,
-                input_ids=forward_inputs["input_ids"],
-                prompt_len=prompt_len,
-            )
+        was_training = bool(getattr(run_model, "training", False))
+        try:
+            if no_grad:
+                # Disable checkpoint wrappers and DDP reducer hooks for reference pass.
+                run_model.eval()
+            with context:
+                # Filter out generate()-only keys that forward() doesn't accept
+                forward_inputs = {
+                    k: v for k, v in inputs_full.items()
+                    if k not in ("images", "image_sizes")
+                }
+                forward_inputs["use_cache"] = False
+                with use_adapter(run_model, adapter_name):
+                    out = run_model(**forward_inputs)
+                prompt_len = int(inputs_prompt["input_ids"].shape[1])
+                seq_logp, token_count = self._sequence_logp_from_logits(
+                    logits=out.logits,
+                    input_ids=forward_inputs["input_ids"],
+                    prompt_len=prompt_len,
+                )
+        finally:
+            if no_grad and was_training:
+                run_model.train(True)
         return seq_logp, token_count
 
     def step(
@@ -439,28 +462,16 @@ class TextPreferenceDPOUpdater:
             completion_token_ids=rejected_completion_token_ids,
         )
 
-        pi_logp_chosen, chosen_token_count = self._forward_seq_logp(
-            model=self.model,
-            adapter_name=self.adapter_name,
-            inputs_prompt=chosen_prompt_inputs,
-            inputs_full=chosen_full_inputs,
-            no_grad=False,
-        )
-        pi_logp_rejected, rejected_token_count = self._forward_seq_logp(
-            model=self.model,
-            adapter_name=self.adapter_name,
-            inputs_prompt=rejected_prompt_inputs,
-            inputs_full=rejected_full_inputs,
-            no_grad=False,
-        )
-
         if self.reference_model is not None:
             ref_model = self.reference_model
             ref_adapter_name = None
         else:
-            ref_model = self.model
+            ref_model = _unwrap_model(self.model)
             ref_adapter_name = None
 
+        # IMPORTANT: when using self-reference (no frozen reference model),
+        # compute reference log-probs before trainable forwards to avoid
+        # checkpoint-recompute metadata mismatches.
         ref_logp_chosen, _ = self._forward_seq_logp(
             model=ref_model,
             adapter_name=ref_adapter_name,
@@ -474,6 +485,21 @@ class TextPreferenceDPOUpdater:
             inputs_prompt=rejected_prompt_inputs,
             inputs_full=rejected_full_inputs,
             no_grad=True,
+        )
+
+        pi_logp_chosen, chosen_token_count = self._forward_seq_logp(
+            model=self.model,
+            adapter_name=self.adapter_name,
+            inputs_prompt=chosen_prompt_inputs,
+            inputs_full=chosen_full_inputs,
+            no_grad=False,
+        )
+        pi_logp_rejected, rejected_token_count = self._forward_seq_logp(
+            model=self.model,
+            adapter_name=self.adapter_name,
+            inputs_prompt=rejected_prompt_inputs,
+            inputs_full=rejected_full_inputs,
+            no_grad=False,
         )
 
         pi_gap = pi_logp_chosen - pi_logp_rejected

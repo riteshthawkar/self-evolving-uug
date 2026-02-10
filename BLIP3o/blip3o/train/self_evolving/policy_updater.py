@@ -123,6 +123,47 @@ class RolePolicyUpdater:
             torch.cuda.empty_cache()
             gc.collect()
 
+        ref_inputs = dict(forward_full)
+        ref_inputs["use_cache"] = False
+        # IMPORTANT: for self-reference KL (reference_model is None), run the
+        # reference pass BEFORE the trainable policy forward. This avoids
+        # mutating module runtime state between checkpointed forward and
+        # backward recompute.
+        if self.reference_model is not None:
+            def _run_ref_forward_ref_model():
+                with torch.no_grad():
+                    return self.reference_model(**ref_inputs)
+            try:
+                out_ref = _run_ref_forward_ref_model()
+            except torch.OutOfMemoryError:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    out_ref = _run_ref_forward_ref_model()
+                else:
+                    raise
+        else:
+            ref_model = _unwrap_model(self.model)
+            def _run_ref_forward_base_adapter():
+                was_training = bool(getattr(ref_model, "training", False))
+                try:
+                    # Keep reference KL pass outside DDP/checkpoint autograd path.
+                    ref_model.eval()
+                    with torch.no_grad():
+                        with use_adapter(ref_model, None):
+                            return ref_model(**ref_inputs)
+                finally:
+                    if was_training:
+                        ref_model.train(True)
+            try:
+                out_ref = _run_ref_forward_base_adapter()
+            except torch.OutOfMemoryError:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    out_ref = _run_ref_forward_base_adapter()
+                else:
+                    raise
         self.model.train(True)
         policy_inputs = dict(forward_full)
         policy_inputs["labels"] = labels
@@ -142,35 +183,6 @@ class RolePolicyUpdater:
             else:
                 raise
         ce_loss = out_pi.loss
-        ref_inputs = dict(forward_full)
-        ref_inputs["use_cache"] = False
-        if self.reference_model is not None:
-            def _run_ref_forward_ref_model():
-                with torch.no_grad():
-                    return self.reference_model(**ref_inputs)
-            try:
-                out_ref = _run_ref_forward_ref_model()
-            except torch.OutOfMemoryError:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    gc.collect()
-                    out_ref = _run_ref_forward_ref_model()
-                else:
-                    raise
-        else:
-            def _run_ref_forward_base_adapter():
-                with torch.no_grad():
-                    with use_adapter(self.model, None):
-                        return self.model(**ref_inputs)
-            try:
-                out_ref = _run_ref_forward_base_adapter()
-            except torch.OutOfMemoryError:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    gc.collect()
-                    out_ref = _run_ref_forward_base_adapter()
-                else:
-                    raise
         if valid_mask.any():
             vocab = out_pi.logits.shape[-1]
             pi_shift = out_pi.logits[:, :-1, :].reshape(-1, vocab)
