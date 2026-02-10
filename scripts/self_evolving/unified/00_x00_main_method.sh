@@ -65,6 +65,13 @@ export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
 ulimit -Sc 0
 ulimit -Hc 0
 
+
+export ATTN_IMPLEMENTATION=sdpa
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+export NCCL_DEBUG=INFO
+export NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_BLOCKING_WAIT=1
+
 "$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" "$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
