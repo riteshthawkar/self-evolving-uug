@@ -26,6 +26,7 @@ _tokenizer_image_token = None  # type: ignore
 _process_images_fn = None  # type: ignore
 _conv_templates = None  # type: ignore
 _IMAGE_TOKEN_IDX = None  # type: ignore
+_qwen_vl_processor = None  # type: ignore — cached Qwen2.5-VL processor for image prep
 
 
 def _ensure_blip3o_mm_utils():
@@ -46,6 +47,27 @@ def _ensure_blip3o_mm_utils():
     except ImportError:
         pass
     _BLIP3O_MM_UTILS_LOADED = True
+
+
+def _get_qwen_vl_processor():
+    """Return a cached Qwen2.5-VL processor for image preprocessing.
+
+    The BLIP3o InferenceLM model inherits from Qwen2_5_VLForConditionalGeneration,
+    so its forward()/generate() expects Qwen2.5-VL-format pixel_values and
+    image_grid_thw.  The official inference.py loads this processor from
+    ``Qwen/Qwen2.5-VL-7B-Instruct``.
+    """
+    global _qwen_vl_processor
+    if _qwen_vl_processor is not None:
+        return _qwen_vl_processor
+    try:
+        from transformers import AutoProcessor
+        _qwen_vl_processor = AutoProcessor.from_pretrained(
+            "Qwen/Qwen2.5-VL-7B-Instruct", trust_remote_code=True,
+        )
+    except Exception:
+        pass
+    return _qwen_vl_processor
 
 
 def _is_bare_tokenizer(processor) -> bool:
@@ -404,6 +426,13 @@ def _prepare_mm_inputs(
 
     if _is_bare_tokenizer(processor) and _tokenizer_image_token is not None:
         # --- BLIP3o native path ---
+        # The BLIP3o InferenceLM inherits from Qwen2_5_VLForConditionalGeneration.
+        # Its generate()/forward() expects Qwen2.5-VL-format inputs:
+        #   input_ids, attention_mask, pixel_values, image_grid_thw
+        #
+        # We use:
+        #   1. tokenizer_image_token() for input_ids (with <image> token IDs)
+        #   2. Qwen2.5-VL processor for pixel_values + image_grid_thw
         input_ids = _tokenizer_image_token(
             chat_text, processor, _IMAGE_TOKEN_IDX, return_tensors="pt"
         ).unsqueeze(0).to(device)
@@ -414,22 +443,38 @@ def _prepare_mm_inputs(
             "attention_mask": attention_mask,
         }
 
-        # Process the image into pixel values if we have the utility +
-        # a vision tower / image_processor from the model.
-        if image is not None and _process_images_fn is not None and model is not None:
-            model_ref = _unwrap_model(model)
-            image_processor = None
-            # Try to get image_processor from the vision tower
-            vision_tower = getattr(model_ref, "get_vision_tower", lambda: None)()
-            if vision_tower is not None:
-                image_processor = getattr(vision_tower, "image_processor", None)
-            if image_processor is not None:
-                model_cfg = getattr(model_ref, "config", None)
-                images_tensor = _process_images_fn([image], image_processor, model_cfg)
-                if isinstance(images_tensor, list):
-                    images_tensor = torch.stack(images_tensor)
-                result["images"] = images_tensor.to(device=device, dtype=torch.float16)
-                result["image_sizes"] = [image.size]
+        # Use the Qwen2.5-VL processor to get pixel_values and image_grid_thw.
+        # This matches the official inference.py which loads processor from
+        # "Qwen/Qwen2.5-VL-7B-Instruct" separately.
+        if image is not None:
+            qwen_proc = _get_qwen_vl_processor()
+            if qwen_proc is not None:
+                try:
+                    messages = [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image", "image": image},
+                                {"type": "text", "text": "placeholder"},
+                            ],
+                        }
+                    ]
+                    # Use qwen_vl_utils.process_vision_info if available,
+                    # otherwise fall back to direct processor call.
+                    try:
+                        from qwen_vl_utils import process_vision_info
+                        image_inputs, _ = process_vision_info(messages)
+                    except ImportError:
+                        image_inputs = [image]
+                    img_inputs = qwen_proc.image_processor(
+                        images=image_inputs, return_tensors="pt"
+                    )
+                    if "pixel_values" in img_inputs:
+                        result["pixel_values"] = img_inputs["pixel_values"].to(device)
+                    if "image_grid_thw" in img_inputs:
+                        result["image_grid_thw"] = img_inputs["image_grid_thw"].to(device)
+                except Exception:
+                    pass
 
         return result
 
