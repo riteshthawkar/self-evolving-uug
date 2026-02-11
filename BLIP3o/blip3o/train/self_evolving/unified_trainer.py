@@ -280,6 +280,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 del stats
                 torch.cuda.empty_cache()
                 gc.collect()
+            # If every sample was skipped (e.g. no valid completion tokens on all
+            # ranks), report this explicitly instead of "applied=true".
+            if solver_stats_list:
+                all_skipped = all(bool(s.get("skipped_reason")) for s in solver_stats_list)
+                if all_skipped:
+                    solver_update_applied = False
+                    if solver_update_skip_reason is None:
+                        solver_update_skip_reason = "all_solver_samples_skipped"
         elif solver_update_due and solver_update_skip_reason is not None:
             self._append_jsonl(
                 self.policy_updates_log_path,

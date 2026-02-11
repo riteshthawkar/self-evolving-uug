@@ -4,7 +4,7 @@
 # Understanding-only self-evolving with different LoRA ranks and alphas.
 # Changing values: (lora_r, lora_alpha) in {(8,16), (16,32), (32,64)}; seed fixed at 42
 
-export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
 export PYTHONPATH="${REPO_ROOT}/BLIP3o:${PYTHONPATH:-}"
 

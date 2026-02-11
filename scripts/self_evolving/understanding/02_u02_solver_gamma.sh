@@ -4,7 +4,7 @@
 # Understanding-only self-evolving with different continuous reward softness.
 # Changing values: solver_soft_gamma in {0.5, 0.7, 1.0}; seed fixed at 42
 
-export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
 export PYTHONPATH="${REPO_ROOT}/BLIP3o:${PYTHONPATH:-}"
 

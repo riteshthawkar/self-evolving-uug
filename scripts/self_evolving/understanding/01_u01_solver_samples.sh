@@ -4,7 +4,7 @@
 # Understanding-only self-evolving with different solver sample counts.
 # Changing values: num_solver_samples in {3, 5, 7}; seed fixed at 42
 
-export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
 export PYTHONPATH="${REPO_ROOT}/BLIP3o:${PYTHONPATH:-}"
 

@@ -3,7 +3,7 @@
 # Experiment G00: Generation-Only Self-Evolving Main Run
 # Updates generator + proposer adapters; solver remains frozen as verifier.
 
-export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
 export PYTHONPATH="${REPO_ROOT}/BLIP3o:${PYTHONPATH:-}"
 
@@ -29,6 +29,7 @@ export WANDB_LOG_IMAGES_EVERY="${WANDB_LOG_IMAGES_EVERY:-0}"
 
 # Run defaults (override via environment)
 export DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/shared_uug_50k_balanced/images}"
+export INCLUDE_SUBFOLDERS="${INCLUDE_SUBFOLDERS:-}"
 export MODEL_NAME="${MODEL_NAME:-BLIP3o/BLIP3o-Model-8B}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/runs/generation_experiments}"
 export TOTAL_STEPS="${TOTAL_STEPS:-10000}"
@@ -53,10 +54,16 @@ export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
 ulimit -Sc 0
 ulimit -Hc 0
 
+SUBFOLDER_FLAGS=()
+if [[ -n "$INCLUDE_SUBFOLDERS" ]]; then
+  SUBFOLDER_FLAGS+=(--include_subfolders "$INCLUDE_SUBFOLDERS")
+fi
+
 "$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" "$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py" \
   --experiment generation_self_evolving \
   --data_dir "$DATA_DIR" \
   --data_split all \
+  "${SUBFOLDER_FLAGS[@]}" \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/G00_main_method" \
   --run_name "g00_main_default_s42" \
