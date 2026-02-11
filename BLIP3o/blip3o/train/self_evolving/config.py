@@ -48,10 +48,25 @@ class UnderstandingSelfEvolvingConfig:
 
     # Reward shaping
     solver_soft_gamma: float = 0.7
+    solver_use_temperature_mix: bool = True
+    solver_temp_min: float = 0.7
+    solver_temp_max: float = 1.3
+    solver_top_p_min: float = 0.5
+    solver_top_p_max: float = 1.0
+    sc_entropy_min: float = 0.15
+    sc_entropy_max: float = 1.2
+    sc_margin_max: float = 0.90
+    sc_negative_weight: float = 0.25
+    skip_solver_update_when_uninformative: bool = True
     len_penalty_weight: float = 0.10
     len_penalty_target_words: int = 6
     prop_entropy_mu: float = 0.90
     prop_entropy_sigma: float = 0.35
+    adaptive_prop_entropy_target: bool = True
+    prop_entropy_ema_momentum: float = 0.90
+    prop_entropy_mu_min: float = 0.40
+    prop_entropy_mu_max: float = 1.5
+    zero_entropy_reward_cap: float = 0.10  # cap proposer reward when entropy=0 (unanimous)
 
     # KL control
     kl_coef: float = 0.01
@@ -150,10 +165,25 @@ class GenerationSelfEvolvingConfig:
 
     # Reward shaping
     solver_soft_gamma: float = 0.7
+    solver_use_temperature_mix: bool = True
+    solver_temp_min: float = 0.7
+    solver_temp_max: float = 1.3
+    solver_top_p_min: float = 0.5
+    solver_top_p_max: float = 1.0
+    sc_entropy_min: float = 0.15
+    sc_entropy_max: float = 1.2
+    sc_margin_max: float = 0.90
+    sc_negative_weight: float = 0.25
+    skip_solver_update_when_uninformative: bool = True
     len_penalty_weight: float = 0.10
     len_penalty_target_words: int = 6
     prop_entropy_mu: float = 0.90
     prop_entropy_sigma: float = 0.35
+    adaptive_prop_entropy_target: bool = True
+    prop_entropy_ema_momentum: float = 0.90
+    prop_entropy_mu_min: float = 0.40
+    prop_entropy_mu_max: float = 1.5
+    zero_entropy_reward_cap: float = 0.10
     reward_spec_weight: float = 0.65
     reward_cycle_weight: float = 0.20
     reward_diversity_weight: float = 0.10

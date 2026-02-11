@@ -80,10 +80,29 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Reward shaping
     p.add_argument("--solver_soft_gamma", type=float, default=0.7)
+    p.add_argument("--solver_use_temperature_mix", action="store_true", default=True)
+    p.add_argument("--disable_solver_temperature_mix", dest="solver_use_temperature_mix", action="store_false")
+    p.add_argument("--solver_temp_min", type=float, default=0.7)
+    p.add_argument("--solver_temp_max", type=float, default=1.3)
+    p.add_argument("--sc_entropy_min", type=float, default=0.15)
+    p.add_argument("--sc_entropy_max", type=float, default=1.2)
+    p.add_argument("--sc_margin_max", type=float, default=0.90)
+    p.add_argument("--sc_negative_weight", type=float, default=0.25)
+    p.add_argument("--skip_solver_update_when_uninformative", action="store_true", default=True)
+    p.add_argument(
+        "--allow_solver_update_when_uninformative",
+        dest="skip_solver_update_when_uninformative",
+        action="store_false",
+    )
     p.add_argument("--len_penalty_weight", type=float, default=0.10)
     p.add_argument("--len_penalty_target_words", type=int, default=6)
     p.add_argument("--prop_entropy_mu", type=float, default=0.90)
     p.add_argument("--prop_entropy_sigma", type=float, default=0.35)
+    p.add_argument("--adaptive_prop_entropy_target", action="store_true", default=True)
+    p.add_argument("--fixed_prop_entropy_target", dest="adaptive_prop_entropy_target", action="store_false")
+    p.add_argument("--prop_entropy_ema_momentum", type=float, default=0.95)
+    p.add_argument("--prop_entropy_mu_min", type=float, default=0.05)
+    p.add_argument("--prop_entropy_mu_max", type=float, default=1.5)
     p.add_argument("--reward_spec_weight", type=float, default=0.65)
     p.add_argument("--reward_cycle_weight", type=float, default=0.20)
     p.add_argument("--reward_diversity_weight", type=float, default=0.10)
@@ -184,10 +203,22 @@ def _build_understanding_config(args):
         max_new_tokens_proposer=args.max_new_tokens_proposer,
         num_solver_samples=args.num_solver_samples,
         solver_soft_gamma=args.solver_soft_gamma,
+        solver_use_temperature_mix=args.solver_use_temperature_mix,
+        solver_temp_min=args.solver_temp_min,
+        solver_temp_max=args.solver_temp_max,
+        sc_entropy_min=args.sc_entropy_min,
+        sc_entropy_max=args.sc_entropy_max,
+        sc_margin_max=args.sc_margin_max,
+        sc_negative_weight=args.sc_negative_weight,
+        skip_solver_update_when_uninformative=args.skip_solver_update_when_uninformative,
         len_penalty_weight=args.len_penalty_weight,
         len_penalty_target_words=args.len_penalty_target_words,
         prop_entropy_mu=args.prop_entropy_mu,
         prop_entropy_sigma=args.prop_entropy_sigma,
+        adaptive_prop_entropy_target=args.adaptive_prop_entropy_target,
+        prop_entropy_ema_momentum=args.prop_entropy_ema_momentum,
+        prop_entropy_mu_min=args.prop_entropy_mu_min,
+        prop_entropy_mu_max=args.prop_entropy_mu_max,
         kl_coef=args.kl_coef,
         kl_target=args.kl_target,
         kl_adapt_rate=args.kl_adapt_rate,
@@ -263,10 +294,22 @@ def _build_generation_config(args):
         dpo_label_smoothing=args.dpo_label_smoothing,
         dpo_min_reward_gap=args.dpo_min_reward_gap,
         solver_soft_gamma=args.solver_soft_gamma,
+        solver_use_temperature_mix=args.solver_use_temperature_mix,
+        solver_temp_min=args.solver_temp_min,
+        solver_temp_max=args.solver_temp_max,
+        sc_entropy_min=args.sc_entropy_min,
+        sc_entropy_max=args.sc_entropy_max,
+        sc_margin_max=args.sc_margin_max,
+        sc_negative_weight=args.sc_negative_weight,
+        skip_solver_update_when_uninformative=args.skip_solver_update_when_uninformative,
         len_penalty_weight=args.len_penalty_weight,
         len_penalty_target_words=args.len_penalty_target_words,
         prop_entropy_mu=args.prop_entropy_mu,
         prop_entropy_sigma=args.prop_entropy_sigma,
+        adaptive_prop_entropy_target=args.adaptive_prop_entropy_target,
+        prop_entropy_ema_momentum=args.prop_entropy_ema_momentum,
+        prop_entropy_mu_min=args.prop_entropy_mu_min,
+        prop_entropy_mu_max=args.prop_entropy_mu_max,
         reward_spec_weight=args.reward_spec_weight,
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
@@ -355,10 +398,22 @@ def _build_unified_config(args):
         dpo_label_smoothing=args.dpo_label_smoothing,
         dpo_min_reward_gap=args.dpo_min_reward_gap,
         solver_soft_gamma=args.solver_soft_gamma,
+        solver_use_temperature_mix=args.solver_use_temperature_mix,
+        solver_temp_min=args.solver_temp_min,
+        solver_temp_max=args.solver_temp_max,
+        sc_entropy_min=args.sc_entropy_min,
+        sc_entropy_max=args.sc_entropy_max,
+        sc_margin_max=args.sc_margin_max,
+        sc_negative_weight=args.sc_negative_weight,
+        skip_solver_update_when_uninformative=args.skip_solver_update_when_uninformative,
         len_penalty_weight=args.len_penalty_weight,
         len_penalty_target_words=args.len_penalty_target_words,
         prop_entropy_mu=args.prop_entropy_mu,
         prop_entropy_sigma=args.prop_entropy_sigma,
+        adaptive_prop_entropy_target=args.adaptive_prop_entropy_target,
+        prop_entropy_ema_momentum=args.prop_entropy_ema_momentum,
+        prop_entropy_mu_min=args.prop_entropy_mu_min,
+        prop_entropy_mu_max=args.prop_entropy_mu_max,
         reward_spec_weight=args.reward_spec_weight,
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,

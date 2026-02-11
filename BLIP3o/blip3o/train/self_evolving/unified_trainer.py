@@ -69,6 +69,51 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             return False
         return (local_idx % freq) == 0
 
+    def _solver_top_p_schedule(self) -> List[float]:
+        """Vary top_p across solver samples to inject diversity.
+
+        Ranges from solver_top_p_min (default 0.5) to solver_top_p_max (default 1.0).
+        Lower top_p forces the model to commit to fewer tokens, producing more
+        varied short answers that break unanimous voting on trivially easy questions.
+        """
+        n = max(1, int(self.cfg.num_solver_samples))
+        top_p_min = float(getattr(self.cfg, "solver_top_p_min", 0.5))
+        top_p_max = float(getattr(self.cfg, "solver_top_p_max", 1.0))
+        if n <= 1:
+            return [top_p_max]
+        if abs(top_p_max - top_p_min) < 1e-8:
+            return [top_p_min] * n
+        return [top_p_min + (top_p_max - top_p_min) * (float(i) / float(n - 1)) for i in range(n)]
+
+    def _solver_temperature_schedule(self) -> List[float]:
+        n = max(1, int(self.cfg.num_solver_samples))
+        base = float(self.cfg.temp)
+        if n <= 1 or not bool(getattr(self.cfg, "solver_use_temperature_mix", True)):
+            return [base] * n
+        tmin = float(getattr(self.cfg, "solver_temp_min", base))
+        tmax = float(getattr(self.cfg, "solver_temp_max", base))
+        if tmin > tmax:
+            tmin, tmax = tmax, tmin
+        if abs(tmax - tmin) < 1e-8:
+            return [tmin] * n
+        return [tmin + (tmax - tmin) * (float(i) / float(n - 1)) for i in range(n)]
+
+    def _update_proposer_entropy_target(self, entropy_nats: float) -> float:
+        if not bool(getattr(self.cfg, "adaptive_prop_entropy_target", True)):
+            return float(self.cfg.prop_entropy_mu)
+        anchor = self._dist_mean(float(entropy_nats))
+        prev = float(getattr(self, "proposer_entropy_mu_ema", self.cfg.prop_entropy_mu))
+        momentum = float(getattr(self.cfg, "prop_entropy_ema_momentum", 0.95))
+        momentum = max(0.0, min(0.9999, momentum))
+        ema = momentum * prev + (1.0 - momentum) * anchor
+        mu_min = float(getattr(self.cfg, "prop_entropy_mu_min", 0.0))
+        mu_max = float(getattr(self.cfg, "prop_entropy_mu_max", 10.0))
+        if mu_min > mu_max:
+            mu_min, mu_max = mu_max, mu_min
+        ema = max(mu_min, min(mu_max, ema))
+        self.proposer_entropy_mu_ema = float(ema)
+        return float(ema)
+
     def _understanding_step(self, step: int, image: Image.Image, meta: Dict) -> Dict[str, object]:
         step_t0 = time.perf_counter()
         proposer_prompt = build_proposer_prompt()
@@ -89,14 +134,26 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         solver_answers_norm: List[str] = []
         pre_words: List[int] = []
 
-        for _ in range(self.cfg.num_solver_samples):
+        solver_temperatures = self._solver_temperature_schedule()
+        solver_top_ps = self._solver_top_p_schedule()
+        for sample_idx in range(self.cfg.num_solver_samples):
+            solver_temp = (
+                float(solver_temperatures[sample_idx])
+                if sample_idx < len(solver_temperatures)
+                else float(self.cfg.temp)
+            )
+            solver_top_p = (
+                float(solver_top_ps[sample_idx])
+                if sample_idx < len(solver_top_ps)
+                else float(self.cfg.top_p)
+            )
             solver_out = self._generate(
                 image=image,
                 prompt=solver_prompt,
                 adapter_name="default" if self.cfg.use_lora else None,
                 max_new_tokens=self.cfg.max_new_tokens_solver,
-                temperature=self.cfg.temp,
-                top_p=self.cfg.top_p,
+                temperature=solver_temp,
+                top_p=solver_top_p,
             )
             answer_raw = _parse_answer(solver_out)
             solver_outputs.append(solver_out)
@@ -112,23 +169,62 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         probs = [count / float(self.cfg.num_solver_samples) for count in hist.values()]
         entropy_nats = shannon_entropy_nats(probs)
 
-        solver_rewards_raw = [1.0 if ans == maj_answer else 0.0 for ans in solver_answers_norm]
+        sorted_probs = sorted(probs, reverse=True)
+        p1 = float(sorted_probs[0]) if sorted_probs else 0.0
+        p2 = float(sorted_probs[1]) if len(sorted_probs) > 1 else 0.0
+        margin = max(0.0, p1 - p2)
+        entropy_min = float(getattr(self.cfg, "sc_entropy_min", 0.15))
+        entropy_max = float(getattr(self.cfg, "sc_entropy_max", 1.2))
+        if entropy_min > entropy_max:
+            entropy_min, entropy_max = entropy_max, entropy_min
+        margin_max = float(getattr(self.cfg, "sc_margin_max", 0.9))
+        neg_weight = float(getattr(self.cfg, "sc_negative_weight", 0.25))
+        solver_informative_local = bool(
+            (entropy_min <= entropy_nats <= entropy_max) or (margin <= margin_max)
+        )
+        solver_informative_all = self._dist_all_bool(solver_informative_local)
+
+        solver_rewards_raw = [
+            margin if ans == maj_answer else (-neg_weight * margin)
+            for ans in solver_answers_norm
+        ]
         target_w = max(1, self.cfg.len_penalty_target_words)
         penalties = [min(1.0, max(0.0, (w - target_w) / float(target_w))) for w in pre_words]
         prob_map = {ans: count / float(self.cfg.num_solver_samples) for ans, count in hist.items()}
         solver_probs = [prob_map[ans] for ans in solver_answers_norm]
         solver_rewards_soft = [
             (prob ** self.cfg.solver_soft_gamma) * (1.0 - self.cfg.len_penalty_weight * pen)
-            for prob, pen in zip(solver_probs, penalties)
+            * reward_raw
+            for prob, pen, reward_raw in zip(solver_probs, penalties, solver_rewards_raw)
         ]
-        proposer_reward = gaussian_reward(entropy_nats, self.cfg.prop_entropy_mu, self.cfg.prop_entropy_sigma)
+        proposer_entropy_mu_used = self._update_proposer_entropy_target(entropy_nats)
+        proposer_reward = gaussian_reward(
+            entropy_nats,
+            proposer_entropy_mu_used,
+            self.cfg.prop_entropy_sigma,
+        )
+        # Penalize zero-entropy (unanimous) outcomes — the question was too easy.
+        # When all solvers agree perfectly, the proposer gets at most 10% of the
+        # Gaussian reward.  Any disagreement (entropy > 0) removes the penalty.
+        zero_entropy_cap = float(getattr(self.cfg, "zero_entropy_reward_cap", 0.10))
+        if entropy_nats < 1e-6 and zero_entropy_cap < 1.0:
+            proposer_reward = min(proposer_reward, zero_entropy_cap)
 
         solver_stats_list = []
-        solver_update_applied = (
+        solver_update_due = (
             self.solver_updater is not None
             and self.cfg.solver_update_freq > 0
             and (step % self.cfg.solver_update_freq == 0)
         )
+        solver_update_applied = bool(solver_update_due)
+        solver_update_skip_reason: Optional[str] = None
+        if (
+            solver_update_applied
+            and bool(getattr(self.cfg, "skip_solver_update_when_uninformative", True))
+            and not solver_informative_all
+        ):
+            solver_update_applied = False
+            solver_update_skip_reason = "uninformative_self_consistency"
         if solver_update_applied:
             for sample_idx, (completion, reward) in enumerate(zip(solver_outputs, solver_rewards_soft)):
                 local_can_solver_update = bool(str(completion).strip())
@@ -166,9 +262,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 del stats
                 torch.cuda.empty_cache()
                 gc.collect()
+        elif solver_update_due and solver_update_skip_reason is not None:
+            self._append_jsonl(
+                self.policy_updates_log_path,
+                {
+                    "step": step,
+                    "role": "solver",
+                    "source": "understanding",
+                    "skipped": True,
+                    "reason": solver_update_skip_reason,
+                    "solver_margin": margin,
+                    "entropy_nats": entropy_nats,
+                },
+            )
 
         proposer_stats = None
-        if self._is_proposer_update_due(step, phase="understanding"):
+        proposer_skip_reason: Optional[str] = None
+        proposer_update_due = self._is_proposer_update_due(step, phase="understanding")
+        if proposer_update_due:
             baseline_before = self.proposer_baseline
             proposer_completion = str(proposer_out or "").strip()
             local_can_proposer_update = bool(proposer_completion)
@@ -186,6 +297,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     self._policy_update_counts["proposer"] += 1
                 self._update_baseline("proposer", proposer_reward)
             else:
+                proposer_skip_reason = "distributed_peer_empty_proposer_completion"
                 self._append_jsonl(
                     self.policy_updates_log_path,
                     {
@@ -193,10 +305,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         "role": "proposer",
                         "source": "understanding",
                         "skipped": True,
-                        "reason": "distributed_peer_empty_proposer_completion",
+                        "reason": proposer_skip_reason,
                     },
                 )
             self._sync_state_scalars()
+        else:
+            proposer_skip_reason = "update_not_due"
 
         step_dt = time.perf_counter() - step_t0
         record = {
@@ -213,12 +327,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "majority_answer": maj_answer,
             "majority_count": maj_count,
             "majority_fraction": maj_frac,
+            "solver_top1_prob": p1,
+            "solver_top2_prob": p2,
+            "solver_margin": margin,
+            "solver_informative_local": solver_informative_local,
+            "solver_informative_all": solver_informative_all,
+            "solver_temperature_schedule": solver_temperatures,
+            "solver_top_p_schedule": solver_top_ps,
             "entropy_nats": entropy_nats,
+            "proposer_entropy_mu_used": proposer_entropy_mu_used,
             "proposer_reward": proposer_reward,
             "solver_baseline": self.solver_baseline,
             "proposer_baseline": self.proposer_baseline,
+            "solver_update_due": solver_update_due,
             "solver_update_applied": solver_update_applied,
+            "solver_update_skip_reason": solver_update_skip_reason,
             "solver_stats": solver_stats_list,
+            "proposer_update_due": proposer_update_due,
+            "proposer_skip_reason": proposer_skip_reason,
             "proposer_stats": proposer_stats,
         }
         self._append_jsonl(self.iter_log_path, record)
@@ -231,8 +357,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "image_path": meta.get("path"),
                 "majority_answer": maj_answer,
                 "majority_fraction": maj_frac,
+                "solver_top1_prob": p1,
+                "solver_top2_prob": p2,
+                "solver_margin": margin,
+                "solver_informative_local": solver_informative_local,
+                "solver_informative_all": solver_informative_all,
                 "entropy_nats": entropy_nats,
                 "solver_reward_soft_mean": sum(solver_rewards_soft) / max(1, len(solver_rewards_soft)),
+                "proposer_entropy_mu_used": proposer_entropy_mu_used,
                 "proposer_reward": proposer_reward,
             },
         )
@@ -240,13 +372,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if self.is_main_process and step % self.cfg.log_every == 0:
             print(
                 f"[Step {step:05d}][U] maj={maj_count}/{self.cfg.num_solver_samples} "
-                f"maj_frac={maj_frac:.2f} H={entropy_nats:.3f} P_R={proposer_reward:.3f} "
+                f"maj_frac={maj_frac:.2f} H={entropy_nats:.3f} M={margin:.3f} "
+                f"info={int(solver_informative_all)} P_R={proposer_reward:.3f} "
                 f"dt={step_dt:.1f}s"
             )
             print(f"  Q: {question}")
 
         self._update_metric("u_majority_fraction", self._dist_mean(maj_frac))
         self._update_metric("u_entropy_nats", self._dist_mean(entropy_nats))
+        self._update_metric("u_solver_margin", self._dist_mean(margin))
+        self._update_metric("u_solver_informative", 1.0 if solver_informative_all else 0.0)
+        self._update_metric("u_proposer_entropy_mu_used", self._dist_mean(proposer_entropy_mu_used))
         self._update_metric("u_proposer_reward", self._dist_mean(proposer_reward))
 
         return record
@@ -324,6 +460,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             "generator_update_rule": self.cfg.generator_update_rule,
                             "generator_update_mode": out.get("generator_update_mode"),
                             "generator_skipped_reason": out.get("generator_skipped_reason"),
+                            "proposer_update_due": out.get("proposer_update_due"),
+                            "proposer_skip_reason": out.get("proposer_skip_reason"),
+                            "proposer_stats": out.get("proposer_stats"),
                             "generator_baseline": self.generator_baseline,
                             "proposer_baseline": self.proposer_baseline,
                             "solver_baseline": self.solver_baseline,

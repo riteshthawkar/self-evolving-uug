@@ -124,8 +124,38 @@ class UnderstandingSelfEvolvingTrainer:
             return
         self.solver_baseline = self._dist_mean(self.solver_baseline)
         self.proposer_baseline = self._dist_mean(self.proposer_baseline)
+        self.proposer_entropy_mu_ema = self._dist_mean(self.proposer_entropy_mu_ema)
         self.solver_updater.kl_coef = self._dist_mean(self.solver_updater.kl_coef)
         self.proposer_updater.kl_coef = self._dist_mean(self.proposer_updater.kl_coef)
+
+    def _solver_temperature_schedule(self) -> List[float]:
+        n = max(1, int(self.cfg.num_solver_samples))
+        base = float(self.cfg.temp)
+        if n <= 1 or not bool(getattr(self.cfg, "solver_use_temperature_mix", True)):
+            return [base] * n
+        tmin = float(getattr(self.cfg, "solver_temp_min", base))
+        tmax = float(getattr(self.cfg, "solver_temp_max", base))
+        if tmin > tmax:
+            tmin, tmax = tmax, tmin
+        if abs(tmax - tmin) < 1e-8:
+            return [tmin] * n
+        return [tmin + (tmax - tmin) * (float(i) / float(n - 1)) for i in range(n)]
+
+    def _update_proposer_entropy_target(self, entropy_nats: float) -> float:
+        if not bool(getattr(self.cfg, "adaptive_prop_entropy_target", True)):
+            return float(self.cfg.prop_entropy_mu)
+        anchor = self._dist_mean(float(entropy_nats))
+        prev = float(getattr(self, "proposer_entropy_mu_ema", self.cfg.prop_entropy_mu))
+        momentum = float(getattr(self.cfg, "prop_entropy_ema_momentum", 0.95))
+        momentum = max(0.0, min(0.9999, momentum))
+        ema = momentum * prev + (1.0 - momentum) * anchor
+        mu_min = float(getattr(self.cfg, "prop_entropy_mu_min", 0.0))
+        mu_max = float(getattr(self.cfg, "prop_entropy_mu_max", 10.0))
+        if mu_min > mu_max:
+            mu_min, mu_max = mu_max, mu_min
+        ema = max(mu_min, min(mu_max, ema))
+        self.proposer_entropy_mu_ema = float(ema)
+        return float(ema)
 
     # -------------------------------------------------------------------
     # Init
@@ -206,6 +236,7 @@ class UnderstandingSelfEvolvingTrainer:
 
         self.solver_baseline = 0.0
         self.proposer_baseline = 0.0
+        self.proposer_entropy_mu_ema = float(config.prop_entropy_mu)
         self.start_step = max(0, int(config.start_step))
 
         self._metric_stats: Dict[str, Dict[str, float]] = {}
@@ -408,6 +439,9 @@ class UnderstandingSelfEvolvingTrainer:
 
         self.solver_baseline = float(state.get("solver_baseline", self.solver_baseline))
         self.proposer_baseline = float(state.get("proposer_baseline", self.proposer_baseline))
+        self.proposer_entropy_mu_ema = float(
+            state.get("proposer_entropy_mu_ema", self.proposer_entropy_mu_ema)
+        )
 
         py_state = state.get("py_random_state")
         if py_state is not None:
@@ -432,6 +466,7 @@ class UnderstandingSelfEvolvingTrainer:
                     "restored_step": restored_step,
                     "restored_solver_baseline": self.solver_baseline,
                     "restored_proposer_baseline": self.proposer_baseline,
+                    "restored_proposer_entropy_mu_ema": self.proposer_entropy_mu_ema,
                 },
             )
         self._dist_barrier()
@@ -444,6 +479,7 @@ class UnderstandingSelfEvolvingTrainer:
             "proposer_updater": self.proposer_updater.state_dict(),
             "solver_baseline": float(self.solver_baseline),
             "proposer_baseline": float(self.proposer_baseline),
+            "proposer_entropy_mu_ema": float(self.proposer_entropy_mu_ema),
             "py_random_state": random.getstate(),
             "torch_rng_state": torch.get_rng_state(),
         }
@@ -882,13 +918,19 @@ class UnderstandingSelfEvolvingTrainer:
                 solver_answers_norm: List[str] = []
                 pre_words: List[int] = []
 
-                for _ in range(cfg.num_solver_samples):
+                solver_temperatures = self._solver_temperature_schedule()
+                for sample_idx in range(cfg.num_solver_samples):
+                    solver_temp = (
+                        float(solver_temperatures[sample_idx])
+                        if sample_idx < len(solver_temperatures)
+                        else float(cfg.temp)
+                    )
                     solver_out = self._generate(
                         image=image,
                         prompt=solver_prompt,
                         adapter_name="default" if cfg.use_lora else None,
                         max_new_tokens=cfg.max_new_tokens_solver,
-                        temperature=cfg.temp,
+                        temperature=solver_temp,
                         top_p=cfg.top_p,
                     )
                     answer_raw = _parse_answer(solver_out)
@@ -906,8 +948,24 @@ class UnderstandingSelfEvolvingTrainer:
                 probs = [count / float(cfg.num_solver_samples) for count in hist.values()]
                 entropy_nats = shannon_entropy_nats(probs)
 
+                sorted_probs = sorted(probs, reverse=True)
+                p1 = float(sorted_probs[0]) if sorted_probs else 0.0
+                p2 = float(sorted_probs[1]) if len(sorted_probs) > 1 else 0.0
+                margin = max(0.0, p1 - p2)
+                entropy_min = float(getattr(cfg, "sc_entropy_min", 0.15))
+                entropy_max = float(getattr(cfg, "sc_entropy_max", 1.2))
+                if entropy_min > entropy_max:
+                    entropy_min, entropy_max = entropy_max, entropy_min
+                margin_max = float(getattr(cfg, "sc_margin_max", 0.9))
+                neg_weight = float(getattr(cfg, "sc_negative_weight", 0.25))
+                solver_informative_local = bool(
+                    (entropy_min <= entropy_nats <= entropy_max) or (margin <= margin_max)
+                )
+                solver_informative_all = self._dist_all_bool(solver_informative_local)
+
                 solver_rewards_raw = [
-                    1.0 if ans == maj_answer else 0.0 for ans in solver_answers_norm
+                    margin if ans == maj_answer else (-neg_weight * margin)
+                    for ans in solver_answers_norm
                 ]
                 target_w = max(1, cfg.len_penalty_target_words)
                 penalties = [
@@ -918,95 +976,124 @@ class UnderstandingSelfEvolvingTrainer:
                 }
                 solver_probs = [prob_map[ans] for ans in solver_answers_norm]
                 solver_rewards_soft = [
-                    (prob ** cfg.solver_soft_gamma) * (1.0 - cfg.len_penalty_weight * pen)
-                    for prob, pen in zip(solver_probs, penalties)
+                    (prob ** cfg.solver_soft_gamma)
+                    * (1.0 - cfg.len_penalty_weight * pen)
+                    * reward_raw
+                    for prob, pen, reward_raw in zip(solver_probs, penalties, solver_rewards_raw)
                 ]
+                proposer_entropy_mu_used = self._update_proposer_entropy_target(entropy_nats)
                 proposer_reward = gaussian_reward(
-                    entropy_nats, cfg.prop_entropy_mu, cfg.prop_entropy_sigma
+                    entropy_nats, proposer_entropy_mu_used, cfg.prop_entropy_sigma
                 )
 
                 # --- Solver policy updates ---
                 solver_baseline_before_step = self.solver_baseline
                 solver_step_stats = []
-                for sample_idx, (
-                    completion,
-                    reward,
-                    reward_raw,
-                    answer_raw,
-                    answer_norm,
-                    prob,
-                    penalty,
-                    words,
-                ) in enumerate(
-                    zip(
-                        solver_outputs,
-                        solver_rewards_soft,
-                        solver_rewards_raw,
-                        solver_answers_raw,
-                        solver_answers_norm,
-                        solver_probs,
-                        penalties,
-                        pre_words,
-                    ),
-                    start=1,
+                solver_update_due = True
+                solver_update_applied = True
+                solver_update_skip_reason = None
+                if (
+                    bool(getattr(cfg, "skip_solver_update_when_uninformative", True))
+                    and not solver_informative_all
                 ):
-                    local_can_solver_update = bool(str(completion).strip())
-                    can_solver_update = self._dist_all_bool(local_can_solver_update)
-                    if not can_solver_update:
+                    solver_update_applied = False
+                    solver_update_skip_reason = "uninformative_self_consistency"
+
+                if solver_update_applied:
+                    for sample_idx, (
+                        completion,
+                        reward,
+                        reward_raw,
+                        answer_raw,
+                        answer_norm,
+                        prob,
+                        penalty,
+                        words,
+                        temp,
+                    ) in enumerate(
+                        zip(
+                            solver_outputs,
+                            solver_rewards_soft,
+                            solver_rewards_raw,
+                            solver_answers_raw,
+                            solver_answers_norm,
+                            solver_probs,
+                            penalties,
+                            pre_words,
+                            solver_temperatures,
+                        ),
+                        start=1,
+                    ):
+                        local_can_solver_update = bool(str(completion).strip())
+                        can_solver_update = self._dist_all_bool(local_can_solver_update)
+                        if not can_solver_update:
+                            self._append_jsonl(
+                                self.policy_updates_log_path,
+                                {
+                                    "step": step,
+                                    "role": "solver",
+                                    "sample_idx": sample_idx,
+                                    "skipped": True,
+                                    "reason": "distributed_peer_empty_solver_completion",
+                                },
+                            )
+                            continue
+                        baseline_before = self.solver_baseline
+                        stats = self.solver_updater.step(
+                            image=image,
+                            prompt=solver_prompt,
+                            completion=completion,
+                            reward=reward,
+                            baseline=baseline_before,
+                            device=self.device,
+                        )
+                        solver_step_stats.append(stats)
+                        if stats.get("did_step", True):
+                            self._policy_update_counts["solver"] += 1
+                        self._update_baseline("solver", reward)
+                        self._sync_state_scalars()
+                        baseline_after = self.solver_baseline
+
+                        self._append_jsonl(
+                            self.rollouts_log_path,
+                            {
+                                "step": step,
+                                "sample_idx": sample_idx,
+                                "image_path": meta.get("path"),
+                                "solver_prompt": solver_prompt,
+                                "solver_completion": completion,
+                                "answer_raw": answer_raw,
+                                "answer_norm": answer_norm,
+                                "answer_probability": prob,
+                                "solver_temperature": temp,
+                                "reward_raw": reward_raw,
+                                "reward_soft": reward,
+                                "length_penalty": penalty,
+                                "pre_answer_word_count": words,
+                            },
+                        )
                         self._append_jsonl(
                             self.policy_updates_log_path,
                             {
                                 "step": step,
                                 "role": "solver",
                                 "sample_idx": sample_idx,
-                                "skipped": True,
-                                "reason": "distributed_peer_empty_solver_completion",
+                                "reward": reward,
+                                "baseline_before": baseline_before,
+                                "baseline_after": baseline_after,
+                                "stats": stats,
                             },
                         )
-                        continue
-                    baseline_before = self.solver_baseline
-                    stats = self.solver_updater.step(
-                        image=image,
-                        prompt=solver_prompt,
-                        completion=completion,
-                        reward=reward,
-                        baseline=baseline_before,
-                        device=self.device,
-                    )
-                    solver_step_stats.append(stats)
-                    if stats.get("did_step", True):
-                        self._policy_update_counts["solver"] += 1
-                    self._update_baseline("solver", reward)
-                    self._sync_state_scalars()
-                    baseline_after = self.solver_baseline
-
-                    self._append_jsonl(
-                        self.rollouts_log_path,
-                        {
-                            "step": step,
-                            "sample_idx": sample_idx,
-                            "image_path": meta.get("path"),
-                            "solver_prompt": solver_prompt,
-                            "solver_completion": completion,
-                            "answer_raw": answer_raw,
-                            "answer_norm": answer_norm,
-                            "answer_probability": prob,
-                            "reward_raw": reward_raw,
-                            "reward_soft": reward,
-                            "length_penalty": penalty,
-                            "pre_answer_word_count": words,
-                        },
-                    )
+                else:
                     self._append_jsonl(
                         self.policy_updates_log_path,
                         {
                             "step": step,
                             "role": "solver",
-                            "sample_idx": sample_idx,
-                            "reward": reward,
-                            "baseline_before": baseline_before,
-                            "baseline_after": baseline_after,
-                            "stats": stats,
+                            "skipped": True,
+                            "reason": solver_update_skip_reason,
+                            "solver_margin": margin,
+                            "entropy_nats": entropy_nats,
                         },
                     )
                 solver_baseline_after_step = self.solver_baseline
@@ -1088,6 +1175,7 @@ class UnderstandingSelfEvolvingTrainer:
                     print(
                         f"[Step {step:05d}] maj={maj_count}/{cfg.num_solver_samples} "
                         f"maj_frac={maj_frac_global:.2f} H={entropy_nats_global:.3f} "
+                        f"M={margin:.3f} info={int(solver_informative_all)} "
                         f"P_R={proposer_reward_global:.3f} "
                         f"S_R_raw={solver_raw_mean_global:.3f} S_R_soft={solver_soft_mean_global:.3f} "
                         f"pre_words={pre_words_mean_global:.2f}"
@@ -1119,11 +1207,21 @@ class UnderstandingSelfEvolvingTrainer:
                         "majority_fraction": maj_frac,
                         "answer_histogram": hist,
                         "answer_probabilities": prob_map,
+                        "solver_top1_prob": p1,
+                        "solver_top2_prob": p2,
+                        "solver_margin": margin,
+                        "solver_informative_local": solver_informative_local,
+                        "solver_informative_all": solver_informative_all,
                         "entropy_nats": entropy_nats,
                         "solver_rewards_raw": solver_rewards_raw,
                         "solver_rewards_soft": solver_rewards_soft,
                         "solver_rewards_raw_mean": solver_raw_mean,
                         "solver_rewards_soft_mean": solver_soft_mean,
+                        "solver_temperature_schedule": solver_temperatures,
+                        "solver_update_due": solver_update_due,
+                        "solver_update_applied": solver_update_applied,
+                        "solver_update_skip_reason": solver_update_skip_reason,
+                        "proposer_entropy_mu_used": proposer_entropy_mu_used,
                         "proposer_reward": proposer_reward,
                         "solver_baseline_before": solver_baseline_before_step,
                         "solver_baseline_after": solver_baseline_after_step,
@@ -1144,18 +1242,28 @@ class UnderstandingSelfEvolvingTrainer:
                         "solver_answers_norm": solver_answers_norm,
                         "solver_rewards_raw": solver_rewards_raw,
                         "solver_rewards_soft": solver_rewards_soft,
+                        "solver_temperature_schedule": solver_temperatures,
                         "solver_probs": solver_probs,
                         "solver_len_penalties": penalties,
                         "pre_answer_word_counts": pre_words,
                         "majority_answer": maj_answer,
                         "majority_count": maj_count,
                         "majority_fraction": maj_frac,
+                        "solver_top1_prob": p1,
+                        "solver_top2_prob": p2,
+                        "solver_margin": margin,
+                        "solver_informative_local": solver_informative_local,
+                        "solver_informative_all": solver_informative_all,
                         "entropy_nats": entropy_nats,
+                        "proposer_entropy_mu_used": proposer_entropy_mu_used,
                         "proposer_reward": proposer_reward,
                         "solver_baseline_before": solver_baseline_before_step,
                         "solver_baseline_after": solver_baseline_after_step,
                         "proposer_baseline_before": proposer_baseline_before_step,
                         "proposer_baseline_after": proposer_baseline_after_step,
+                        "solver_update_due": solver_update_due,
+                        "solver_update_applied": solver_update_applied,
+                        "solver_update_skip_reason": solver_update_skip_reason,
                         "solver_kl_coef": self.solver_updater.kl_coef,
                         "proposer_kl_coef": self.proposer_updater.kl_coef,
                         "solver_stats_per_sample": solver_step_stats,
@@ -1188,6 +1296,9 @@ class UnderstandingSelfEvolvingTrainer:
                 self._update_metric("solver_reward_soft_mean", solver_soft_mean_global)
                 self._update_metric("proposer_reward", proposer_reward_global)
                 self._update_metric("entropy_nats", entropy_nats_global)
+                self._update_metric("solver_margin", self._dist_mean(margin))
+                self._update_metric("solver_informative", 1.0 if solver_informative_all else 0.0)
+                self._update_metric("proposer_entropy_mu_used", self._dist_mean(proposer_entropy_mu_used))
                 self._update_metric("majority_fraction", maj_frac_global)
                 self._update_metric("pre_answer_words_mean", pre_words_mean_global)
                 self._update_metric("solver_kl_coef", float(self.solver_updater.kl_coef))
