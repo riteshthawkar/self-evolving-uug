@@ -198,6 +198,7 @@ class GenerationSelfEvolvingTrainer:
             return
         self.generator_baseline = self._dist_mean(self.generator_baseline)
         self.proposer_baseline = self._dist_mean(self.proposer_baseline)
+        self.proposer_entropy_mu_ema = self._dist_mean(self.proposer_entropy_mu_ema)
         if self.solver_updater is not None:
             self.solver_baseline = self._dist_mean(self.solver_baseline)
             self.solver_updater.kl_coef = self._dist_mean(self.solver_updater.kl_coef)
@@ -363,6 +364,7 @@ class GenerationSelfEvolvingTrainer:
         self.generator_baseline = 0.0
         self.proposer_baseline = 0.0
         self.solver_baseline = 0.0
+        self.proposer_entropy_mu_ema = float(config.prop_entropy_mu)
         self.start_step = max(0, int(config.start_step))
 
         self._metric_stats: Dict[str, Dict[str, float]] = {}
@@ -579,6 +581,9 @@ class GenerationSelfEvolvingTrainer:
         self.solver_baseline = float(state.get("solver_baseline", self.solver_baseline))
         self.proposer_baseline = float(state.get("proposer_baseline", self.proposer_baseline))
         self.generator_baseline = float(state.get("generator_baseline", self.generator_baseline))
+        self.proposer_entropy_mu_ema = float(
+            state.get("proposer_entropy_mu_ema", self.proposer_entropy_mu_ema)
+        )
 
         py_state = state.get("py_random_state")
         if py_state is not None:
@@ -616,6 +621,7 @@ class GenerationSelfEvolvingTrainer:
             "generator_updater": self.generator_updater.state_dict(),
             "proposer_baseline": float(self.proposer_baseline),
             "generator_baseline": float(self.generator_baseline),
+            "proposer_entropy_mu_ema": float(self.proposer_entropy_mu_ema),
             "py_random_state": random.getstate(),
             "torch_rng_state": torch.get_rng_state(),
         }
@@ -2268,6 +2274,7 @@ class GenerationSelfEvolvingTrainer:
             self._sync_state_scalars()
 
         proposer_reward = float(best["total_reward"])
+        proposer_skip_reason = None
         proposer_update_due = False
         if self.cfg.proposer_update_freq > 0:
             phase_due_fn = getattr(self, "_is_proposer_update_due", None)
@@ -2323,6 +2330,8 @@ class GenerationSelfEvolvingTrainer:
                     },
                 )
             self._sync_state_scalars()
+        else:
+            proposer_skip_reason = "update_not_due"
 
         self._sync_state_scalars()
 
@@ -2400,6 +2409,10 @@ class GenerationSelfEvolvingTrainer:
                 "generator_update_rule": self.cfg.generator_update_rule,
                 "generator_skipped_reason": generator_skipped_reason,
                 "generator_update_mode": generator_update_mode,
+                "proposer_update_due": proposer_update_due,
+                "proposer_skip_reason": proposer_skip_reason,
+                "proposer_reward": proposer_reward,
+                "proposer_stats": proposer_stats,
                 "generator_update_stats": generator_stats,
             },
         )
@@ -2416,6 +2429,9 @@ class GenerationSelfEvolvingTrainer:
             "generator_update_rule": self.cfg.generator_update_rule,
             "generator_skipped_reason": generator_skipped_reason,
             "generator_update_mode": generator_update_mode,
+            "proposer_update_due": proposer_update_due,
+            "proposer_skip_reason": proposer_skip_reason,
+            "proposer_reward": proposer_reward,
         }
 
     def _solver_synthetic_update_from_best(self, step: int, best: Dict[str, object]):

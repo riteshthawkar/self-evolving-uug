@@ -38,8 +38,17 @@ export SAVE_EVERY="${SAVE_EVERY:-500}"
 export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-5}"
 export SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-500}"
 export NUM_GENERATIONS="${NUM_GENERATIONS:-3}"
-export NUM_SOLVER_SAMPLES="${NUM_SOLVER_SAMPLES:-5}"
+export NUM_SOLVER_SAMPLES="${NUM_SOLVER_SAMPLES:-7}"
 export NUM_SOLVER_SAMPLES_SPEC="${NUM_SOLVER_SAMPLES_SPEC:-2}"
+export PROPOSER_UPDATE_FREQ="${PROPOSER_UPDATE_FREQ:-1}"
+export SOLVER_USE_TEMPERATURE_MIX="${SOLVER_USE_TEMPERATURE_MIX:-1}"
+export SOLVER_TEMP_MIN="${SOLVER_TEMP_MIN:-0.7}"
+export SOLVER_TEMP_MAX="${SOLVER_TEMP_MAX:-1.3}"
+export SC_ENTROPY_MIN="${SC_ENTROPY_MIN:-0.15}"
+export SC_ENTROPY_MAX="${SC_ENTROPY_MAX:-1.20}"
+export SC_MARGIN_MAX="${SC_MARGIN_MAX:-0.90}"
+export SC_NEGATIVE_WEIGHT="${SC_NEGATIVE_WEIGHT:-0.25}"
+export SKIP_SOLVER_UPDATE_WHEN_UNINFORMATIVE="${SKIP_SOLVER_UPDATE_WHEN_UNINFORMATIVE:-1}"
 export GENERATION_NUM_INFERENCE_STEPS="${GENERATION_NUM_INFERENCE_STEPS:-20}"
 export SOLVER_UPDATE_FREQ="${SOLVER_UPDATE_FREQ:-2}"
 export SYNTHETIC_SOLVER_UPDATE_FREQ="${SYNTHETIC_SOLVER_UPDATE_FREQ:-2}"
@@ -74,6 +83,20 @@ export NCCL_DEBUG=INFO
 export NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_BLOCKING_WAIT=1
 
+SC_TEMP_FLAGS=()
+if [[ "$SOLVER_USE_TEMPERATURE_MIX" == "1" ]]; then
+  SC_TEMP_FLAGS+=(--solver_use_temperature_mix)
+else
+  SC_TEMP_FLAGS+=(--disable_solver_temperature_mix)
+fi
+
+SC_UPDATE_FLAGS=()
+if [[ "$SKIP_SOLVER_UPDATE_WHEN_UNINFORMATIVE" == "1" ]]; then
+  SC_UPDATE_FLAGS+=(--skip_solver_update_when_uninformative)
+else
+  SC_UPDATE_FLAGS+=(--allow_solver_update_when_uninformative)
+fi
+
 "$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" "$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
@@ -101,7 +124,7 @@ export TORCH_NCCL_BLOCKING_WAIT=1
   --weight_decay 0.01 \
   --grad_clip 1.0 \
   --grad_accum_steps 4 \
-  --proposer_update_freq 5 \
+  --proposer_update_freq "$PROPOSER_UPDATE_FREQ" \
   --generator_update_freq 1 \
   --generator_update_rule reinforce \
   --enable_solver_updates \
@@ -129,6 +152,18 @@ export TORCH_NCCL_BLOCKING_WAIT=1
   --max_expected_words 8 \
   --max_question_words 24 \
   --solver_soft_gamma 0.7 \
+  "${SC_TEMP_FLAGS[@]}" \
+  --solver_temp_min "$SOLVER_TEMP_MIN" \
+  --solver_temp_max "$SOLVER_TEMP_MAX" \
+  --sc_entropy_min "$SC_ENTROPY_MIN" \
+  --sc_entropy_max "$SC_ENTROPY_MAX" \
+  --sc_margin_max "$SC_MARGIN_MAX" \
+  --sc_negative_weight "$SC_NEGATIVE_WEIGHT" \
+  "${SC_UPDATE_FLAGS[@]}" \
+  --adaptive_prop_entropy_target \
+  --prop_entropy_ema_momentum 0.95 \
+  --prop_entropy_mu_min 0.05 \
+  --prop_entropy_mu_max 1.50 \
   --len_penalty_weight 0.10 \
   --len_penalty_target_words 6 \
   --prop_entropy_mu 0.90 \

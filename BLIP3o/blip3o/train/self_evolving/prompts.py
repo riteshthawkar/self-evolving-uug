@@ -7,10 +7,14 @@ Ported from self_evolving/experiments/understanding.py and generation.py.
 def build_proposer_prompt() -> str:
     return (
         "You are a Question Proposer.\n"
-        "Given the image, generate exactly one short-answer question that can be answered from the image alone.\n"
+        "Given the image, generate exactly one question that can be answered from the image alone.\n"
         "Rules:\n"
-        "- Avoid ambiguity and external knowledge.\n"
-        "- Keep the question concise and specific.\n"
+        "- Prefer questions that require reasoning, comparison, or inference over simple factual lookup.\n"
+        "- Good: 'Why might X be happening?', 'What is the relationship between A and B?', "
+        "'How does X compare to Y?', 'What can be inferred about...?'\n"
+        "- Avoid trivially obvious questions (e.g. reading a single label or number directly).\n"
+        "- The answer should be short (a few words) but the question should require thought.\n"
+        "- Do not require external knowledge beyond what is visible.\n"
         "- Output XML only:\n"
         "<question>...</question>\n"
         "<rationale>...</rationale>"
