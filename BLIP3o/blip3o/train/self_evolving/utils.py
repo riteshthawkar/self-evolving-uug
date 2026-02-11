@@ -7,6 +7,7 @@ import contextlib
 import importlib.util
 import json
 import math
+import os
 import pathlib
 import random
 import re
@@ -87,6 +88,61 @@ def _is_bare_tokenizer(processor) -> bool:
         return True
     # Fallback: try calling with images kwarg — if it raises TypeError it's bare.
     return not hasattr(processor, "image_processor")
+
+
+def _normalize_vl_image_size(image: Image.Image) -> Image.Image:
+    """Resize very large/small inputs to stable bounds for VL preprocessing.
+
+    This reduces sporadic backend failures on extreme resolutions while keeping
+    behavior configurable by environment variables:
+      - SE_MAX_IMAGE_SIDE (default: 1536, <=0 disables upper-bound resize)
+      - SE_MIN_IMAGE_SIDE (default: 56)
+      - SE_IMAGE_SIZE_MULTIPLE (default: 28)
+    """
+    if not isinstance(image, Image.Image):
+        return image
+
+    try:
+        max_side = int(os.environ.get("SE_MAX_IMAGE_SIDE", "1536"))
+    except Exception:
+        max_side = 1536
+    try:
+        min_side = int(os.environ.get("SE_MIN_IMAGE_SIDE", "56"))
+    except Exception:
+        min_side = 56
+    try:
+        size_multiple = int(os.environ.get("SE_IMAGE_SIZE_MULTIPLE", "28"))
+    except Exception:
+        size_multiple = 28
+
+    size_multiple = max(1, size_multiple)
+    min_side = max(size_multiple, min_side)
+
+    w, h = image.size
+    if w <= 0 or h <= 0:
+        return image
+
+    scale = 1.0
+    longest = max(w, h)
+    shortest = min(w, h)
+    if max_side > 0 and longest > max_side:
+        scale = min(scale, max_side / float(longest))
+    if shortest < min_side:
+        scale = max(scale, min_side / float(shortest))
+
+    if scale != 1.0:
+        new_w = max(size_multiple, int(round(w * scale)))
+        new_h = max(size_multiple, int(round(h * scale)))
+    else:
+        new_w, new_h = w, h
+
+    # Keep dimensions aligned to patch multiple.
+    new_w = max(size_multiple, (new_w // size_multiple) * size_multiple)
+    new_h = max(size_multiple, (new_h // size_multiple) * size_multiple)
+
+    if new_w == w and new_h == h:
+        return image
+    return image.resize((new_w, new_h), Image.BICUBIC)
 
 # ---------------------------------------------------------------------------
 # Optional dependency flags
@@ -463,6 +519,7 @@ def _prepare_mm_inputs(
     ``processor(text=..., images=..., ...)``.
     """
     _ensure_blip3o_mm_utils()
+    image = _normalize_vl_image_size(image)
 
     if _is_bare_tokenizer(processor) and _tokenizer_image_token is not None:
         # --- BLIP3o native path ---
