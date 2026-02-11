@@ -1102,6 +1102,12 @@ class UnderstandingSelfEvolvingTrainer:
                                 "stats": stats,
                             },
                         )
+                    if solver_step_stats:
+                        all_skipped = all(bool(s.get("skipped_reason")) for s in solver_step_stats)
+                        if all_skipped:
+                            solver_update_applied = False
+                            if solver_update_skip_reason is None:
+                                solver_update_skip_reason = "all_solver_samples_skipped"
                 else:
                     self._append_jsonl(
                         self.policy_updates_log_path,

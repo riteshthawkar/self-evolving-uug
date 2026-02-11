@@ -4,7 +4,7 @@
 # Understanding-only self-evolving with different proposer update cadences.
 # Changing values: proposer_update_freq in {1, 3, 5, 10}; seed fixed at 42
 
-export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
 export PYTHONPATH="${REPO_ROOT}/BLIP3o:${PYTHONPATH:-}"
 

@@ -25,6 +25,37 @@ from .utils import (
 )
 
 
+def _aligned_prompt_prefix_len(
+    prompt_ids: torch.Tensor,
+    full_ids: torch.Tensor,
+    completion_text: str,
+) -> int:
+    """Return a robust prompt-prefix length for loss masking.
+
+    In multimodal chat templates, ``prompt`` and ``prompt+completion`` can be
+    serialized with slightly different control-token layouts. In that case,
+    using plain ``len(prompt_ids)`` can incorrectly mask all completion tokens.
+    We recover a stable boundary by falling back to longest-common-prefix when
+    completion text is non-empty.
+    """
+    prompt_len = int(prompt_ids.shape[1])
+    full_len = int(full_ids.shape[1])
+    if full_len <= 0:
+        return 0
+    if prompt_len < full_len:
+        return prompt_len
+    if not str(completion_text or "").strip():
+        return min(prompt_len, full_len)
+
+    max_len = min(prompt_len, full_len)
+    lcp = 0
+    p = prompt_ids[0]
+    f = full_ids[0]
+    while lcp < max_len and int(p[lcp].item()) == int(f[lcp].item()):
+        lcp += 1
+    return min(lcp, full_len)
+
+
 class RolePolicyUpdater:
     """
     KL-regularized REINFORCE updater for a role adapter.
@@ -111,7 +142,11 @@ class RolePolicyUpdater:
 
         input_ids = inputs_full["input_ids"]
         labels = input_ids.clone()
-        prompt_len = inputs_prompt["input_ids"].shape[1]
+        prompt_len = _aligned_prompt_prefix_len(
+            inputs_prompt["input_ids"],
+            input_ids,
+            completion_text=completion,
+        )
         labels[:, :prompt_len] = -100
         valid_mask = labels[:, 1:] != -100
         valid_token_count = int(valid_mask.sum().item())

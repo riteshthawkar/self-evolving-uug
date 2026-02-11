@@ -4,7 +4,7 @@
 # Uses original BLIP3o (`BLIP3o/BLIP3o-Model-8B`) with alternating
 # understanding and generation updates in a single loop.
 
-export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
 export PYTHONPATH="${REPO_ROOT}/BLIP3o:${PYTHONPATH:-}"
 
@@ -31,6 +31,7 @@ export WANDB_PROJECT="${WANDB_PROJECT:-self-evolve-uug}"
 
 # Run defaults (override via environment)
 export DATA_DIR="/workspace/self-evolving-uug/data/uug_50k/train"
+export INCLUDE_SUBFOLDERS="${INCLUDE_SUBFOLDERS:-}"
 export MODEL_NAME="BLIP3o/BLIP3o-Model-8B"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/runs/unified_experiments}"
 export TOTAL_STEPS="${TOTAL_STEPS:-10000}"
@@ -105,10 +106,16 @@ if [[ "$SYNTHETIC_SOLVER_HARD_ONLY" == "1" ]]; then
   SYNTH_HARD_FLAGS+=(--synthetic_solver_hard_only)
 fi
 
+SUBFOLDER_FLAGS=()
+if [[ -n "$INCLUDE_SUBFOLDERS" ]]; then
+  SUBFOLDER_FLAGS+=(--include_subfolders "$INCLUDE_SUBFOLDERS")
+fi
+
 "$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" "$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
   --data_split all \
+  "${SUBFOLDER_FLAGS[@]}" \
   --model_name "$MODEL_NAME" \
   --output_dir "$OUTPUT_ROOT/X00_main_method" \
   --run_name "x00_main_default_s42" \

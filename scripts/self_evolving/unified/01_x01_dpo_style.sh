@@ -3,7 +3,7 @@
 # Experiment X01: Unified Self-Evolving with DPO-Style Generator Update
 # Same unified loop as X00, but generator updates use pairwise DPO instead of REINFORCE.
 
-export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
 export PYTHONPATH="${REPO_ROOT}/BLIP3o:${PYTHONPATH:-}"
 

@@ -14,6 +14,7 @@ import math
 import os
 import pathlib
 import random
+import re
 import shutil
 import time
 import traceback
@@ -1162,6 +1163,93 @@ class GenerationSelfEvolvingTrainer:
         )
         return lower.startswith(starters)
 
+    def _strip_instruction_prefix(self, text: str) -> str:
+        s = " ".join((text or "").split()).strip()
+        if not s:
+            return s
+
+        s_l = s.lower()
+        fixed_prefixes = (
+            "create an image variation of:",
+            "create an image of:",
+            "generate an image of:",
+            "generate image of:",
+            "draw an image of:",
+            "an image of ",
+            "image of ",
+        )
+        for prefix in fixed_prefixes:
+            if s_l.startswith(prefix):
+                s = s[len(prefix):].strip()
+                s_l = s.lower()
+                break
+
+        verb_prefixes = (
+            "describe ",
+            "explain ",
+            "illustrate ",
+            "show ",
+            "depict ",
+            "create ",
+            "generate ",
+            "draw ",
+            "compare ",
+            "analyze ",
+            "summarize ",
+            "outline ",
+        )
+        for prefix in verb_prefixes:
+            if s_l.startswith(prefix):
+                s = s[len(prefix):].strip()
+                s_l = s.lower()
+                break
+
+        # Drop common instruction wrappers that make prompts awkward.
+        s = re.sub(r"^(in (this|the) (image|figure|diagram),?\s*)", "", s, flags=re.IGNORECASE).strip()
+        s = s.rstrip(" .")
+        return s
+
+    def _question_to_fact_label(self, question: str) -> str:
+        q = " ".join((question or "").replace("?", "").split()).strip()
+        if not q:
+            return ""
+        q_l = q.lower()
+
+        direct_rules = (
+            ("how many ", "count of "),
+            ("how much ", "amount of "),
+            ("how long ", "length of "),
+            ("how far ", "distance of "),
+            ("how high ", "height of "),
+            ("what is the ", "the "),
+            ("what was the ", "the "),
+            ("what are the ", "the "),
+            ("what were the ", "the "),
+            ("what is ", ""),
+            ("what was ", ""),
+            ("what are ", ""),
+            ("what were ", ""),
+            ("which ", ""),
+            ("identify ", ""),
+            ("name the ", "the "),
+            ("is there ", "presence of "),
+            ("are there ", "presence of "),
+            ("does ", "whether "),
+            ("do ", "whether "),
+            ("did ", "whether "),
+            ("can ", "whether "),
+        )
+        for src, dst in direct_rules:
+            if q_l.startswith(src):
+                q = (dst + q[len(src):]).strip()
+                break
+
+        q = self._strip_instruction_prefix(q)
+        q = q.strip(" :.")
+        if not q:
+            q = "visual detail"
+        return q
+
     def _compose_generation_prompt(
         self,
         raw_prompt: str,
@@ -1182,21 +1270,9 @@ class GenerationSelfEvolvingTrainer:
         else:
             subject = "a coherent scene with clear objects and relationships"
 
-        # Remove common instruction wrappers to keep the final prompt caption-like.
-        subject_l = subject.lower()
-        for prefix in (
-            "create an image variation of:",
-            "create an image of:",
-            "generate an image of:",
-            "generate image of:",
-            "draw an image of:",
-            "an image of ",
-            "image of ",
-        ):
-            if subject_l.startswith(prefix):
-                subject = subject[len(prefix):].strip()
-                break
-        subject = subject.rstrip(" .")
+        subject = self._strip_instruction_prefix(subject)
+        if self._is_question_like_prompt(subject):
+            subject = "a scene matching the verified visual facts"
         if not subject:
             subject = "a coherent scene with clear objects and relationships"
 
@@ -1205,7 +1281,8 @@ class GenerationSelfEvolvingTrainer:
             q = " ".join((qa.question or "").replace("?", "").split())
             e = " ".join((qa.expected or "").replace("?", "").split())
             if q and e:
-                facts.append(f"{q}: {e}")
+                fact_label = self._question_to_fact_label(q)
+                facts.append(f"{fact_label}: {e}")
             elif e:
                 facts.append(e)
 

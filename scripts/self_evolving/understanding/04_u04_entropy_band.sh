@@ -4,7 +4,7 @@
 # Understanding-only self-evolving with different entropy reward band parameters.
 # Changing values: (prop_entropy_mu, prop_entropy_sigma) grid; seed fixed at 42
 
-export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
 export PYTHONPATH="${REPO_ROOT}/BLIP3o:${PYTHONPATH:-}"
 

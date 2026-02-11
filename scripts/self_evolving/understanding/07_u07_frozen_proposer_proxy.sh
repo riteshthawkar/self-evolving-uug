@@ -4,7 +4,7 @@
 # Understanding-only ablation where proposer updates are effectively disabled.
 # Changing values: FROZEN_PROPOSER_UPDATE_FREQ (default 6001) with seed fixed at 42
 
-export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$REPO_ROOT"
 export PYTHONPATH="${REPO_ROOT}/BLIP3o:${PYTHONPATH:-}"
 

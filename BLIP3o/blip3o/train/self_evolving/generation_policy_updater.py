@@ -13,6 +13,30 @@ from .generation_helpers import _prepare_text_inputs
 from .utils import (_build_chat_text, _clip_grad_norm_multi_device, _collect_trainable_params, _prepare_mm_inputs, _unwrap_model, use_adapter)
 
 
+def _aligned_prompt_prefix_len(
+    prompt_ids: torch.Tensor,
+    full_ids: torch.Tensor,
+    completion_text: str,
+) -> int:
+    """Return a robust prompt-prefix length for completion masking."""
+    prompt_len = int(prompt_ids.shape[1])
+    full_len = int(full_ids.shape[1])
+    if full_len <= 0:
+        return 0
+    if prompt_len < full_len:
+        return prompt_len
+    if not str(completion_text or "").strip():
+        return min(prompt_len, full_len)
+
+    max_len = min(prompt_len, full_len)
+    lcp = 0
+    p = prompt_ids[0]
+    f = full_ids[0]
+    while lcp < max_len and int(p[lcp].item()) == int(f[lcp].item()):
+        lcp += 1
+    return min(lcp, full_len)
+
+
 class TextPolicyUpdater:
     """KL-regularized REINFORCE updater for text-only trajectories (generator role)."""
 
@@ -107,7 +131,11 @@ class TextPolicyUpdater:
 
         input_ids = inputs_full["input_ids"]
         labels = input_ids.clone()
-        prompt_len = inputs_prompt["input_ids"].shape[1]
+        prompt_len = _aligned_prompt_prefix_len(
+            inputs_prompt["input_ids"],
+            input_ids,
+            completion_text=completion,
+        )
         labels[:, :prompt_len] = -100
         valid_mask = labels[:, 1:] != -100
         valid_token_count = int(valid_mask.sum().item())
@@ -476,6 +504,7 @@ class TextPreferenceDPOUpdater:
         adapter_name: Optional[str],
         inputs_prompt: Dict[str, torch.Tensor],
         inputs_full: Dict[str, torch.Tensor],
+        completion_text: str,
         no_grad: bool,
     ) -> Tuple[torch.Tensor, int]:
         run_model = _unwrap_model(model) if no_grad else model
@@ -494,7 +523,11 @@ class TextPreferenceDPOUpdater:
                 forward_inputs["use_cache"] = False
                 with use_adapter(run_model, adapter_name):
                     out = run_model(**forward_inputs)
-                prompt_len = int(inputs_prompt["input_ids"].shape[1])
+                prompt_len = _aligned_prompt_prefix_len(
+                    inputs_prompt["input_ids"],
+                    forward_inputs["input_ids"],
+                    completion_text=completion_text,
+                )
                 seq_logp, token_count = self._sequence_logp_from_logits(
                     logits=out.logits,
                     input_ids=forward_inputs["input_ids"],
@@ -550,6 +583,7 @@ class TextPreferenceDPOUpdater:
             adapter_name=ref_adapter_name,
             inputs_prompt=chosen_prompt_inputs,
             inputs_full=chosen_full_inputs,
+            completion_text=chosen_completion,
             no_grad=True,
         )
         ref_logp_rejected, _ = self._forward_seq_logp(
@@ -557,6 +591,7 @@ class TextPreferenceDPOUpdater:
             adapter_name=ref_adapter_name,
             inputs_prompt=rejected_prompt_inputs,
             inputs_full=rejected_full_inputs,
+            completion_text=rejected_completion,
             no_grad=True,
         )
 
@@ -565,6 +600,7 @@ class TextPreferenceDPOUpdater:
             adapter_name=self.adapter_name,
             inputs_prompt=chosen_prompt_inputs,
             inputs_full=chosen_full_inputs,
+            completion_text=chosen_completion,
             no_grad=False,
         )
         pi_logp_rejected, rejected_token_count = self._forward_seq_logp(
@@ -572,6 +608,7 @@ class TextPreferenceDPOUpdater:
             adapter_name=self.adapter_name,
             inputs_prompt=rejected_prompt_inputs,
             inputs_full=rejected_full_inputs,
+            completion_text=rejected_completion,
             no_grad=False,
         )
 
