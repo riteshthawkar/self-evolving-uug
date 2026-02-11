@@ -67,6 +67,7 @@ if HAS_WANDB:
 from .diffusion_pipeline import (
     _build_original_blip3o_diffusion_pipeline,
     _decode_blip3o_generate_image_output,
+    _ensure_pipeline_device_placement,
     _is_original_blip3o_model_name,
     _resolve_multimodal_encoder_for_pipeline,
 )
@@ -166,6 +167,31 @@ class GenerationSelfEvolvingTrainer:
         tensor = torch.tensor([int(value)], dtype=torch.int64, device=dev)
         dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
         return int(tensor.item())
+
+    def _run_diffusion_pipeline_with_repair(self, **kwargs):
+        if self._blip3o_diffusion_pipe is None:
+            raise RuntimeError("Diffusion pipeline is not initialized.")
+
+        try:
+            return self._blip3o_diffusion_pipe(**kwargs)
+        except RuntimeError as exc:
+            msg = str(exc)
+            needs_repair = (
+                "Expected all tensors to be on the same device" in msg
+                or "wrapper_CUDA__native_group_norm" in msg
+            )
+            if not needs_repair:
+                raise
+
+            repair_device = (
+                torch.device(f"cuda:{self.local_rank}") if torch.cuda.is_available() else torch.device("cpu")
+            )
+            self._blip3o_diffusion_pipe = _ensure_pipeline_device_placement(
+                self._blip3o_diffusion_pipe,
+                device=repair_device,
+                torch_dtype=_safe_dtype(self.cfg.dtype),
+            )
+            return self._blip3o_diffusion_pipe(**kwargs)
 
     def _sync_state_scalars(self):
         if not (self.distributed and dist.is_initialized()):
@@ -1047,7 +1073,7 @@ class GenerationSelfEvolvingTrainer:
         if (api_name is None or api_obj is None) and self._blip3o_diffusion_pipe is not None:
             with torch.no_grad():
                 with use_adapter(self.model, "generator" if self.cfg.use_lora else None):
-                    out = self._blip3o_diffusion_pipe(
+                    out = self._run_diffusion_pipeline_with_repair(
                         prompt=prompt,
                         guidance_scale=self.cfg.generation_guidance_scale,
                         num_inference_steps=self.cfg.generation_num_inference_steps,
@@ -1178,13 +1204,13 @@ class GenerationSelfEvolvingTrainer:
             if self._blip3o_diffusion_pipe is not None:
                 with torch.no_grad():
                     with use_adapter(self.model, "generator" if self.cfg.use_lora else None):
-                            pipe_out = self._blip3o_diffusion_pipe(
-                                inputs=prompt,
-                                guidance_scale=self.cfg.generation_guidance_scale,
-                                num_inference_steps=self.cfg.generation_num_inference_steps,
-                                height=self.cfg.generation_height,
-                                width=self.cfg.generation_width,
-                            )
+                        pipe_out = self._run_diffusion_pipeline_with_repair(
+                            inputs=prompt,
+                            guidance_scale=self.cfg.generation_guidance_scale,
+                            num_inference_steps=self.cfg.generation_num_inference_steps,
+                            height=self.cfg.generation_height,
+                            width=self.cfg.generation_width,
+                        )
                 images = getattr(pipe_out, "images", None)
                 if images is None:
                     if hasattr(pipe_out, "image"):
@@ -2215,7 +2241,17 @@ class GenerationSelfEvolvingTrainer:
             self._sync_state_scalars()
 
         proposer_reward = float(best["total_reward"])
-        if step % self.cfg.proposer_update_freq == 0:
+        proposer_update_due = False
+        if self.cfg.proposer_update_freq > 0:
+            phase_due_fn = getattr(self, "_is_proposer_update_due", None)
+            if callable(phase_due_fn):
+                try:
+                    proposer_update_due = bool(phase_due_fn(step, phase="generation"))
+                except Exception:
+                    proposer_update_due = bool(step % self.cfg.proposer_update_freq == 0)
+            else:
+                proposer_update_due = bool(step % self.cfg.proposer_update_freq == 0)
+        if proposer_update_due:
             baseline_before = self.proposer_baseline
             proposer_completion = str(spec.raw_output or "").strip()
             local_proposer_can_update = bool(proposer_completion)

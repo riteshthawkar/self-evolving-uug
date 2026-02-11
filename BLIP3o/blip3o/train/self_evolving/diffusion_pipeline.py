@@ -312,6 +312,19 @@ def _module_primary_device(module: torch.nn.Module) -> Optional[torch.device]:
     return None
 
 
+def _iter_module_tensor_devices(module: torch.nn.Module):
+    try:
+        for name, param in module.named_parameters(recurse=True):
+            yield f"param:{name}", param.device
+    except Exception:
+        pass
+    try:
+        for name, buf in module.named_buffers(recurse=True):
+            yield f"buffer:{name}", buf.device
+    except Exception:
+        pass
+
+
 def _iter_pipeline_modules(pipe):
     seen_ids = set()
     for name in _PIPELINE_DEVICE_COMPONENT_NAMES:
@@ -351,14 +364,67 @@ def _collect_pipeline_device_mismatches(pipe, expected_device: torch.device) -> 
     expected = torch.device(expected_device)
     mismatches: List[str] = []
     for name, module in _iter_pipeline_modules(pipe):
-        mod_dev = _module_primary_device(module)
-        if mod_dev is None:
-            continue
-        type_match = mod_dev.type == expected.type
-        index_match = (expected.index is None) or (mod_dev.index == expected.index)
-        if not (type_match and index_match):
-            mismatches.append(f"{name}={mod_dev}")
+        found_mismatch = None
+        for tensor_name, tensor_dev in _iter_module_tensor_devices(module):
+            type_match = tensor_dev.type == expected.type
+            index_match = (expected.index is None) or (tensor_dev.index == expected.index)
+            if not (type_match and index_match):
+                found_mismatch = f"{name}.{tensor_name}={tensor_dev}"
+                break
+        if found_mismatch is not None:
+            mismatches.append(found_mismatch)
     return mismatches
+
+
+def _reset_pipeline_offload_state(pipe):
+    # Some diffusers versions can leave cpu-offload hooks/device maps active
+    # even when the caller expects single-device execution.
+    try:
+        remove_all_hooks = getattr(pipe, "remove_all_hooks", None)
+        if callable(remove_all_hooks):
+            remove_all_hooks()
+    except Exception:
+        pass
+    try:
+        reset_device_map = getattr(pipe, "reset_device_map", None)
+        if callable(reset_device_map):
+            reset_device_map()
+    except Exception:
+        pass
+    try:
+        if hasattr(pipe, "hf_device_map"):
+            pipe.hf_device_map = None
+    except Exception:
+        pass
+
+
+def _ensure_pipeline_device_placement(pipe, device: torch.device, torch_dtype: Optional[torch.dtype]):
+    placement_errors: List[str] = []
+    _reset_pipeline_offload_state(pipe)
+    try:
+        pipe = pipe.to(device=device, dtype=torch_dtype)
+    except TypeError:
+        try:
+            pipe = pipe.to(device=device)
+        except Exception as exc:
+            placement_errors.append(f"pipe.to(device) failed: {repr(exc)}")
+    except Exception as exc:
+        placement_errors.append(f"pipe.to(device,dtype) failed: {repr(exc)}")
+
+    try:
+        _force_pipeline_modules_to_device(pipe, device)
+    except Exception as exc:
+        placement_errors.append(repr(exc))
+
+    mismatches = _collect_pipeline_device_mismatches(pipe, device)
+    if mismatches:
+        mismatch_text = ", ".join(mismatches[:12])
+        detail = f" placement_errors={' | '.join(placement_errors)}" if placement_errors else ""
+        raise RuntimeError(
+            "Diffusion pipeline has components on unexpected devices "
+            f"(expected={torch.device(device)}): {mismatch_text}.{detail}"
+        )
+    return pipe
 
 
 def _build_original_blip3o_diffusion_pipeline(
@@ -430,6 +496,8 @@ def _build_original_blip3o_diffusion_pipeline(
                         torch_dtype=torch_dtype,
                         use_safetensors=True,
                         variant="bf16",
+                        device_map=None,
+                        low_cpu_mem_usage=False,
                     )
                 except TypeError:
                     pipe = DiffusionPipeline.from_pretrained(
@@ -504,6 +572,8 @@ def _build_original_blip3o_diffusion_pipeline(
                                     torch_dtype=torch_dtype,
                                     use_safetensors=True,
                                     variant="bf16",
+                                    device_map=None,
+                                    low_cpu_mem_usage=False,
                                 )
                                 break
                             except TypeError:
@@ -532,29 +602,4 @@ def _build_original_blip3o_diffusion_pipeline(
         detail = " | ".join(errors)
         raise RuntimeError(f"Failed to build BLIP3o diffusion pipeline. {detail}")
 
-    placement_errors: List[str] = []
-    try:
-        pipe = pipe.to(device=device, dtype=torch_dtype)
-    except TypeError:
-        try:
-            pipe = pipe.to(device=device)
-        except Exception as exc:
-            placement_errors.append(f"pipe.to(device) failed: {repr(exc)}")
-    except Exception as exc:
-        placement_errors.append(f"pipe.to(device,dtype) failed: {repr(exc)}")
-
-    try:
-        _force_pipeline_modules_to_device(pipe, device)
-    except Exception as exc:
-        placement_errors.append(repr(exc))
-
-    mismatches = _collect_pipeline_device_mismatches(pipe, device)
-    if mismatches:
-        mismatch_text = ", ".join(mismatches[:12])
-        detail = f" placement_errors={' | '.join(placement_errors)}" if placement_errors else ""
-        raise RuntimeError(
-            "Diffusion pipeline has components on unexpected devices "
-            f"(expected={torch.device(device)}): {mismatch_text}.{detail}"
-        )
-
-    return pipe
+    return _ensure_pipeline_device_placement(pipe, device=device, torch_dtype=torch_dtype)
