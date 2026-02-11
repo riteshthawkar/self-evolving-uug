@@ -52,10 +52,13 @@ export SKIP_SOLVER_UPDATE_WHEN_UNINFORMATIVE="${SKIP_SOLVER_UPDATE_WHEN_UNINFORM
 export GENERATION_NUM_INFERENCE_STEPS="${GENERATION_NUM_INFERENCE_STEPS:-20}"
 export SOLVER_UPDATE_FREQ="${SOLVER_UPDATE_FREQ:-2}"
 export SYNTHETIC_SOLVER_UPDATE_FREQ="${SYNTHETIC_SOLVER_UPDATE_FREQ:-2}"
+export SYNTHETIC_SOLVER_HARD_ONLY="${SYNTHETIC_SOLVER_HARD_ONLY:-1}"
+export SOLVER_HARDNESS_MIN_ENTROPY="${SOLVER_HARDNESS_MIN_ENTROPY:-0.20}"
 export MAX_NEW_TOKENS_SOLVER="${MAX_NEW_TOKENS_SOLVER:-96}"
 export MAX_NEW_TOKENS_PROPOSER="${MAX_NEW_TOKENS_PROPOSER:-192}"
 export MAX_NEW_TOKENS_CAPTION="${MAX_NEW_TOKENS_CAPTION:-64}"
 export MAX_NEW_TOKENS_GENERATOR="${MAX_NEW_TOKENS_GENERATOR:-512}"
+export GENERATOR_PROXY_MAX_RATIO="${GENERATOR_PROXY_MAX_RATIO:-1.00}"
 export CLEAR_CACHE_EVERY="${CLEAR_CACHE_EVERY:-10}"
 export CUDA_DEVICE="${CUDA_DEVICE:-0}"
 export PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -95,6 +98,11 @@ if [[ "$SKIP_SOLVER_UPDATE_WHEN_UNINFORMATIVE" == "1" ]]; then
   SC_UPDATE_FLAGS+=(--skip_solver_update_when_uninformative)
 else
   SC_UPDATE_FLAGS+=(--allow_solver_update_when_uninformative)
+fi
+
+SYNTH_HARD_FLAGS=()
+if [[ "$SYNTHETIC_SOLVER_HARD_ONLY" == "1" ]]; then
+  SYNTH_HARD_FLAGS+=(--synthetic_solver_hard_only)
 fi
 
 "$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" "$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py" \
@@ -142,6 +150,7 @@ fi
   --generation_guidance_scale 2.0 \
   --allow_missing_generation_tokens \
   --generator_missing_trace_strategy proxy \
+  --generator_proxy_max_ratio "$GENERATOR_PROXY_MAX_RATIO" \
   --verification_use_reference_solver \
   --reward_spec_weight 0.65 \
   --reward_cycle_weight 0.20 \
@@ -171,6 +180,8 @@ fi
   --understanding_steps_per_cycle 3 \
   --generation_steps_per_cycle 2 \
   --synthetic_solver_update_freq "$SYNTHETIC_SOLVER_UPDATE_FREQ" \
+  "${SYNTH_HARD_FLAGS[@]}" \
+  --solver_hardness_min_entropy "$SOLVER_HARDNESS_MIN_ENTROPY" \
   --kl_coef 0.01 \
   --kl_target 0.02 \
   --kl_adapt_rate 0.10 \

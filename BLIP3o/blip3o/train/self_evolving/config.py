@@ -162,6 +162,11 @@ class GenerationSelfEvolvingConfig:
     dpo_beta: float = 0.1
     dpo_label_smoothing: float = 0.0
     dpo_min_reward_gap: float = 0.0
+    dpo_min_spec_gap: float = 0.0
+    dpo_min_confidence_gap: float = 0.0
+    dpo_max_contradiction: float = 1.0
+    dpo_pair_selection: str = "best_worst"  # best_worst|best_hard_negative
+    generator_proxy_max_ratio: float = 1.0
 
     # Reward shaping
     solver_soft_gamma: float = 0.7
@@ -239,3 +244,5 @@ class UnifiedSelfEvolvingConfig(GenerationSelfEvolvingConfig):
     understanding_steps_per_cycle: int = 3
     generation_steps_per_cycle: int = 2
     synthetic_solver_update_freq: int = 1
+    synthetic_solver_hard_only: bool = False
+    solver_hardness_min_entropy: float = 0.2

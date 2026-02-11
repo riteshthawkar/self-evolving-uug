@@ -5,6 +5,7 @@ import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from PIL import Image
 
@@ -32,6 +33,7 @@ class TextPolicyUpdater:
         self.step_id = 0
         self.grad_accum_steps = max(1, getattr(config, "grad_accum_steps", 1))
         self._accum_count = 0
+        self._has_real_grad_in_window = False
 
         params = list(_collect_trainable_params(model, adapter_name))
         if not params:
@@ -240,6 +242,15 @@ class TextPolicyUpdater:
                 # Non-finite total_loss: backward zero instead.
                 total_loss = out_pi.logits.sum() * 0.0
                 skipped_reason = "non_finite_total_loss"
+        has_real_grad = skipped_reason is None
+        if dist.is_available() and dist.is_initialized():
+            t = torch.tensor(
+                [1 if has_real_grad else 0],
+                dtype=torch.int32,
+                device=total_loss.device,
+            )
+            dist.all_reduce(t, op=dist.ReduceOp.MAX)
+            has_real_grad = bool(int(t.item()) == 1)
 
         # Gradient accumulation: scale loss and accumulate.
         # All ranks MUST call backward() on the DDP model to participate
@@ -248,6 +259,7 @@ class TextPolicyUpdater:
         scaled_loss = total_loss / self.grad_accum_steps
         if self._accum_count == 0:
             self.opt.zero_grad(set_to_none=True)
+            self._has_real_grad_in_window = False
         restore_adapter = None
         model_ref = _unwrap_model(self.model)
         if self.adapter_name is not None and hasattr(model_ref, "set_adapter"):
@@ -265,13 +277,21 @@ class TextPolicyUpdater:
                 except Exception:
                     pass
         self._accum_count += 1
+        if has_real_grad:
+            self._has_real_grad_in_window = True
 
         did_step = False
         if self._accum_count >= self.grad_accum_steps:
-            _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
-            self.opt.step()
+            if self._has_real_grad_in_window:
+                _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
+                self.opt.step()
+                did_step = True
+            else:
+                # All microbatches in this accumulation window were effectively skipped.
+                # Do not step AdamW to avoid decoupled-weight-decay drift.
+                self.opt.zero_grad(set_to_none=True)
             self._accum_count = 0
-            did_step = True
+            self._has_real_grad_in_window = False
         self.model.train(False)
 
         if skipped_reason:
@@ -282,7 +302,7 @@ class TextPolicyUpdater:
                 "kl_coef_before": beta_before,
                 "kl_coef_after": float(self.kl_coef),
                 "total_loss": 0.0,
-                "did_step": False,
+                "did_step": bool(did_step),
                 "skipped_reason": skipped_reason,
                 "valid_token_count": float(valid_token_count),
             }
@@ -351,6 +371,7 @@ class TextPreferenceDPOUpdater:
         self.kl_coef = 0.0
         self.grad_accum_steps = max(1, getattr(config, "grad_accum_steps", 1))
         self._accum_count = 0
+        self._has_real_grad_in_window = False
 
         self.dpo_beta = float(max(1e-6, getattr(config, "dpo_beta", 0.1)))
         self.dpo_label_smoothing = float(getattr(config, "dpo_label_smoothing", 0.0))
@@ -565,52 +586,50 @@ class TextPreferenceDPOUpdater:
             dpo_loss = (1.0 - self.dpo_label_smoothing) * pos_term + self.dpo_label_smoothing * neg_term
         else:
             dpo_loss = pos_term
-
+        skipped_reason: Optional[str] = None
+        skip_backward = False
         if chosen_token_count <= 0 or rejected_token_count <= 0:
-            self.model.train(False)
-            return {
-                "dpo_loss": 0.0,
-                "dpo_beta": float(self.dpo_beta),
-                "label_smoothing": float(self.dpo_label_smoothing),
-                "pi_logp_chosen": float(pi_logp_chosen.detach().item()),
-                "pi_logp_rejected": float(pi_logp_rejected.detach().item()),
-                "ref_logp_chosen": float(ref_logp_chosen.detach().item()),
-                "ref_logp_rejected": float(ref_logp_rejected.detach().item()),
-                "pi_gap": float(pi_gap.detach().item()),
-                "ref_gap": float(ref_gap.detach().item()),
-                "preference_margin": float(preference_margin.detach().item()),
-                "chosen_token_count": float(chosen_token_count),
-                "rejected_token_count": float(rejected_token_count),
-                "kl_coef_before": 0.0,
-                "kl_coef_after": 0.0,
-                "did_step": False,
-                "skipped_reason": "no_valid_completion_tokens",
-            }
-        if not bool(torch.isfinite(dpo_loss.detach()).all().item()):
-            self.model.train(False)
-            return {
-                "dpo_loss": float("nan"),
-                "dpo_beta": float(self.dpo_beta),
-                "label_smoothing": float(self.dpo_label_smoothing),
-                "pi_logp_chosen": float(pi_logp_chosen.detach().item()),
-                "pi_logp_rejected": float(pi_logp_rejected.detach().item()),
-                "ref_logp_chosen": float(ref_logp_chosen.detach().item()),
-                "ref_logp_rejected": float(ref_logp_rejected.detach().item()),
-                "pi_gap": float(pi_gap.detach().item()),
-                "ref_gap": float(ref_gap.detach().item()),
-                "preference_margin": float(preference_margin.detach().item()),
-                "chosen_token_count": float(chosen_token_count),
-                "rejected_token_count": float(rejected_token_count),
-                "kl_coef_before": 0.0,
-                "kl_coef_after": 0.0,
-                "did_step": False,
-                "skipped_reason": "non_finite_dpo_loss",
-            }
+            skipped_reason = "no_valid_completion_tokens"
+            skip_backward = True
+        elif not bool(torch.isfinite(pi_logp_chosen.detach()).all().item()):
+            skipped_reason = "non_finite_pi_logp_chosen"
+            skip_backward = True
+        elif not bool(torch.isfinite(pi_logp_rejected.detach()).all().item()):
+            skipped_reason = "non_finite_pi_logp_rejected"
+            skip_backward = True
+        elif not bool(torch.isfinite(ref_logp_chosen.detach()).all().item()):
+            skipped_reason = "non_finite_ref_logp_chosen"
+            skip_backward = True
+        elif not bool(torch.isfinite(ref_logp_rejected.detach()).all().item()):
+            skipped_reason = "non_finite_ref_logp_rejected"
+            skip_backward = True
+        elif not bool(torch.isfinite(dpo_loss.detach()).all().item()):
+            skipped_reason = "non_finite_dpo_loss"
+            skip_backward = True
+
+        if skip_backward:
+            # Keep DDP collectives in sync: backward a zero-connected objective.
+            dpo_loss_for_backward = (
+                torch.nan_to_num(pi_logp_chosen, nan=0.0, posinf=0.0, neginf=0.0) * 0.0
+                + torch.nan_to_num(pi_logp_rejected, nan=0.0, posinf=0.0, neginf=0.0) * 0.0
+            )
+        else:
+            dpo_loss_for_backward = dpo_loss
+        has_real_grad = skipped_reason is None
+        if dist.is_available() and dist.is_initialized():
+            t = torch.tensor(
+                [1 if has_real_grad else 0],
+                dtype=torch.int32,
+                device=dpo_loss_for_backward.device,
+            )
+            dist.all_reduce(t, op=dist.ReduceOp.MAX)
+            has_real_grad = bool(int(t.item()) == 1)
 
         # Gradient accumulation: scale loss and accumulate
-        scaled_loss = dpo_loss / self.grad_accum_steps
+        scaled_loss = dpo_loss_for_backward / self.grad_accum_steps
         if self._accum_count == 0:
             self.opt.zero_grad(set_to_none=True)
+            self._has_real_grad_in_window = False
         restore_adapter = None
         model_ref = _unwrap_model(self.model)
         if self.adapter_name is not None and hasattr(model_ref, "set_adapter"):
@@ -628,13 +647,21 @@ class TextPreferenceDPOUpdater:
                 except Exception:
                     pass
         self._accum_count += 1
+        if has_real_grad:
+            self._has_real_grad_in_window = True
 
         did_step = False
         if self._accum_count >= self.grad_accum_steps:
-            _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
-            self.opt.step()
+            if self._has_real_grad_in_window:
+                _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
+                self.opt.step()
+                did_step = True
+            else:
+                # All microbatches in this accumulation window were effectively skipped.
+                # Do not step AdamW to avoid decoupled-weight-decay drift.
+                self.opt.zero_grad(set_to_none=True)
             self._accum_count = 0
-            did_step = True
+            self._has_real_grad_in_window = False
         self.model.train(False)
 
         if (
@@ -649,8 +676,9 @@ class TextPreferenceDPOUpdater:
                 pass
             gc.collect()
 
+        reported_dpo_loss = float(dpo_loss.detach().item()) if torch.isfinite(dpo_loss.detach()).all() else float("nan")
         return {
-            "dpo_loss": float(dpo_loss.item()),
+            "dpo_loss": reported_dpo_loss,
             "dpo_beta": float(self.dpo_beta),
             "label_smoothing": float(self.dpo_label_smoothing),
             "pi_logp_chosen": float(pi_logp_chosen.detach().item()),
@@ -664,5 +692,6 @@ class TextPreferenceDPOUpdater:
             "rejected_token_count": float(rejected_token_count),
             "kl_coef_before": 0.0,
             "kl_coef_after": 0.0,
-            "did_step": did_step,
+            "did_step": bool(did_step),
+            "skipped_reason": skipped_reason,
         }

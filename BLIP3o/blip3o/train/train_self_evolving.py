@@ -155,11 +155,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dpo_beta", type=float, default=0.1)
     p.add_argument("--dpo_label_smoothing", type=float, default=0.0)
     p.add_argument("--dpo_min_reward_gap", type=float, default=0.0)
+    p.add_argument("--dpo_min_spec_gap", type=float, default=0.0)
+    p.add_argument("--dpo_min_confidence_gap", type=float, default=0.0)
+    p.add_argument("--dpo_max_contradiction", type=float, default=1.0)
+    p.add_argument("--dpo_pair_selection", type=str, default="best_worst", choices=["best_worst", "best_hard_negative"])
+    p.add_argument("--generator_proxy_max_ratio", type=float, default=1.0)
 
     # Unified scheduler
     p.add_argument("--understanding_steps_per_cycle", type=int, default=3)
     p.add_argument("--generation_steps_per_cycle", type=int, default=2)
     p.add_argument("--synthetic_solver_update_freq", type=int, default=1)
+    p.add_argument("--synthetic_solver_hard_only", action="store_true", default=False)
+    p.add_argument("--solver_hardness_min_entropy", type=float, default=0.2)
     p.add_argument("--min_spec_quality_for_update", type=float, default=0.35)
     p.add_argument("--min_spec_qa_pairs", type=int, default=2)
     p.add_argument("--max_expected_words", type=int, default=8)
@@ -293,6 +300,11 @@ def _build_generation_config(args):
         dpo_beta=args.dpo_beta,
         dpo_label_smoothing=args.dpo_label_smoothing,
         dpo_min_reward_gap=args.dpo_min_reward_gap,
+        dpo_min_spec_gap=args.dpo_min_spec_gap,
+        dpo_min_confidence_gap=args.dpo_min_confidence_gap,
+        dpo_max_contradiction=args.dpo_max_contradiction,
+        dpo_pair_selection=args.dpo_pair_selection,
+        generator_proxy_max_ratio=args.generator_proxy_max_ratio,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,
@@ -397,6 +409,11 @@ def _build_unified_config(args):
         dpo_beta=args.dpo_beta,
         dpo_label_smoothing=args.dpo_label_smoothing,
         dpo_min_reward_gap=args.dpo_min_reward_gap,
+        dpo_min_spec_gap=args.dpo_min_spec_gap,
+        dpo_min_confidence_gap=args.dpo_min_confidence_gap,
+        dpo_max_contradiction=args.dpo_max_contradiction,
+        dpo_pair_selection=args.dpo_pair_selection,
+        generator_proxy_max_ratio=args.generator_proxy_max_ratio,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,
@@ -450,6 +467,8 @@ def _build_unified_config(args):
         understanding_steps_per_cycle=args.understanding_steps_per_cycle,
         generation_steps_per_cycle=args.generation_steps_per_cycle,
         synthetic_solver_update_freq=args.synthetic_solver_update_freq,
+        synthetic_solver_hard_only=args.synthetic_solver_hard_only,
+        solver_hardness_min_entropy=args.solver_hardness_min_entropy,
     )
 
 

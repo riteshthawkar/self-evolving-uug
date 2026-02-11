@@ -218,18 +218,30 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         solver_update_applied = bool(solver_update_due)
         solver_update_skip_reason: Optional[str] = None
-        if (
-            solver_update_applied
-            and bool(getattr(self.cfg, "skip_solver_update_when_uninformative", True))
-            and not solver_informative_all
-        ):
+
+        # Use LOCAL informativeness check instead of ALL-ranks.
+        # Ranks with uninformative data still participate in DDP collectives
+        # (the policy updater's zero-loss backward handles this), but pass
+        # reward=0 so they contribute zero gradient.  This allows the solver
+        # to learn whenever ANY rank has informative data.
+        skip_uninformative = bool(
+            getattr(self.cfg, "skip_solver_update_when_uninformative", True)
+        )
+        local_uninformative = skip_uninformative and not solver_informative_local
+
+        # Check if ANY rank wants to do a solver update (has informative data).
+        # All ranks must participate in DDP collectives together, so we only
+        # skip the entire update if NO rank is informative.
+        any_rank_informative = self._dist_any_bool(solver_informative_local) if solver_update_applied else False
+        if solver_update_applied and skip_uninformative and not any_rank_informative:
             solver_update_applied = False
-            solver_update_skip_reason = "uninformative_self_consistency"
+            solver_update_skip_reason = "uninformative_self_consistency_all_ranks"
+
         if solver_update_applied:
             for sample_idx, (completion, reward) in enumerate(zip(solver_outputs, solver_rewards_soft)):
                 local_can_solver_update = bool(str(completion).strip())
-                can_solver_update = self._dist_all_bool(local_can_solver_update)
-                if not can_solver_update:
+                any_rank_can_solver_update = self._dist_any_bool(local_can_solver_update)
+                if not any_rank_can_solver_update:
                     self._append_jsonl(
                         self.policy_updates_log_path,
                         {
@@ -238,23 +250,29 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             "source": "understanding",
                             "sample_idx": int(sample_idx),
                             "skipped": True,
-                            "reason": "distributed_peer_empty_solver_completion",
+                            "reason": "all_ranks_empty_solver_completion",
                         },
                     )
                     continue
                 baseline_before = self.solver_baseline
+                # Uninformative ranks participate in DDP collectives but force
+                # an empty completion so the updater takes the zero-loss path.
+                local_skip_update = local_uninformative or (not local_can_solver_update)
+                completion_for_update = completion if not local_skip_update else ""
+                effective_reward = reward if not local_skip_update else 0.0
                 stats = self.solver_updater.step(
                     image=image,
                     prompt=solver_prompt,
-                    completion=completion,
-                    reward=reward,
-                    baseline=baseline_before,
+                    completion=completion_for_update,
+                    reward=effective_reward,
+                    baseline=baseline_before if not local_skip_update else 0.0,
                     device=self.device,
                 )
                 solver_stats_list.append(stats)
                 if stats.get("did_step", True):
                     self._policy_update_counts["solver"] += 1
-                self._update_baseline("solver", reward)
+                if not local_skip_update:
+                    self._update_baseline("solver", reward)
                 self._sync_state_scalars()
 
                 # Aggressive cleanup after each solver update step to avoid OOM
@@ -283,21 +301,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             baseline_before = self.proposer_baseline
             proposer_completion = str(proposer_out or "").strip()
             local_can_proposer_update = bool(proposer_completion)
-            can_proposer_update = self._dist_all_bool(local_can_proposer_update)
-            if can_proposer_update:
+            any_rank_can_proposer_update = self._dist_any_bool(local_can_proposer_update)
+            if any_rank_can_proposer_update:
+                completion_for_update = proposer_completion if local_can_proposer_update else ""
+                effective_reward = proposer_reward if local_can_proposer_update else 0.0
                 proposer_stats = self.proposer_updater.step(
                     image=image,
                     prompt=proposer_prompt,
-                    completion=proposer_completion,
-                    reward=proposer_reward,
-                    baseline=baseline_before,
+                    completion=completion_for_update,
+                    reward=effective_reward,
+                    baseline=baseline_before if local_can_proposer_update else 0.0,
                     device=self.device,
                 )
                 if proposer_stats.get("did_step", True):
                     self._policy_update_counts["proposer"] += 1
-                self._update_baseline("proposer", proposer_reward)
+                if local_can_proposer_update:
+                    self._update_baseline("proposer", proposer_reward)
             else:
-                proposer_skip_reason = "distributed_peer_empty_proposer_completion"
+                proposer_skip_reason = "all_ranks_empty_proposer_completion"
                 self._append_jsonl(
                     self.policy_updates_log_path,
                     {

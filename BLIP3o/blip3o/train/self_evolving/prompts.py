@@ -25,7 +25,11 @@ def build_solver_prompt(question_text: str) -> str:
     return (
         "You are a precise vision-language solver.\n"
         "Answer the question using only the provided image.\n"
-        "Return only the final answer inside XML:\n"
+        "Rules:\n"
+        "- Your answer MUST be 1-5 words only. No full sentences.\n"
+        "- Give only the core answer, not an explanation.\n"
+        "- Examples of good answers: 'primary producer', '42%', 'increases then decreases', 'red circle'\n"
+        "- Return only the final answer inside XML:\n"
         "<answer>...</answer>\n"
         f"Question: {question_text}"
     )
