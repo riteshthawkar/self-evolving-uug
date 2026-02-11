@@ -108,6 +108,20 @@ class TextPolicyUpdater:
         prompt_len = inputs_prompt["input_ids"].shape[1]
         labels[:, :prompt_len] = -100
         valid_mask = labels[:, 1:] != -100
+        valid_token_count = int(valid_mask.sum().item())
+        if valid_token_count <= 0:
+            self.model.train(False)
+            return {
+                "ce_loss": 0.0,
+                "kl_loss": 0.0,
+                "advantage": float(reward - baseline),
+                "kl_coef_before": float(self.kl_coef),
+                "kl_coef_after": float(self.kl_coef),
+                "total_loss": 0.0,
+                "did_step": False,
+                "skipped_reason": "no_valid_completion_tokens",
+                "valid_token_count": 0.0,
+            }
 
         # For BLIP3o forward(), we must NOT pass 'images' to model(**inputs)
         # because the CausalLM forward() doesn't accept it the same way
@@ -180,6 +194,19 @@ class TextPolicyUpdater:
             else:
                 raise
         ce_loss = out_pi.loss
+        if not bool(torch.isfinite(ce_loss.detach()).all().item()):
+            self.model.train(False)
+            return {
+                "ce_loss": float("nan"),
+                "kl_loss": 0.0,
+                "advantage": float(reward - baseline),
+                "kl_coef_before": float(self.kl_coef),
+                "kl_coef_after": float(self.kl_coef),
+                "total_loss": float("nan"),
+                "did_step": False,
+                "skipped_reason": "non_finite_ce_loss",
+                "valid_token_count": float(valid_token_count),
+            }
         if valid_mask.any():
             vocab = out_pi.logits.shape[-1]
             pi_shift = out_pi.logits[:, :-1, :].reshape(-1, vocab)
@@ -205,6 +232,19 @@ class TextPolicyUpdater:
         advantage = float(reward - baseline)
         beta_before = float(self.kl_coef)
         total_loss = advantage * ce_loss + beta_before * kl_loss
+        if not bool(torch.isfinite(total_loss.detach()).all().item()):
+            self.model.train(False)
+            return {
+                "ce_loss": float(ce_loss.detach().item()),
+                "kl_loss": float(kl_loss.detach().item()),
+                "advantage": advantage,
+                "kl_coef_before": beta_before,
+                "kl_coef_after": float(self.kl_coef),
+                "total_loss": float("nan"),
+                "did_step": False,
+                "skipped_reason": "non_finite_total_loss",
+                "valid_token_count": float(valid_token_count),
+            }
 
         # Gradient accumulation: scale loss and accumulate
         scaled_loss = total_loss / self.grad_accum_steps
@@ -271,6 +311,7 @@ class TextPolicyUpdater:
             "kl_coef_after": float(self.kl_coef),
             "total_loss": float(total_loss.item()),
             "did_step": did_step,
+            "valid_token_count": float(valid_token_count),
         }
 
 
@@ -513,6 +554,47 @@ class TextPreferenceDPOUpdater:
             dpo_loss = (1.0 - self.dpo_label_smoothing) * pos_term + self.dpo_label_smoothing * neg_term
         else:
             dpo_loss = pos_term
+
+        if chosen_token_count <= 0 or rejected_token_count <= 0:
+            self.model.train(False)
+            return {
+                "dpo_loss": 0.0,
+                "dpo_beta": float(self.dpo_beta),
+                "label_smoothing": float(self.dpo_label_smoothing),
+                "pi_logp_chosen": float(pi_logp_chosen.detach().item()),
+                "pi_logp_rejected": float(pi_logp_rejected.detach().item()),
+                "ref_logp_chosen": float(ref_logp_chosen.detach().item()),
+                "ref_logp_rejected": float(ref_logp_rejected.detach().item()),
+                "pi_gap": float(pi_gap.detach().item()),
+                "ref_gap": float(ref_gap.detach().item()),
+                "preference_margin": float(preference_margin.detach().item()),
+                "chosen_token_count": float(chosen_token_count),
+                "rejected_token_count": float(rejected_token_count),
+                "kl_coef_before": 0.0,
+                "kl_coef_after": 0.0,
+                "did_step": False,
+                "skipped_reason": "no_valid_completion_tokens",
+            }
+        if not bool(torch.isfinite(dpo_loss.detach()).all().item()):
+            self.model.train(False)
+            return {
+                "dpo_loss": float("nan"),
+                "dpo_beta": float(self.dpo_beta),
+                "label_smoothing": float(self.dpo_label_smoothing),
+                "pi_logp_chosen": float(pi_logp_chosen.detach().item()),
+                "pi_logp_rejected": float(pi_logp_rejected.detach().item()),
+                "ref_logp_chosen": float(ref_logp_chosen.detach().item()),
+                "ref_logp_rejected": float(ref_logp_rejected.detach().item()),
+                "pi_gap": float(pi_gap.detach().item()),
+                "ref_gap": float(ref_gap.detach().item()),
+                "preference_margin": float(preference_margin.detach().item()),
+                "chosen_token_count": float(chosen_token_count),
+                "rejected_token_count": float(rejected_token_count),
+                "kl_coef_before": 0.0,
+                "kl_coef_after": 0.0,
+                "did_step": False,
+                "skipped_reason": "non_finite_dpo_loss",
+            }
 
         # Gradient accumulation: scale loss and accumulate
         scaled_loss = dpo_loss / self.grad_accum_steps
