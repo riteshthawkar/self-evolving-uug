@@ -283,6 +283,84 @@ def _ensure_diffusers_component_weight_aliases(component_dir: pathlib.Path):
             pass
 
 
+_PIPELINE_DEVICE_COMPONENT_NAMES: Tuple[str, ...] = (
+    "unet",
+    "vae",
+    "text_encoder",
+    "text_encoder_2",
+    "tokenizer",
+    "tokenizer_2",
+    "image_encoder",
+    "multimodal_encoder",
+    "transformer",
+    "controlnet",
+    "prior",
+)
+
+
+def _module_primary_device(module: torch.nn.Module) -> Optional[torch.device]:
+    try:
+        for param in module.parameters(recurse=True):
+            return param.device
+    except Exception:
+        pass
+    try:
+        for buf in module.buffers(recurse=True):
+            return buf.device
+    except Exception:
+        pass
+    return None
+
+
+def _iter_pipeline_modules(pipe):
+    seen_ids = set()
+    for name in _PIPELINE_DEVICE_COMPONENT_NAMES:
+        module = getattr(pipe, name, None)
+        if isinstance(module, torch.nn.Module):
+            mid = id(module)
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            yield name, module
+
+    components = getattr(pipe, "components", None)
+    if isinstance(components, dict):
+        for name, module in components.items():
+            if not isinstance(module, torch.nn.Module):
+                continue
+            mid = id(module)
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            yield f"components.{name}", module
+
+
+def _force_pipeline_modules_to_device(pipe, device: torch.device):
+    move_errors: List[str] = []
+    for name, module in _iter_pipeline_modules(pipe):
+        try:
+            module.to(device=device)
+        except Exception as exc:
+            move_errors.append(f"{name}: {repr(exc)}")
+    if move_errors:
+        joined = " | ".join(move_errors[:8])
+        raise RuntimeError(f"Failed to move diffusion pipeline components to {device}: {joined}")
+
+
+def _collect_pipeline_device_mismatches(pipe, expected_device: torch.device) -> List[str]:
+    expected = torch.device(expected_device)
+    mismatches: List[str] = []
+    for name, module in _iter_pipeline_modules(pipe):
+        mod_dev = _module_primary_device(module)
+        if mod_dev is None:
+            continue
+        type_match = mod_dev.type == expected.type
+        index_match = (expected.index is None) or (mod_dev.index == expected.index)
+        if not (type_match and index_match):
+            mismatches.append(f"{name}={mod_dev}")
+    return mismatches
+
+
 def _build_original_blip3o_diffusion_pipeline(
     model_name: str,
     *,
@@ -454,8 +532,29 @@ def _build_original_blip3o_diffusion_pipeline(
         detail = " | ".join(errors)
         raise RuntimeError(f"Failed to build BLIP3o diffusion pipeline. {detail}")
 
+    placement_errors: List[str] = []
     try:
-        pipe = pipe.to(device)
-    except Exception:
-        pass
+        pipe = pipe.to(device=device, dtype=torch_dtype)
+    except TypeError:
+        try:
+            pipe = pipe.to(device=device)
+        except Exception as exc:
+            placement_errors.append(f"pipe.to(device) failed: {repr(exc)}")
+    except Exception as exc:
+        placement_errors.append(f"pipe.to(device,dtype) failed: {repr(exc)}")
+
+    try:
+        _force_pipeline_modules_to_device(pipe, device)
+    except Exception as exc:
+        placement_errors.append(repr(exc))
+
+    mismatches = _collect_pipeline_device_mismatches(pipe, device)
+    if mismatches:
+        mismatch_text = ", ".join(mismatches[:12])
+        detail = f" placement_errors={' | '.join(placement_errors)}" if placement_errors else ""
+        raise RuntimeError(
+            "Diffusion pipeline has components on unexpected devices "
+            f"(expected={torch.device(device)}): {mismatch_text}.{detail}"
+        )
+
     return pipe
