@@ -112,6 +112,20 @@ class RolePolicyUpdater:
         prompt_len = inputs_prompt["input_ids"].shape[1]
         labels[:, :prompt_len] = -100
         valid_mask = labels[:, 1:] != -100
+        valid_token_count = int(valid_mask.sum().item())
+        if valid_token_count <= 0:
+            self.model.train(False)
+            return {
+                "ce_loss": 0.0,
+                "kl_loss": 0.0,
+                "advantage": float(reward - baseline),
+                "kl_coef_before": float(self.kl_coef),
+                "kl_coef_after": float(self.kl_coef),
+                "total_loss": 0.0,
+                "did_step": False,
+                "skipped_reason": "no_valid_completion_tokens",
+                "valid_token_count": 0.0,
+            }
 
         # For BLIP3o, forward() doesn't accept 'images'/'image_sizes' —
         # those are only for generate().  Filter them out for forward calls.
@@ -183,6 +197,19 @@ class RolePolicyUpdater:
             else:
                 raise
         ce_loss = out_pi.loss
+        if not bool(torch.isfinite(ce_loss.detach()).all().item()):
+            self.model.train(False)
+            return {
+                "ce_loss": float("nan"),
+                "kl_loss": 0.0,
+                "advantage": float(reward - baseline),
+                "kl_coef_before": float(self.kl_coef),
+                "kl_coef_after": float(self.kl_coef),
+                "total_loss": float("nan"),
+                "did_step": False,
+                "skipped_reason": "non_finite_ce_loss",
+                "valid_token_count": float(valid_token_count),
+            }
         if valid_mask.any():
             vocab = out_pi.logits.shape[-1]
             pi_shift = out_pi.logits[:, :-1, :].reshape(-1, vocab)
@@ -208,6 +235,19 @@ class RolePolicyUpdater:
         advantage = float(reward - baseline)
         beta_before = float(self.kl_coef)
         total_loss = advantage * ce_loss + beta_before * kl_loss
+        if not bool(torch.isfinite(total_loss.detach()).all().item()):
+            self.model.train(False)
+            return {
+                "ce_loss": float(ce_loss.detach().item()),
+                "kl_loss": float(kl_loss.detach().item()),
+                "advantage": advantage,
+                "kl_coef_before": beta_before,
+                "kl_coef_after": float(self.kl_coef),
+                "total_loss": float("nan"),
+                "did_step": False,
+                "skipped_reason": "non_finite_total_loss",
+                "valid_token_count": float(valid_token_count),
+            }
 
         # Gradient accumulation: scale loss and accumulate
         scaled_loss = total_loss / self.grad_accum_steps
@@ -279,4 +319,5 @@ class RolePolicyUpdater:
             "kl_coef_after": float(self.kl_coef),
             "total_loss": total_loss_val,
             "did_step": did_step,
+            "valid_token_count": float(valid_token_count),
         }

@@ -404,6 +404,47 @@ def _build_chat_text(
     return "<image>\n" + prompt
 
 
+def _extract_qwen_user_assistant_text(chat_text: str) -> Tuple[str, Optional[str]]:
+    """Extract user prompt text and optional assistant completion from CHATML text.
+
+    ``chat_text`` in this pipeline is often built via ``conv_templates['qwen']``
+    and may include:
+      - system/user/assistant role markers
+      - an ``<image>`` placeholder
+      - optional assistant completion appended to the generation prompt
+
+    We normalize this into:
+      1) user text (without role/control tokens)
+      2) assistant text if present, else ``None``.
+    """
+    text = str(chat_text or "")
+    user_text = text
+    assistant_text: Optional[str] = None
+
+    if "<image>" in user_text:
+        user_text = user_text.split("<image>", 1)[1]
+
+    assistant_marker = "<|im_start|>assistant"
+    if assistant_marker in user_text:
+        user_text, assistant_text = user_text.split(assistant_marker, 1)
+
+    if "<|im_end|>" in user_text:
+        user_text = user_text.split("<|im_end|>", 1)[0]
+    user_text = user_text.strip()
+
+    if assistant_text is not None:
+        assistant_text = assistant_text.strip()
+        if "<|im_end|>" in assistant_text:
+            assistant_text = assistant_text.split("<|im_end|>", 1)[0]
+        if "<|im_start|>" in assistant_text:
+            assistant_text = assistant_text.split("<|im_start|>", 1)[0]
+        assistant_text = assistant_text.strip() or None
+
+    if not user_text:
+        user_text = text.strip() or "Describe the image."
+    return user_text, assistant_text
+
+
 def _prepare_mm_inputs(
     processor,
     device: torch.device,
@@ -432,24 +473,32 @@ def _prepare_mm_inputs(
             qwen_proc = _get_qwen_vl_processor()
             if qwen_proc is not None and hasattr(qwen_proc, "apply_chat_template"):
                 try:
-                    prompt_text = chat_text
-                    if "<image>" in prompt_text:
-                        prompt_text = prompt_text.split("<image>", 1)[1]
-                    if "<|im_end|>" in prompt_text:
-                        prompt_text = prompt_text.split("<|im_end|>", 1)[0]
-                    prompt_text = prompt_text.strip() or chat_text
+                    user_text, assistant_text = _extract_qwen_user_assistant_text(chat_text)
 
                     messages = [
                         {
                             "role": "user",
                             "content": [
                                 {"type": "image", "image": image},
-                                {"type": "text", "text": prompt_text},
+                                {"type": "text", "text": user_text},
                             ],
                         }
                     ]
+                    add_generation_prompt = True
+                    if assistant_text is not None:
+                        # Preserve appended completion text for training-loss
+                        # construction (prompt + completion) instead of dropping it.
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": assistant_text}],
+                            }
+                        )
+                        add_generation_prompt = False
                     text_mm = qwen_proc.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=add_generation_prompt,
                     )
                     try:
                         from qwen_vl_utils import process_vision_info
