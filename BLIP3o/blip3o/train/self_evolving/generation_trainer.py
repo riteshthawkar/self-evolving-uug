@@ -930,19 +930,46 @@ class GenerationSelfEvolvingTrainer:
 
         gen_inputs = _adapt_mm_generate_inputs(self.model, dict(inputs))
 
+        # Fail fast on corrupted / incompatible token IDs before hitting
+        # device-side asserts inside HIP kernels.
+        model_cfg = getattr(_unwrap_model(self.model), "config", None)
+        vocab_size = getattr(model_cfg, "vocab_size", None)
+        input_ids = gen_inputs.get("input_ids")
+        if torch.is_tensor(input_ids) and isinstance(vocab_size, int) and vocab_size > 0:
+            min_id = int(input_ids.min().item())
+            max_id = int(input_ids.max().item())
+            if min_id < 0 or max_id >= vocab_size:
+                raise RuntimeError(
+                    "Invalid token ids prepared for generation: "
+                    f"min_id={min_id}, max_id={max_id}, vocab_size={vocab_size}. "
+                    "This indicates tokenizer/model mismatch in multimodal input preparation."
+                )
+
         # Extract pad_token_id robustly — processor may BE the tokenizer
         _tok = _extract_tokenizer_from_processor(self.processor)
         _pad_id = getattr(_tok, "eos_token_id", None) if _tok is not None else None
 
         def _run_generate(curr_inputs: Dict[str, torch.Tensor]):
-            return self.model.generate(
-                **curr_inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=temperature,
-                top_p=top_p,
-                pad_token_id=_pad_id,
-            )
+            base_kwargs = {
+                "max_new_tokens": max_new_tokens,
+                "do_sample": True,
+                "temperature": temperature,
+                "top_p": top_p,
+                "pad_token_id": _pad_id,
+                # Stabilize multinomial sampling on mixed precision by
+                # sanitizing invalid logits and re-normalizing probabilities.
+                "remove_invalid_values": True,
+                "renormalize_logits": True,
+            }
+            try:
+                return self.model.generate(**curr_inputs, **base_kwargs)
+            except TypeError as exc:
+                msg = str(exc)
+                if ("remove_invalid_values" in msg) or ("renormalize_logits" in msg):
+                    base_kwargs.pop("remove_invalid_values", None)
+                    base_kwargs.pop("renormalize_logits", None)
+                    return self.model.generate(**curr_inputs, **base_kwargs)
+                raise
 
         with torch.no_grad():
             with use_adapter(self.model, adapter_name):
