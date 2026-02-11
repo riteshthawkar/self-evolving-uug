@@ -1135,7 +1135,102 @@ class GenerationSelfEvolvingTrainer:
         spec = _parse_generation_spec(raw)
         return spec
 
-    def _sanitize_and_score_spec(self, spec: GenerationSpec) -> Tuple[GenerationSpec, float, Dict[str, float]]:
+    def _is_question_like_prompt(self, text: str) -> bool:
+        s = " ".join((text or "").split())
+        if not s:
+            return True
+        if "?" in s:
+            return True
+        lower = s.lower()
+        starters = (
+            "what ",
+            "which ",
+            "who ",
+            "where ",
+            "when ",
+            "why ",
+            "how ",
+            "is ",
+            "are ",
+            "do ",
+            "does ",
+            "did ",
+            "can ",
+            "could ",
+            "would ",
+            "should ",
+        )
+        return lower.startswith(starters)
+
+    def _compose_generation_prompt(
+        self,
+        raw_prompt: str,
+        source_caption: str,
+        qa_pairs: Tuple[GenerationQAPair, ...],
+    ) -> str:
+        raw = " ".join((raw_prompt or "").split())
+        caption = " ".join((source_caption or "").split())
+        prompt_was_question = self._is_question_like_prompt(raw)
+
+        if raw and not prompt_was_question:
+            subject = raw.rstrip(".")
+        elif caption:
+            subject = caption.rstrip(".")
+        elif raw:
+            # Last resort: use raw text but make it declarative.
+            subject = raw.replace("?", "").rstrip(".")
+        else:
+            subject = "a coherent scene with clear objects and relationships"
+
+        # Remove common instruction wrappers to keep the final prompt caption-like.
+        subject_l = subject.lower()
+        for prefix in (
+            "create an image variation of:",
+            "create an image of:",
+            "generate an image of:",
+            "generate image of:",
+            "draw an image of:",
+            "an image of ",
+            "image of ",
+        ):
+            if subject_l.startswith(prefix):
+                subject = subject[len(prefix):].strip()
+                break
+        subject = subject.rstrip(" .")
+        if not subject:
+            subject = "a coherent scene with clear objects and relationships"
+
+        facts: List[str] = []
+        for qa in qa_pairs[:3]:
+            q = " ".join((qa.question or "").replace("?", "").split())
+            e = " ".join((qa.expected or "").replace("?", "").split())
+            if q and e:
+                facts.append(f"{q}: {e}")
+            elif e:
+                facts.append(e)
+
+        parts: List[str] = [f"A detailed, realistic scene showing {subject}."]
+        if facts:
+            parts.append(
+                "Visible details include " + "; ".join(facts) + "."
+            )
+        parts.append(
+            "The composition should be coherent, with readable text or numbers when present."
+        )
+
+        composed = " ".join(parts).replace("?", "")
+        composed = " ".join(composed.split())
+        max_words = 96
+        words = composed.split()
+        if len(words) > max_words:
+            composed = " ".join(words[:max_words])
+        return composed
+
+    def _sanitize_and_score_spec(
+        self,
+        spec: GenerationSpec,
+        source_caption: str = "",
+    ) -> Tuple[GenerationSpec, float, Dict[str, float]]:
         filtered: List[GenerationQAPair] = []
         seen_questions = set()
         valid_count = 0
@@ -1172,8 +1267,15 @@ class GenerationSelfEvolvingTrainer:
         quality = 0.5 * count_score + 0.3 * validity_score + 0.2 * uniqueness_score - yes_no_penalty
         quality = float(max(0.0, min(1.0, quality)))
 
+        prompt_was_question = self._is_question_like_prompt(spec.prompt)
+        composed_prompt = self._compose_generation_prompt(
+            raw_prompt=spec.prompt,
+            source_caption=source_caption,
+            qa_pairs=tuple(filtered),
+        )
+
         sanitized = GenerationSpec(
-            prompt=spec.prompt,
+            prompt=composed_prompt,
             qa_pairs=tuple(filtered),
             raw_output=spec.raw_output,
             fallback_used=spec.fallback_used or (qa_count < self.cfg.min_spec_qa_pairs),
@@ -1186,6 +1288,9 @@ class GenerationSelfEvolvingTrainer:
             "uniqueness_score": float(uniqueness_score),
             "yes_no_penalty": float(yes_no_penalty),
             "spec_quality": float(quality),
+            "prompt_was_question": 1.0 if prompt_was_question else 0.0,
+            "raw_prompt_words": float(len(_tokenize_words(spec.prompt))),
+            "sanitized_prompt_words": float(len(_tokenize_words(composed_prompt))),
         }
         return sanitized, quality, details
 
@@ -2020,7 +2125,10 @@ class GenerationSelfEvolvingTrainer:
                 fallback_used=True,
             )
 
-        spec, spec_quality, spec_quality_details = self._sanitize_and_score_spec(spec)
+        spec, spec_quality, spec_quality_details = self._sanitize_and_score_spec(
+            spec,
+            source_caption=source_caption,
+        )
         if verbose:
             print(
                 f"[Step {step:05d}][G] spec ready: qa_pairs={len(spec.qa_pairs)} "

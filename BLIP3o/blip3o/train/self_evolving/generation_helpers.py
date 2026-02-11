@@ -27,6 +27,8 @@ GEN_PROMPT_TEMPLATE = (
     "Given the source image, propose one new text-to-image prompt and verification QA pairs.\n"
     "Rules:\n"
     "- Prompt must be image-grounded but not a trivial copy.\n"
+    "- Prompt must be declarative (caption/instruction style), not a question.\n"
+    "- Do not use a question mark in the prompt.\n"
     "- QA pairs must be short-answer and visually verifiable.\n"
     "- Expected answers must be concise.\n"
     "Output XML only:\n"
