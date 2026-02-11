@@ -109,19 +109,13 @@ class TextPolicyUpdater:
         labels[:, :prompt_len] = -100
         valid_mask = labels[:, 1:] != -100
         valid_token_count = int(valid_mask.sum().item())
-        if valid_token_count <= 0:
-            self.model.train(False)
-            return {
-                "ce_loss": 0.0,
-                "kl_loss": 0.0,
-                "advantage": float(reward - baseline),
-                "kl_coef_before": float(self.kl_coef),
-                "kl_coef_after": float(self.kl_coef),
-                "total_loss": 0.0,
-                "did_step": False,
-                "skipped_reason": "no_valid_completion_tokens",
-                "valid_token_count": 0.0,
-            }
+        # NOTE: Do NOT return early when valid_token_count <= 0.
+        # In DDP, all ranks must participate in the forward pass (which triggers
+        # collective buffer sync). If some ranks return early while others
+        # proceed to self.model(**inputs), the NCCL broadcast will hang and
+        # eventually time out.  Instead, we run the forward pass on all ranks
+        # and gate the backward/optimizer step on valid_token_count > 0.
+        skip_backward = valid_token_count <= 0
 
         # For BLIP3o forward(), we must NOT pass 'images' to model(**inputs)
         # because the CausalLM forward() doesn't accept it the same way
@@ -194,20 +188,13 @@ class TextPolicyUpdater:
             else:
                 raise
         ce_loss = out_pi.loss
+
+        # Check for non-finite ce_loss — mark for skip but do NOT return early
+        # to keep DDP in sync across ranks.
         if not bool(torch.isfinite(ce_loss.detach()).all().item()):
-            self.model.train(False)
-            return {
-                "ce_loss": float("nan"),
-                "kl_loss": 0.0,
-                "advantage": float(reward - baseline),
-                "kl_coef_before": float(self.kl_coef),
-                "kl_coef_after": float(self.kl_coef),
-                "total_loss": float("nan"),
-                "did_step": False,
-                "skipped_reason": "non_finite_ce_loss",
-                "valid_token_count": float(valid_token_count),
-            }
-        if valid_mask.any():
+            skip_backward = True
+
+        if not skip_backward and valid_mask.any():
             vocab = out_pi.logits.shape[-1]
             pi_shift = out_pi.logits[:, :-1, :].reshape(-1, vocab)
             ref_shift = out_ref.logits[:, :-1, :].reshape(-1, vocab)
@@ -231,22 +218,33 @@ class TextPolicyUpdater:
 
         advantage = float(reward - baseline)
         beta_before = float(self.kl_coef)
-        total_loss = advantage * ce_loss + beta_before * kl_loss
-        if not bool(torch.isfinite(total_loss.detach()).all().item()):
-            self.model.train(False)
-            return {
-                "ce_loss": float(ce_loss.detach().item()),
-                "kl_loss": float(kl_loss.detach().item()),
-                "advantage": advantage,
-                "kl_coef_before": beta_before,
-                "kl_coef_after": float(self.kl_coef),
-                "total_loss": float("nan"),
-                "did_step": False,
-                "skipped_reason": "non_finite_total_loss",
-                "valid_token_count": float(valid_token_count),
-            }
 
-        # Gradient accumulation: scale loss and accumulate
+        if skip_backward:
+            # No valid completion tokens or non-finite loss on this rank.
+            # We use a zero loss for backward so DDP AllReduce still fires
+            # (contributing zero gradients), keeping all ranks in sync.
+            # Backward a zero loss that is still connected to the model's
+            # computation graph so DDP AllReduce fires for all parameters.
+            # Use sum() so every parameter contributes; multiply by 0 so
+            # the actual gradient is zero.  nan_to_num guards against the
+            # (rare) case where logits contain NaN.
+            total_loss = (out_pi.logits.sum() * 0.0)
+            if not torch.isfinite(total_loss):
+                total_loss = torch.zeros((), device=out_pi.logits.device,
+                                         dtype=out_pi.logits.dtype, requires_grad=True)
+            skipped_reason = "no_valid_completion_tokens" if valid_token_count <= 0 else "non_finite_ce_loss"
+        else:
+            total_loss = advantage * ce_loss + beta_before * kl_loss
+            skipped_reason = None
+            if not bool(torch.isfinite(total_loss.detach()).all().item()):
+                # Non-finite total_loss: backward zero instead.
+                total_loss = out_pi.logits.sum() * 0.0
+                skipped_reason = "non_finite_total_loss"
+
+        # Gradient accumulation: scale loss and accumulate.
+        # All ranks MUST call backward() on the DDP model to participate
+        # in the AllReduce gradient sync.  Ranks with no valid tokens
+        # backward a zero loss, contributing zero gradients.
         scaled_loss = total_loss / self.grad_accum_steps
         if self._accum_count == 0:
             self.opt.zero_grad(set_to_none=True)
@@ -275,6 +273,19 @@ class TextPolicyUpdater:
             self._accum_count = 0
             did_step = True
         self.model.train(False)
+
+        if skipped_reason:
+            return {
+                "ce_loss": float(ce_loss.detach().item()) if torch.isfinite(ce_loss.detach()).all() else float("nan"),
+                "kl_loss": float(kl_loss.detach().item()),
+                "advantage": advantage,
+                "kl_coef_before": beta_before,
+                "kl_coef_after": float(self.kl_coef),
+                "total_loss": 0.0,
+                "did_step": False,
+                "skipped_reason": skipped_reason,
+                "valid_token_count": float(valid_token_count),
+            }
 
         kl_val = float(kl_loss.item())
         self._adapt_beta(kl_val)
