@@ -45,6 +45,30 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         super().__init__(config)
         self.ucfg = config
 
+    def _phase_local_step_index(self, step: int, phase: str) -> int:
+        cycle = max(1, self.cfg.understanding_steps_per_cycle + self.cfg.generation_steps_per_cycle)
+        cycle_idx = (step - 1) // cycle
+        phase_idx = (step - 1) % cycle
+        if phase == "understanding":
+            if phase_idx >= self.cfg.understanding_steps_per_cycle:
+                return 0
+            return cycle_idx * self.cfg.understanding_steps_per_cycle + phase_idx + 1
+        if phase == "generation":
+            if phase_idx < self.cfg.understanding_steps_per_cycle:
+                return 0
+            gen_pos = phase_idx - self.cfg.understanding_steps_per_cycle
+            return cycle_idx * self.cfg.generation_steps_per_cycle + gen_pos + 1
+        raise ValueError(f"Unknown phase: {phase!r}")
+
+    def _is_proposer_update_due(self, step: int, phase: str) -> bool:
+        freq = int(getattr(self.cfg, "proposer_update_freq", 0) or 0)
+        if freq <= 0:
+            return False
+        local_idx = self._phase_local_step_index(step, phase)
+        if local_idx <= 0:
+            return False
+        return (local_idx % freq) == 0
+
     def _understanding_step(self, step: int, image: Image.Image, meta: Dict) -> Dict[str, object]:
         step_t0 = time.perf_counter()
         proposer_prompt = build_proposer_prompt()
@@ -144,7 +168,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 gc.collect()
 
         proposer_stats = None
-        if step % self.cfg.proposer_update_freq == 0:
+        if self._is_proposer_update_due(step, phase="understanding"):
             baseline_before = self.proposer_baseline
             proposer_completion = str(proposer_out or "").strip()
             local_can_proposer_update = bool(proposer_completion)
