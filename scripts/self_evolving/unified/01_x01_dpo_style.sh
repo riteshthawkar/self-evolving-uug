@@ -61,10 +61,27 @@ export BLIP3O_REPO="${BLIP3O_REPO:-$REPO_ROOT/BLIP3o}"
 export BLIP3O_USE_LOCAL_CLASSES="${BLIP3O_USE_LOCAL_CLASSES:-1}"
 # Decoder fallback source for BLIP3o-Model-8B latent->image decoding.
 export BLIP3O_DIFFUSION_REPO="${BLIP3O_DIFFUSION_REPO:-BLIP3o/BLIP3o-Model}"
+# Checkpoint setting: non-reentrant is safer with DDP + multi-adapter LoRA.
+export SE_USE_GRADIENT_CHECKPOINTING="${SE_USE_GRADIENT_CHECKPOINTING:-1}"
+export SE_GRADIENT_CHECKPOINT_USE_REENTRANT="${SE_GRADIENT_CHECKPOINT_USE_REENTRANT:-0}"
+
+# Robust DPO pair/update gating defaults.
+export DPO_PAIR_SELECTION="${DPO_PAIR_SELECTION:-best_hard_negative}"
+export DPO_MIN_SPEC_GAP="${DPO_MIN_SPEC_GAP:-0.05}"
+export DPO_MIN_CONFIDENCE_GAP="${DPO_MIN_CONFIDENCE_GAP:-0.10}"
+export DPO_MAX_CONTRADICTION="${DPO_MAX_CONTRADICTION:-0.25}"
+export GENERATOR_PROXY_MAX_RATIO="${GENERATOR_PROXY_MAX_RATIO:-0.35}"
+export SYNTHETIC_SOLVER_HARD_ONLY="${SYNTHETIC_SOLVER_HARD_ONLY:-1}"
+export SOLVER_HARDNESS_MIN_ENTROPY="${SOLVER_HARDNESS_MIN_ENTROPY:-0.20}"
 
 # Disable host + ROCm GPU core dumps
 ulimit -Sc 0
 ulimit -Hc 0
+
+SYNTH_HARD_FLAGS=()
+if [[ "$SYNTHETIC_SOLVER_HARD_ONLY" == "1" ]]; then
+  SYNTH_HARD_FLAGS+=(--synthetic_solver_hard_only)
+fi
 
 "$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" "$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py" \
   --experiment unified_self_evolving \
@@ -99,6 +116,11 @@ ulimit -Hc 0
   --dpo_beta 0.1 \
   --dpo_label_smoothing 0.05 \
   --dpo_min_reward_gap 0.02 \
+  --dpo_min_spec_gap "$DPO_MIN_SPEC_GAP" \
+  --dpo_min_confidence_gap "$DPO_MIN_CONFIDENCE_GAP" \
+  --dpo_max_contradiction "$DPO_MAX_CONTRADICTION" \
+  --dpo_pair_selection "$DPO_PAIR_SELECTION" \
+  --generator_proxy_max_ratio "$GENERATOR_PROXY_MAX_RATIO" \
   --enable_solver_updates \
   --solver_update_freq "$SOLVER_UPDATE_FREQ" \
   --temp 1.0 \
@@ -131,6 +153,8 @@ ulimit -Hc 0
   --understanding_steps_per_cycle 3 \
   --generation_steps_per_cycle 2 \
   --synthetic_solver_update_freq "$SYNTHETIC_SOLVER_UPDATE_FREQ" \
+  "${SYNTH_HARD_FLAGS[@]}" \
+  --solver_hardness_min_entropy "$SOLVER_HARDNESS_MIN_ENTROPY" \
   --kl_coef 0.01 \
   --kl_target 0.02 \
   --kl_adapt_rate 0.10 \

@@ -11,6 +11,7 @@ import math
 from typing import Dict, Iterable, Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from PIL import Image
 
@@ -51,6 +52,7 @@ class RolePolicyUpdater:
         self.step_id = 0
         self.grad_accum_steps = max(1, getattr(config, "grad_accum_steps", 1))
         self._accum_count = 0
+        self._has_real_grad_in_window = False
 
         params = list(_collect_trainable_params(model, adapter_name))
         if not params:
@@ -243,6 +245,15 @@ class RolePolicyUpdater:
                 # Non-finite total_loss: backward zero instead.
                 total_loss = out_pi.logits.sum() * 0.0
                 skipped_reason = "non_finite_total_loss"
+        has_real_grad = skipped_reason is None
+        if dist.is_available() and dist.is_initialized():
+            t = torch.tensor(
+                [1 if has_real_grad else 0],
+                dtype=torch.int32,
+                device=total_loss.device,
+            )
+            dist.all_reduce(t, op=dist.ReduceOp.MAX)
+            has_real_grad = bool(int(t.item()) == 1)
 
         # Gradient accumulation: scale loss and accumulate.
         # All ranks MUST call backward() on the DDP model to participate
@@ -251,6 +262,7 @@ class RolePolicyUpdater:
         scaled_loss = total_loss / self.grad_accum_steps
         if self._accum_count == 0:
             self.opt.zero_grad(set_to_none=True)
+            self._has_real_grad_in_window = False
         restore_adapter = None
         model_ref = _unwrap_model(self.model)
         if self.adapter_name is not None and hasattr(model_ref, "set_adapter"):
@@ -268,13 +280,21 @@ class RolePolicyUpdater:
                 except Exception:
                     pass
         self._accum_count += 1
+        if has_real_grad:
+            self._has_real_grad_in_window = True
 
         did_step = False
         if self._accum_count >= self.grad_accum_steps:
-            _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
-            self.opt.step()
+            if self._has_real_grad_in_window:
+                _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
+                self.opt.step()
+                did_step = True
+            else:
+                # All microbatches in this accumulation window were effectively skipped.
+                # Do not step AdamW to avoid decoupled-weight-decay drift.
+                self.opt.zero_grad(set_to_none=True)
             self._accum_count = 0
-            did_step = True
+            self._has_real_grad_in_window = False
         self.model.train(False)
 
         if skipped_reason:
@@ -285,7 +305,7 @@ class RolePolicyUpdater:
                 "kl_coef_before": beta_before,
                 "kl_coef_after": float(self.kl_coef),
                 "total_loss": 0.0,
-                "did_step": False,
+                "did_step": bool(did_step),
                 "skipped_reason": skipped_reason,
                 "valid_token_count": float(valid_token_count),
             }

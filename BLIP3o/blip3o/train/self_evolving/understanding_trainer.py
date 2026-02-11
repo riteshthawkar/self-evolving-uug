@@ -119,6 +119,18 @@ class UnderstandingSelfEvolvingTrainer:
         dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
         return bool(int(tensor.item()) == 1)
 
+    def _dist_any_bool(self, value: bool) -> bool:
+        if not (self.distributed and dist.is_initialized()):
+            return bool(value)
+        dev = (
+            torch.device(f"cuda:{self.local_rank}")
+            if torch.cuda.is_available()
+            else torch.device("cpu")
+        )
+        tensor = torch.tensor([1 if value else 0], dtype=torch.int32, device=dev)
+        dist.all_reduce(tensor, op=dist.ReduceOp.MAX)
+        return bool(int(tensor.item()) == 1)
+
     def _sync_state_scalars(self):
         if not (self.distributed and dist.is_initialized()):
             return
@@ -992,12 +1004,14 @@ class UnderstandingSelfEvolvingTrainer:
                 solver_update_due = True
                 solver_update_applied = True
                 solver_update_skip_reason = None
-                if (
-                    bool(getattr(cfg, "skip_solver_update_when_uninformative", True))
-                    and not solver_informative_all
-                ):
+                skip_uninformative = bool(
+                    getattr(cfg, "skip_solver_update_when_uninformative", True)
+                )
+                local_uninformative = skip_uninformative and not solver_informative_local
+                any_rank_informative = self._dist_any_bool(solver_informative_local)
+                if skip_uninformative and not any_rank_informative:
                     solver_update_applied = False
-                    solver_update_skip_reason = "uninformative_self_consistency"
+                    solver_update_skip_reason = "uninformative_self_consistency_all_ranks"
 
                 if solver_update_applied:
                     for sample_idx, (
@@ -1025,8 +1039,8 @@ class UnderstandingSelfEvolvingTrainer:
                         start=1,
                     ):
                         local_can_solver_update = bool(str(completion).strip())
-                        can_solver_update = self._dist_all_bool(local_can_solver_update)
-                        if not can_solver_update:
+                        any_rank_can_solver_update = self._dist_any_bool(local_can_solver_update)
+                        if not any_rank_can_solver_update:
                             self._append_jsonl(
                                 self.policy_updates_log_path,
                                 {
@@ -1034,23 +1048,27 @@ class UnderstandingSelfEvolvingTrainer:
                                     "role": "solver",
                                     "sample_idx": sample_idx,
                                     "skipped": True,
-                                    "reason": "distributed_peer_empty_solver_completion",
+                                    "reason": "all_ranks_empty_solver_completion",
                                 },
                             )
                             continue
                         baseline_before = self.solver_baseline
+                        local_skip_update = local_uninformative or (not local_can_solver_update)
+                        completion_for_update = completion if not local_skip_update else ""
+                        effective_reward = reward if not local_skip_update else 0.0
                         stats = self.solver_updater.step(
                             image=image,
                             prompt=solver_prompt,
-                            completion=completion,
-                            reward=reward,
-                            baseline=baseline_before,
+                            completion=completion_for_update,
+                            reward=effective_reward,
+                            baseline=baseline_before if not local_skip_update else 0.0,
                             device=self.device,
                         )
                         solver_step_stats.append(stats)
                         if stats.get("did_step", True):
                             self._policy_update_counts["solver"] += 1
-                        self._update_baseline("solver", reward)
+                        if not local_skip_update:
+                            self._update_baseline("solver", reward)
                         self._sync_state_scalars()
                         baseline_after = self.solver_baseline
 
@@ -1105,14 +1123,16 @@ class UnderstandingSelfEvolvingTrainer:
                 if step % cfg.proposer_update_freq == 0:
                     proposer_completion = str(proposer_out or "").strip()
                     local_can_proposer_update = bool(proposer_completion)
-                    can_proposer_update = self._dist_all_bool(local_can_proposer_update)
-                    if can_proposer_update:
+                    any_rank_can_proposer_update = self._dist_any_bool(local_can_proposer_update)
+                    if any_rank_can_proposer_update:
+                        completion_for_update = proposer_completion if local_can_proposer_update else ""
+                        effective_reward = proposer_reward if local_can_proposer_update else 0.0
                         proposer_stats = self.proposer_updater.step(
                             image=image,
                             prompt=proposer_prompt,
-                            completion=proposer_completion,
-                            reward=proposer_reward,
-                            baseline=proposer_baseline_before_step,
+                            completion=completion_for_update,
+                            reward=effective_reward,
+                            baseline=proposer_baseline_before_step if local_can_proposer_update else 0.0,
                             device=self.device,
                         )
                         if proposer_stats.get("did_step", True):
@@ -1127,7 +1147,8 @@ class UnderstandingSelfEvolvingTrainer:
                                 "stats": proposer_stats,
                             },
                         )
-                        self._update_baseline("proposer", proposer_reward)
+                        if local_can_proposer_update:
+                            self._update_baseline("proposer", proposer_reward)
                     else:
                         self._append_jsonl(
                             self.policy_updates_log_path,
@@ -1135,7 +1156,7 @@ class UnderstandingSelfEvolvingTrainer:
                                 "step": step,
                                 "role": "proposer",
                                 "skipped": True,
-                                "reason": "distributed_peer_empty_proposer_completion",
+                                "reason": "all_ranks_empty_proposer_completion",
                                 "baseline_before": proposer_baseline_before_step,
                             },
                         )

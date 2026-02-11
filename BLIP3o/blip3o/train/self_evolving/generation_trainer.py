@@ -66,6 +66,7 @@ if HAS_WANDB:
 
 from .diffusion_pipeline import (
     _build_original_blip3o_diffusion_pipeline,
+    _collect_pipeline_device_mismatches,
     _decode_blip3o_generate_image_output,
     _ensure_pipeline_device_placement,
     _is_original_blip3o_model_name,
@@ -160,6 +161,15 @@ class GenerationSelfEvolvingTrainer:
         dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
         return bool(int(tensor.item()) == 1)
 
+    def _dist_any_bool(self, value: bool) -> bool:
+        """Return True if ANY rank has value=True."""
+        if not (self.distributed and dist.is_initialized()):
+            return bool(value)
+        dev = torch.device(f"cuda:{self.local_rank}") if torch.cuda.is_available() else torch.device("cpu")
+        tensor = torch.tensor([1 if value else 0], dtype=torch.int32, device=dev)
+        dist.all_reduce(tensor, op=dist.ReduceOp.MAX)
+        return bool(int(tensor.item()) == 1)
+
     def _dist_min_int(self, value: int) -> int:
         if not (self.distributed and dist.is_initialized()):
             return int(value)
@@ -168,30 +178,108 @@ class GenerationSelfEvolvingTrainer:
         dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
         return int(tensor.item())
 
+    def _dist_max_int(self, value: int) -> int:
+        if not (self.distributed and dist.is_initialized()):
+            return int(value)
+        dev = torch.device(f"cuda:{self.local_rank}") if torch.cuda.is_available() else torch.device("cpu")
+        tensor = torch.tensor([int(value)], dtype=torch.int64, device=dev)
+        dist.all_reduce(tensor, op=dist.ReduceOp.MAX)
+        return int(tensor.item())
+
+    def _expected_pipeline_device(self) -> torch.device:
+        if torch.cuda.is_available():
+            return torch.device(f"cuda:{self.local_rank}")
+        return torch.device("cpu")
+
+    @staticmethod
+    def _is_diffusion_device_mismatch_error(exc: BaseException) -> bool:
+        msg = str(exc)
+        return (
+            "Expected all tensors to be on the same device" in msg
+            or "wrapper_CUDA__native_group_norm" in msg
+            or "found at least two devices" in msg
+        )
+
+    def _rebuild_diffusion_pipeline(self):
+        if not _is_original_blip3o_model_name(self.cfg.model_name):
+            raise RuntimeError(
+                "Diffusion pipeline rebuild requested for non-BLIP3o-original model. "
+                f"model_name={self.cfg.model_name}"
+            )
+        dtype = _safe_dtype(self.cfg.dtype)
+        pipeline_device = self._expected_pipeline_device()
+        pipe_encoder = _resolve_multimodal_encoder_for_pipeline(self.model)
+        self._blip3o_diffusion_pipe = _build_original_blip3o_diffusion_pipeline(
+            self.cfg.model_name,
+            multimodal_encoder=pipe_encoder,
+            processor=self.processor,
+            torch_dtype=dtype,
+            device=pipeline_device,
+        )
+        if self.is_main_process:
+            print(
+                "[Generation] Rebuilt diffusion pipeline after placement failure "
+                f"(device={pipeline_device}, dtype={dtype})."
+            )
+
     def _run_diffusion_pipeline_with_repair(self, **kwargs):
         if self._blip3o_diffusion_pipe is None:
             raise RuntimeError("Diffusion pipeline is not initialized.")
 
-        try:
-            return self._blip3o_diffusion_pipe(**kwargs)
-        except RuntimeError as exc:
-            msg = str(exc)
-            needs_repair = (
-                "Expected all tensors to be on the same device" in msg
-                or "wrapper_CUDA__native_group_norm" in msg
-            )
-            if not needs_repair:
-                raise
+        repair_device = self._expected_pipeline_device()
+        repair_dtype = _safe_dtype(self.cfg.dtype)
 
-            repair_device = (
-                torch.device(f"cuda:{self.local_rank}") if torch.cuda.is_available() else torch.device("cpu")
-            )
+        def _preflight_has_mismatch() -> bool:
+            try:
+                mismatches = _collect_pipeline_device_mismatches(self._blip3o_diffusion_pipe, repair_device)
+            except Exception:
+                return False
+            if mismatches and self.is_main_process:
+                preview = ", ".join(mismatches[:6])
+                print(
+                    "[Generation] Detected diffusion device drift before generation call "
+                    f"(expected={repair_device}): {preview}"
+                )
+            return bool(mismatches)
+
+        def _repair_pipeline_placement():
             self._blip3o_diffusion_pipe = _ensure_pipeline_device_placement(
                 self._blip3o_diffusion_pipe,
                 device=repair_device,
-                torch_dtype=_safe_dtype(self.cfg.dtype),
+                torch_dtype=repair_dtype,
             )
+            self._diffusion_repair_count = int(getattr(self, "_diffusion_repair_count", 0)) + 1
+
+        if _preflight_has_mismatch():
+            _repair_pipeline_placement()
+
+        try:
             return self._blip3o_diffusion_pipe(**kwargs)
+        except RuntimeError as exc:
+            if not self._is_diffusion_device_mismatch_error(exc):
+                raise
+            first_error = exc
+
+        # First repair attempt: re-place all components and retry once.
+        try:
+            _repair_pipeline_placement()
+            return self._blip3o_diffusion_pipe(**kwargs)
+        except Exception as repair_exc:
+            if not self._is_diffusion_device_mismatch_error(repair_exc):
+                raise
+            second_error = repair_exc
+
+        # Second repair attempt: rebuild full pipeline and retry once.
+        try:
+            self._rebuild_diffusion_pipeline()
+            return self._blip3o_diffusion_pipe(**kwargs)
+        except Exception as rebuild_exc:
+            raise RuntimeError(
+                "Diffusion pipeline failed after placement-repair and rebuild attempts. "
+                f"first_error={type(first_error).__name__}: {first_error} | "
+                f"second_error={type(second_error).__name__}: {second_error} | "
+                f"rebuild_error={type(rebuild_exc).__name__}: {rebuild_exc}"
+            ) from rebuild_exc
 
     def _sync_state_scalars(self):
         if not (self.distributed and dist.is_initialized()):
@@ -212,6 +300,20 @@ class GenerationSelfEvolvingTrainer:
             raise ValueError(
                 f"Unsupported generator_update_rule={self.cfg.generator_update_rule!r}. "
                 "Expected one of: reinforce, dpo."
+            )
+        self.cfg.dpo_pair_selection = str(
+            getattr(self.cfg, "dpo_pair_selection", "best_worst") or "best_worst"
+        ).strip().lower()
+        if self.cfg.dpo_pair_selection not in {"best_worst", "best_hard_negative"}:
+            raise ValueError(
+                f"Unsupported dpo_pair_selection={self.cfg.dpo_pair_selection!r}. "
+                "Expected one of: best_worst, best_hard_negative."
+            )
+        self.cfg.generator_proxy_max_ratio = float(getattr(self.cfg, "generator_proxy_max_ratio", 1.0))
+        if not (0.0 <= self.cfg.generator_proxy_max_ratio <= 1.0):
+            raise ValueError(
+                "generator_proxy_max_ratio must be in [0, 1]. "
+                f"Got {self.cfg.generator_proxy_max_ratio}."
             )
         self._setup_distributed()
         _set_global_seed(config.seed + self.rank, deterministic=config.deterministic)
@@ -374,6 +476,7 @@ class GenerationSelfEvolvingTrainer:
             "proxy_caption": 0,
             "skipped": 0,
         }
+        self._diffusion_repair_count: int = 0
         self.wandb_run = self._init_wandb()
 
         loaded_resume_step = self._maybe_resume_state()
@@ -1549,6 +1652,7 @@ class GenerationSelfEvolvingTrainer:
                 candidate_count=len(candidates),
                 verbose=verbose,
             )
+            qa_confidence = self._qa_confidence_from_logs(qa_logs)
             cycle_score, cycle_caption = self._cycle_reward(prompt=prompt, image=image)
 
             pos_sum = (
@@ -1584,6 +1688,7 @@ class GenerationSelfEvolvingTrainer:
                     "base_reward": base_reward,
                     "spec_quality": spec_quality,
                     "total_reward": total_reward,
+                    "qa_confidence": qa_confidence,
                     "qa_logs": qa_logs,
                     "image": image,
                 }
@@ -1635,13 +1740,52 @@ class GenerationSelfEvolvingTrainer:
         )
         return " ".join(completion.split())
 
+    def _current_proxy_ratio(self) -> float:
+        token_updates = float(self._generator_update_mode_counts.get("token_trace", 0))
+        proxy_updates = float(self._generator_update_mode_counts.get("proxy_caption", 0))
+        denom = token_updates + proxy_updates
+        if denom <= 0:
+            return 0.0
+        return proxy_updates / denom
+
+    def _proxy_updates_allowed(self) -> bool:
+        max_ratio = float(getattr(self.cfg, "generator_proxy_max_ratio", 1.0))
+        max_ratio = max(0.0, min(1.0, max_ratio))
+        if max_ratio >= 1.0:
+            return True
+        return self._current_proxy_ratio() < max_ratio
+
+    @staticmethod
+    def _qa_confidence_from_logs(qa_logs: List[Dict[str, object]]) -> float:
+        values: List[float] = []
+        for qa in qa_logs:
+            try:
+                frac = float(qa.get("majority_fraction", 0.0))
+            except Exception:
+                continue
+            if math.isfinite(frac):
+                values.append(max(0.0, min(1.0, frac)))
+        if not values:
+            return 0.0
+        return float(sum(values) / max(1, len(values)))
+
     def _select_dpo_pair_indices(self, scored: List[Dict[str, object]], best_idx: int) -> Optional[Tuple[int, int]]:
         if len(scored) < 2:
             return None
         candidate_indices = [i for i in range(len(scored)) if i != best_idx]
         if not candidate_indices:
             return None
-        rejected_idx = min(candidate_indices, key=lambda i: float(scored[i]["total_reward"]))
+        mode = str(getattr(self.cfg, "dpo_pair_selection", "best_worst") or "best_worst").strip().lower()
+        if mode == "best_hard_negative":
+            # Hard negative: strongest non-winning candidate (closest competitor).
+            rejected_idx = max(candidate_indices, key=lambda i: float(scored[i]["total_reward"]))
+        elif mode == "best_worst":
+            rejected_idx = min(candidate_indices, key=lambda i: float(scored[i]["total_reward"]))
+        else:
+            raise ValueError(
+                f"Unsupported dpo_pair_selection={self.cfg.dpo_pair_selection!r}. "
+                "Expected one of: best_worst, best_hard_negative."
+            )
         return int(best_idx), int(rejected_idx)
 
     def _save_checkpoint(self, step: int):
@@ -1748,6 +1892,7 @@ class GenerationSelfEvolvingTrainer:
                 "error": error,
                 "policy_update_counts": self._policy_update_counts,
                 "generator_update_mode_counts": self._generator_update_mode_counts,
+                "diffusion_repair_count": int(self._diffusion_repair_count),
                 "metrics": self._metrics_summary(),
             },
         )
@@ -1791,6 +1936,7 @@ class GenerationSelfEvolvingTrainer:
             "train/best_cycle_score": float(best_cycle_global),
             "train/best_diversity_score": float(best_diversity_global),
             "train/best_contradiction_score": float(best_contradiction_global),
+            "train/best_qa_confidence": float(best.get("qa_confidence", 0.0)),
             "train/generator_baseline": self.generator_baseline,
             "train/proposer_baseline": self.proposer_baseline,
             "train/generator_update_skipped": 1.0 if generator_skipped_reason else 0.0,
@@ -1798,6 +1944,8 @@ class GenerationSelfEvolvingTrainer:
             "train/generator_update_mode_proxy_caption": 1.0 if generator_update_mode == "proxy_caption" else 0.0,
             "train/generator_update_rule_reinforce": 1.0 if self.cfg.generator_update_rule == "reinforce" else 0.0,
             "train/generator_update_rule_dpo": 1.0 if self.cfg.generator_update_rule == "dpo" else 0.0,
+            "train/generator_proxy_update_ratio": float(self._current_proxy_ratio()),
+            "train/diffusion_repair_count": float(self._diffusion_repair_count),
             "kl/generator_beta": self.generator_updater.kl_coef,
             "kl/proposer_beta": self.proposer_updater.kl_coef,
             "text/prompt": spec.prompt,
@@ -1939,33 +2087,27 @@ class GenerationSelfEvolvingTrainer:
 
             if update_rule == "dpo":
                 pair = self._select_dpo_pair_indices(scored, best_idx)
+                chosen_idx: Optional[int] = None
+                rejected_idx: Optional[int] = None
+                chosen_reward = 0.0
+                rejected_reward = 0.0
+                reward_gap = 0.0
+                chosen_spec = 0.0
+                rejected_spec = 0.0
+                spec_gap = 0.0
+                chosen_confidence = 0.0
+                rejected_confidence = 0.0
+                confidence_gap = 0.0
+                chosen_contradiction = 0.0
+                rejected_contradiction = 0.0
+                contradiction_max = 0.0
+                chosen: Optional[Dict[str, object]] = None
+                rejected: Optional[Dict[str, object]] = None
+
+                local_pair_ready = False
+                local_pair_skip_reason: Optional[str] = None
                 if pair is None:
-                    generator_skipped_reason = "dpo_requires_two_candidates"
-                    self._generator_update_mode_counts["skipped"] = (
-                        self._generator_update_mode_counts.get("skipped", 0) + 1
-                    )
-                    self._append_jsonl(
-                        self.policy_updates_log_path,
-                        {
-                            "step": step,
-                            "role": "generator",
-                            "update_rule": "dpo",
-                            "skipped": True,
-                            "reason": generator_skipped_reason,
-                            "candidate_count": len(scored),
-                            "spec_quality": spec_quality,
-                        },
-                    )
-                    self._append_jsonl(
-                        self.dpo_pairs_log_path,
-                        {
-                            "step": step,
-                            "skipped": True,
-                            "reason": generator_skipped_reason,
-                            "candidate_count": len(scored),
-                            "best_idx": int(best_idx),
-                        },
-                    )
+                    local_pair_skip_reason = "dpo_requires_two_candidates"
                 else:
                     chosen_idx, rejected_idx = pair
                     chosen = scored[chosen_idx]
@@ -1973,9 +2115,177 @@ class GenerationSelfEvolvingTrainer:
                     chosen_reward = float(chosen["total_reward"])
                     rejected_reward = float(rejected["total_reward"])
                     reward_gap = chosen_reward - rejected_reward
+                    chosen_spec = float(chosen.get("spec_score", 0.0))
+                    rejected_spec = float(rejected.get("spec_score", 0.0))
+                    spec_gap = chosen_spec - rejected_spec
+                    chosen_confidence = float(chosen.get("qa_confidence", 0.0))
+                    rejected_confidence = float(rejected.get("qa_confidence", 0.0))
+                    confidence_gap = chosen_confidence - rejected_confidence
+                    chosen_contradiction = float(chosen.get("contradiction_score", 0.0))
+                    rejected_contradiction = float(rejected.get("contradiction_score", 0.0))
+                    contradiction_max = max(chosen_contradiction, rejected_contradiction)
 
+                    pair_gate_reason: Optional[str] = None
                     if reward_gap < float(self.cfg.dpo_min_reward_gap):
-                        generator_skipped_reason = "dpo_reward_gap_too_small"
+                        pair_gate_reason = "dpo_reward_gap_too_small"
+                    elif spec_gap < float(getattr(self.cfg, "dpo_min_spec_gap", 0.0)):
+                        pair_gate_reason = "dpo_spec_gap_too_small"
+                    elif confidence_gap < float(getattr(self.cfg, "dpo_min_confidence_gap", 0.0)):
+                        pair_gate_reason = "dpo_confidence_gap_too_small"
+                    elif contradiction_max > float(getattr(self.cfg, "dpo_max_contradiction", 1.0)):
+                        pair_gate_reason = "dpo_contradiction_too_high"
+
+                    if pair_gate_reason is not None:
+                        local_pair_skip_reason = pair_gate_reason
+                    else:
+                        local_pair_ready = True
+
+                pair_ready, generator_skipped_reason = _global_update_ready(
+                    local_pair_ready,
+                    local_pair_skip_reason,
+                    peer_reason="distributed_peer_skip",
+                )
+
+                if pair_ready:
+                    assert chosen is not None and rejected is not None
+                    assert chosen_idx is not None and rejected_idx is not None
+                    chosen_completion = str(chosen.get("policy_completion", "")).strip()
+                    rejected_completion = str(rejected.get("policy_completion", "")).strip()
+
+                    chosen_token_ids = chosen.get("policy_completion_ids")
+                    if not isinstance(chosen_token_ids, list):
+                        chosen_token_ids = None
+                    rejected_token_ids = rejected.get("policy_completion_ids")
+                    if not isinstance(rejected_token_ids, list):
+                        rejected_token_ids = None
+
+                    update_prompt = str(chosen.get("policy_prompt", spec.prompt))
+                    chosen_image: Optional[Image.Image] = None
+                    rejected_image: Optional[Image.Image] = None
+
+                    if chosen_completion and rejected_completion:
+                        generator_update_mode = "token_trace"
+                    else:
+                        strategy = (self.cfg.generator_missing_trace_strategy or "proxy").strip().lower()
+                        if self.cfg.strict_require_generation_tokens or strategy == "error":
+                            generator_skipped_reason = "missing_generation_token_trace_strict"
+                            strategy = "skip"
+                        if strategy == "proxy":
+                            if not self._proxy_updates_allowed():
+                                generator_skipped_reason = "proxy_budget_exceeded"
+                                strategy = "skip"
+                            chosen_raw_image = chosen.get("image")
+                            rejected_raw_image = rejected.get("image")
+                            if (
+                                generator_skipped_reason is None
+                                and isinstance(chosen_raw_image, Image.Image)
+                                and isinstance(rejected_raw_image, Image.Image)
+                            ):
+                                chosen_proxy = self._proxy_generator_completion(chosen_raw_image)
+                                rejected_proxy = self._proxy_generator_completion(rejected_raw_image)
+                                if chosen_proxy and rejected_proxy:
+                                    chosen_completion = chosen_proxy
+                                    rejected_completion = rejected_proxy
+                                    chosen_token_ids = None
+                                    rejected_token_ids = None
+                                    update_prompt = GENERATOR_PROXY_CAPTION_PROMPT
+                                    chosen_image = chosen_raw_image
+                                    rejected_image = rejected_raw_image
+                                    generator_update_mode = "proxy_caption"
+                                else:
+                                    generator_skipped_reason = "dpo_proxy_empty_completion"
+                            elif generator_skipped_reason is None:
+                                generator_skipped_reason = "dpo_proxy_missing_image"
+                        elif strategy == "skip":
+                            generator_skipped_reason = "missing_generation_token_trace"
+                        else:
+                            raise ValueError(
+                                "Unsupported generator_missing_trace_strategy="
+                                f"{self.cfg.generator_missing_trace_strategy!r}. Expected one of: proxy, skip, error."
+                            )
+
+                    local_can_update = bool(chosen_completion and rejected_completion and generator_skipped_reason is None)
+                    can_update, generator_skipped_reason = _global_update_ready(
+                        local_can_update,
+                        generator_skipped_reason,
+                        peer_reason="distributed_peer_skip",
+                    )
+
+                    if can_update:
+                        generator_stats = self.generator_updater.step(
+                            prompt=update_prompt,
+                            chosen_completion=chosen_completion,
+                            rejected_completion=rejected_completion,
+                            device=self.device,
+                            chosen_image=chosen_image,
+                            rejected_image=rejected_image,
+                            chosen_completion_token_ids=chosen_token_ids,
+                            rejected_completion_token_ids=rejected_token_ids,
+                        )
+                        if generator_stats.get("did_step", True):
+                            self._policy_update_counts["generator"] += 1
+                            self._generator_update_mode_counts[generator_update_mode] = (
+                                self._generator_update_mode_counts.get(generator_update_mode, 0) + 1
+                            )
+
+                        self._append_jsonl(
+                            self.policy_updates_log_path,
+                            {
+                                "step": step,
+                                "role": "generator",
+                                "update_rule": "dpo",
+                                "reward": generator_reward,
+                                "baseline_before": baseline_before,
+                                "baseline_after": baseline_before,
+                                "stats": generator_stats,
+                                "update_mode": generator_update_mode,
+                                "update_prompt": update_prompt,
+                                "used_image_conditioning": chosen_image is not None and rejected_image is not None,
+                                "chosen_candidate_idx": int(chosen_idx),
+                                "rejected_candidate_idx": int(rejected_idx),
+                                "chosen_reward": chosen_reward,
+                                "rejected_reward": rejected_reward,
+                                "reward_gap": reward_gap,
+                                "chosen_spec": chosen_spec,
+                                "rejected_spec": rejected_spec,
+                                "spec_gap": spec_gap,
+                                "chosen_confidence": chosen_confidence,
+                                "rejected_confidence": rejected_confidence,
+                                "confidence_gap": confidence_gap,
+                                "chosen_contradiction": chosen_contradiction,
+                                "rejected_contradiction": rejected_contradiction,
+                                "spec_quality": spec_quality,
+                            },
+                        )
+                        self._append_jsonl(
+                            self.dpo_pairs_log_path,
+                            {
+                                "step": step,
+                                "chosen_candidate_idx": int(chosen_idx),
+                                "rejected_candidate_idx": int(rejected_idx),
+                                "chosen_reward": chosen_reward,
+                                "rejected_reward": rejected_reward,
+                                "reward_gap": reward_gap,
+                                "chosen_spec": chosen_spec,
+                                "rejected_spec": rejected_spec,
+                                "spec_gap": spec_gap,
+                                "chosen_confidence": chosen_confidence,
+                                "rejected_confidence": rejected_confidence,
+                                "confidence_gap": confidence_gap,
+                                "chosen_contradiction": chosen_contradiction,
+                                "rejected_contradiction": rejected_contradiction,
+                                "update_mode": generator_update_mode,
+                                "prompt": update_prompt,
+                                "chosen_completion_char_len": len(chosen_completion),
+                                "rejected_completion_char_len": len(rejected_completion),
+                                "chosen_completion_token_count": len(chosen_token_ids) if chosen_token_ids else None,
+                                "rejected_completion_token_count": len(rejected_token_ids) if rejected_token_ids else None,
+                                "stats": generator_stats,
+                            },
+                        )
+                    else:
+                        if generator_skipped_reason is None:
+                            generator_skipped_reason = "dpo_missing_completion"
                         self._generator_update_mode_counts["skipped"] = (
                             self._generator_update_mode_counts.get("skipped", 0) + 1
                         )
@@ -1987,12 +2297,7 @@ class GenerationSelfEvolvingTrainer:
                                 "update_rule": "dpo",
                                 "skipped": True,
                                 "reason": generator_skipped_reason,
-                                "chosen_candidate_idx": int(chosen_idx),
-                                "rejected_candidate_idx": int(rejected_idx),
-                                "chosen_reward": chosen_reward,
-                                "rejected_reward": rejected_reward,
-                                "reward_gap": reward_gap,
-                                "min_reward_gap": float(self.cfg.dpo_min_reward_gap),
+                                "candidate_idx": int(best_idx),
                                 "spec_quality": spec_quality,
                             },
                         )
@@ -2002,154 +2307,79 @@ class GenerationSelfEvolvingTrainer:
                                 "step": step,
                                 "skipped": True,
                                 "reason": generator_skipped_reason,
+                                "candidate_count": len(scored),
+                                "best_idx": int(best_idx),
+                            },
+                        )
+                else:
+                    if generator_skipped_reason is None:
+                        generator_skipped_reason = "dpo_pair_not_ready"
+                    self._generator_update_mode_counts["skipped"] = (
+                        self._generator_update_mode_counts.get("skipped", 0) + 1
+                    )
+                    policy_skip_payload: Dict[str, object] = {
+                        "step": step,
+                        "role": "generator",
+                        "update_rule": "dpo",
+                        "skipped": True,
+                        "reason": generator_skipped_reason,
+                        "candidate_count": len(scored),
+                        "spec_quality": spec_quality,
+                    }
+                    pair_skip_payload: Dict[str, object] = {
+                        "step": step,
+                        "skipped": True,
+                        "reason": generator_skipped_reason,
+                        "candidate_count": len(scored),
+                        "best_idx": int(best_idx),
+                    }
+                    if chosen_idx is not None and rejected_idx is not None:
+                        policy_skip_payload.update(
+                            {
                                 "chosen_candidate_idx": int(chosen_idx),
                                 "rejected_candidate_idx": int(rejected_idx),
                                 "chosen_reward": chosen_reward,
                                 "rejected_reward": rejected_reward,
                                 "reward_gap": reward_gap,
                                 "min_reward_gap": float(self.cfg.dpo_min_reward_gap),
-                            },
+                                "chosen_spec": chosen_spec,
+                                "rejected_spec": rejected_spec,
+                                "spec_gap": spec_gap,
+                                "min_spec_gap": float(getattr(self.cfg, "dpo_min_spec_gap", 0.0)),
+                                "chosen_confidence": chosen_confidence,
+                                "rejected_confidence": rejected_confidence,
+                                "confidence_gap": confidence_gap,
+                                "min_confidence_gap": float(getattr(self.cfg, "dpo_min_confidence_gap", 0.0)),
+                                "chosen_contradiction": chosen_contradiction,
+                                "rejected_contradiction": rejected_contradiction,
+                                "max_contradiction": contradiction_max,
+                                "dpo_max_contradiction": float(getattr(self.cfg, "dpo_max_contradiction", 1.0)),
+                            }
                         )
-                    else:
-                        chosen_completion = str(chosen.get("policy_completion", "")).strip()
-                        rejected_completion = str(rejected.get("policy_completion", "")).strip()
-
-                        chosen_token_ids = chosen.get("policy_completion_ids")
-                        if not isinstance(chosen_token_ids, list):
-                            chosen_token_ids = None
-                        rejected_token_ids = rejected.get("policy_completion_ids")
-                        if not isinstance(rejected_token_ids, list):
-                            rejected_token_ids = None
-
-                        update_prompt = str(chosen.get("policy_prompt", spec.prompt))
-                        chosen_image: Optional[Image.Image] = None
-                        rejected_image: Optional[Image.Image] = None
-
-                        if chosen_completion and rejected_completion:
-                            generator_update_mode = "token_trace"
-                        else:
-                            strategy = (self.cfg.generator_missing_trace_strategy or "proxy").strip().lower()
-                            if self.cfg.strict_require_generation_tokens or strategy == "error":
-                                generator_skipped_reason = "missing_generation_token_trace_strict"
-                                strategy = "skip"
-                            if strategy == "proxy":
-                                chosen_raw_image = chosen.get("image")
-                                rejected_raw_image = rejected.get("image")
-                                if isinstance(chosen_raw_image, Image.Image) and isinstance(rejected_raw_image, Image.Image):
-                                    chosen_proxy = self._proxy_generator_completion(chosen_raw_image)
-                                    rejected_proxy = self._proxy_generator_completion(rejected_raw_image)
-                                    if chosen_proxy and rejected_proxy:
-                                        chosen_completion = chosen_proxy
-                                        rejected_completion = rejected_proxy
-                                        chosen_token_ids = None
-                                        rejected_token_ids = None
-                                        update_prompt = GENERATOR_PROXY_CAPTION_PROMPT
-                                        chosen_image = chosen_raw_image
-                                        rejected_image = rejected_raw_image
-                                        generator_update_mode = "proxy_caption"
-                                    else:
-                                        generator_skipped_reason = "dpo_proxy_empty_completion"
-                                else:
-                                    generator_skipped_reason = "dpo_proxy_missing_image"
-                            elif strategy == "skip":
-                                generator_skipped_reason = "missing_generation_token_trace"
-                            else:
-                                raise ValueError(
-                                    "Unsupported generator_missing_trace_strategy="
-                                    f"{self.cfg.generator_missing_trace_strategy!r}. Expected one of: proxy, skip, error."
-                                )
-
-                        local_can_update = bool(chosen_completion and rejected_completion and generator_skipped_reason is None)
-                        can_update, generator_skipped_reason = _global_update_ready(
-                            local_can_update,
-                            generator_skipped_reason,
-                            peer_reason="distributed_peer_skip",
+                        pair_skip_payload.update(
+                            {
+                                "chosen_candidate_idx": int(chosen_idx),
+                                "rejected_candidate_idx": int(rejected_idx),
+                                "chosen_reward": chosen_reward,
+                                "rejected_reward": rejected_reward,
+                                "reward_gap": reward_gap,
+                                "min_reward_gap": float(self.cfg.dpo_min_reward_gap),
+                                "chosen_spec": chosen_spec,
+                                "rejected_spec": rejected_spec,
+                                "spec_gap": spec_gap,
+                                "min_spec_gap": float(getattr(self.cfg, "dpo_min_spec_gap", 0.0)),
+                                "chosen_confidence": chosen_confidence,
+                                "rejected_confidence": rejected_confidence,
+                                "confidence_gap": confidence_gap,
+                                "min_confidence_gap": float(getattr(self.cfg, "dpo_min_confidence_gap", 0.0)),
+                                "chosen_contradiction": chosen_contradiction,
+                                "rejected_contradiction": rejected_contradiction,
+                                "max_contradiction": contradiction_max,
+                                "dpo_max_contradiction": float(getattr(self.cfg, "dpo_max_contradiction", 1.0)),
+                            }
                         )
-
-                        if can_update:
-                            generator_stats = self.generator_updater.step(
-                                prompt=update_prompt,
-                                chosen_completion=chosen_completion,
-                                rejected_completion=rejected_completion,
-                                device=self.device,
-                                chosen_image=chosen_image,
-                                rejected_image=rejected_image,
-                                chosen_completion_token_ids=chosen_token_ids,
-                                rejected_completion_token_ids=rejected_token_ids,
-                            )
-                            if generator_stats.get("did_step", True):
-                                self._policy_update_counts["generator"] += 1
-                                self._generator_update_mode_counts[generator_update_mode] = (
-                                    self._generator_update_mode_counts.get(generator_update_mode, 0) + 1
-                                )
-
-                            self._append_jsonl(
-                                self.policy_updates_log_path,
-                                {
-                                    "step": step,
-                                    "role": "generator",
-                                    "update_rule": "dpo",
-                                    "reward": generator_reward,
-                                    "baseline_before": baseline_before,
-                                    "baseline_after": baseline_before,
-                                    "stats": generator_stats,
-                                    "update_mode": generator_update_mode,
-                                    "update_prompt": update_prompt,
-                                    "used_image_conditioning": chosen_image is not None and rejected_image is not None,
-                                    "chosen_candidate_idx": int(chosen_idx),
-                                    "rejected_candidate_idx": int(rejected_idx),
-                                    "chosen_reward": chosen_reward,
-                                    "rejected_reward": rejected_reward,
-                                    "reward_gap": reward_gap,
-                                    "spec_quality": spec_quality,
-                                },
-                            )
-                            self._append_jsonl(
-                                self.dpo_pairs_log_path,
-                                {
-                                    "step": step,
-                                    "chosen_candidate_idx": int(chosen_idx),
-                                    "rejected_candidate_idx": int(rejected_idx),
-                                    "chosen_reward": chosen_reward,
-                                    "rejected_reward": rejected_reward,
-                                    "reward_gap": reward_gap,
-                                    "update_mode": generator_update_mode,
-                                    "prompt": update_prompt,
-                                    "chosen_completion_char_len": len(chosen_completion),
-                                    "rejected_completion_char_len": len(rejected_completion),
-                                    "chosen_completion_token_count": len(chosen_token_ids) if chosen_token_ids else None,
-                                    "rejected_completion_token_count": len(rejected_token_ids) if rejected_token_ids else None,
-                                    "stats": generator_stats,
-                                },
-                            )
-                        else:
-                            if generator_skipped_reason is None:
-                                generator_skipped_reason = "dpo_missing_completion"
-                            self._generator_update_mode_counts["skipped"] = (
-                                self._generator_update_mode_counts.get("skipped", 0) + 1
-                            )
-                            self._append_jsonl(
-                                self.policy_updates_log_path,
-                                {
-                                    "step": step,
-                                    "role": "generator",
-                                    "update_rule": "dpo",
-                                    "skipped": True,
-                                    "reason": generator_skipped_reason,
-                                    "candidate_idx": int(best_idx),
-                                    "spec_quality": spec_quality,
-                                },
-                            )
-                            self._append_jsonl(
-                                self.dpo_pairs_log_path,
-                                {
-                                    "step": step,
-                                    "skipped": True,
-                                    "reason": generator_skipped_reason,
-                                    "candidate_count": len(scored),
-                                    "best_idx": int(best_idx),
-                                },
-                            )
+                    self._append_jsonl(self.policy_updates_log_path, policy_skip_payload)
+                    self._append_jsonl(self.dpo_pairs_log_path, pair_skip_payload)
             else:
                 # REINFORCE path
                 completion = str(best.get("policy_completion", "")).strip()
@@ -2166,8 +2396,11 @@ class GenerationSelfEvolvingTrainer:
                         strategy = "skip"
 
                     if strategy == "proxy":
+                        if not self._proxy_updates_allowed():
+                            generator_skipped_reason = "proxy_budget_exceeded"
+                            strategy = "skip"
                         best_image = best.get("image")
-                        if isinstance(best_image, Image.Image):
+                        if generator_skipped_reason is None and isinstance(best_image, Image.Image):
                             proxy_completion = self._proxy_generator_completion(best_image)
                             if proxy_completion:
                                 completion = proxy_completion
@@ -2177,7 +2410,7 @@ class GenerationSelfEvolvingTrainer:
                                 generator_update_mode = "proxy_caption"
                             else:
                                 generator_skipped_reason = "missing_trace_proxy_empty_completion"
-                        else:
+                        elif generator_skipped_reason is None:
                             generator_skipped_reason = "missing_trace_proxy_missing_image"
                     elif strategy == "skip":
                         generator_skipped_reason = "missing_generation_token_trace"
@@ -2376,6 +2609,7 @@ class GenerationSelfEvolvingTrainer:
                     "cycle_score": cand["cycle_score"],
                     "cycle_caption": cand["cycle_caption"],
                     "diversity_score": cand["diversity_score"],
+                    "qa_confidence": cand.get("qa_confidence", 0.0),
                     "base_reward": cand["base_reward"],
                     "spec_quality": cand["spec_quality"],
                     "total_reward": cand["total_reward"],
@@ -2404,11 +2638,13 @@ class GenerationSelfEvolvingTrainer:
                 "best_cycle_score": float(best["cycle_score"]),
                 "best_diversity_score": float(best["diversity_score"]),
                 "best_contradiction_score": float(best["contradiction_score"]),
+                "best_qa_confidence": float(best.get("qa_confidence", 0.0)),
                 "generator_baseline": self.generator_baseline,
                 "proposer_baseline": self.proposer_baseline,
                 "generator_update_rule": self.cfg.generator_update_rule,
                 "generator_skipped_reason": generator_skipped_reason,
                 "generator_update_mode": generator_update_mode,
+                "generator_proxy_ratio": float(self._current_proxy_ratio()),
                 "proposer_update_due": proposer_update_due,
                 "proposer_skip_reason": proposer_skip_reason,
                 "proposer_reward": proposer_reward,
@@ -2429,6 +2665,7 @@ class GenerationSelfEvolvingTrainer:
             "generator_update_rule": self.cfg.generator_update_rule,
             "generator_skipped_reason": generator_skipped_reason,
             "generator_update_mode": generator_update_mode,
+            "generator_proxy_ratio": float(self._current_proxy_ratio()),
             "proposer_update_due": proposer_update_due,
             "proposer_skip_reason": proposer_skip_reason,
             "proposer_reward": proposer_reward,
@@ -2446,29 +2683,50 @@ class GenerationSelfEvolvingTrainer:
 
         qa_logs = best.get("qa_logs", [])
         valid_qas: List[Dict[str, object]] = []
+        hard_only = bool(getattr(self.cfg, "synthetic_solver_hard_only", False))
+        min_entropy = float(getattr(self.cfg, "solver_hardness_min_entropy", 0.2))
         for qa in qa_logs:
             question = str(qa.get("question", "")).strip()
-            if question:
-                valid_qas.append(qa)
+            if not question:
+                continue
+            if hard_only:
+                entropy = None
+                solver_info = qa.get("solver")
+                if isinstance(solver_info, dict):
+                    try:
+                        entropy = float(solver_info.get("entropy_nats", 0.0))
+                    except Exception:
+                        entropy = None
+                if entropy is None or entropy < min_entropy:
+                    continue
+            valid_qas.append(qa)
 
         shared_qa_count = len(valid_qas)
         if self.distributed and dist.is_initialized():
-            shared_qa_count = self._dist_min_int(shared_qa_count)
+            shared_qa_count = self._dist_max_int(shared_qa_count)
 
         for qa_idx in range(shared_qa_count):
-            qa = valid_qas[qa_idx]
+            has_local_qa = qa_idx < len(valid_qas)
+            any_rank_has_qa = self._dist_any_bool(has_local_qa)
+            if not any_rank_has_qa:
+                continue
+
+            qa = valid_qas[qa_idx] if has_local_qa else {}
             question = str(qa.get("question", "")).strip()
-            completion = self._generate(
-                image=image,
-                prompt=build_solver_prompt(question),
-                adapter_name="default" if self.cfg.use_lora else None,
-                max_new_tokens=self.cfg.max_new_tokens_solver,
-                temperature=self.cfg.temp,
-                top_p=self.cfg.top_p,
-            ).strip()
-            local_can_update = bool(completion)
-            can_update = self._dist_all_bool(local_can_update)
-            if not can_update:
+
+            if has_local_qa and question:
+                completion = self._generate(
+                    image=image,
+                    prompt=build_solver_prompt(question),
+                    adapter_name="default" if self.cfg.use_lora else None,
+                    max_new_tokens=self.cfg.max_new_tokens_solver,
+                    temperature=self.cfg.temp,
+                    top_p=self.cfg.top_p,
+                ).strip()
+            else:
+                completion = ""
+            local_has_completion = bool(completion)
+            if not local_has_completion:
                 self._append_jsonl(
                     self.policy_updates_log_path,
                     {
@@ -2476,26 +2734,27 @@ class GenerationSelfEvolvingTrainer:
                         "role": "solver",
                         "source": "synthetic_generation",
                         "skipped": True,
-                        "reason": "distributed_peer_empty_solver_completion",
+                        "reason": "empty_solver_completion_local",
                         "qa_idx": int(qa_idx),
                         "question": question,
                     },
                 )
-                continue
-            reward = float(qa.get("combined_score", 0.0))
+            effective_completion = completion if local_has_completion else ""
+            reward = float(qa.get("combined_score", 0.0)) if (has_local_qa and local_has_completion) else 0.0
 
             baseline_before = self.solver_baseline
             stats = self.solver_updater.step(
                 image=image,
                 prompt=build_solver_prompt(question),
-                completion=completion,
+                completion=effective_completion,
                 reward=reward,
-                baseline=baseline_before,
+                baseline=baseline_before if local_has_completion else 0.0,
                 device=self.device,
             )
             if stats.get("did_step", True):
                 self._policy_update_counts["solver"] += 1
-            self._update_baseline("solver", reward)
+            if local_has_completion:
+                self._update_baseline("solver", reward)
             self._sync_state_scalars()
 
             self._append_jsonl(

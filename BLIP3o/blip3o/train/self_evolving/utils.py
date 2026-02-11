@@ -253,11 +253,23 @@ def strip_tags(text: str, tag: str) -> Optional[str]:
     return None
 
 
-def normalize_answer(ans: str) -> str:
+def normalize_answer(ans: str, max_words: int = 8) -> str:
+    """Normalize and optionally truncate an answer for self-consistency voting.
+
+    Truncating to ``max_words`` prevents phrasing-level variation in verbose
+    answers from creating fake disagreement (e.g. two sentences that say the
+    same thing differently would match after truncation to their core).
+    """
     s = ans.strip().lower()
     s = s.replace(",", " ")
     s = " ".join(s.split())
-    return s.strip(" .,:;!?\"'")
+    s = s.strip(" .,:;!?\"'")
+    # Truncate to max_words to avoid phrasing-level fake disagreement.
+    if max_words > 0:
+        words = s.split()
+        if len(words) > max_words:
+            s = " ".join(words[:max_words])
+    return s
 
 
 def majority_vote(answers: List[str]) -> Tuple[str, int]:
