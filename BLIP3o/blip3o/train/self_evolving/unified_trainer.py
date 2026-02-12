@@ -218,17 +218,26 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             for prob, pen, reward_raw in zip(solver_probs, penalties, solver_rewards_raw)
         ]
         proposer_entropy_mu_used = self._update_proposer_entropy_target(entropy_nats)
-        proposer_reward = gaussian_reward(
+        proposer_reward_raw = gaussian_reward(
             entropy_nats,
             proposer_entropy_mu_used,
             self.cfg.prop_entropy_sigma,
         )
+        proposer_reward = proposer_reward_raw
         # Penalize zero-entropy (unanimous) outcomes — the question was too easy.
         # When all solvers agree perfectly, the proposer gets at most 10% of the
         # Gaussian reward.  Any disagreement (entropy > 0) removes the penalty.
         zero_entropy_cap = float(getattr(self.cfg, "zero_entropy_reward_cap", 0.10))
+        zero_entropy_capped = False
         if entropy_nats < 1e-6 and zero_entropy_cap < 1.0:
             proposer_reward = min(proposer_reward, zero_entropy_cap)
+            zero_entropy_capped = True
+        # Additional easy-question penalty for low-entropy, high-margin cases.
+        easy_question_penalty = float(getattr(self.cfg, "easy_question_penalty", 0.15))
+        easy_question_detected = bool((entropy_nats < entropy_min) and (margin > margin_max))
+        if easy_question_detected and easy_question_penalty > 0.0:
+            proposer_reward -= easy_question_penalty
+        proposer_reward = max(-1.0, min(1.0, proposer_reward))
 
         solver_stats_list = []
         solver_update_due = (
@@ -391,7 +400,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "solver_top_p_schedule": solver_top_ps,
             "entropy_nats": entropy_nats,
             "proposer_entropy_mu_used": proposer_entropy_mu_used,
+            "proposer_reward_raw": proposer_reward_raw,
             "proposer_reward": proposer_reward,
+            "zero_entropy_capped": zero_entropy_capped,
+            "zero_entropy_reward_cap": zero_entropy_cap,
+            "easy_question_detected": easy_question_detected,
+            "easy_question_penalty": easy_question_penalty,
             "solver_baseline": self.solver_baseline,
             "proposer_baseline": self.proposer_baseline,
             "solver_update_due": solver_update_due,
@@ -428,7 +442,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "entropy_nats": entropy_nats,
                 "solver_reward_soft_mean": sum(solver_rewards_soft) / max(1, len(solver_rewards_soft)),
                 "proposer_entropy_mu_used": proposer_entropy_mu_used,
+                "proposer_reward_raw": proposer_reward_raw,
                 "proposer_reward": proposer_reward,
+                "zero_entropy_capped": zero_entropy_capped,
+                "zero_entropy_reward_cap": zero_entropy_cap,
+                "easy_question_detected": easy_question_detected,
+                "easy_question_penalty": easy_question_penalty,
             },
         )
 
