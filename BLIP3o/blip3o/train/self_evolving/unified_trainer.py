@@ -6,6 +6,7 @@ Extends GenerationSelfEvolvingTrainer with an interleaved understanding phase.
 """
 
 import gc
+import math
 import time
 import traceback
 from typing import Dict, List, Optional
@@ -178,14 +179,33 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if entropy_min > entropy_max:
             entropy_min, entropy_max = entropy_max, entropy_min
         margin_max = float(getattr(self.cfg, "sc_margin_max", 0.9))
+        ratio_min = float(getattr(self.cfg, "sc_informative_ratio_min", 0.25))
+        ratio_min = max(0.0, min(1.0, ratio_min))
         neg_weight = float(getattr(self.cfg, "sc_negative_weight", 0.25))
+        # Informativeness score encourages moderate disagreement and
+        # penalizes collapsed unanimity.
+        entropy_span = max(1e-6, entropy_max - entropy_min)
+        entropy_mid = 0.5 * (entropy_min + entropy_max)
+        entropy_sigma = max(1e-6, 0.5 * entropy_span)
+        entropy_band_score = math.exp(
+            -((entropy_nats - entropy_mid) ** 2) / (2.0 * (entropy_sigma ** 2))
+        )
+        margin_damp_score = max(0.0, 1.0 - (margin / max(1e-6, margin_max)))
+        local_info_score = max(
+            0.0,
+            min(1.0, 0.5 * entropy_band_score + 0.5 * margin_damp_score),
+        )
         solver_informative_local = bool(
             (entropy_min <= entropy_nats <= entropy_max) or (margin <= margin_max)
         )
-        solver_informative_all = self._dist_all_bool(solver_informative_local)
+        informative_ratio = self._dist_mean(1.0 if solver_informative_local else 0.0)
+        solver_informative_any = informative_ratio > 0.0
+        solver_informative_all = informative_ratio >= (1.0 - 1e-8)
+        solver_informative_gate = informative_ratio >= ratio_min
 
+        sc_signal = max(1e-4, local_info_score)
         solver_rewards_raw = [
-            margin if ans == maj_answer else (-neg_weight * margin)
+            sc_signal if ans == maj_answer else (-neg_weight * sc_signal)
             for ans in solver_answers_norm
         ]
         target_w = max(1, self.cfg.len_penalty_target_words)
@@ -219,23 +239,21 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         solver_update_applied = bool(solver_update_due)
         solver_update_skip_reason: Optional[str] = None
 
-        # Use LOCAL informativeness check instead of ALL-ranks.
-        # Ranks with uninformative data still participate in DDP collectives
-        # (the policy updater's zero-loss backward handles this), but pass
-        # reward=0 so they contribute zero gradient.  This allows the solver
-        # to learn whenever ANY rank has informative data.
         skip_uninformative = bool(
             getattr(self.cfg, "skip_solver_update_when_uninformative", True)
         )
-        local_uninformative = skip_uninformative and not solver_informative_local
-
-        # Check if ANY rank wants to do a solver update (has informative data).
-        # All ranks must participate in DDP collectives together, so we only
-        # skip the entire update if NO rank is informative.
-        any_rank_informative = self._dist_any_bool(solver_informative_local) if solver_update_applied else False
-        if solver_update_applied and skip_uninformative and not any_rank_informative:
-            solver_update_applied = False
-            solver_update_skip_reason = "uninformative_self_consistency_all_ranks"
+        always_scale = bool(
+            getattr(self.cfg, "solver_always_update_with_informative_scaling", True)
+        )
+        min_update_scale = float(getattr(self.cfg, "solver_update_min_scale", 0.20))
+        min_update_scale = max(0.0, min(1.0, min_update_scale))
+        if always_scale:
+            solver_update_scale = max(min_update_scale, informative_ratio)
+        else:
+            solver_update_scale = 1.0
+            if solver_update_applied and skip_uninformative and not solver_informative_gate:
+                solver_update_applied = False
+                solver_update_skip_reason = "uninformative_ratio_below_threshold"
 
         if solver_update_applied:
             for sample_idx, (completion, reward) in enumerate(zip(solver_outputs, solver_rewards_soft)):
@@ -255,11 +273,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     )
                     continue
                 baseline_before = self.solver_baseline
-                # Uninformative ranks participate in DDP collectives but force
-                # an empty completion so the updater takes the zero-loss path.
-                local_skip_update = local_uninformative or (not local_can_solver_update)
+                local_skip_update = not local_can_solver_update
                 completion_for_update = completion if not local_skip_update else ""
-                effective_reward = reward if not local_skip_update else 0.0
+                effective_reward = (
+                    reward * solver_update_scale if not local_skip_update else 0.0
+                )
                 stats = self.solver_updater.step(
                     image=image,
                     prompt=solver_prompt,
@@ -360,7 +378,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "solver_top2_prob": p2,
             "solver_margin": margin,
             "solver_informative_local": solver_informative_local,
+            "solver_informative_any": solver_informative_any,
             "solver_informative_all": solver_informative_all,
+            "solver_informative_ratio": informative_ratio,
+            "solver_informative_ratio_min": ratio_min,
+            "solver_informative_gate": solver_informative_gate,
+            "solver_margin_score": margin_damp_score,
+            "solver_entropy_band_score": entropy_band_score,
+            "solver_local_info_score": local_info_score,
+            "solver_update_scale": solver_update_scale,
             "solver_temperature_schedule": solver_temperatures,
             "solver_top_p_schedule": solver_top_ps,
             "entropy_nats": entropy_nats,
@@ -390,7 +416,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "solver_top2_prob": p2,
                 "solver_margin": margin,
                 "solver_informative_local": solver_informative_local,
+                "solver_informative_any": solver_informative_any,
                 "solver_informative_all": solver_informative_all,
+                "solver_informative_ratio": informative_ratio,
+                "solver_informative_ratio_min": ratio_min,
+                "solver_informative_gate": solver_informative_gate,
+                "solver_margin_score": margin_damp_score,
+                "solver_entropy_band_score": entropy_band_score,
+                "solver_local_info_score": local_info_score,
+                "solver_update_scale": solver_update_scale,
                 "entropy_nats": entropy_nats,
                 "solver_reward_soft_mean": sum(solver_rewards_soft) / max(1, len(solver_rewards_soft)),
                 "proposer_entropy_mu_used": proposer_entropy_mu_used,
@@ -402,7 +436,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             print(
                 f"[Step {step:05d}][U] maj={maj_count}/{self.cfg.num_solver_samples} "
                 f"maj_frac={maj_frac:.2f} H={entropy_nats:.3f} M={margin:.3f} "
-                f"info={int(solver_informative_all)} P_R={proposer_reward:.3f} "
+                f"info_local={int(solver_informative_local)} "
+                f"info_ratio={informative_ratio:.2f} info_gate={int(solver_informative_gate)} "
+                f"up_scale={solver_update_scale:.2f} P_R={proposer_reward:.3f} "
                 f"dt={step_dt:.1f}s"
             )
             print(f"  Q: {question}")
@@ -410,7 +446,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._update_metric("u_majority_fraction", self._dist_mean(maj_frac))
         self._update_metric("u_entropy_nats", self._dist_mean(entropy_nats))
         self._update_metric("u_solver_margin", self._dist_mean(margin))
-        self._update_metric("u_solver_informative", 1.0 if solver_informative_all else 0.0)
+        self._update_metric("u_solver_informative", self._dist_mean(informative_ratio))
         self._update_metric("u_proposer_entropy_mu_used", self._dist_mean(proposer_entropy_mu_used))
         self._update_metric("u_proposer_reward", self._dist_mean(proposer_reward))
 

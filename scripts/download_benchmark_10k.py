@@ -21,12 +21,13 @@ import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from urllib.request import urlopen
 
 from PIL import Image
 
 try:
-    from datasets import Dataset, IterableDataset, load_dataset
+    from datasets import Dataset, IterableDataset, get_dataset_split_names, load_dataset
 except Exception as exc:  # pragma: no cover
     raise RuntimeError(
         "This script requires `datasets`. Install with: pip install datasets pillow"
@@ -37,12 +38,19 @@ try:
 except Exception:  # pragma: no cover
     np = None
 
+try:
+    import requests
+except Exception:  # pragma: no cover
+    requests = None
+
 
 @dataclass(frozen=True)
 class DatasetSpec:
     alias: str
     dataset_ids: Tuple[str, ...]
+    domain: str
     split: str = "train"
+    fallback_splits: Tuple[str, ...] = ()
     config_name: Optional[str] = None
     prefer_streaming: bool = True
 
@@ -52,24 +60,36 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
     "chartqa": DatasetSpec(
         alias="chartqa",
         dataset_ids=("ahmed-masry/ChartQA",),
+        domain="chart_math",
         split="train",
         prefer_streaming=True,
     ),
     "docvqa": DatasetSpec(
         alias="docvqa",
         dataset_ids=("lmms-lab/DocVQA",),
-        split="train",
+        domain="ocr",
+        config_name="DocVQA",
+        split="validation",
+        fallback_splits=("test",),
         prefer_streaming=True,
     ),
     "sa1b": DatasetSpec(
         alias="sa1b",
-        dataset_ids=("facebook/segment-anything-1-billion",),
+        dataset_ids=(
+            # Preferred id (may be unavailable in some environments)
+            "facebook/segment-anything-1-billion",
+            # Fallback natural-image datasets
+            "HuggingFaceM4/COCO",
+            "astro21/coco-caption-train-split-10k",
+        ),
+        domain="natural",
         split="train",
         prefer_streaming=True,
     ),
     "laion_coco": DatasetSpec(
         alias="laion_coco",
         dataset_ids=("laion/laion-coco",),
+        domain="natural",
         split="train",
         prefer_streaming=True,
     ),
@@ -78,12 +98,46 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         alias="textvqa",
         dataset_ids=(
             "lmms-lab/TextVQA",
+            "lmms-lab/textvqa",
             "textvqa",
         ),
+        domain="ocr",
+        split="train",
+        prefer_streaming=True,
+    ),
+    # Optional chart/math domain expansion.
+    "mathvista": DatasetSpec(
+        alias="mathvista",
+        dataset_ids=(
+            "AI4Math/MathVista",
+            "lmms-lab/MathVista",
+        ),
+        domain="chart_math",
+        split="train",
+        prefer_streaming=True,
+    ),
+    # Optional compositional reasoning visuals.
+    "gqa": DatasetSpec(
+        alias="gqa",
+        dataset_ids=(
+            "lmms-lab/GQA",
+            "Graphcore/gqa",
+            "echarlaix/gqa",
+        ),
+        domain="compositional",
+        split="train",
+        prefer_streaming=True,
+    ),
+    "coco10k": DatasetSpec(
+        alias="coco10k",
+        dataset_ids=("astro21/coco-caption-train-split-10k",),
+        domain="natural",
         split="train",
         prefer_streaming=True,
     ),
 }
+
+DEFAULT_DOMAIN_DISTRIBUTION = "natural:0.40,ocr:0.25,chart_math:0.20,compositional:0.15"
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,7 +153,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--datasets",
         type=str,
-        default="chartqa,docvqa,sa1b,laion_coco",
+        default="sa1b,laion_coco,docvqa,textvqa,chartqa,mathvista,gqa",
         help=(
             "Comma-separated preset aliases. "
             f"Available: {', '.join(sorted(PRESET_SPECS.keys()))}"
@@ -109,7 +163,28 @@ def parse_args() -> argparse.Namespace:
         "--samples_per_dataset",
         type=int,
         default=10_000,
-        help="Target sample count per dataset (default: 10000).",
+        help=(
+            "Target sample count per dataset (default: 10000). "
+            "Ignored if --total_samples is provided."
+        ),
+    )
+    parser.add_argument(
+        "--total_samples",
+        type=int,
+        default=None,
+        help=(
+            "Combined total samples across selected datasets. "
+            "When set, per-dataset targets are allocated by --domain_distribution."
+        ),
+    )
+    parser.add_argument(
+        "--domain_distribution",
+        type=str,
+        default=DEFAULT_DOMAIN_DISTRIBUTION,
+        help=(
+            "Domain weights for --total_samples. Format: "
+            "'natural:0.40,ocr:0.25,chart_math:0.20,compositional:0.15'."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -162,30 +237,131 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _largest_remainder_allocation(total: int, weights: Dict[str, float]) -> Dict[str, int]:
+    if total < 0:
+        raise ValueError("total must be non-negative")
+    if not weights:
+        raise ValueError("weights must be non-empty")
+    s = sum(float(v) for v in weights.values())
+    if s <= 0:
+        raise ValueError("weights must sum to a positive value")
+    norm = {k: float(v) / s for k, v in weights.items()}
+    raw = {k: total * v for k, v in norm.items()}
+    floors = {k: int(raw[k]) for k in raw}
+    remainder = total - sum(floors.values())
+    ranked = sorted(raw.keys(), key=lambda k: (raw[k] - floors[k], k), reverse=True)
+    for k in ranked[:remainder]:
+        floors[k] += 1
+    return floors
+
+
+def _parse_domain_distribution(text: str) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise ValueError(
+                f"Invalid domain_distribution token '{part}'. Expected '<domain>:<weight>'."
+            )
+        domain, weight = part.split(":", 1)
+        domain = domain.strip()
+        weight = float(weight.strip())
+        if weight < 0:
+            raise ValueError(f"Weight for domain '{domain}' must be non-negative.")
+        out[domain] = weight
+    if not out:
+        raise ValueError("domain_distribution parsed empty.")
+    return out
+
+
+def allocate_alias_targets(
+    aliases: Sequence[str],
+    total_samples: int,
+    domain_distribution: Dict[str, float],
+) -> Dict[str, int]:
+    if total_samples <= 0:
+        raise ValueError("total_samples must be > 0")
+
+    aliases_by_domain: Dict[str, List[str]] = {}
+    for alias in aliases:
+        domain = PRESET_SPECS[alias].domain
+        aliases_by_domain.setdefault(domain, []).append(alias)
+
+    present_domains = set(aliases_by_domain.keys())
+    active_weights = {
+        domain: weight
+        for domain, weight in domain_distribution.items()
+        if domain in present_domains
+    }
+    if not active_weights:
+        raise ValueError(
+            "None of the selected datasets map to domains in --domain_distribution."
+        )
+
+    domain_targets = _largest_remainder_allocation(total_samples, active_weights)
+    alias_targets: Dict[str, int] = {a: 0 for a in aliases}
+
+    for domain, d_target in domain_targets.items():
+        domain_aliases = sorted(aliases_by_domain.get(domain, []))
+        if not domain_aliases:
+            continue
+        # Evenly split domain quota across datasets in this domain.
+        base = d_target // len(domain_aliases)
+        rem = d_target - base * len(domain_aliases)
+        for i, alias in enumerate(domain_aliases):
+            alias_targets[alias] = base + (1 if i < rem else 0)
+
+    # Safety: keep exact sum.
+    assigned = sum(alias_targets.values())
+    if assigned != total_samples:
+        raise RuntimeError(
+            f"Internal allocation mismatch: assigned={assigned}, total={total_samples}"
+        )
+    return alias_targets
+
+
 def load_with_fallback(spec: DatasetSpec, *, streaming_only: bool):
     errors: List[str] = []
     streaming_options = (True,) if streaming_only else (spec.prefer_streaming, not spec.prefer_streaming)
     for dataset_id in spec.dataset_ids:
-        for streaming in streaming_options:
-            try:
-                kwargs = {
-                    "path": dataset_id,
-                    "split": spec.split,
-                    "streaming": streaming,
-                }
-                if spec.config_name:
-                    kwargs["name"] = spec.config_name
-                ds = load_dataset(**kwargs)
-                if streaming_only and not isinstance(ds, IterableDataset):
-                    raise RuntimeError(
-                        "Expected IterableDataset in streaming-only mode "
-                        f"for dataset_id={dataset_id}, got {type(ds).__name__}."
+        split_candidates: List[str] = [spec.split]
+        for s in spec.fallback_splits:
+            if s not in split_candidates:
+                split_candidates.append(s)
+        try:
+            discovered_splits = get_dataset_split_names(
+                dataset_id,
+                config_name=spec.config_name,
+            )
+            for s in discovered_splits:
+                if s not in split_candidates:
+                    split_candidates.append(s)
+        except Exception:
+            # Best effort only; load_dataset attempts below remain authoritative.
+            pass
+        for split_name in split_candidates:
+            for streaming in streaming_options:
+                try:
+                    kwargs = {
+                        "path": dataset_id,
+                        "split": split_name,
+                        "streaming": streaming,
+                    }
+                    if spec.config_name:
+                        kwargs["name"] = spec.config_name
+                    ds = load_dataset(**kwargs)
+                    if streaming_only and not isinstance(ds, IterableDataset):
+                        raise RuntimeError(
+                            "Expected IterableDataset in streaming-only mode "
+                            f"for dataset_id={dataset_id}, got {type(ds).__name__}."
+                        )
+                    return ds, dataset_id, streaming, split_name
+                except Exception as exc:  # pragma: no cover
+                    errors.append(
+                        f"id={dataset_id} split={split_name} streaming={streaming}: {repr(exc)}"
                     )
-                return ds, dataset_id, streaming
-            except Exception as exc:  # pragma: no cover
-                errors.append(
-                    f"id={dataset_id} split={spec.split} streaming={streaming}: {repr(exc)}"
-                )
     joined = "\n  - ".join(errors)
     raise RuntimeError(
         f"Failed to load dataset preset '{spec.alias}'. Attempts:\n  - {joined}"
@@ -203,12 +379,24 @@ def try_decode_image(value) -> Optional[Image.Image]:
         except Exception:
             return None
     if isinstance(value, str):
-        path = Path(value)
-        if path.is_file():
+        if value.startswith("http://") or value.startswith("https://"):
+            # Support URL-backed datasets without requiring the requests package.
+            if requests is not None:
+                try:
+                    resp = requests.get(value, timeout=10)
+                    if resp.status_code != 200:
+                        return None
+                    return Image.open(io.BytesIO(resp.content)).convert("RGB")
+                except Exception:
+                    return None
             try:
-                return Image.open(path).convert("RGB")
+                with urlopen(value, timeout=10) as resp:
+                    content = resp.read()
+                return Image.open(io.BytesIO(content)).convert("RGB")
             except Exception:
                 return None
+        # Do not probe arbitrary strings as local paths; this is slow and causes
+        # path-length errors on caption-like fields.
         return None
     if isinstance(value, dict):
         if "bytes" in value:
@@ -237,22 +425,46 @@ def try_decode_image(value) -> Optional[Image.Image]:
 
 
 def extract_image(record: Dict) -> Tuple[Optional[Image.Image], Optional[str]]:
-    preferred_keys = (
+    preferred_exact = {
         "image",
         "img",
         "photo",
         "jpg",
+        "jpeg",
         "png",
-    )
-    for key in preferred_keys:
-        if key in record:
-            img = try_decode_image(record[key])
-            if img is not None:
-                return img, key
+        "webp",
+        "image_url",
+        "url",
+        "uri",
+        "path",
+        "image_path",
+        "source_url",
+    }
+    preferred_tokens = ("image", "img", "photo", "jpg", "jpeg", "png", "webp", "url", "uri", "path")
+
+    # Pass 1: exact well-known key names (case-insensitive).
     for key, value in record.items():
+        key_s = str(key).lower()
+        if key_s in preferred_exact:
+            img = try_decode_image(value)
+            if img is not None:
+                return img, str(key)
+
+    # Pass 2: heuristic key names that look image-related.
+    for key, value in record.items():
+        key_s = str(key).lower()
+        if any(token in key_s for token in preferred_tokens):
+            img = try_decode_image(value)
+            if img is not None:
+                return img, str(key)
+
+    # Pass 3: only non-string structured payloads; skip free-form text fields.
+    for key, value in record.items():
+        if isinstance(value, str):
+            continue
         img = try_decode_image(value)
         if img is not None:
-            return img, key
+            return img, str(key)
     return None, None
 
 
@@ -303,7 +515,9 @@ def save_subset_for_spec(
     shuffle_buffer: int,
     streaming_only: bool,
 ) -> Dict[str, object]:
-    ds, dataset_id, streaming = load_with_fallback(spec, streaming_only=streaming_only)
+    ds, dataset_id, streaming, used_split = load_with_fallback(
+        spec, streaming_only=streaming_only
+    )
     images_dir = output_root / "images" / spec.alias
     manifests_dir = output_root / "manifests"
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -339,7 +553,7 @@ def save_subset_for_spec(
                     {
                         "alias": spec.alias,
                         "dataset_id": dataset_id,
-                        "split": spec.split,
+                        "split": used_split,
                         "streaming": streaming,
                         "image_key": key,
                         "saved_index": saved,
@@ -361,8 +575,9 @@ def save_subset_for_spec(
 
     return {
         "alias": spec.alias,
+        "domain": spec.domain,
         "dataset_id": dataset_id,
-        "split": spec.split,
+        "split": used_split,
         "streaming": streaming,
         "image_key_detected": image_key,
         "saved": saved,
@@ -390,8 +605,25 @@ def main() -> int:
     out_root = args.output_dir.expanduser().resolve()
     out_root.mkdir(parents=True, exist_ok=True)
 
+    if args.total_samples is not None:
+        distribution = _parse_domain_distribution(args.domain_distribution)
+        alias_targets = allocate_alias_targets(
+            aliases=aliases,
+            total_samples=int(args.total_samples),
+            domain_distribution=distribution,
+        )
+        print(f"[download] Combined target: {args.total_samples}")
+        print(f"[download] Domain distribution: {args.domain_distribution}")
+        print(
+            "[download] Per-dataset targets: "
+            + ", ".join(f"{k}:{alias_targets[k]}" for k in aliases)
+        )
+    else:
+        alias_targets = {alias: int(args.samples_per_dataset) for alias in aliases}
+
     print(f"[download] Output root: {out_root}")
-    print(f"[download] Target per dataset: {args.samples_per_dataset}")
+    if args.total_samples is None:
+        print(f"[download] Target per dataset: {args.samples_per_dataset}")
     print(f"[download] Datasets: {', '.join(aliases)}")
     print(
         "[download] Mode: "
@@ -405,13 +637,16 @@ def main() -> int:
 
     for i, alias in enumerate(aliases):
         spec = PRESET_SPECS[alias]
+        target = alias_targets[alias]
+        if target <= 0:
+            continue
         run_seed = args.seed + i
-        print(f"\n[download] -> {alias} (seed={run_seed})")
+        print(f"\n[download] -> {alias} (domain={spec.domain}, target={target}, seed={run_seed})")
         try:
             result = save_subset_for_spec(
                 spec,
                 output_root=out_root,
-                samples_target=args.samples_per_dataset,
+                samples_target=target,
                 seed=run_seed,
                 strict=args.strict,
                 max_scan_multiplier=args.max_scan_multiplier,
@@ -435,7 +670,10 @@ def main() -> int:
             {
                 "output_root": str(out_root),
                 "samples_per_dataset": args.samples_per_dataset,
+                "total_samples": args.total_samples,
                 "selected_aliases": aliases,
+                "alias_targets": alias_targets,
+                "domain_distribution": args.domain_distribution,
                 "strict": args.strict,
                 "streaming_only": args.streaming_only,
                 "shuffle_buffer": args.shuffle_buffer,
@@ -453,6 +691,15 @@ def main() -> int:
         for item in failures:
             print(f"  - {item}")
         return 1
+    if args.total_samples is not None:
+        total_saved = sum(int(r.get("saved", 0)) for r in summary)
+        if args.strict and total_saved != int(args.total_samples):
+            print(
+                f"[download] ERROR: strict total mismatch saved={total_saved} "
+                f"expected={args.total_samples}",
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 

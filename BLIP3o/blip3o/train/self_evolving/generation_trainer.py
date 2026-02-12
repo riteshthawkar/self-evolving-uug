@@ -90,7 +90,7 @@ from .generation_helpers import (
     _tokenize_words,
     _yes_no_polarity,
 )
-from .generation_policy_updater import TextPolicyUpdater, TextPreferenceDPOUpdater
+from .generation_policy_updater import TextPolicyUpdater, TextPreferenceDPOUpdater, TextGRPOUpdater
 from .model_api import (
     _adapt_mm_generate_inputs,
     _collect_image_token_ids,
@@ -297,10 +297,10 @@ class GenerationSelfEvolvingTrainer:
     def __init__(self, config: GenerationSelfEvolvingConfig):
         self.cfg = config
         self.cfg.generator_update_rule = str(self.cfg.generator_update_rule or "reinforce").strip().lower()
-        if self.cfg.generator_update_rule not in {"reinforce", "dpo"}:
+        if self.cfg.generator_update_rule not in {"reinforce", "dpo", "grpo"}:
             raise ValueError(
                 f"Unsupported generator_update_rule={self.cfg.generator_update_rule!r}. "
-                "Expected one of: reinforce, dpo."
+                "Expected one of: reinforce, dpo, grpo."
             )
         self.cfg.dpo_pair_selection = str(
             getattr(self.cfg, "dpo_pair_selection", "best_worst") or "best_worst"
@@ -449,6 +449,14 @@ class GenerationSelfEvolvingTrainer:
 
         if self.cfg.generator_update_rule == "dpo":
             self.generator_updater = TextPreferenceDPOUpdater(
+                model=self.train_model,
+                processor=self.processor,
+                config=config,
+                adapter_name="generator" if config.use_lora else None,
+                reference_model=reference_model,
+            )
+        elif self.cfg.generator_update_rule == "grpo":
+            self.generator_updater = TextGRPOUpdater(
                 model=self.train_model,
                 processor=self.processor,
                 config=config,
@@ -2126,6 +2134,7 @@ class GenerationSelfEvolvingTrainer:
             "train/generator_update_mode_proxy_caption": 1.0 if generator_update_mode == "proxy_caption" else 0.0,
             "train/generator_update_rule_reinforce": 1.0 if self.cfg.generator_update_rule == "reinforce" else 0.0,
             "train/generator_update_rule_dpo": 1.0 if self.cfg.generator_update_rule == "dpo" else 0.0,
+            "train/generator_update_rule_grpo": 1.0 if self.cfg.generator_update_rule == "grpo" else 0.0,
             "train/generator_proxy_update_ratio": float(self._current_proxy_ratio()),
             "train/diffusion_repair_count": float(self._diffusion_repair_count),
             "kl/generator_beta": self.generator_updater.kl_coef,
@@ -2565,6 +2574,115 @@ class GenerationSelfEvolvingTrainer:
                         )
                     self._append_jsonl(self.policy_updates_log_path, policy_skip_payload)
                     self._append_jsonl(self.dpo_pairs_log_path, pair_skip_payload)
+            elif update_rule == "grpo":
+                # GRPO path: use ALL scored candidates, not just best/worst pair.
+                # To avoid mixing token-trace and proxy-caption completions under
+                # different prompt contexts, we force a single mode for the whole
+                # group: if ANY candidate lacks a token trace, generate proxy
+                # captions for ALL candidates so the prompt is consistent.
+                grpo_completions: list = []
+                grpo_rewards: list = []
+                grpo_images: list = []
+                grpo_token_ids: list = []
+
+                any_needs_proxy = any(
+                    not str(sc.get("policy_completion", "")).strip()
+                    for sc in scored
+                )
+                use_proxy_for_all = any_needs_proxy and (
+                    (self.cfg.generator_missing_trace_strategy or "proxy").strip().lower() == "proxy"
+                )
+
+                if use_proxy_for_all:
+                    generator_update_mode = "proxy_caption"
+                    for sc in scored:
+                        img_i = sc.get("image")
+                        if isinstance(img_i, Image.Image) and self._proxy_updates_allowed():
+                            proxy_comp = self._proxy_generator_completion(img_i)
+                            if proxy_comp:
+                                grpo_completions.append(proxy_comp)
+                                grpo_rewards.append(float(sc["total_reward"]))
+                                grpo_images.append(img_i)
+                                grpo_token_ids.append(None)
+                else:
+                    # All candidates have token traces — use them directly
+                    generator_update_mode = "token_trace"
+                    for sc in scored:
+                        comp_i = str(sc.get("policy_completion", "")).strip()
+                        if comp_i:
+                            grpo_completions.append(comp_i)
+                            grpo_rewards.append(float(sc["total_reward"]))
+                            img_i = sc.get("image")
+                            grpo_images.append(img_i if isinstance(img_i, Image.Image) else None)
+                            tid_i = sc.get("policy_completion_ids")
+                            grpo_token_ids.append(tid_i if isinstance(tid_i, list) else None)
+
+                local_can_update = len(grpo_completions) >= 2
+                grpo_skip_reason: Optional[str] = None
+                if not local_can_update:
+                    grpo_skip_reason = "grpo_too_few_completions"
+
+                can_update, generator_skipped_reason = _global_update_ready(
+                    local_can_update,
+                    grpo_skip_reason,
+                    peer_reason="distributed_peer_skip",
+                )
+
+                if can_update:
+                    # generator_update_mode is already set above (proxy_caption or token_trace)
+                    grpo_update_prompt = GENERATOR_PROXY_CAPTION_PROMPT if generator_update_mode == "proxy_caption" else str(spec.prompt)
+                    generator_stats = self.generator_updater.step(
+                        prompt=grpo_update_prompt,
+                        completions=grpo_completions,
+                        rewards=grpo_rewards,
+                        device=self.device,
+                        images=grpo_images,
+                        completion_token_ids=grpo_token_ids,
+                    )
+                    if generator_stats.get("did_step", True):
+                        self._policy_update_counts["generator"] += 1
+                        self._generator_update_mode_counts[generator_update_mode] = (
+                            self._generator_update_mode_counts.get(generator_update_mode, 0) + 1
+                        )
+                    self._update_baseline("generator", generator_reward)
+
+                    self._append_jsonl(
+                        self.policy_updates_log_path,
+                        {
+                            "step": step,
+                            "role": "generator",
+                            "update_rule": "grpo",
+                            "reward": generator_reward,
+                            "baseline_before": baseline_before,
+                            "baseline_after": self.generator_baseline,
+                            "stats": generator_stats,
+                            "update_mode": generator_update_mode,
+                            "update_prompt": grpo_update_prompt,
+                            "group_size": len(grpo_completions),
+                            "group_rewards": grpo_rewards,
+                            "best_idx": int(best_idx),
+                            "spec_quality": spec_quality,
+                        },
+                    )
+                else:
+                    if generator_skipped_reason is None:
+                        generator_skipped_reason = "grpo_update_failed"
+                    self._generator_update_mode_counts["skipped"] = (
+                        self._generator_update_mode_counts.get("skipped", 0) + 1
+                    )
+                    self._append_jsonl(
+                        self.policy_updates_log_path,
+                        {
+                            "step": step,
+                            "role": "generator",
+                            "update_rule": "grpo",
+                            "skipped": True,
+                            "reason": generator_skipped_reason,
+                            "valid_completions": len(grpo_completions),
+                            "candidate_count": len(scored),
+                            "spec_quality": spec_quality,
+                        },
+                    )
             else:
                 # REINFORCE path
                 completion = str(best.get("policy_completion", "")).strip()

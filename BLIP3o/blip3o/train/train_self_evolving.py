@@ -84,9 +84,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--disable_solver_temperature_mix", dest="solver_use_temperature_mix", action="store_false")
     p.add_argument("--solver_temp_min", type=float, default=0.7)
     p.add_argument("--solver_temp_max", type=float, default=1.3)
+    p.add_argument("--solver_top_p_min", type=float, default=0.5)
+    p.add_argument("--solver_top_p_max", type=float, default=1.0)
     p.add_argument("--sc_entropy_min", type=float, default=0.15)
     p.add_argument("--sc_entropy_max", type=float, default=1.2)
     p.add_argument("--sc_margin_max", type=float, default=0.90)
+    p.add_argument("--sc_informative_ratio_min", type=float, default=0.25)
     p.add_argument("--sc_negative_weight", type=float, default=0.25)
     p.add_argument("--skip_solver_update_when_uninformative", action="store_true", default=True)
     p.add_argument(
@@ -94,6 +97,13 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="skip_solver_update_when_uninformative",
         action="store_false",
     )
+    p.add_argument("--solver_always_update_with_informative_scaling", action="store_true", default=True)
+    p.add_argument(
+        "--disable_solver_always_update_with_informative_scaling",
+        dest="solver_always_update_with_informative_scaling",
+        action="store_false",
+    )
+    p.add_argument("--solver_update_min_scale", type=float, default=0.20)
     p.add_argument("--len_penalty_weight", type=float, default=0.10)
     p.add_argument("--len_penalty_target_words", type=int, default=6)
     p.add_argument("--prop_entropy_mu", type=float, default=0.90)
@@ -151,7 +161,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--generator_missing_trace_strategy", type=str, default="proxy", choices=["proxy", "skip", "error"])
     p.add_argument("--verification_use_reference_solver", action="store_true", default=True)
     p.add_argument("--verification_use_trainable_solver", dest="verification_use_reference_solver", action="store_false")
-    p.add_argument("--generator_update_rule", type=str, default="reinforce", choices=["reinforce", "dpo"])
+    p.add_argument("--generator_update_rule", type=str, default="reinforce", choices=["reinforce", "dpo", "grpo"])
     p.add_argument("--dpo_beta", type=float, default=0.1)
     p.add_argument("--dpo_label_smoothing", type=float, default=0.0)
     p.add_argument("--dpo_min_reward_gap", type=float, default=0.0)
@@ -160,6 +170,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dpo_max_contradiction", type=float, default=1.0)
     p.add_argument("--dpo_pair_selection", type=str, default="best_worst", choices=["best_worst", "best_hard_negative"])
     p.add_argument("--generator_proxy_max_ratio", type=float, default=1.0)
+    p.add_argument("--grpo_clip_ratio", type=float, default=0.2)
+    p.add_argument("--grpo_min_group_std", type=float, default=1e-6)
 
     # Unified scheduler
     p.add_argument("--understanding_steps_per_cycle", type=int, default=3)
@@ -213,11 +225,16 @@ def _build_understanding_config(args):
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,
         solver_temp_max=args.solver_temp_max,
+        solver_top_p_min=args.solver_top_p_min,
+        solver_top_p_max=args.solver_top_p_max,
         sc_entropy_min=args.sc_entropy_min,
         sc_entropy_max=args.sc_entropy_max,
         sc_margin_max=args.sc_margin_max,
+        sc_informative_ratio_min=args.sc_informative_ratio_min,
         sc_negative_weight=args.sc_negative_weight,
         skip_solver_update_when_uninformative=args.skip_solver_update_when_uninformative,
+        solver_always_update_with_informative_scaling=args.solver_always_update_with_informative_scaling,
+        solver_update_min_scale=args.solver_update_min_scale,
         len_penalty_weight=args.len_penalty_weight,
         len_penalty_target_words=args.len_penalty_target_words,
         prop_entropy_mu=args.prop_entropy_mu,
@@ -305,15 +322,22 @@ def _build_generation_config(args):
         dpo_max_contradiction=args.dpo_max_contradiction,
         dpo_pair_selection=args.dpo_pair_selection,
         generator_proxy_max_ratio=args.generator_proxy_max_ratio,
+        grpo_clip_ratio=args.grpo_clip_ratio,
+        grpo_min_group_std=args.grpo_min_group_std,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,
         solver_temp_max=args.solver_temp_max,
+        solver_top_p_min=args.solver_top_p_min,
+        solver_top_p_max=args.solver_top_p_max,
         sc_entropy_min=args.sc_entropy_min,
         sc_entropy_max=args.sc_entropy_max,
         sc_margin_max=args.sc_margin_max,
+        sc_informative_ratio_min=args.sc_informative_ratio_min,
         sc_negative_weight=args.sc_negative_weight,
         skip_solver_update_when_uninformative=args.skip_solver_update_when_uninformative,
+        solver_always_update_with_informative_scaling=args.solver_always_update_with_informative_scaling,
+        solver_update_min_scale=args.solver_update_min_scale,
         len_penalty_weight=args.len_penalty_weight,
         len_penalty_target_words=args.len_penalty_target_words,
         prop_entropy_mu=args.prop_entropy_mu,
@@ -414,15 +438,22 @@ def _build_unified_config(args):
         dpo_max_contradiction=args.dpo_max_contradiction,
         dpo_pair_selection=args.dpo_pair_selection,
         generator_proxy_max_ratio=args.generator_proxy_max_ratio,
+        grpo_clip_ratio=args.grpo_clip_ratio,
+        grpo_min_group_std=args.grpo_min_group_std,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,
         solver_temp_max=args.solver_temp_max,
+        solver_top_p_min=args.solver_top_p_min,
+        solver_top_p_max=args.solver_top_p_max,
         sc_entropy_min=args.sc_entropy_min,
         sc_entropy_max=args.sc_entropy_max,
         sc_margin_max=args.sc_margin_max,
+        sc_informative_ratio_min=args.sc_informative_ratio_min,
         sc_negative_weight=args.sc_negative_weight,
         skip_solver_update_when_uninformative=args.skip_solver_update_when_uninformative,
+        solver_always_update_with_informative_scaling=args.solver_always_update_with_informative_scaling,
+        solver_update_min_scale=args.solver_update_min_scale,
         len_penalty_weight=args.len_penalty_weight,
         len_penalty_target_words=args.len_penalty_target_words,
         prop_entropy_mu=args.prop_entropy_mu,
