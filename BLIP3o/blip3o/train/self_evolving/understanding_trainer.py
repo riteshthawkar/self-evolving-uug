@@ -1009,7 +1009,10 @@ class UnderstandingSelfEvolvingTrainer:
                 informative_ratio = self._dist_mean(1.0 if solver_informative_local else 0.0)
                 solver_informative_any = informative_ratio > 0.0
                 solver_informative_all = informative_ratio >= (1.0 - 1e-8)
-                solver_informative_gate = informative_ratio >= ratio_min
+                # NOTE: Updates are per-rank on per-rank images. Use local
+                # informativeness for gating; keep global ratio for logging.
+                solver_informative_gate = solver_informative_local
+                solver_informative_gate_global = informative_ratio >= ratio_min
 
                 sc_signal = max(1e-4, local_info_score)
                 # Penalize unanimous, low-entropy, high-margin (trivially easy) cases.
@@ -1079,13 +1082,13 @@ class UnderstandingSelfEvolvingTrainer:
                 min_update_scale = float(getattr(cfg, "solver_update_min_scale", 0.20))
                 min_update_scale = max(0.0, min(1.0, min_update_scale))
                 if always_scale:
-                    solver_update_scale = max(min_update_scale, informative_ratio)
+                    solver_update_scale = max(min_update_scale, local_info_score)
                 else:
                     solver_update_scale = 1.0
                     if skip_uninformative and not solver_informative_gate:
                         solver_update_applied = False
                         solver_update_skip_reason = (
-                            "uninformative_ratio_below_threshold"
+                            "uninformative_local"
                         )
 
                 if solver_update_applied:
@@ -1333,6 +1336,7 @@ class UnderstandingSelfEvolvingTrainer:
                         "solver_informative_ratio": informative_ratio,
                         "solver_informative_ratio_min": ratio_min,
                         "solver_informative_gate": solver_informative_gate,
+                        "solver_informative_gate_global": solver_informative_gate_global,
                         "entropy_nats": entropy_nats,
                         "solver_rewards_raw": solver_rewards_raw,
                         "solver_rewards_soft": solver_rewards_soft,
@@ -1386,6 +1390,7 @@ class UnderstandingSelfEvolvingTrainer:
                         "solver_informative_all": solver_informative_all,
                         "solver_informative_ratio": informative_ratio,
                         "solver_informative_gate": solver_informative_gate,
+                        "solver_informative_gate_global": solver_informative_gate_global,
                         "solver_update_scale": solver_update_scale,
                         "entropy_nats": entropy_nats,
                         "proposer_entropy_mu_used": proposer_entropy_mu_used,
