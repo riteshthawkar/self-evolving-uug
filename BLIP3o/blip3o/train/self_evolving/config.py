@@ -70,6 +70,7 @@ class UnderstandingSelfEvolvingConfig:
     prop_entropy_mu_min: float = 0.40
     prop_entropy_mu_max: float = 1.5
     zero_entropy_reward_cap: float = 0.10  # cap proposer reward when entropy=0 (unanimous)
+    easy_question_penalty: float = 0.15  # subtract from proposer reward for trivially easy questions
 
     # KL control
     kl_coef: float = 0.01
@@ -197,6 +198,7 @@ class GenerationSelfEvolvingConfig:
     prop_entropy_mu_min: float = 0.40
     prop_entropy_mu_max: float = 1.5
     zero_entropy_reward_cap: float = 0.10
+    easy_question_penalty: float = 0.15
     reward_spec_weight: float = 0.65
     reward_cycle_weight: float = 0.20
     reward_diversity_weight: float = 0.10

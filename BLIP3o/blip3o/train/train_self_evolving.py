@@ -113,6 +113,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prop_entropy_ema_momentum", type=float, default=0.95)
     p.add_argument("--prop_entropy_mu_min", type=float, default=0.05)
     p.add_argument("--prop_entropy_mu_max", type=float, default=1.5)
+    p.add_argument("--zero_entropy_reward_cap", type=float, default=0.10)
+    p.add_argument("--easy_question_penalty", type=float, default=0.15)
     p.add_argument("--reward_spec_weight", type=float, default=0.65)
     p.add_argument("--reward_cycle_weight", type=float, default=0.20)
     p.add_argument("--reward_diversity_weight", type=float, default=0.10)
@@ -243,6 +245,8 @@ def _build_understanding_config(args):
         prop_entropy_ema_momentum=args.prop_entropy_ema_momentum,
         prop_entropy_mu_min=args.prop_entropy_mu_min,
         prop_entropy_mu_max=args.prop_entropy_mu_max,
+        zero_entropy_reward_cap=args.zero_entropy_reward_cap,
+        easy_question_penalty=args.easy_question_penalty,
         kl_coef=args.kl_coef,
         kl_target=args.kl_target,
         kl_adapt_rate=args.kl_adapt_rate,
@@ -346,6 +350,8 @@ def _build_generation_config(args):
         prop_entropy_ema_momentum=args.prop_entropy_ema_momentum,
         prop_entropy_mu_min=args.prop_entropy_mu_min,
         prop_entropy_mu_max=args.prop_entropy_mu_max,
+        zero_entropy_reward_cap=args.zero_entropy_reward_cap,
+        easy_question_penalty=args.easy_question_penalty,
         reward_spec_weight=args.reward_spec_weight,
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
@@ -462,6 +468,8 @@ def _build_unified_config(args):
         prop_entropy_ema_momentum=args.prop_entropy_ema_momentum,
         prop_entropy_mu_min=args.prop_entropy_mu_min,
         prop_entropy_mu_max=args.prop_entropy_mu_max,
+        zero_entropy_reward_cap=args.zero_entropy_reward_cap,
+        easy_question_penalty=args.easy_question_penalty,
         reward_spec_weight=args.reward_spec_weight,
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
