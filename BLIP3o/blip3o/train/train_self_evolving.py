@@ -91,6 +91,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sc_margin_max", type=float, default=0.90)
     p.add_argument("--sc_informative_ratio_min", type=float, default=0.25)
     p.add_argument("--sc_negative_weight", type=float, default=0.25)
+    p.add_argument("--easy_solver_penalty_scale", type=float, default=1.0)
     p.add_argument("--skip_solver_update_when_uninformative", action="store_true", default=True)
     p.add_argument(
         "--allow_solver_update_when_uninformative",
@@ -186,6 +187,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max_expected_words", type=int, default=8)
     p.add_argument("--max_question_words", type=int, default=24)
 
+    # Phase 2: self-evolving feedback loop
+    p.add_argument("--evolving_phase", type=str, default="cold_start",
+                    choices=["cold_start", "self_evolving", "auto"],
+                    help="cold_start=Phase1 only (default), self_evolving=Phase2 from start, auto=transition automatically")
+    p.add_argument("--use_ref_answer_scoring", action="store_true", default=False,
+                    help="Use reference-answer log-prob scoring instead of multi-component scoring")
+    p.add_argument("--replay_buffer_size", type=int, default=1000)
+    p.add_argument("--replay_min_reward", type=float, default=0.5)
+    p.add_argument("--replay_max_staleness", type=int, default=500)
+    p.add_argument("--gen_mix_ratio_start", type=float, default=0.05)
+    p.add_argument("--gen_mix_ratio_max", type=float, default=0.30)
+    p.add_argument("--gen_mix_ratio_warmup_steps", type=int, default=500)
+    p.add_argument("--phase_transition_reward_threshold", type=float, default=0.6)
+    p.add_argument("--phase_transition_warmup_steps", type=int, default=200)
+    p.add_argument("--phase_transition_reward_ema_momentum", type=float, default=0.95)
+
     # W&B
     p.add_argument("--wandb_mode", type=str, default=os.environ.get("WANDB_MODE", "disabled"), choices=["online", "offline", "disabled"])
     p.add_argument("--wandb_project", type=str, default=os.environ.get("WANDB_PROJECT", "self-evolving-uug"))
@@ -234,6 +251,7 @@ def _build_understanding_config(args):
         sc_margin_max=args.sc_margin_max,
         sc_informative_ratio_min=args.sc_informative_ratio_min,
         sc_negative_weight=args.sc_negative_weight,
+        easy_solver_penalty_scale=args.easy_solver_penalty_scale,
         skip_solver_update_when_uninformative=args.skip_solver_update_when_uninformative,
         solver_always_update_with_informative_scaling=args.solver_always_update_with_informative_scaling,
         solver_update_min_scale=args.solver_update_min_scale,
@@ -339,6 +357,7 @@ def _build_generation_config(args):
         sc_margin_max=args.sc_margin_max,
         sc_informative_ratio_min=args.sc_informative_ratio_min,
         sc_negative_weight=args.sc_negative_weight,
+        easy_solver_penalty_scale=args.easy_solver_penalty_scale,
         skip_solver_update_when_uninformative=args.skip_solver_update_when_uninformative,
         solver_always_update_with_informative_scaling=args.solver_always_update_with_informative_scaling,
         solver_update_min_scale=args.solver_update_min_scale,
@@ -457,6 +476,7 @@ def _build_unified_config(args):
         sc_margin_max=args.sc_margin_max,
         sc_informative_ratio_min=args.sc_informative_ratio_min,
         sc_negative_weight=args.sc_negative_weight,
+        easy_solver_penalty_scale=args.easy_solver_penalty_scale,
         skip_solver_update_when_uninformative=args.skip_solver_update_when_uninformative,
         solver_always_update_with_informative_scaling=args.solver_always_update_with_informative_scaling,
         solver_update_min_scale=args.solver_update_min_scale,
@@ -508,6 +528,18 @@ def _build_unified_config(args):
         synthetic_solver_update_freq=args.synthetic_solver_update_freq,
         synthetic_solver_hard_only=args.synthetic_solver_hard_only,
         solver_hardness_min_entropy=args.solver_hardness_min_entropy,
+        # Phase 2: self-evolving feedback loop
+        evolving_phase=args.evolving_phase,
+        use_ref_answer_scoring=args.use_ref_answer_scoring,
+        replay_buffer_size=args.replay_buffer_size,
+        replay_min_reward=args.replay_min_reward,
+        replay_max_staleness=args.replay_max_staleness,
+        gen_mix_ratio_start=args.gen_mix_ratio_start,
+        gen_mix_ratio_max=args.gen_mix_ratio_max,
+        gen_mix_ratio_warmup_steps=args.gen_mix_ratio_warmup_steps,
+        phase_transition_reward_threshold=args.phase_transition_reward_threshold,
+        phase_transition_warmup_steps=args.phase_transition_warmup_steps,
+        phase_transition_reward_ema_momentum=args.phase_transition_reward_ema_momentum,
     )
 
 

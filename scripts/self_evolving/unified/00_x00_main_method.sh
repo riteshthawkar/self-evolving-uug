@@ -61,6 +61,18 @@ export MAX_NEW_TOKENS_CAPTION="${MAX_NEW_TOKENS_CAPTION:-64}"
 export MAX_NEW_TOKENS_GENERATOR="${MAX_NEW_TOKENS_GENERATOR:-512}"
 export GENERATOR_PROXY_MAX_RATIO="${GENERATOR_PROXY_MAX_RATIO:-1.00}"
 export CLEAR_CACHE_EVERY="${CLEAR_CACHE_EVERY:-10}"
+# Phase 2: self-evolving feedback loop (default=cold_start preserves Phase 1 behaviour)
+# Set EVOLVING_PHASE=auto to enable auto-transition, or =self_evolving to skip cold start
+export EVOLVING_PHASE="${EVOLVING_PHASE:-cold_start}"
+export USE_REF_ANSWER_SCORING="${USE_REF_ANSWER_SCORING:-0}"
+export REPLAY_BUFFER_SIZE="${REPLAY_BUFFER_SIZE:-1000}"
+export REPLAY_MIN_REWARD="${REPLAY_MIN_REWARD:-0.50}"
+export REPLAY_MAX_STALENESS="${REPLAY_MAX_STALENESS:-500}"
+export GEN_MIX_RATIO_START="${GEN_MIX_RATIO_START:-0.05}"
+export GEN_MIX_RATIO_MAX="${GEN_MIX_RATIO_MAX:-0.30}"
+export GEN_MIX_RATIO_WARMUP_STEPS="${GEN_MIX_RATIO_WARMUP_STEPS:-500}"
+export PHASE_TRANSITION_REWARD_THRESHOLD="${PHASE_TRANSITION_REWARD_THRESHOLD:-0.60}"
+export PHASE_TRANSITION_WARMUP_STEPS="${PHASE_TRANSITION_WARMUP_STEPS:-200}"
 export CUDA_DEVICE="${CUDA_DEVICE:-0}"
 export PYTHON_BIN="${PYTHON_BIN:-python3}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
@@ -109,6 +121,11 @@ fi
 SUBFOLDER_FLAGS=()
 if [[ -n "$INCLUDE_SUBFOLDERS" ]]; then
   SUBFOLDER_FLAGS+=(--include_subfolders "$INCLUDE_SUBFOLDERS")
+fi
+
+REF_SCORING_FLAGS=()
+if [[ "$USE_REF_ANSWER_SCORING" == "1" ]]; then
+  REF_SCORING_FLAGS+=(--use_ref_answer_scoring)
 fi
 
 "$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" "$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py" \
@@ -196,6 +213,16 @@ fi
   --kl_max 1e2 \
   --baseline_momentum 0.9 \
   --clear_cache_every "$CLEAR_CACHE_EVERY" \
+  --evolving_phase "$EVOLVING_PHASE" \
+  "${REF_SCORING_FLAGS[@]}" \
+  --replay_buffer_size "$REPLAY_BUFFER_SIZE" \
+  --replay_min_reward "$REPLAY_MIN_REWARD" \
+  --replay_max_staleness "$REPLAY_MAX_STALENESS" \
+  --gen_mix_ratio_start "$GEN_MIX_RATIO_START" \
+  --gen_mix_ratio_max "$GEN_MIX_RATIO_MAX" \
+  --gen_mix_ratio_warmup_steps "$GEN_MIX_RATIO_WARMUP_STEPS" \
+  --phase_transition_reward_threshold "$PHASE_TRANSITION_REWARD_THRESHOLD" \
+  --phase_transition_warmup_steps "$PHASE_TRANSITION_WARMUP_STEPS" \
   --wandb_mode "$WANDB_MODE" \
   --wandb_project "$WANDB_PROJECT" \
   --wandb_run_name "x00_main_default_s42" \

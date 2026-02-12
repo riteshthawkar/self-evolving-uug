@@ -1012,10 +1012,24 @@ class UnderstandingSelfEvolvingTrainer:
                 solver_informative_gate = informative_ratio >= ratio_min
 
                 sc_signal = max(1e-4, local_info_score)
-                solver_rewards_raw = [
-                    sc_signal if ans == maj_answer else (-neg_weight * sc_signal)
-                    for ans in solver_answers_norm
-                ]
+                # Penalize unanimous, low-entropy, high-margin (trivially easy) cases.
+                easy_solver_case = bool((entropy_nats < entropy_min) and (margin > margin_max))
+                easy_solver_penalty_scale = float(
+                    getattr(cfg, "easy_solver_penalty_scale", 1.0)
+                )
+                easy_solver_penalty_scale = max(0.0, easy_solver_penalty_scale)
+                if easy_solver_case:
+                    solver_rewards_raw = [
+                        (-easy_solver_penalty_scale * sc_signal)
+                        if ans == maj_answer
+                        else (neg_weight * sc_signal)
+                        for ans in solver_answers_norm
+                    ]
+                else:
+                    solver_rewards_raw = [
+                        sc_signal if ans == maj_answer else (-neg_weight * sc_signal)
+                        for ans in solver_answers_norm
+                    ]
                 target_w = max(1, cfg.len_penalty_target_words)
                 penalties = [
                     min(1.0, max(0.0, (w - target_w) / float(target_w))) for w in pre_words
@@ -1310,6 +1324,8 @@ class UnderstandingSelfEvolvingTrainer:
                         "solver_margin_score": margin_damp_score,
                         "solver_entropy_band_score": entropy_band_score,
                         "solver_local_info_score": local_info_score,
+                        "easy_solver_case": easy_solver_case,
+                        "easy_solver_penalty_scale": easy_solver_penalty_scale,
                         "solver_update_scale": solver_update_scale,
                         "solver_informative_local": solver_informative_local,
                         "solver_informative_any": solver_informative_any,
@@ -1363,6 +1379,8 @@ class UnderstandingSelfEvolvingTrainer:
                         "solver_top1_prob": p1,
                         "solver_top2_prob": p2,
                         "solver_margin": margin,
+                        "easy_solver_case": easy_solver_case,
+                        "easy_solver_penalty_scale": easy_solver_penalty_scale,
                         "solver_informative_local": solver_informative_local,
                         "solver_informative_any": solver_informative_any,
                         "solver_informative_all": solver_informative_all,

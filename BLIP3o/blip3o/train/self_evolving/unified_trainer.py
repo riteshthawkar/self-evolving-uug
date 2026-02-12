@@ -7,6 +7,7 @@ Extends GenerationSelfEvolvingTrainer with an interleaved understanding phase.
 
 import gc
 import math
+import random
 import time
 import traceback
 from typing import Dict, List, Optional
@@ -19,6 +20,7 @@ from .config import UnifiedSelfEvolvingConfig
 from .generation_helpers import GenerationSpec
 from .generation_trainer import GenerationSelfEvolvingTrainer
 from .prompts import build_proposer_prompt, build_solver_prompt
+from .replay_buffer import ReplayBuffer
 from .utils import (
     HAS_WANDB,
     _json_dump,
@@ -45,6 +47,31 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             config.solver_update_freq = max(1, config.synthetic_solver_update_freq)
         super().__init__(config)
         self.ucfg = config
+
+        # ---- Phase 2: self-evolving feedback loop state ---- #
+        _phase_cfg = getattr(config, "evolving_phase", "cold_start")
+        if _phase_cfg == "self_evolving":
+            # Skip cold start — start Phase 2 immediately
+            self._evolving_phase = "self_evolving"
+            self._phase2_start_step = 0
+        else:
+            # "cold_start" or "auto" — begin in Phase 1
+            self._evolving_phase = "cold_start"
+            self._phase2_start_step = -1  # not yet transitioned
+
+        # Replay buffer (created for all modes, but only populated in Phase 2)
+        _buf_size = getattr(config, "replay_buffer_size", 1000)
+        _buf_min_r = getattr(config, "replay_min_reward", 0.5)
+        _buf_stale = getattr(config, "replay_max_staleness", 500)
+        self.replay_buffer = ReplayBuffer(
+            max_size=_buf_size,
+            min_reward=_buf_min_r,
+            max_staleness=_buf_stale,
+        )
+
+        # Generator reward EMA for auto phase transition
+        self._gen_reward_ema: float = 0.0
+        self._gen_reward_ema_initialized: bool = False
 
     def _phase_local_step_index(self, step: int, phase: str) -> int:
         cycle = max(1, self.cfg.understanding_steps_per_cycle + self.cfg.generation_steps_per_cycle)
@@ -204,10 +231,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         solver_informative_gate = informative_ratio >= ratio_min
 
         sc_signal = max(1e-4, local_info_score)
-        solver_rewards_raw = [
-            sc_signal if ans == maj_answer else (-neg_weight * sc_signal)
-            for ans in solver_answers_norm
-        ]
+        # Penalize unanimous, low-entropy, high-margin (trivially easy) cases.
+        easy_solver_case = bool((entropy_nats < entropy_min) and (margin > margin_max))
+        easy_solver_penalty_scale = float(
+            getattr(self.cfg, "easy_solver_penalty_scale", 1.0)
+        )
+        easy_solver_penalty_scale = max(0.0, easy_solver_penalty_scale)
+        if easy_solver_case:
+            solver_rewards_raw = [
+                (-easy_solver_penalty_scale * sc_signal)
+                if ans == maj_answer
+                else (neg_weight * sc_signal)
+                for ans in solver_answers_norm
+            ]
+        else:
+            solver_rewards_raw = [
+                sc_signal if ans == maj_answer else (-neg_weight * sc_signal)
+                for ans in solver_answers_norm
+            ]
         target_w = max(1, self.cfg.len_penalty_target_words)
         penalties = [min(1.0, max(0.0, (w - target_w) / float(target_w))) for w in pre_words]
         prob_map = {ans: count / float(self.cfg.num_solver_samples) for ans, count in hist.items()}
@@ -395,6 +436,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "solver_margin_score": margin_damp_score,
             "solver_entropy_band_score": entropy_band_score,
             "solver_local_info_score": local_info_score,
+            "easy_solver_case": easy_solver_case,
+            "easy_solver_penalty_scale": easy_solver_penalty_scale,
             "solver_update_scale": solver_update_scale,
             "solver_temperature_schedule": solver_temperatures,
             "solver_top_p_schedule": solver_top_ps,
@@ -438,6 +481,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "solver_margin_score": margin_damp_score,
                 "solver_entropy_band_score": entropy_band_score,
                 "solver_local_info_score": local_info_score,
+                "easy_solver_case": easy_solver_case,
+                "easy_solver_penalty_scale": easy_solver_penalty_scale,
                 "solver_update_scale": solver_update_scale,
                 "entropy_nats": entropy_nats,
                 "solver_reward_soft_mean": sum(solver_rewards_soft) / max(1, len(solver_rewards_soft)),
@@ -471,6 +516,83 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
 
         return record
 
+    # ---- Phase 2: helper methods ---- #
+
+    def _current_gen_mix_ratio(self, step: int) -> float:
+        """Compute the generated-image mixing ratio for the understanding step.
+
+        Returns 0.0 when in cold-start phase (Phase 1) or when the config
+        defaults keep the feature off.  During Phase 2, linearly ramps from
+        ``gen_mix_ratio_start`` to ``gen_mix_ratio_max`` over
+        ``gen_mix_ratio_warmup_steps``.
+        """
+        if self._evolving_phase != "self_evolving":
+            return 0.0
+        start = getattr(self.ucfg, "gen_mix_ratio_start", 0.0)
+        mx = getattr(self.ucfg, "gen_mix_ratio_max", 0.0)
+        warmup = max(1, getattr(self.ucfg, "gen_mix_ratio_warmup_steps", 1))
+        if mx <= 0.0:
+            return 0.0
+        p2_start = max(0, self._phase2_start_step)
+        elapsed = max(0, step - p2_start)
+        t = min(1.0, elapsed / warmup)
+        return start + t * (mx - start)
+
+    def _update_gen_reward_ema(self, reward_mean: float) -> None:
+        """Update the exponential moving average of generator reward."""
+        mom = getattr(self.ucfg, "phase_transition_reward_ema_momentum", 0.95)
+        if not self._gen_reward_ema_initialized:
+            self._gen_reward_ema = reward_mean
+            self._gen_reward_ema_initialized = True
+        else:
+            self._gen_reward_ema = mom * self._gen_reward_ema + (1.0 - mom) * reward_mean
+
+    def _maybe_transition_phase(self, step: int) -> None:
+        """Check if cold_start → self_evolving transition should happen.
+
+        Only active when ``evolving_phase == "auto"`` in the config.
+        Transition criteria:
+        1. At least ``phase_transition_warmup_steps`` cold-start steps
+        2. Generator reward EMA exceeds ``phase_transition_reward_threshold``
+        """
+        if self._evolving_phase != "cold_start":
+            return
+        if getattr(self.ucfg, "evolving_phase", "cold_start") != "auto":
+            return
+
+        warmup = getattr(self.ucfg, "phase_transition_warmup_steps", 200)
+        threshold = getattr(self.ucfg, "phase_transition_reward_threshold", 0.6)
+
+        # Use steps-since-training-start, not absolute step number,
+        # so resume from checkpoint doesn't skip warmup.
+        effective_steps = step - self.start_step
+        if effective_steps < warmup:
+            return
+        if not self._gen_reward_ema_initialized:
+            return
+        if self._gen_reward_ema < threshold:
+            return
+
+        # Transition!
+        self._evolving_phase = "self_evolving"
+        self._phase2_start_step = step
+        if self.is_main_process:
+            print(
+                f"[Unified] *** Phase transition: cold_start → self_evolving at step {step} ***"
+                f" (gen_reward_ema={self._gen_reward_ema:.4f} >= {threshold})"
+            )
+        self._append_jsonl(
+            self.iter_log_path,
+            {
+                "step": step,
+                "event": "phase_transition",
+                "from": "cold_start",
+                "to": "self_evolving",
+                "gen_reward_ema": self._gen_reward_ema,
+                "threshold": threshold,
+            },
+        )
+
     def train(self):
         cfg = self.ucfg
         if cfg.total_steps <= self.start_step:
@@ -488,6 +610,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             print(
                 f"[Unified] Schedule: Ux{cfg.understanding_steps_per_cycle} + Gx{cfg.generation_steps_per_cycle} (cycle={cycle})"
             )
+            _ev_phase = getattr(cfg, "evolving_phase", "cold_start")
+            print(f"[Unified] Evolving phase mode: {_ev_phase}")
+            if _ev_phase != "cold_start":
+                print(
+                    f"[Unified] Ref-answer scoring: {getattr(cfg, 'use_ref_answer_scoring', False)}, "
+                    f"Replay buffer: size={getattr(cfg, 'replay_buffer_size', 0)}, "
+                    f"Mix ratio: {getattr(cfg, 'gen_mix_ratio_start', 0)}->{getattr(cfg, 'gen_mix_ratio_max', 0)}"
+                )
 
         last_completed_step = self.start_step
         last_attempted_step = self.start_step
@@ -497,9 +627,40 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 last_attempted_step = step
                 image, meta = self._sample_image_for_step(step)
                 phase_tag = "U"
+                _data_source = "real"  # default; overwritten if replay buffer used
 
                 phase_idx = (step - 1) % cycle
                 if phase_idx < cfg.understanding_steps_per_cycle:
+                    # ---- Phase 2: optionally mix generated images ---- #
+                    # Use a step-seeded RNG so ALL DDP ranks make the same
+                    # real-vs-replay decision and pick the same buffer index.
+                    # This prevents rank-divergent training data.
+                    _gen_mix = self._current_gen_mix_ratio(step)
+                    if (
+                        _gen_mix > 0
+                        and self.replay_buffer
+                        and len(self.replay_buffer) > 0
+                    ):
+                        _step_rng = random.Random(cfg.seed + step)
+                        _use_replay = _step_rng.random() < _gen_mix
+                        if _use_replay:
+                            _buf_idx = _step_rng.randint(0, len(self.replay_buffer) - 1)
+                            _entry = self.replay_buffer._entries[_buf_idx]
+                            image = _entry.image
+                            meta = {
+                                "source": "replay_buffer",
+                                "prompt": _entry.prompt,
+                                "questions": _entry.questions,
+                                "reference_answers": _entry.reference_answers,
+                                "reward": _entry.reward,
+                                "step_generated": _entry.step_generated,
+                            }
+                            _data_source = "replay_buffer"
+                        else:
+                            meta["source"] = "real"
+                    else:
+                        meta["source"] = "real"
+
                     self._understanding_step(step=step, image=image, meta=meta)
                 else:
                     phase_tag = "G"
@@ -521,11 +682,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     reward_min_g = self._dist_mean(reward_min)
                     spec_quality_g = self._dist_mean(spec_quality)
 
+                    # ---- Phase transition tracking ---- #
+                    # Use the *global* reward mean (synced across ranks) so that
+                    # all DDP ranks transition at the same step.
+                    self._update_gen_reward_ema(reward_mean_g)
+                    self._maybe_transition_phase(step)
+
                     best = scored[best_idx]
-                    best_spec = float(best["spec_score"])
-                    best_cycle = float(best["cycle_score"])
-                    best_div = float(best["diversity_score"])
-                    best_contra = float(best["contradiction_score"])
+                    best_spec = float(best.get("spec_score", 0.0))
+                    best_cycle = float(best.get("cycle_score", 0.0))
+                    best_div = float(best.get("diversity_score", 0.0))
+                    best_contra = float(best.get("contradiction_score", 0.0))
                     best_spec_g = self._dist_mean(best_spec)
                     best_cycle_g = self._dist_mean(best_cycle)
                     best_div_g = self._dist_mean(best_div)
@@ -576,7 +743,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
 
                 if self.is_main_process:
                     step_dt = time.perf_counter() - step_t0
-                    print(f"[Step {step:05d}] phase={phase_tag} total_dt={step_dt:.1f}s")
+                    _src = _data_source if phase_tag == "U" else ""
+                    _phase_lbl = self._evolving_phase
+                    _mix_info = ""
+                    if phase_tag == "U" and _src == "replay_buffer":
+                        _mix_info = f" [replay_buf, mix={self._current_gen_mix_ratio(step):.2f}]"
+                    _ema_info = ""
+                    if self._gen_reward_ema_initialized:
+                        _ema_info = f" ema_r={self._gen_reward_ema:.4f}"
+                    print(
+                        f"[Step {step:05d}] phase={phase_tag} evolving={_phase_lbl}"
+                        f"{_mix_info}{_ema_info} dt={step_dt:.1f}s"
+                    )
 
                 if cfg.save_every > 0 and step % cfg.save_every == 0:
                     self._dist_barrier()
