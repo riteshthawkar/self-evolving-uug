@@ -1891,6 +1891,208 @@ class GenerationSelfEvolvingTrainer:
                 )
         return scored
 
+    # ---- Phase 2: reference-answer log-prob scoring ---- #
+
+    @torch.no_grad()
+    def _compute_ref_answer_logp(
+        self,
+        image: Image.Image,
+        question: str,
+        reference_answer: str,
+        device: torch.device,
+    ) -> float:
+        """Compute log P(reference_answer | image, question) under solver.
+
+        Returns the *mean* per-token log-probability of the reference answer
+        conditioned on the generated image and the question.  This is used
+        as a continuous reward signal for ranking candidate images.
+
+        Runs under ``torch.no_grad()`` — inference only, no gradient.
+        Uses the solver adapter ("default") on the *wrapped* model to stay
+        consistent with ``_generate`` and the rest of the codebase.
+        """
+        import torch.nn.functional as F
+        from .generation_policy_updater import _aligned_prompt_prefix_len
+
+        ref_ans_stripped = reference_answer.strip()
+        if not ref_ans_stripped:
+            return -10.0
+
+        solver_prompt = build_solver_prompt(question)
+        solver_prompt_chat = _build_chat_text(self.processor, image, solver_prompt)
+        # The chat template ends with the assistant generation prompt; the
+        # reference answer follows as if the model had generated it.
+        full_text = solver_prompt_chat + ref_ans_stripped
+
+        # Use the *wrapped* model (consistent with _generate), not unwrapped.
+        model = self.train_model if hasattr(self, "train_model") else self.model
+        adapter = "default" if self.cfg.use_lora else None
+        was_training = model.training
+
+        try:
+            with use_adapter(model, adapter):
+                model.eval()
+                prompt_inputs = _prepare_mm_inputs(
+                    self.processor, device, image, solver_prompt_chat,
+                    model=_unwrap_model(model),
+                )
+                full_inputs = _prepare_mm_inputs(
+                    self.processor, device, image, full_text,
+                    model=_unwrap_model(model),
+                )
+
+                out = model(**full_inputs)
+
+                # Robust prompt length via token alignment (handles edge cases
+                # where prompt/full tokenization differs).
+                prompt_len = _aligned_prompt_prefix_len(
+                    prompt_inputs["input_ids"],
+                    full_inputs["input_ids"],
+                    ref_ans_stripped,
+                )
+                labels = full_inputs["input_ids"].clone()
+                labels[:, :prompt_len] = -100
+                shift_labels = labels[:, 1:]
+                valid_mask = shift_labels != -100
+
+                logp = F.log_softmax(out.logits[:, :-1, :], dim=-1)
+                gathered = logp.gather(
+                    -1, shift_labels.clamp_min(0).unsqueeze(-1)
+                ).squeeze(-1)
+
+                valid_count = int(valid_mask.sum().item())
+                if valid_count > 0:
+                    return float(gathered[valid_mask].mean().item())
+                else:
+                    return -10.0
+        finally:
+            # Restore original training/eval state
+            model.train(was_training)
+
+    def _score_candidates_ref_answer(
+        self,
+        real_image: Image.Image,
+        spec: "GenerationSpec",
+        candidates: List[Dict[str, object]],
+        *,
+        step: Optional[int] = None,
+        verbose: bool = False,
+    ) -> Tuple[List[Dict[str, object]], List[str], List[str]]:
+        """Phase 2 scoring: reference-answer log-prob on generated images.
+
+        1. Extract questions from ``spec.qa_pairs``.
+        2. Solver answers each question looking at ``real_image`` → reference answers.
+        3. For each candidate, compute mean log P(ref_answer | candidate, question).
+        4. That mean log-prob is the ``total_reward``.
+
+        Returns
+        -------
+        scored : list of dicts (same schema as ``_score_candidates``)
+        questions : list of question strings
+        reference_answers : list of solver answers on the real image
+        """
+        questions = [qa.question for qa in spec.qa_pairs if qa.question.strip()]
+        if not questions:
+            # Fallback: empty scoring — all zeros
+            scored = [
+                {
+                    "candidate_idx": idx,
+                    "total_reward": 0.0,
+                    "ref_answer_logps": [],
+                    "image": cand.get("image"),
+                    "policy_prompt": cand.get("policy_prompt", spec.prompt),
+                    "policy_completion": cand.get("policy_completion", ""),
+                    "policy_completion_ids": cand.get("policy_completion_ids"),
+                    "backend": cand.get("backend"),
+                }
+                for idx, cand in enumerate(candidates)
+            ]
+            return scored, [], []
+
+        # Step 1: Solver generates reference answers on the REAL image
+        device = self.device
+        cfg = self.cfg
+        reference_answers: List[str] = []
+        temp = max(0.2, min(0.8, cfg.temp))
+        for q in questions:
+            ref_ans = self._generate(
+                image=real_image,
+                prompt=build_solver_prompt(q),
+                adapter_name="default" if cfg.use_lora else None,
+                max_new_tokens=cfg.max_new_tokens_solver,
+                temperature=temp,
+                top_p=cfg.top_p,
+            )
+            reference_answers.append(ref_ans.strip())
+
+        if verbose and self.is_main_process and step is not None:
+            for i, (q, a) in enumerate(zip(questions, reference_answers)):
+                print(f"[Step {step:05d}][G-ref] Q{i}: {q}")
+                print(f"[Step {step:05d}][G-ref] A{i}: {a}")
+
+        # Step 2: Score each candidate via log-prob
+        scored: List[Dict[str, object]] = []
+        for idx, cand in enumerate(candidates):
+            cand_image = cand.get("image")
+            if not isinstance(cand_image, Image.Image):
+                scored.append(
+                    {
+                        "candidate_idx": idx,
+                        "total_reward": -10.0,
+                        "ref_answer_logps": [],
+                        "image": cand_image,
+                        "policy_prompt": cand.get("policy_prompt", spec.prompt),
+                        "policy_completion": cand.get("policy_completion", ""),
+                        "policy_completion_ids": cand.get("policy_completion_ids"),
+                        "backend": cand.get("backend"),
+                    }
+                )
+                continue
+
+            logps: List[float] = []
+            for q, ref_ans in zip(questions, reference_answers):
+                if not ref_ans:
+                    continue
+                lp = self._compute_ref_answer_logp(
+                    image=cand_image,
+                    question=q,
+                    reference_answer=ref_ans,
+                    device=device,
+                )
+                logps.append(lp)
+
+            reward = sum(logps) / len(logps) if logps else -10.0
+
+            scored.append(
+                {
+                    "candidate_idx": idx,
+                    "total_reward": reward,
+                    "ref_answer_logps": logps,
+                    "image": cand_image,
+                    "policy_prompt": cand.get("policy_prompt", spec.prompt),
+                    "policy_completion": cand.get("policy_completion", ""),
+                    "policy_completion_ids": cand.get("policy_completion_ids"),
+                    "backend": cand.get("backend"),
+                    # Compat keys for logging (not used in ref-answer mode)
+                    "spec_score": 0.0,
+                    "cycle_score": 0.0,
+                    "diversity_score": 0.0,
+                    "contradiction_score": 0.0,
+                    "base_reward": reward,
+                    "spec_quality": 1.0,
+                    "qa_confidence": 0.0,
+                    "qa_logs": [],
+                }
+            )
+
+            if verbose and self.is_main_process and step is not None:
+                print(
+                    f"[Step {step:05d}][G-ref] candidate {idx + 1}/{len(candidates)} "
+                    f"reward={reward:.4f} logps={[f'{lp:.3f}' for lp in logps]}"
+                )
+
+        return scored, questions, reference_answers
+
     def _update_baseline(self, which: str, reward: float):
         m = self.cfg.baseline_momentum
         if which == "generator":
@@ -2237,16 +2439,45 @@ class GenerationSelfEvolvingTrainer:
                     f"[Step {step:05d}][G] generated candidate {cand_idx + 1}/{self.cfg.num_generations} "
                     f"in {cand_dt:.1f}s (backend={backend})"
                 )
-        scored = self._score_candidates(
-            prompt=spec.prompt,
-            qa_pairs=spec.qa_pairs,
-            candidates=candidates,
-            spec_quality=spec_quality,
-            step=step,
-            verbose=verbose,
-        )
+        # ---- Score candidates (Phase 1 vs Phase 2 scoring) ---- #
+        _use_ref_scoring = getattr(self.cfg, "use_ref_answer_scoring", False)
+        _ref_questions: Optional[List[str]] = None
+        _ref_answers: Optional[List[str]] = None
+
+        if _use_ref_scoring:
+            scored, _ref_questions, _ref_answers = self._score_candidates_ref_answer(
+                real_image=image,
+                spec=spec,
+                candidates=candidates,
+                step=step,
+                verbose=verbose,
+            )
+        else:
+            scored = self._score_candidates(
+                prompt=spec.prompt,
+                qa_pairs=spec.qa_pairs,
+                candidates=candidates,
+                spec_quality=spec_quality,
+                step=step,
+                verbose=verbose,
+            )
         best_idx = max(range(len(scored)), key=lambda i: float(scored[i]["total_reward"]))
         best = scored[best_idx]
+
+        # ---- Store best candidate in replay buffer (Phase 2) ---- #
+        _replay_buf = getattr(self, "replay_buffer", None)
+        if _replay_buf is not None and isinstance(best.get("image"), Image.Image):
+            _rb_questions = _ref_questions or [qa.question for qa in spec.qa_pairs]
+            _rb_answers = _ref_answers or [qa.expected for qa in spec.qa_pairs]
+            _replay_buf.add(
+                image=best["image"],
+                prompt=spec.prompt,
+                questions=_rb_questions,
+                reference_answers=_rb_answers,
+                reward=float(best["total_reward"]),
+                step=step,
+                meta={"best_idx": best_idx, "num_candidates": len(candidates)},
+            )
 
         proposer_stats = None
         generator_stats = None

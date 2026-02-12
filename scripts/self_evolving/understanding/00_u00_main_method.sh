@@ -96,6 +96,7 @@ torchrun --standalone \
   --sc_margin_max 0.70 \
   --sc_informative_ratio_min 0.50 \
   --sc_negative_weight 0.25 \
+  --easy_solver_penalty_scale 1.0 \
   --skip_solver_update_when_uninformative \
   --disable_solver_always_update_with_informative_scaling \
   --solver_update_min_scale 0.20 \

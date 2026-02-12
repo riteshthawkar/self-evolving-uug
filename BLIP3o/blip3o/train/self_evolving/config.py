@@ -58,6 +58,7 @@ class UnderstandingSelfEvolvingConfig:
     sc_margin_max: float = 0.90
     sc_informative_ratio_min: float = 0.25
     sc_negative_weight: float = 0.25
+    easy_solver_penalty_scale: float = 1.0
     skip_solver_update_when_uninformative: bool = True
     solver_always_update_with_informative_scaling: bool = True
     solver_update_min_scale: float = 0.20
@@ -186,6 +187,7 @@ class GenerationSelfEvolvingConfig:
     sc_margin_max: float = 0.90
     sc_informative_ratio_min: float = 0.25
     sc_negative_weight: float = 0.25
+    easy_solver_penalty_scale: float = 1.0
     skip_solver_update_when_uninformative: bool = True
     solver_always_update_with_informative_scaling: bool = True
     solver_update_min_scale: float = 0.20
@@ -256,3 +258,28 @@ class UnifiedSelfEvolvingConfig(GenerationSelfEvolvingConfig):
     synthetic_solver_update_freq: int = 1
     synthetic_solver_hard_only: bool = False
     solver_hardness_min_entropy: float = 0.2
+
+    # ---- Phase 2: self-evolving feedback loop ---- #
+    # "cold_start" = Phase 1 only (current pipeline, default — backward compat)
+    # "self_evolving" = Phase 2 from step 0 (skip cold start)
+    # "auto" = start cold_start, transition to self_evolving when criteria met
+    evolving_phase: str = "cold_start"
+
+    # Reference-answer log-prob scoring (Phase 2 generation scoring)
+    # When False, uses existing multi-component scoring (spec+cycle+diversity)
+    use_ref_answer_scoring: bool = False
+
+    # Replay buffer: stores best generated images for understanding training
+    replay_buffer_size: int = 1000
+    replay_min_reward: float = 0.5
+    replay_max_staleness: int = 500
+
+    # Generated-image mixing ratio for understanding step
+    gen_mix_ratio_start: float = 0.05     # initial ratio when Phase 2 begins
+    gen_mix_ratio_max: float = 0.30       # cap (real data always >= 70%)
+    gen_mix_ratio_warmup_steps: int = 500  # linear ramp from start to max
+
+    # Auto phase transition criteria (only used when evolving_phase="auto")
+    phase_transition_reward_threshold: float = 0.6   # generator reward EMA threshold
+    phase_transition_warmup_steps: int = 200          # min cold-start steps before transition
+    phase_transition_reward_ema_momentum: float = 0.95  # EMA smoothing for reward tracking
