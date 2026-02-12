@@ -141,7 +141,7 @@ fi
   --grad_accum_steps 4 \
   --proposer_update_freq "$PROPOSER_UPDATE_FREQ" \
   --generator_update_freq 1 \
-  --generator_update_rule reinforce \
+  --generator_update_rule grpo \
   --enable_solver_updates \
   --solver_update_freq "$SOLVER_UPDATE_FREQ" \
   --temp 1.0 \
@@ -177,8 +177,8 @@ fi
   --sc_negative_weight "$SC_NEGATIVE_WEIGHT" \
   "${SC_UPDATE_FLAGS[@]}" \
   --adaptive_prop_entropy_target \
-  --prop_entropy_ema_momentum 0.95 \
-  --prop_entropy_mu_min 0.05 \
+  --prop_entropy_ema_momentum 0.90 \
+  --prop_entropy_mu_min 0.40 \
   --prop_entropy_mu_max 1.50 \
   --len_penalty_weight 0.10 \
   --len_penalty_target_words 6 \

@@ -1,4 +1,4 @@
-"""Text-based policy updaters for generation training (REINFORCE and DPO)."""
+"""Text-based policy updaters for generation training (REINFORCE, DPO, GRPO)."""
 
 import gc
 import math
@@ -35,6 +35,28 @@ def _aligned_prompt_prefix_len(
     while lcp < max_len and int(p[lcp].item()) == int(f[lcp].item()):
         lcp += 1
     return min(lcp, full_len)
+
+
+def _estimate_completion_token_count(processor, completion_text: str) -> int:
+    """Best-effort completion token count used for mask fallback."""
+    text = str(completion_text or "").strip()
+    if not text:
+        return 0
+    tok = getattr(processor, "tokenizer", None)
+    if tok is None:
+        tok = processor
+    if tok is None or not hasattr(tok, "encode"):
+        return 0
+    try:
+        ids = tok.encode(text, add_special_tokens=False)
+    except TypeError:
+        ids = tok.encode(text)
+    except Exception:
+        return 0
+    try:
+        return int(len(ids))
+    except Exception:
+        return 0
 
 
 class TextPolicyUpdater:
@@ -139,6 +161,18 @@ class TextPolicyUpdater:
         labels[:, :prompt_len] = -100
         valid_mask = labels[:, 1:] != -100
         valid_token_count = int(valid_mask.sum().item())
+        forced_tail_tokens = 0
+        if valid_token_count <= 0 and str(completion or "").strip():
+            full_len = int(input_ids.shape[1])
+            prompt_raw_len = int(inputs_prompt["input_ids"].shape[1])
+            tail_from_len_delta = max(0, full_len - min(prompt_raw_len, full_len))
+            tail_from_completion = _estimate_completion_token_count(self.processor, completion)
+            forced_tail_tokens = max(tail_from_len_delta, tail_from_completion)
+            forced_tail_tokens = max(0, min(forced_tail_tokens, max(0, full_len - 1)))
+            if forced_tail_tokens > 0:
+                labels[:, : full_len - forced_tail_tokens] = -100
+                valid_mask = labels[:, 1:] != -100
+                valid_token_count = int(valid_mask.sum().item())
         # NOTE: Do NOT return early when valid_token_count <= 0.
         # In DDP, all ranks must participate in the forward pass (which triggers
         # collective buffer sync). If some ranks return early while others
@@ -333,6 +367,7 @@ class TextPolicyUpdater:
                 "did_step": bool(did_step),
                 "skipped_reason": skipped_reason,
                 "valid_token_count": float(valid_token_count),
+                "forced_tail_tokens": float(forced_tail_tokens),
             }
 
         kl_val = float(kl_loss.item())
@@ -371,6 +406,7 @@ class TextPolicyUpdater:
             "total_loss": float(total_loss.item()),
             "did_step": did_step,
             "valid_token_count": float(valid_token_count),
+            "forced_tail_tokens": float(forced_tail_tokens),
         }
 
 
@@ -731,4 +767,369 @@ class TextPreferenceDPOUpdater:
             "kl_coef_after": 0.0,
             "did_step": bool(did_step),
             "skipped_reason": skipped_reason,
+        }
+
+
+# ---------------------------------------------------------------------------
+# TextGRPOUpdater (Group Relative Policy Optimization for generator role)
+# ---------------------------------------------------------------------------
+
+
+class TextGRPOUpdater:
+    """GRPO updater for generator role.
+
+    Takes a group of (completion, reward) pairs from N candidates,
+    computes group-normalised advantages, and applies weighted policy
+    gradient on *all* completions in one optimiser step.
+
+    Unlike DPO (which uses only best-vs-worst), GRPO uses every candidate,
+    giving a stronger, lower-variance training signal.
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        processor,
+        config,
+        adapter_name: Optional[str],
+        reference_model: Optional[torch.nn.Module] = None,
+    ):
+        self.model = model
+        self.processor = processor
+        self.config = config
+        self.adapter_name = adapter_name
+        self.reference_model = reference_model
+        self.kl_coef = config.kl_coef
+        self.step_id = 0
+        self.grad_accum_steps = max(1, getattr(config, "grad_accum_steps", 1))
+        self._accum_count = 0
+        self._has_real_grad_in_window = False
+        self.clip_ratio = float(getattr(config, "grpo_clip_ratio", 0.2))
+        self.min_group_std = float(getattr(config, "grpo_min_group_std", 1e-6))
+
+        params = list(_collect_trainable_params(model, adapter_name))
+        if not params:
+            raise RuntimeError(f"No trainable parameters found for adapter={adapter_name!r}")
+        self.params = params
+        self.opt = torch.optim.AdamW(params, lr=config.lr, weight_decay=config.weight_decay)
+
+    # ---- state management (same pattern as other updaters) ----
+
+    def state_dict(self) -> Dict:
+        return {
+            "optimizer": self.opt.state_dict(),
+            "kl_coef": float(self.kl_coef),
+            "step_id": int(self.step_id),
+        }
+
+    def load_state_dict(self, state: Dict):
+        if not isinstance(state, dict):
+            return
+        if "optimizer" in state:
+            self.opt.load_state_dict(state["optimizer"])
+        if "kl_coef" in state:
+            self.kl_coef = float(state["kl_coef"])
+        if "step_id" in state:
+            self.step_id = int(state["step_id"])
+
+    def _adapt_beta(self, kl_val: float):
+        target = max(self.config.kl_target, 1e-8)
+        delta = (kl_val - target) / target
+        beta = self.kl_coef * math.exp(self.config.kl_adapt_rate * delta)
+        beta = max(self.config.kl_min, min(self.config.kl_max, beta))
+        self.kl_coef = float(beta)
+
+    # ---- per-completion forward pass ----
+
+    def _seq_logp(
+        self,
+        prompt_inputs: Dict[str, torch.Tensor],
+        full_inputs: Dict[str, torch.Tensor],
+        completion_text: str,
+        *,
+        use_ref: bool,
+    ) -> Tuple[torch.Tensor, int, torch.Tensor]:
+        """Forward pass for one completion, returning (seq_logp, valid_count, logits).
+
+        If *use_ref* is True, runs under no_grad on the reference / base adapter.
+        Otherwise runs the trainable policy adapter with grad enabled.
+        """
+        forward_inputs = {
+            k: v for k, v in full_inputs.items()
+            if k not in ("images", "image_sizes")
+        }
+        forward_inputs["use_cache"] = False
+
+        if use_ref:
+            if self.reference_model is not None:
+                run_model = self.reference_model
+                ctx_adapter = None
+            else:
+                run_model = _unwrap_model(self.model)
+                ctx_adapter = None
+            was_training = bool(getattr(run_model, "training", False))
+            try:
+                run_model.eval()
+                with torch.no_grad():
+                    with use_adapter(run_model, ctx_adapter):
+                        out = run_model(**forward_inputs)
+            finally:
+                if was_training:
+                    run_model.train(True)
+        else:
+            with use_adapter(self.model, self.adapter_name):
+                out = self.model(**forward_inputs)
+
+        prompt_len = _aligned_prompt_prefix_len(
+            prompt_inputs["input_ids"],
+            forward_inputs["input_ids"],
+            completion_text=completion_text,
+        )
+        input_ids = forward_inputs["input_ids"]
+        labels = input_ids.clone()
+        labels[:, :prompt_len] = -100
+        shift_labels = labels[:, 1:]
+        valid_mask = shift_labels != -100
+
+        logp = F.log_softmax(out.logits[:, :-1, :], dim=-1)
+        gathered = logp.gather(-1, shift_labels.clamp_min(0).unsqueeze(-1)).squeeze(-1)
+
+        valid_count = int(valid_mask.sum().item())
+        if valid_count > 0:
+            seq_logp = gathered[valid_mask].mean()
+        else:
+            seq_logp = torch.tensor(0.0, device=out.logits.device, dtype=out.logits.dtype)
+
+        return seq_logp, valid_count, out.logits
+
+    # ---- main step ----
+
+    def step(
+        self,
+        *,
+        prompt: str,
+        completions: List[str],
+        rewards: List[float],
+        device: torch.device,
+        images: Optional[List[Optional[Image.Image]]] = None,
+        completion_token_ids: Optional[List[Optional[List[int]]]] = None,
+    ) -> Dict[str, float]:
+        """Run one GRPO update using a group of (completion, reward) pairs."""
+        self.step_id += 1
+        n = len(completions)
+        assert n == len(rewards), "completions and rewards must have same length"
+
+        # --- 1. Group-normalised advantages ---
+        r_tensor = torch.tensor(rewards, dtype=torch.float64)
+        r_mean = float(r_tensor.mean().item())
+        r_std = float(r_tensor.std(correction=0).item())
+
+        # When group std is too low, zero out advantages so the completion loop
+        # still runs (producing at least one forward for DDP AllReduce sync)
+        # but contributes zero policy-gradient signal.
+        skip_low_std = r_std < self.min_group_std
+        if skip_low_std:
+            advantages = [0.0] * n
+        else:
+            advantages = [(r - r_mean) / (r_std + 1e-8) for r in rewards]
+
+        # --- 2. Build inputs for each completion ---
+        self.model.train(True)
+        if torch.cuda.is_available() and getattr(self.config, "clear_cache_every", 0) <= 1:
+            torch.cuda.empty_cache()
+            gc.collect()
+
+        beta_before = float(self.kl_coef)
+        total_grpo_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
+        total_kl_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
+        valid_count_total = 0
+        valid_completions = 0
+        last_logits = None  # keep one reference for DDP zero-loss fallback
+
+        # Process each completion sequentially to avoid OOM.
+        for i in range(n):
+            comp = completions[i]
+            if not comp or not str(comp).strip():
+                continue
+
+            adv_i = advantages[i]
+            img_i = images[i] if images is not None and i < len(images) else None
+            tid_i = (completion_token_ids[i]
+                     if completion_token_ids is not None and i < len(completion_token_ids)
+                     else None)
+
+            # Build prompt and full inputs
+            if img_i is not None:
+                chat_prompt = _build_chat_text(self.processor, img_i, prompt)
+                chat_full = chat_prompt + comp
+                inputs_prompt = _prepare_mm_inputs(
+                    self.processor, device, img_i, chat_prompt, model=self.model
+                )
+                inputs_full = _prepare_mm_inputs(
+                    self.processor, device, img_i, chat_full, model=self.model
+                )
+            elif tid_i is not None:
+                inputs_prompt = _prepare_text_inputs(self.processor, device, prompt)
+                prompt_ids = inputs_prompt["input_ids"]
+                comp_ids = torch.tensor(tid_i, dtype=torch.long, device=device).view(1, -1)
+                full_ids = torch.cat([prompt_ids, comp_ids], dim=1)
+                full_mask = torch.ones_like(full_ids, dtype=torch.long)
+                inputs_full = {"input_ids": full_ids, "attention_mask": full_mask}
+            else:
+                inputs_prompt = _prepare_text_inputs(self.processor, device, prompt)
+                inputs_full = _prepare_text_inputs(self.processor, device, prompt + comp)
+
+            # Reference log-prob (no grad)
+            ref_logp, ref_vc, _ = self._seq_logp(
+                inputs_prompt, inputs_full, comp, use_ref=True,
+            )
+
+            # Policy log-prob (with grad)
+            self.model.train(True)
+            pi_logp, pi_vc, logits_i = self._seq_logp(
+                inputs_prompt, inputs_full, comp, use_ref=False,
+            )
+            last_logits = logits_i
+
+            if pi_vc <= 0:
+                continue
+
+            valid_completions += 1
+            valid_count_total += pi_vc
+
+            # Simplified per-sequence KL: difference in mean log-probs.
+            kl_i = (pi_logp - ref_logp).clamp(min=0.0)
+
+            # Clipped GRPO policy gradient loss.
+            # Importance ratio = pi(completion) / ref(completion).
+            log_ratio_i = pi_logp - ref_logp.detach()
+            ratio_i = log_ratio_i.exp().clamp(max=10.0)  # safety cap
+            surr1 = -adv_i * ratio_i
+            surr2 = -adv_i * ratio_i.clamp(
+                1.0 - self.clip_ratio, 1.0 + self.clip_ratio,
+            )
+            # Pessimistic bound: take the worse (larger) loss.
+            pg_loss_i = torch.max(surr1, surr2)
+
+            total_grpo_loss = total_grpo_loss + pg_loss_i
+            total_kl_loss = total_kl_loss + kl_i
+
+        # --- 3. Combine and backward ---
+        if valid_completions > 0:
+            avg_grpo_loss = total_grpo_loss / valid_completions
+            avg_kl_loss = total_kl_loss / valid_completions
+            total_loss = avg_grpo_loss + beta_before * avg_kl_loss
+            if not bool(torch.isfinite(total_loss.detach()).all().item()):
+                skip_backward = True
+                skipped_reason = "non_finite_loss"
+            elif skip_low_std:
+                # Advantages were zeroed, so total_grpo_loss ≈ 0; mark as skipped
+                # but still run backward (zero-gradient) for DDP sync.
+                skip_backward = True
+                skipped_reason = "group_std_too_low"
+            else:
+                skip_backward = False
+                skipped_reason = None
+        else:
+            skip_backward = True
+            skipped_reason = "group_std_too_low" if skip_low_std else "no_valid_completions"
+            total_loss = None
+
+        if skip_backward:
+            # DDP sync: backward zero gradient
+            if last_logits is not None:
+                zero_loss = last_logits.sum() * 0.0
+            else:
+                # No forward was run at all; run a dummy forward for DDP sync
+                dummy_inputs = _prepare_text_inputs(self.processor, device, prompt)
+                forward_inputs = {
+                    k: v for k, v in dummy_inputs.items()
+                    if k not in ("images", "image_sizes")
+                }
+                forward_inputs["use_cache"] = False
+                with use_adapter(self.model, self.adapter_name):
+                    dummy_out = self.model(**forward_inputs)
+                zero_loss = dummy_out.logits.sum() * 0.0
+            total_loss = zero_loss
+
+        has_real_grad = skipped_reason is None
+        if dist.is_available() and dist.is_initialized():
+            t = torch.tensor(
+                [1 if has_real_grad else 0],
+                dtype=torch.int32, device=device,
+            )
+            dist.all_reduce(t, op=dist.ReduceOp.MAX)
+            has_real_grad = bool(int(t.item()) == 1)
+
+        # Gradient accumulation
+        scaled_loss = total_loss / self.grad_accum_steps
+        if self._accum_count == 0:
+            self.opt.zero_grad(set_to_none=True)
+            self._has_real_grad_in_window = False
+
+        restore_adapter = None
+        model_ref = _unwrap_model(self.model)
+        if self.adapter_name is not None and hasattr(model_ref, "set_adapter"):
+            restore_adapter = getattr(model_ref, "active_adapter", None)
+            try:
+                model_ref.set_adapter(self.adapter_name)
+            except Exception:
+                restore_adapter = None
+        try:
+            scaled_loss.backward()
+        finally:
+            if restore_adapter is not None:
+                try:
+                    model_ref.set_adapter(restore_adapter)
+                except Exception:
+                    pass
+
+        self._accum_count += 1
+        if has_real_grad:
+            self._has_real_grad_in_window = True
+
+        did_step = False
+        if self._accum_count >= self.grad_accum_steps:
+            if self._has_real_grad_in_window:
+                _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
+                self.opt.step()
+                did_step = True
+            else:
+                self.opt.zero_grad(set_to_none=True)
+            self._accum_count = 0
+            self._has_real_grad_in_window = False
+
+        self.model.train(False)
+
+        # Adapt KL coefficient
+        kl_val = float(total_kl_loss.detach().item()) if torch.isfinite(total_kl_loss.detach()).all() else 0.0
+        if skipped_reason is None:
+            self._adapt_beta(kl_val)
+
+        if (
+            torch.cuda.is_available()
+            and self.config.clear_cache_every > 0
+            and self.step_id % self.config.clear_cache_every == 0
+        ):
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+            gc.collect()
+
+        return {
+            "grpo_loss": float(avg_grpo_loss.detach().item()) if valid_completions > 0 and torch.is_tensor(avg_grpo_loss) else 0.0,
+            "group_size": n,
+            "mean_reward": r_mean,
+            "std_reward": r_std,
+            "mean_advantage": float(sum(advantages) / len(advantages)),
+            "max_advantage": float(max(advantages)),
+            "min_advantage": float(min(advantages)),
+            "kl_loss": kl_val,
+            "kl_coef_before": beta_before,
+            "kl_coef_after": float(self.kl_coef),
+            "did_step": did_step,
+            "skipped_reason": skipped_reason,
+            "valid_completions": valid_completions,
         }

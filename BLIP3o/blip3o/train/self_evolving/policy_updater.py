@@ -56,6 +56,28 @@ def _aligned_prompt_prefix_len(
     return min(lcp, full_len)
 
 
+def _estimate_completion_token_count(processor, completion_text: str) -> int:
+    """Best-effort completion token count used for mask fallback."""
+    text = str(completion_text or "").strip()
+    if not text:
+        return 0
+    tok = getattr(processor, "tokenizer", None)
+    if tok is None:
+        tok = processor
+    if tok is None or not hasattr(tok, "encode"):
+        return 0
+    try:
+        ids = tok.encode(text, add_special_tokens=False)
+    except TypeError:
+        ids = tok.encode(text)
+    except Exception:
+        return 0
+    try:
+        return int(len(ids))
+    except Exception:
+        return 0
+
+
 class RolePolicyUpdater:
     """
     KL-regularized REINFORCE updater for a role adapter.
@@ -150,6 +172,18 @@ class RolePolicyUpdater:
         labels[:, :prompt_len] = -100
         valid_mask = labels[:, 1:] != -100
         valid_token_count = int(valid_mask.sum().item())
+        forced_tail_tokens = 0
+        if valid_token_count <= 0 and str(completion or "").strip():
+            full_len = int(input_ids.shape[1])
+            prompt_raw_len = int(inputs_prompt["input_ids"].shape[1])
+            tail_from_len_delta = max(0, full_len - min(prompt_raw_len, full_len))
+            tail_from_completion = _estimate_completion_token_count(self.processor, completion)
+            forced_tail_tokens = max(tail_from_len_delta, tail_from_completion)
+            forced_tail_tokens = max(0, min(forced_tail_tokens, max(0, full_len - 1)))
+            if forced_tail_tokens > 0:
+                labels[:, : full_len - forced_tail_tokens] = -100
+                valid_mask = labels[:, 1:] != -100
+                valid_token_count = int(valid_mask.sum().item())
         # NOTE: Do NOT return early when valid_token_count <= 0.
         # In DDP, all ranks must participate in the forward pass (which triggers
         # collective buffer sync). If some ranks return early while others
@@ -343,6 +377,7 @@ class RolePolicyUpdater:
                 "did_step": bool(did_step),
                 "skipped_reason": skipped_reason,
                 "valid_token_count": float(valid_token_count),
+                "forced_tail_tokens": float(forced_tail_tokens),
             }
 
         kl_val = float(kl_loss.item())
@@ -386,4 +421,5 @@ class RolePolicyUpdater:
             "total_loss": total_loss_val,
             "did_step": did_step,
             "valid_token_count": float(valid_token_count),
+            "forced_tail_tokens": float(forced_tail_tokens),
         }

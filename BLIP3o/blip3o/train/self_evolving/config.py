@@ -56,8 +56,11 @@ class UnderstandingSelfEvolvingConfig:
     sc_entropy_min: float = 0.15
     sc_entropy_max: float = 1.2
     sc_margin_max: float = 0.90
+    sc_informative_ratio_min: float = 0.25
     sc_negative_weight: float = 0.25
     skip_solver_update_when_uninformative: bool = True
+    solver_always_update_with_informative_scaling: bool = True
+    solver_update_min_scale: float = 0.20
     len_penalty_weight: float = 0.10
     len_penalty_target_words: int = 6
     prop_entropy_mu: float = 0.90
@@ -158,7 +161,7 @@ class GenerationSelfEvolvingConfig:
     strict_require_generation_tokens: bool = True
     generator_missing_trace_strategy: str = "proxy"  # proxy|skip|error
     verification_use_reference_solver: bool = True
-    generator_update_rule: str = "reinforce"  # reinforce|dpo
+    generator_update_rule: str = "reinforce"  # reinforce|dpo|grpo
     dpo_beta: float = 0.1
     dpo_label_smoothing: float = 0.0
     dpo_min_reward_gap: float = 0.0
@@ -167,6 +170,8 @@ class GenerationSelfEvolvingConfig:
     dpo_max_contradiction: float = 1.0
     dpo_pair_selection: str = "best_worst"  # best_worst|best_hard_negative
     generator_proxy_max_ratio: float = 1.0
+    grpo_clip_ratio: float = 0.2              # PPO-style importance ratio clipping for GRPO
+    grpo_min_group_std: float = 1e-6          # skip GRPO update if reward std below this
 
     # Reward shaping
     solver_soft_gamma: float = 0.7
@@ -178,8 +183,11 @@ class GenerationSelfEvolvingConfig:
     sc_entropy_min: float = 0.15
     sc_entropy_max: float = 1.2
     sc_margin_max: float = 0.90
+    sc_informative_ratio_min: float = 0.25
     sc_negative_weight: float = 0.25
     skip_solver_update_when_uninformative: bool = True
+    solver_always_update_with_informative_scaling: bool = True
+    solver_update_min_scale: float = 0.20
     len_penalty_weight: float = 0.10
     len_penalty_target_words: int = 6
     prop_entropy_mu: float = 0.90
