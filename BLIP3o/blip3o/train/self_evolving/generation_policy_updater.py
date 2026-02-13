@@ -298,7 +298,8 @@ class TextPolicyUpdater:
                                          dtype=out_pi.logits.dtype, requires_grad=True)
             skipped_reason = "no_valid_completion_tokens" if valid_token_count <= 0 else "non_finite_ce_loss"
         else:
-            total_loss = advantage * ce_loss + beta_before * kl_loss
+            # REINFORCE sign: maximize (advantage * logprob) via gradient descent.
+            total_loss = (-advantage) * ce_loss + beta_before * kl_loss
             skipped_reason = None
             if not bool(torch.isfinite(total_loss.detach()).all().item()):
                 # Non-finite total_loss: backward zero instead.

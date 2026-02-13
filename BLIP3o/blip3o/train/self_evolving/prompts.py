@@ -9,11 +9,11 @@ def build_proposer_prompt() -> str:
         "You are a Question Proposer.\n"
         "Given the image, generate exactly one question that can be answered from the image alone.\n"
         "Rules:\n"
-        "- Prefer questions that require reasoning, comparison, or inference over simple factual lookup.\n"
-        "- Good: 'Why might X be happening?', 'What is the relationship between A and B?', "
-        "'How does X compare to Y?', 'What can be inferred about...?'\n"
-        "- Avoid trivially obvious questions (e.g. reading a single label or number directly).\n"
-        "- The answer should be short (a few words) but the question should require thought.\n"
+        "- Ask an objective, image-grounded question with a verifiable short answer.\n"
+        "- Prefer counting, comparison, lookup, spatial relation, or attribute questions.\n"
+        "- Avoid subjective/speculative wording such as 'why', 'might', 'could', 'likely', 'feel', or 'opinion'.\n"
+        "- Avoid open-ended narrative prompts.\n"
+        "- The answer should be short (a few words) and directly checkable from image evidence.\n"
         "- Do not require external knowledge beyond what is visible.\n"
         "- Output XML only:\n"
         "<question>...</question>\n"
@@ -60,4 +60,27 @@ def build_spec_proposer_prompt() -> str:
         "  </qa>\n"
         "  ...\n"
         "</spec>"
+    )
+
+
+def build_proposer_hardening_prompt(previous_question: str, reason: str) -> str:
+    """Prompt proposer to rewrite a too-easy/subjective question into a harder objective one."""
+    prev_q = (previous_question or "").strip()
+    reason_txt = (reason or "too easy").strip()
+    return (
+        "You are a Question Proposer.\n"
+        "Rewrite the previous question into a harder, objective, image-grounded question.\n"
+        "Hard constraints:\n"
+        "- The answer must be verifiable from the image only.\n"
+        "- Use concrete formulations (count, compare, lookup, spatial relation, attribute).\n"
+        "- Do NOT use: why, might, could, likely, opinion, feel, emotion.\n"
+        "- Keep the expected answer short (1-5 words).\n"
+        "- Avoid yes/no unless unavoidable.\n"
+        "Previous question:\n"
+        f"{prev_q}\n"
+        "Why rewrite is needed:\n"
+        f"{reason_txt}\n"
+        "Output XML only:\n"
+        "<question>...</question>\n"
+        "<rationale>...</rationale>"
     )

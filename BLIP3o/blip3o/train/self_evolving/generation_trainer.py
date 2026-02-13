@@ -1924,9 +1924,16 @@ class GenerationSelfEvolvingTrainer:
         # reference answer follows as if the model had generated it.
         full_text = solver_prompt_chat + ref_ans_stripped
 
-        # Use the *wrapped* model (consistent with _generate), not unwrapped.
+        # Respect verification_use_reference_solver: when True, use the base
+        # model without LoRA adapters (adapter=None → disables adapters).
+        # This prevents co-adaptation between the reward signal and the
+        # trainable solver, which would weaken anti-reward-hacking.
         model = self.train_model if hasattr(self, "train_model") else self.model
-        adapter = "default" if self.cfg.use_lora else None
+        _use_ref_solver = getattr(self.cfg, "verification_use_reference_solver", True)
+        if self.cfg.use_lora and not _use_ref_solver:
+            adapter = "default"  # trainable solver adapter
+        else:
+            adapter = None       # base model (reference solver)
         was_training = model.training
 
         try:
@@ -2009,16 +2016,24 @@ class GenerationSelfEvolvingTrainer:
             ]
             return scored, [], []
 
-        # Step 1: Solver generates reference answers on the REAL image
+        # Step 1: Solver generates reference answers on the REAL image.
+        # Respect verification_use_reference_solver: use base model (no adapters)
+        # when True to prevent co-adaptation with the trainable solver.
         device = self.device
         cfg = self.cfg
+        _use_ref_solver = getattr(cfg, "verification_use_reference_solver", True)
+        if cfg.use_lora and not _use_ref_solver:
+            _solver_adapter = "default"  # trainable solver
+        else:
+            _solver_adapter = None       # reference (base model)
+
         reference_answers: List[str] = []
         temp = max(0.2, min(0.8, cfg.temp))
         for q in questions:
             ref_ans = self._generate(
                 image=real_image,
                 prompt=build_solver_prompt(q),
-                adapter_name="default" if cfg.use_lora else None,
+                adapter_name=_solver_adapter,
                 max_new_tokens=cfg.max_new_tokens_solver,
                 temperature=temp,
                 top_p=cfg.top_p,
@@ -2464,9 +2479,15 @@ class GenerationSelfEvolvingTrainer:
         best_idx = max(range(len(scored)), key=lambda i: float(scored[i]["total_reward"]))
         best = scored[best_idx]
 
-        # ---- Store best candidate in replay buffer (Phase 2) ---- #
+        # ---- Store best candidate in replay buffer ---- #
+        # Best generated image enters the replay buffer for mixing into
+        # understanding training. The buffer's quality gate (min_reward)
+        # ensures only good images are kept.
         _replay_buf = getattr(self, "replay_buffer", None)
-        if _replay_buf is not None and isinstance(best.get("image"), Image.Image):
+        if (
+            _replay_buf is not None
+            and isinstance(best.get("image"), Image.Image)
+        ):
             _rb_questions = _ref_questions or [qa.question for qa in spec.qa_pairs]
             _rb_answers = _ref_answers or [qa.expected for qa in spec.qa_pairs]
             _replay_buf.add(

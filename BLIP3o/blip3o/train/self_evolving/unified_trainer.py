@@ -8,8 +8,10 @@ Extends GenerationSelfEvolvingTrainer with an interleaved understanding phase.
 import gc
 import math
 import random
+import re
 import time
 import traceback
+from collections import deque
 from typing import Dict, List, Optional
 
 import torch
@@ -19,7 +21,7 @@ from PIL import Image
 from .config import UnifiedSelfEvolvingConfig
 from .generation_helpers import GenerationSpec
 from .generation_trainer import GenerationSelfEvolvingTrainer
-from .prompts import build_proposer_prompt, build_solver_prompt
+from .prompts import build_proposer_hardening_prompt, build_proposer_prompt, build_solver_prompt
 from .replay_buffer import ReplayBuffer
 from .utils import (
     HAS_WANDB,
@@ -31,7 +33,36 @@ from .utils import (
     normalize_answer,
     pre_answer_word_count,
     shannon_entropy_nats,
+    strip_tags,
 )
+
+_SUBJECTIVE_QUESTION_RE = re.compile(
+    r"\b(why|might|could|likely|opinion|feel|emotion|think|believe|suggest|imply|purpose|reason)\b",
+    flags=re.IGNORECASE,
+)
+_OBJECTIVE_QUESTION_RE = re.compile(
+    r"\b("
+    r"how many|count|number of|what (?:is|are|was|were)|which|compare|difference|ratio|"
+    r"total|sum|percent|percentage|value|label|name|color|shape|position|left|right|top|bottom|"
+    r"highest|lowest|maximum|minimum"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _quantile(values: List[float], q: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    qq = max(0.0, min(1.0, float(q)))
+    pos = qq * float(len(values) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return float(values[lo])
+    w = pos - float(lo)
+    return float(values[lo] * (1.0 - w) + values[hi] * w)
 
 
 class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
@@ -45,21 +76,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
     def __init__(self, config: UnifiedSelfEvolvingConfig):
         if config.enable_solver_updates and config.solver_update_freq <= 0:
             config.solver_update_freq = max(1, config.synthetic_solver_update_freq)
+        # GenerationSelfEvolvingTrainer.__init__ invokes self._maybe_resume_state().
+        # Initialize adaptive windows early so resume can safely restore them.
+        self.cfg = config
+        self._init_adaptive_windows()
         super().__init__(config)
         self.ucfg = config
 
-        # ---- Phase 2: self-evolving feedback loop state ---- #
-        _phase_cfg = getattr(config, "evolving_phase", "cold_start")
-        if _phase_cfg == "self_evolving":
-            # Skip cold start — start Phase 2 immediately
-            self._evolving_phase = "self_evolving"
-            self._phase2_start_step = 0
-        else:
-            # "cold_start" or "auto" — begin in Phase 1
-            self._evolving_phase = "cold_start"
-            self._phase2_start_step = -1  # not yet transitioned
-
-        # Replay buffer (created for all modes, but only populated in Phase 2)
+        # ---- Self-evolving feedback loop state ---- #
+        # Always create replay buffer — generated images mix into understanding
         _buf_size = getattr(config, "replay_buffer_size", 1000)
         _buf_min_r = getattr(config, "replay_min_reward", 0.5)
         _buf_stale = getattr(config, "replay_max_staleness", 500)
@@ -69,9 +94,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             max_staleness=_buf_stale,
         )
 
-        # Generator reward EMA for auto phase transition
-        self._gen_reward_ema: float = 0.0
-        self._gen_reward_ema_initialized: bool = False
+        # Generator reward EMA for monitoring
+        self._gen_reward_ema = float(getattr(self, "_gen_reward_ema", 0.0))
+        self._gen_reward_ema_initialized = bool(
+            getattr(self, "_gen_reward_ema_initialized", False)
+        )
 
     def _phase_local_step_index(self, step: int, phase: str) -> int:
         cycle = max(1, self.cfg.understanding_steps_per_cycle + self.cfg.generation_steps_per_cycle)
@@ -142,52 +169,297 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self.proposer_entropy_mu_ema = float(ema)
         return float(ema)
 
+    def _is_objective_question(self, question: str) -> bool:
+        q = str(question or "").strip()
+        if not q:
+            return False
+        if _SUBJECTIVE_QUESTION_RE.search(q):
+            return False
+        return bool(_OBJECTIVE_QUESTION_RE.search(q))
+
+    def _init_adaptive_windows(self):
+        ent_window_size = max(8, int(getattr(self.cfg, "entropy_iqr_window_size", 256)))
+        diff_window_size = max(8, int(getattr(self.cfg, "difficulty_sampler_window_size", 256)))
+        self._entropy_window = deque(maxlen=ent_window_size)
+        self._difficulty_window = deque(maxlen=diff_window_size)
+
+    def _entropy_iqr_filter_state(self) -> Dict[str, float]:
+        static_threshold = float(getattr(self.cfg, "sc_entropy_min", 0.15))
+        enabled = bool(getattr(self.cfg, "entropy_iqr_filter_enabled", True))
+        min_samples = max(4, int(getattr(self.cfg, "entropy_iqr_min_samples", 32)))
+        history = [float(x) for x in self._entropy_window]
+        history_size = len(history)
+        state: Dict[str, float] = {
+            "enabled": 1.0 if enabled else 0.0,
+            "active": 0.0,
+            "history_size": float(history_size),
+            "min_samples": float(min_samples),
+            "threshold": float(static_threshold),
+            "q1": float(static_threshold),
+            "q3": float(static_threshold),
+            "iqr": 0.0,
+        }
+        if (not enabled) or history_size < min_samples:
+            return state
+
+        values = sorted(history)
+        q = float(getattr(self.cfg, "entropy_iqr_easy_quantile", 0.25))
+        q = max(0.01, min(0.49, q))
+        q1 = _quantile(values, q)
+        q3 = _quantile(values, 1.0 - q)
+        iqr = max(0.0, q3 - q1)
+        coef = float(getattr(self.cfg, "entropy_iqr_easy_iqr_coef", 0.25))
+        threshold = q1 + coef * iqr
+        thr_min = float(getattr(self.cfg, "entropy_iqr_min_threshold", 0.02))
+        thr_max = float(
+            getattr(self.cfg, "entropy_iqr_max_threshold", getattr(self.cfg, "sc_entropy_max", 1.2))
+        )
+        if thr_min > thr_max:
+            thr_min, thr_max = thr_max, thr_min
+        threshold = max(thr_min, min(thr_max, threshold))
+        state.update(
+            {
+                "active": 1.0,
+                "threshold": float(threshold),
+                "q1": float(q1),
+                "q3": float(q3),
+                "iqr": float(iqr),
+            }
+        )
+        return state
+
+    def _difficulty_bucket(
+        self,
+        entropy_nats: float,
+        margin: float,
+        majority_fraction: float,
+        easy_entropy_threshold: float,
+    ) -> str:
+        easy_majority = float(getattr(self.cfg, "easy_update_majority_frac_threshold", 0.95))
+        hard_min_entropy = float(getattr(self.cfg, "difficulty_hard_min_entropy", 0.90))
+        hard_max_margin = float(getattr(self.cfg, "difficulty_hard_max_margin", 0.35))
+        if entropy_nats <= easy_entropy_threshold or majority_fraction >= easy_majority:
+            return "easy"
+        if entropy_nats >= hard_min_entropy and margin <= hard_max_margin:
+            return "hard"
+        return "medium"
+
+    def _difficulty_target_weights(self) -> Dict[str, float]:
+        w_easy = max(0.0, float(getattr(self.cfg, "difficulty_target_easy", 0.20)))
+        w_medium = max(0.0, float(getattr(self.cfg, "difficulty_target_medium", 0.60)))
+        w_hard = max(0.0, float(getattr(self.cfg, "difficulty_target_hard", 0.20)))
+        total = w_easy + w_medium + w_hard
+        if total <= 1e-8:
+            return {"easy": 0.2, "medium": 0.6, "hard": 0.2}
+        return {
+            "easy": w_easy / total,
+            "medium": w_medium / total,
+            "hard": w_hard / total,
+        }
+
+    def _sample_bucket(self, weights: Dict[str, float]) -> str:
+        r = random.random()
+        c = 0.0
+        for key in ("easy", "medium", "hard"):
+            c += float(weights.get(key, 0.0))
+            if r <= c:
+                return key
+        return "medium"
+
+    def _choose_difficulty_target(self) -> Dict[str, object]:
+        enabled = bool(getattr(self.cfg, "difficulty_sampler_enabled", True))
+        min_samples = max(4, int(getattr(self.cfg, "difficulty_sampler_min_samples", 32)))
+        target = self._difficulty_target_weights()
+        history = list(self._difficulty_window)
+        history_size = len(history)
+        mode = "target"
+        observed = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
+        weights_for_sampling = dict(target)
+        if enabled and history_size >= min_samples:
+            for b in history:
+                if b in observed:
+                    observed[b] += 1.0
+            for key in observed:
+                observed[key] /= float(history_size)
+            deficits = {
+                key: max(0.0, target[key] - observed[key]) for key in ("easy", "medium", "hard")
+            }
+            deficit_total = deficits["easy"] + deficits["medium"] + deficits["hard"]
+            if deficit_total > 1e-8:
+                weights_for_sampling = {
+                    key: deficits[key] / deficit_total for key in ("easy", "medium", "hard")
+                }
+                mode = "deficit"
+            else:
+                mode = "target_fallback"
+        elif not enabled:
+            mode = "disabled"
+
+        desired_bucket = self._sample_bucket(weights_for_sampling) if enabled else "medium"
+        return {
+            "enabled": enabled,
+            "desired_bucket": desired_bucket,
+            "mode": mode,
+            "history_size": history_size,
+            "min_samples": min_samples,
+            "target_weights": target,
+            "observed_weights": observed,
+            "sampling_weights": weights_for_sampling,
+        }
+
     def _understanding_step(self, step: int, image: Image.Image, meta: Dict) -> Dict[str, object]:
         step_t0 = time.perf_counter()
-        proposer_prompt = build_proposer_prompt()
-        proposer_out = self._generate(
-            image=image,
-            prompt=proposer_prompt,
-            adapter_name="proposer" if self.cfg.use_lora else None,
-            max_new_tokens=self.cfg.max_new_tokens_proposer,
-            temperature=self.cfg.temp,
-            top_p=self.cfg.top_p,
+        entropy_min = float(getattr(self.cfg, "sc_entropy_min", 0.15))
+        entropy_max = float(getattr(self.cfg, "sc_entropy_max", 1.2))
+        if entropy_min > entropy_max:
+            entropy_min, entropy_max = entropy_max, entropy_min
+        margin_max = float(getattr(self.cfg, "sc_margin_max", 0.9))
+        require_objective = bool(getattr(self.cfg, "proposer_require_objective", True))
+        harden_on_easy = bool(getattr(self.cfg, "proposer_hardening_on_easy", True))
+        max_hardening_retries = max(
+            0, int(getattr(self.cfg, "proposer_hardening_max_retries", 0))
         )
-        parsed_question = _parse_first_question(proposer_out).replace("\n", " ").strip()
-        question = parsed_question or "What is the most salient object in the image?"
+        entropy_iqr_state = self._entropy_iqr_filter_state()
+        entropy_easy_threshold = float(entropy_iqr_state.get("threshold", entropy_min))
+        entropy_iqr_filter_active = bool(entropy_iqr_state.get("active", 0.0) > 0.5)
+        difficulty_target_state = self._choose_difficulty_target()
+        difficulty_sampler_enabled = bool(difficulty_target_state.get("enabled", False))
+        desired_difficulty_bucket = str(difficulty_target_state.get("desired_bucket", "medium"))
+        difficulty_sampler_mode = str(difficulty_target_state.get("mode", "target"))
+        difficulty_sampler_max_retries = max(
+            0, int(getattr(self.cfg, "difficulty_sampler_max_retries", 1))
+        )
+        solver_temperatures = self._solver_temperature_schedule()
+        solver_top_ps = self._solver_top_p_schedule()
 
-        solver_prompt = build_solver_prompt(question)
+        proposer_prompt = build_proposer_prompt()
+        proposer_out = ""
+        parsed_question = ""
+        question = ""
+        fallback_used = False
+        proposer_rationale = ""
+        proposer_non_objective_question = False
+        hardening_retries_used = 0
+        hardening_reason = ""
+        difficulty_sampler_retries_used = 0
+        difficulty_bucket_observed = "unknown"
+
+        solver_prompt = ""
         solver_outputs: List[str] = []
         solver_answers_raw: List[str] = []
         solver_answers_norm: List[str] = []
         pre_words: List[int] = []
 
-        solver_temperatures = self._solver_temperature_schedule()
-        solver_top_ps = self._solver_top_p_schedule()
-        for sample_idx in range(self.cfg.num_solver_samples):
-            solver_temp = (
-                float(solver_temperatures[sample_idx])
-                if sample_idx < len(solver_temperatures)
-                else float(self.cfg.temp)
-            )
-            solver_top_p = (
-                float(solver_top_ps[sample_idx])
-                if sample_idx < len(solver_top_ps)
-                else float(self.cfg.top_p)
-            )
-            solver_out = self._generate(
+        while True:
+            proposer_out = self._generate(
                 image=image,
-                prompt=solver_prompt,
-                adapter_name="default" if self.cfg.use_lora else None,
-                max_new_tokens=self.cfg.max_new_tokens_solver,
-                temperature=solver_temp,
-                top_p=solver_top_p,
+                prompt=proposer_prompt,
+                adapter_name="proposer" if self.cfg.use_lora else None,
+                max_new_tokens=self.cfg.max_new_tokens_proposer,
+                temperature=self.cfg.temp,
+                top_p=self.cfg.top_p,
             )
-            answer_raw = _parse_answer(solver_out)
-            solver_outputs.append(solver_out)
-            solver_answers_raw.append(answer_raw)
-            solver_answers_norm.append(normalize_answer(answer_raw))
-            pre_words.append(pre_answer_word_count(solver_out))
+            parsed_question = _parse_first_question(proposer_out).replace("\n", " ").strip()
+            question = parsed_question or "What is the most salient object in the image?"
+            fallback_used = not bool(parsed_question)
+            proposer_rationale = strip_tags(proposer_out, "rationale")
+            proposer_non_objective_question = bool(
+                require_objective and (not self._is_objective_question(question))
+            )
+
+            solver_prompt = build_solver_prompt(question)
+            solver_outputs = []
+            solver_answers_raw = []
+            solver_answers_norm = []
+            pre_words = []
+
+            for sample_idx in range(self.cfg.num_solver_samples):
+                solver_temp = (
+                    float(solver_temperatures[sample_idx])
+                    if sample_idx < len(solver_temperatures)
+                    else float(self.cfg.temp)
+                )
+                solver_top_p = (
+                    float(solver_top_ps[sample_idx])
+                    if sample_idx < len(solver_top_ps)
+                    else float(self.cfg.top_p)
+                )
+                solver_out = self._generate(
+                    image=image,
+                    prompt=solver_prompt,
+                    adapter_name="default" if self.cfg.use_lora else None,
+                    max_new_tokens=self.cfg.max_new_tokens_solver,
+                    temperature=solver_temp,
+                    top_p=solver_top_p,
+                )
+                answer_raw = _parse_answer(solver_out)
+                solver_outputs.append(solver_out)
+                solver_answers_raw.append(answer_raw)
+                solver_answers_norm.append(normalize_answer(answer_raw))
+                pre_words.append(pre_answer_word_count(solver_out))
+
+            _tmp_hist: Dict[str, int] = {}
+            for ans in solver_answers_norm:
+                _tmp_hist[ans] = _tmp_hist.get(ans, 0) + 1
+            _tmp_probs = [
+                count / float(self.cfg.num_solver_samples)
+                for count in _tmp_hist.values()
+            ]
+            _tmp_entropy = shannon_entropy_nats(_tmp_probs)
+            _tmp_sorted = sorted(_tmp_probs, reverse=True)
+            _tmp_p1 = float(_tmp_sorted[0]) if _tmp_sorted else 0.0
+            _tmp_p2 = float(_tmp_sorted[1]) if len(_tmp_sorted) > 1 else 0.0
+            _tmp_margin = max(0.0, _tmp_p1 - _tmp_p2)
+            _tmp_maj_frac = _tmp_p1
+            difficulty_bucket_observed = self._difficulty_bucket(
+                _tmp_entropy,
+                _tmp_margin,
+                _tmp_maj_frac,
+                entropy_easy_threshold,
+            )
+            easy_for_hardening = bool(
+                (_tmp_entropy < entropy_easy_threshold) and (_tmp_margin > margin_max)
+            )
+            retry_due_to_easy = bool(harden_on_easy and easy_for_hardening)
+            retry_due_to_non_objective = bool(proposer_non_objective_question)
+            retry_due_to_bucket = bool(
+                difficulty_sampler_enabled
+                and (difficulty_bucket_observed != desired_difficulty_bucket)
+            )
+
+            can_retry_hardening = bool(
+                hardening_retries_used < max_hardening_retries
+                and (retry_due_to_easy or retry_due_to_non_objective)
+            )
+            can_retry_bucket = bool(
+                difficulty_sampler_retries_used < difficulty_sampler_max_retries
+                and retry_due_to_bucket
+            )
+            if can_retry_hardening or can_retry_bucket:
+                if retry_due_to_non_objective and retry_due_to_easy:
+                    hardening_reason = (
+                        "question was subjective/open-ended and produced unanimous easy solver answers"
+                    )
+                elif retry_due_to_non_objective:
+                    hardening_reason = (
+                        "question was subjective/open-ended, not objectively verifiable"
+                    )
+                elif retry_due_to_easy:
+                    hardening_reason = (
+                        "question was too easy; solver consensus was near-unanimous"
+                    )
+                else:
+                    hardening_reason = (
+                        "question did not match requested difficulty bucket "
+                        f"(target={desired_difficulty_bucket}, observed={difficulty_bucket_observed})"
+                    )
+                if can_retry_hardening:
+                    hardening_retries_used += 1
+                if can_retry_bucket:
+                    difficulty_sampler_retries_used += 1
+                proposer_prompt = build_proposer_hardening_prompt(question, hardening_reason)
+                continue
+            break
 
         maj_answer, maj_count = majority_vote(solver_answers_norm)
         maj_frac = maj_count / float(self.cfg.num_solver_samples)
@@ -201,11 +473,6 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         p1 = float(sorted_probs[0]) if sorted_probs else 0.0
         p2 = float(sorted_probs[1]) if len(sorted_probs) > 1 else 0.0
         margin = max(0.0, p1 - p2)
-        entropy_min = float(getattr(self.cfg, "sc_entropy_min", 0.15))
-        entropy_max = float(getattr(self.cfg, "sc_entropy_max", 1.2))
-        if entropy_min > entropy_max:
-            entropy_min, entropy_max = entropy_max, entropy_min
-        margin_max = float(getattr(self.cfg, "sc_margin_max", 0.9))
         ratio_min = float(getattr(self.cfg, "sc_informative_ratio_min", 0.25))
         ratio_min = max(0.0, min(1.0, ratio_min))
         neg_weight = float(getattr(self.cfg, "sc_negative_weight", 0.25))
@@ -235,7 +502,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
 
         sc_signal = max(1e-4, local_info_score)
         # Penalize unanimous, low-entropy, high-margin (trivially easy) cases.
-        easy_solver_case = bool((entropy_nats < entropy_min) and (margin > margin_max))
+        easy_solver_case = bool((entropy_nats < entropy_easy_threshold) and (margin > margin_max))
+        difficulty_bucket_observed = self._difficulty_bucket(
+            entropy_nats,
+            margin,
+            maj_frac,
+            entropy_easy_threshold,
+        )
+        self._entropy_window.append(float(entropy_nats))
+        self._difficulty_window.append(difficulty_bucket_observed)
         easy_solver_penalty_scale = float(
             getattr(self.cfg, "easy_solver_penalty_scale", 1.0)
         )
@@ -278,9 +553,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             zero_entropy_capped = True
         # Additional easy-question penalty for low-entropy, high-margin cases.
         easy_question_penalty = float(getattr(self.cfg, "easy_question_penalty", 0.15))
-        easy_question_detected = bool((entropy_nats < entropy_min) and (margin > margin_max))
+        easy_question_detected = bool((entropy_nats < entropy_easy_threshold) and (margin > margin_max))
         if easy_question_detected and easy_question_penalty > 0.0:
             proposer_reward -= easy_question_penalty
+        proposer_non_objective_penalty = float(
+            getattr(self.cfg, "proposer_non_objective_penalty", 0.0)
+        )
+        proposer_non_objective_penalty = max(0.0, proposer_non_objective_penalty)
+        if proposer_non_objective_question and proposer_non_objective_penalty > 0.0:
+            proposer_reward -= proposer_non_objective_penalty
         proposer_reward = max(-1.0, min(1.0, proposer_reward))
 
         solver_stats_list = []
@@ -304,9 +585,43 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             solver_update_scale = max(min_update_scale, local_info_score)
         else:
             solver_update_scale = 1.0
-            if solver_update_applied and skip_uninformative and not solver_informative_gate:
-                solver_update_applied = False
-                solver_update_skip_reason = "uninformative_local"
+        solver_skip_update_on_easy = bool(
+            getattr(self.cfg, "solver_skip_update_on_easy", True)
+        )
+        easy_update_majority_frac_threshold = float(
+            getattr(self.cfg, "easy_update_majority_frac_threshold", 0.95)
+        )
+        easy_update_majority_frac_threshold = max(
+            0.0, min(1.0, easy_update_majority_frac_threshold)
+        )
+        entropy_iqr_filter_min_majority_frac = float(
+            getattr(self.cfg, "entropy_iqr_filter_min_majority_frac", 0.80)
+        )
+        entropy_iqr_filter_min_majority_frac = max(
+            0.0, min(1.0, entropy_iqr_filter_min_majority_frac)
+        )
+        solver_entropy_iqr_blocked = bool(
+            entropy_iqr_filter_active
+            and (entropy_nats <= entropy_easy_threshold)
+            and (maj_frac >= entropy_iqr_filter_min_majority_frac)
+        )
+        solver_easy_update_blocked = bool(
+            solver_update_due
+            and solver_skip_update_on_easy
+            and (
+                easy_solver_case
+                or (maj_frac >= easy_update_majority_frac_threshold)
+            )
+        )
+        if solver_update_applied and solver_entropy_iqr_blocked:
+            solver_update_applied = False
+            solver_update_skip_reason = "entropy_iqr_filter"
+        elif solver_update_applied and solver_easy_update_blocked:
+            solver_update_applied = False
+            solver_update_skip_reason = "easy_case"
+        elif solver_update_applied and (not always_scale) and skip_uninformative and not solver_informative_gate:
+            solver_update_applied = False
+            solver_update_skip_reason = "uninformative_local"
 
         if solver_update_applied:
             for sample_idx, (completion, reward) in enumerate(zip(solver_outputs, solver_rewards_soft)):
@@ -420,6 +735,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "step_time_sec": step_dt,
             "question": question,
             "proposer_out": proposer_out,
+            "proposer_rationale": proposer_rationale,
+            "fallback_question_used": fallback_used,
+            "proposer_non_objective_question": proposer_non_objective_question,
+            "proposer_non_objective_penalty": proposer_non_objective_penalty,
+            "proposer_hardening_retries_used": hardening_retries_used,
+            "proposer_hardening_reason": hardening_reason,
             "solver_answers_raw": solver_answers_raw,
             "solver_answers_norm": solver_answers_norm,
             "solver_rewards_raw": solver_rewards_raw,
@@ -430,6 +751,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "solver_top1_prob": p1,
             "solver_top2_prob": p2,
             "solver_margin": margin,
+            "entropy_easy_threshold": entropy_easy_threshold,
+            "entropy_iqr_filter_enabled": bool(entropy_iqr_state.get("enabled", 0.0)),
+            "entropy_iqr_filter_active": entropy_iqr_filter_active,
+            "entropy_iqr_filter_history_size": int(entropy_iqr_state.get("history_size", 0.0)),
+            "entropy_iqr_filter_q1": entropy_iqr_state.get("q1"),
+            "entropy_iqr_filter_q3": entropy_iqr_state.get("q3"),
+            "entropy_iqr_filter_iqr": entropy_iqr_state.get("iqr"),
             "solver_informative_local": solver_informative_local,
             "solver_informative_any": solver_informative_any,
             "solver_informative_all": solver_informative_all,
@@ -453,6 +781,20 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "zero_entropy_reward_cap": zero_entropy_cap,
             "easy_question_detected": easy_question_detected,
             "easy_question_penalty": easy_question_penalty,
+            "solver_skip_update_on_easy": solver_skip_update_on_easy,
+            "solver_entropy_iqr_blocked": solver_entropy_iqr_blocked,
+            "entropy_iqr_filter_min_majority_frac": entropy_iqr_filter_min_majority_frac,
+            "solver_easy_update_blocked": solver_easy_update_blocked,
+            "easy_update_majority_frac_threshold": easy_update_majority_frac_threshold,
+            "difficulty_sampler_enabled": difficulty_sampler_enabled,
+            "difficulty_sampler_mode": difficulty_sampler_mode,
+            "difficulty_target_bucket": desired_difficulty_bucket,
+            "difficulty_bucket_observed": difficulty_bucket_observed,
+            "difficulty_sampler_retries_used": difficulty_sampler_retries_used,
+            "difficulty_sampler_max_retries": difficulty_sampler_max_retries,
+            "difficulty_target_weights": difficulty_target_state.get("target_weights", {}),
+            "difficulty_observed_weights": difficulty_target_state.get("observed_weights", {}),
+            "difficulty_sampling_weights": difficulty_target_state.get("sampling_weights", {}),
             "solver_baseline": self.solver_baseline,
             "proposer_baseline": self.proposer_baseline,
             "solver_update_due": solver_update_due,
@@ -476,6 +818,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "solver_top1_prob": p1,
                 "solver_top2_prob": p2,
                 "solver_margin": margin,
+                "entropy_easy_threshold": entropy_easy_threshold,
+                "entropy_iqr_filter_enabled": bool(entropy_iqr_state.get("enabled", 0.0)),
+                "entropy_iqr_filter_active": entropy_iqr_filter_active,
+                "entropy_iqr_filter_history_size": int(entropy_iqr_state.get("history_size", 0.0)),
+                "entropy_iqr_filter_q1": entropy_iqr_state.get("q1"),
+                "entropy_iqr_filter_q3": entropy_iqr_state.get("q3"),
+                "entropy_iqr_filter_iqr": entropy_iqr_state.get("iqr"),
                 "solver_informative_local": solver_informative_local,
                 "solver_informative_any": solver_informative_any,
                 "solver_informative_all": solver_informative_all,
@@ -494,10 +843,28 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "proposer_entropy_mu_used": proposer_entropy_mu_used,
                 "proposer_reward_raw": proposer_reward_raw,
                 "proposer_reward": proposer_reward,
+                "proposer_non_objective_question": proposer_non_objective_question,
+                "proposer_non_objective_penalty": proposer_non_objective_penalty,
+                "proposer_hardening_retries_used": hardening_retries_used,
+                "proposer_hardening_reason": hardening_reason,
                 "zero_entropy_capped": zero_entropy_capped,
                 "zero_entropy_reward_cap": zero_entropy_cap,
                 "easy_question_detected": easy_question_detected,
                 "easy_question_penalty": easy_question_penalty,
+                "solver_skip_update_on_easy": solver_skip_update_on_easy,
+                "solver_entropy_iqr_blocked": solver_entropy_iqr_blocked,
+                "entropy_iqr_filter_min_majority_frac": entropy_iqr_filter_min_majority_frac,
+                "solver_easy_update_blocked": solver_easy_update_blocked,
+                "easy_update_majority_frac_threshold": easy_update_majority_frac_threshold,
+                "difficulty_sampler_enabled": difficulty_sampler_enabled,
+                "difficulty_sampler_mode": difficulty_sampler_mode,
+                "difficulty_target_bucket": desired_difficulty_bucket,
+                "difficulty_bucket_observed": difficulty_bucket_observed,
+                "difficulty_sampler_retries_used": difficulty_sampler_retries_used,
+                "difficulty_sampler_max_retries": difficulty_sampler_max_retries,
+                "difficulty_target_weights": difficulty_target_state.get("target_weights", {}),
+                "difficulty_observed_weights": difficulty_target_state.get("observed_weights", {}),
+                "difficulty_sampling_weights": difficulty_target_state.get("sampling_weights", {}),
             },
         )
 
@@ -516,87 +883,119 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._update_metric("u_entropy_nats", self._dist_mean(entropy_nats))
         self._update_metric("u_solver_margin", self._dist_mean(margin))
         self._update_metric("u_solver_informative", self._dist_mean(informative_ratio))
+        self._update_metric("u_entropy_easy_threshold", self._dist_mean(entropy_easy_threshold))
+        self._update_metric(
+            "u_solver_entropy_iqr_blocked",
+            self._dist_mean(1.0 if solver_entropy_iqr_blocked else 0.0),
+        )
+        self._update_metric(
+            "u_difficulty_bucket_easy",
+            self._dist_mean(1.0 if difficulty_bucket_observed == "easy" else 0.0),
+        )
+        self._update_metric(
+            "u_difficulty_bucket_medium",
+            self._dist_mean(1.0 if difficulty_bucket_observed == "medium" else 0.0),
+        )
+        self._update_metric(
+            "u_difficulty_bucket_hard",
+            self._dist_mean(1.0 if difficulty_bucket_observed == "hard" else 0.0),
+        )
         self._update_metric("u_proposer_entropy_mu_used", self._dist_mean(proposer_entropy_mu_used))
         self._update_metric("u_proposer_reward", self._dist_mean(proposer_reward))
 
         return record
 
-    # ---- Phase 2: helper methods ---- #
+    # ---- Checkpoint: save/restore self-evolving state ---- #
+
+    def _trainer_state_dict(self, step: int) -> Dict:
+        """Extend parent state dict with self-evolving fields."""
+        state = super()._trainer_state_dict(step)
+        state["unified_gen_reward_ema"] = self._gen_reward_ema
+        state["unified_gen_reward_ema_initialized"] = self._gen_reward_ema_initialized
+        state["unified_entropy_window"] = list(self._entropy_window)
+        state["unified_difficulty_window"] = list(self._difficulty_window)
+        # Replay buffer metadata (not the images — too large for checkpoint;
+        # the buffer refills naturally after resume).
+        state["unified_replay_buffer_len"] = len(self.replay_buffer)
+        return state
+
+    def _maybe_resume_state(self):
+        """Restore parent state, then restore self-evolving fields."""
+        restored_step = super()._maybe_resume_state()
+        if restored_step is None:
+            return None
+
+        resume_dir = self._resolve_resume_dir()
+        if resume_dir is None:
+            return restored_step
+
+        state_path = resume_dir / "trainer_state.pt"
+        if not state_path.exists():
+            return restored_step
+
+        try:
+            state = torch.load(state_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            state = torch.load(state_path, map_location="cpu")
+
+        if "unified_gen_reward_ema" in state:
+            self._gen_reward_ema = float(state["unified_gen_reward_ema"])
+            self._gen_reward_ema_initialized = bool(
+                state.get("unified_gen_reward_ema_initialized", False)
+            )
+            entropy_window = state.get("unified_entropy_window")
+            if isinstance(entropy_window, list):
+                self._entropy_window.clear()
+                max_keep = int(self._entropy_window.maxlen or len(entropy_window))
+                for value in entropy_window[-max_keep:]:
+                    try:
+                        self._entropy_window.append(float(value))
+                    except Exception:
+                        continue
+            difficulty_window = state.get("unified_difficulty_window")
+            if isinstance(difficulty_window, list):
+                self._difficulty_window.clear()
+                max_keep = int(self._difficulty_window.maxlen or len(difficulty_window))
+                for bucket in difficulty_window[-max_keep:]:
+                    b = str(bucket).strip().lower()
+                    if b in {"easy", "medium", "hard"}:
+                        self._difficulty_window.append(b)
+            if self.is_main_process:
+                print(
+                    f"[Unified] Restored self-evolving state: "
+                    f"gen_reward_ema={self._gen_reward_ema:.4f}, "
+                    f"replay_buf_was={state.get('unified_replay_buffer_len', 0)}"
+                )
+
+        return restored_step
+
+    # ---- Self-evolving: helper methods ---- #
 
     def _current_gen_mix_ratio(self, step: int) -> float:
         """Compute the generated-image mixing ratio for the understanding step.
 
-        Returns 0.0 when in cold-start phase (Phase 1) or when the config
-        defaults keep the feature off.  During Phase 2, linearly ramps from
-        ``gen_mix_ratio_start`` to ``gen_mix_ratio_max`` over
-        ``gen_mix_ratio_warmup_steps``.
+        Linearly ramps from ``gen_mix_ratio_start`` to ``gen_mix_ratio_max``
+        over ``gen_mix_ratio_warmup_steps`` from the beginning of training.
+        Returns 0.0 if the replay buffer is empty (naturally acts as a soft
+        warm-up until the first generation steps populate the buffer).
         """
-        if self._evolving_phase != "self_evolving":
-            return 0.0
         start = getattr(self.ucfg, "gen_mix_ratio_start", 0.0)
         mx = getattr(self.ucfg, "gen_mix_ratio_max", 0.0)
         warmup = max(1, getattr(self.ucfg, "gen_mix_ratio_warmup_steps", 1))
         if mx <= 0.0:
             return 0.0
-        p2_start = max(0, self._phase2_start_step)
-        elapsed = max(0, step - p2_start)
+        elapsed = max(0, step - self.start_step)
         t = min(1.0, elapsed / warmup)
         return start + t * (mx - start)
 
     def _update_gen_reward_ema(self, reward_mean: float) -> None:
         """Update the exponential moving average of generator reward."""
-        mom = getattr(self.ucfg, "phase_transition_reward_ema_momentum", 0.95)
+        mom = getattr(self.ucfg, "reward_ema_momentum", 0.95)
         if not self._gen_reward_ema_initialized:
             self._gen_reward_ema = reward_mean
             self._gen_reward_ema_initialized = True
         else:
             self._gen_reward_ema = mom * self._gen_reward_ema + (1.0 - mom) * reward_mean
-
-    def _maybe_transition_phase(self, step: int) -> None:
-        """Check if cold_start → self_evolving transition should happen.
-
-        Only active when ``evolving_phase == "auto"`` in the config.
-        Transition criteria:
-        1. At least ``phase_transition_warmup_steps`` cold-start steps
-        2. Generator reward EMA exceeds ``phase_transition_reward_threshold``
-        """
-        if self._evolving_phase != "cold_start":
-            return
-        if getattr(self.ucfg, "evolving_phase", "cold_start") != "auto":
-            return
-
-        warmup = getattr(self.ucfg, "phase_transition_warmup_steps", 200)
-        threshold = getattr(self.ucfg, "phase_transition_reward_threshold", 0.6)
-
-        # Use steps-since-training-start, not absolute step number,
-        # so resume from checkpoint doesn't skip warmup.
-        effective_steps = step - self.start_step
-        if effective_steps < warmup:
-            return
-        if not self._gen_reward_ema_initialized:
-            return
-        if self._gen_reward_ema < threshold:
-            return
-
-        # Transition!
-        self._evolving_phase = "self_evolving"
-        self._phase2_start_step = step
-        if self.is_main_process:
-            print(
-                f"[Unified] *** Phase transition: cold_start → self_evolving at step {step} ***"
-                f" (gen_reward_ema={self._gen_reward_ema:.4f} >= {threshold})"
-            )
-        self._append_jsonl(
-            self.iter_log_path,
-            {
-                "step": step,
-                "event": "phase_transition",
-                "from": "cold_start",
-                "to": "self_evolving",
-                "gen_reward_ema": self._gen_reward_ema,
-                "threshold": threshold,
-            },
-        )
 
     def train(self):
         cfg = self.ucfg
@@ -615,14 +1014,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             print(
                 f"[Unified] Schedule: Ux{cfg.understanding_steps_per_cycle} + Gx{cfg.generation_steps_per_cycle} (cycle={cycle})"
             )
-            _ev_phase = getattr(cfg, "evolving_phase", "cold_start")
-            print(f"[Unified] Evolving phase mode: {_ev_phase}")
-            if _ev_phase != "cold_start":
-                print(
-                    f"[Unified] Ref-answer scoring: {getattr(cfg, 'use_ref_answer_scoring', False)}, "
-                    f"Replay buffer: size={getattr(cfg, 'replay_buffer_size', 0)}, "
-                    f"Mix ratio: {getattr(cfg, 'gen_mix_ratio_start', 0)}->{getattr(cfg, 'gen_mix_ratio_max', 0)}"
-                )
+            print(
+                f"[Unified] Ref-answer scoring: {getattr(cfg, 'use_ref_answer_scoring', False)}, "
+                f"Replay buffer: size={getattr(cfg, 'replay_buffer_size', 0)}, "
+                f"Mix ratio: {getattr(cfg, 'gen_mix_ratio_start', 0)}->{getattr(cfg, 'gen_mix_ratio_max', 0)}"
+            )
 
         last_completed_step = self.start_step
         last_attempted_step = self.start_step
@@ -687,11 +1083,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     reward_min_g = self._dist_mean(reward_min)
                     spec_quality_g = self._dist_mean(spec_quality)
 
-                    # ---- Phase transition tracking ---- #
-                    # Use the *global* reward mean (synced across ranks) so that
-                    # all DDP ranks transition at the same step.
+                    # Track generator reward EMA for monitoring
                     self._update_gen_reward_ema(reward_mean_g)
-                    self._maybe_transition_phase(step)
 
                     best = scored[best_idx]
                     best_spec = float(best.get("spec_score", 0.0))
@@ -749,7 +1142,6 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 if self.is_main_process:
                     step_dt = time.perf_counter() - step_t0
                     _src = _data_source if phase_tag == "U" else ""
-                    _phase_lbl = self._evolving_phase
                     _mix_info = ""
                     if phase_tag == "U" and _src == "replay_buffer":
                         _mix_info = f" [replay_buf, mix={self._current_gen_mix_ratio(step):.2f}]"
@@ -757,7 +1149,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     if self._gen_reward_ema_initialized:
                         _ema_info = f" ema_r={self._gen_reward_ema:.4f}"
                     print(
-                        f"[Step {step:05d}] phase={phase_tag} evolving={_phase_lbl}"
+                        f"[Step {step:05d}] phase={phase_tag}"
                         f"{_mix_info}{_ema_info} dt={step_dt:.1f}s"
                     )
 

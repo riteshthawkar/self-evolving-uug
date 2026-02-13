@@ -1,5 +1,5 @@
 """
-Replay buffer for the self-evolving pipeline (Phase 2).
+Replay buffer for the self-evolving pipeline.
 
 Stores the best generated images along with their scoring metadata
 (prompt, questions, reference answers) so they can be mixed into
@@ -7,9 +7,8 @@ the understanding training step.  This closes the
 *generation → understanding* supervision loop.
 
 Design principles:
-    - All new features are opt-in; the buffer is only instantiated when
-      ``evolving_phase`` is ``"self_evolving"`` or ``"auto"``.
     - FIFO eviction keeps the buffer bounded.
+    - Quality gate (min_reward) ensures only good images are kept.
     - Staleness eviction ensures the solver/proposer always train on
       images from the *current* generator quality level.
     - Thread-safety is **not** required (one buffer per DDP rank,
