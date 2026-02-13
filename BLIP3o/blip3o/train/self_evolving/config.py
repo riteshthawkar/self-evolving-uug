@@ -72,6 +72,29 @@ class UnderstandingSelfEvolvingConfig:
     prop_entropy_mu_max: float = 1.5
     zero_entropy_reward_cap: float = 0.10  # cap proposer reward when entropy=0 (unanimous)
     easy_question_penalty: float = 0.15  # subtract from proposer reward for trivially easy questions
+    proposer_non_objective_penalty: float = 0.20  # subtract from proposer reward when question is subjective/open-ended
+    proposer_require_objective: bool = True
+    proposer_hardening_on_easy: bool = True
+    proposer_hardening_max_retries: int = 2
+    solver_skip_update_on_easy: bool = True
+    easy_update_majority_frac_threshold: float = 0.95
+    entropy_iqr_filter_enabled: bool = True
+    entropy_iqr_window_size: int = 256
+    entropy_iqr_min_samples: int = 32
+    entropy_iqr_easy_quantile: float = 0.25
+    entropy_iqr_easy_iqr_coef: float = 0.25
+    entropy_iqr_min_threshold: float = 0.02
+    entropy_iqr_max_threshold: float = 1.2
+    entropy_iqr_filter_min_majority_frac: float = 0.80
+    difficulty_sampler_enabled: bool = True
+    difficulty_sampler_window_size: int = 256
+    difficulty_sampler_min_samples: int = 32
+    difficulty_sampler_max_retries: int = 1
+    difficulty_target_easy: float = 0.20
+    difficulty_target_medium: float = 0.60
+    difficulty_target_hard: float = 0.20
+    difficulty_hard_min_entropy: float = 0.90
+    difficulty_hard_max_margin: float = 0.35
 
     # KL control
     kl_coef: float = 0.01
@@ -201,6 +224,29 @@ class GenerationSelfEvolvingConfig:
     prop_entropy_mu_max: float = 1.5
     zero_entropy_reward_cap: float = 0.10
     easy_question_penalty: float = 0.15
+    proposer_non_objective_penalty: float = 0.20
+    proposer_require_objective: bool = True
+    proposer_hardening_on_easy: bool = True
+    proposer_hardening_max_retries: int = 2
+    solver_skip_update_on_easy: bool = True
+    easy_update_majority_frac_threshold: float = 0.95
+    entropy_iqr_filter_enabled: bool = True
+    entropy_iqr_window_size: int = 256
+    entropy_iqr_min_samples: int = 32
+    entropy_iqr_easy_quantile: float = 0.25
+    entropy_iqr_easy_iqr_coef: float = 0.25
+    entropy_iqr_min_threshold: float = 0.02
+    entropy_iqr_max_threshold: float = 1.2
+    entropy_iqr_filter_min_majority_frac: float = 0.80
+    difficulty_sampler_enabled: bool = True
+    difficulty_sampler_window_size: int = 256
+    difficulty_sampler_min_samples: int = 32
+    difficulty_sampler_max_retries: int = 1
+    difficulty_target_easy: float = 0.20
+    difficulty_target_medium: float = 0.60
+    difficulty_target_hard: float = 0.20
+    difficulty_hard_min_entropy: float = 0.90
+    difficulty_hard_max_margin: float = 0.35
     reward_spec_weight: float = 0.65
     reward_cycle_weight: float = 0.20
     reward_diversity_weight: float = 0.10
@@ -259,27 +305,21 @@ class UnifiedSelfEvolvingConfig(GenerationSelfEvolvingConfig):
     synthetic_solver_hard_only: bool = False
     solver_hardness_min_entropy: float = 0.2
 
-    # ---- Phase 2: self-evolving feedback loop ---- #
-    # "cold_start" = Phase 1 only (current pipeline, default — backward compat)
-    # "self_evolving" = Phase 2 from step 0 (skip cold start)
-    # "auto" = start cold_start, transition to self_evolving when criteria met
-    evolving_phase: str = "cold_start"
-
-    # Reference-answer log-prob scoring (Phase 2 generation scoring)
-    # When False, uses existing multi-component scoring (spec+cycle+diversity)
+    # ---- Self-evolving feedback loop ---- #
+    # Reference-answer log-prob scoring for generation.
+    # When False, uses existing multi-component scoring (spec+cycle+diversity).
     use_ref_answer_scoring: bool = False
 
-    # Replay buffer: stores best generated images for understanding training
+    # Replay buffer: stores best generated images for mixing into understanding training.
     replay_buffer_size: int = 1000
     replay_min_reward: float = 0.5
     replay_max_staleness: int = 500
 
-    # Generated-image mixing ratio for understanding step
-    gen_mix_ratio_start: float = 0.05     # initial ratio when Phase 2 begins
-    gen_mix_ratio_max: float = 0.30       # cap (real data always >= 70%)
-    gen_mix_ratio_warmup_steps: int = 500  # linear ramp from start to max
+    # Generated-image mixing ratio for understanding step.
+    # Linearly ramps from start → max over warmup_steps.
+    gen_mix_ratio_start: float = 0.02     # initial ratio (conservative start)
+    gen_mix_ratio_max: float = 0.25       # cap (real data always >= 75%)
+    gen_mix_ratio_warmup_steps: int = 1000  # longer warmup for stability
 
-    # Auto phase transition criteria (only used when evolving_phase="auto")
-    phase_transition_reward_threshold: float = 0.6   # generator reward EMA threshold
-    phase_transition_warmup_steps: int = 200          # min cold-start steps before transition
-    phase_transition_reward_ema_momentum: float = 0.95  # EMA smoothing for reward tracking
+    # Generator reward EMA tracking (for monitoring / logging)
+    reward_ema_momentum: float = 0.95

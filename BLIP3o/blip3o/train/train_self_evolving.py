@@ -116,6 +116,54 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prop_entropy_mu_max", type=float, default=1.5)
     p.add_argument("--zero_entropy_reward_cap", type=float, default=0.10)
     p.add_argument("--easy_question_penalty", type=float, default=0.15)
+    p.add_argument("--proposer_non_objective_penalty", type=float, default=0.20)
+    p.add_argument("--proposer_require_objective", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_require_objective",
+        dest="proposer_require_objective",
+        action="store_false",
+    )
+    p.add_argument("--proposer_hardening_on_easy", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_hardening_on_easy",
+        dest="proposer_hardening_on_easy",
+        action="store_false",
+    )
+    p.add_argument("--proposer_hardening_max_retries", type=int, default=2)
+    p.add_argument("--solver_skip_update_on_easy", action="store_true", default=True)
+    p.add_argument(
+        "--allow_solver_update_on_easy",
+        dest="solver_skip_update_on_easy",
+        action="store_false",
+    )
+    p.add_argument("--easy_update_majority_frac_threshold", type=float, default=0.95)
+    p.add_argument("--entropy_iqr_filter_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_entropy_iqr_filter",
+        dest="entropy_iqr_filter_enabled",
+        action="store_false",
+    )
+    p.add_argument("--entropy_iqr_window_size", type=int, default=256)
+    p.add_argument("--entropy_iqr_min_samples", type=int, default=32)
+    p.add_argument("--entropy_iqr_easy_quantile", type=float, default=0.25)
+    p.add_argument("--entropy_iqr_easy_iqr_coef", type=float, default=0.25)
+    p.add_argument("--entropy_iqr_min_threshold", type=float, default=0.02)
+    p.add_argument("--entropy_iqr_max_threshold", type=float, default=1.2)
+    p.add_argument("--entropy_iqr_filter_min_majority_frac", type=float, default=0.80)
+    p.add_argument("--difficulty_sampler_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_difficulty_sampler",
+        dest="difficulty_sampler_enabled",
+        action="store_false",
+    )
+    p.add_argument("--difficulty_sampler_window_size", type=int, default=256)
+    p.add_argument("--difficulty_sampler_min_samples", type=int, default=32)
+    p.add_argument("--difficulty_sampler_max_retries", type=int, default=1)
+    p.add_argument("--difficulty_target_easy", type=float, default=0.20)
+    p.add_argument("--difficulty_target_medium", type=float, default=0.60)
+    p.add_argument("--difficulty_target_hard", type=float, default=0.20)
+    p.add_argument("--difficulty_hard_min_entropy", type=float, default=0.90)
+    p.add_argument("--difficulty_hard_max_margin", type=float, default=0.35)
     p.add_argument("--reward_spec_weight", type=float, default=0.65)
     p.add_argument("--reward_cycle_weight", type=float, default=0.20)
     p.add_argument("--reward_diversity_weight", type=float, default=0.10)
@@ -187,21 +235,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max_expected_words", type=int, default=8)
     p.add_argument("--max_question_words", type=int, default=24)
 
-    # Phase 2: self-evolving feedback loop
-    p.add_argument("--evolving_phase", type=str, default="cold_start",
-                    choices=["cold_start", "self_evolving", "auto"],
-                    help="cold_start=Phase1 only (default), self_evolving=Phase2 from start, auto=transition automatically")
+    # Self-evolving feedback loop
     p.add_argument("--use_ref_answer_scoring", action="store_true", default=False,
                     help="Use reference-answer log-prob scoring instead of multi-component scoring")
     p.add_argument("--replay_buffer_size", type=int, default=1000)
     p.add_argument("--replay_min_reward", type=float, default=0.5)
     p.add_argument("--replay_max_staleness", type=int, default=500)
-    p.add_argument("--gen_mix_ratio_start", type=float, default=0.05)
-    p.add_argument("--gen_mix_ratio_max", type=float, default=0.30)
-    p.add_argument("--gen_mix_ratio_warmup_steps", type=int, default=500)
-    p.add_argument("--phase_transition_reward_threshold", type=float, default=0.6)
-    p.add_argument("--phase_transition_warmup_steps", type=int, default=200)
-    p.add_argument("--phase_transition_reward_ema_momentum", type=float, default=0.95)
+    p.add_argument("--gen_mix_ratio_start", type=float, default=0.02)
+    p.add_argument("--gen_mix_ratio_max", type=float, default=0.25)
+    p.add_argument("--gen_mix_ratio_warmup_steps", type=int, default=1000)
+    p.add_argument("--reward_ema_momentum", type=float, default=0.95)
 
     # W&B
     p.add_argument("--wandb_mode", type=str, default=os.environ.get("WANDB_MODE", "disabled"), choices=["online", "offline", "disabled"])
@@ -265,6 +308,29 @@ def _build_understanding_config(args):
         prop_entropy_mu_max=args.prop_entropy_mu_max,
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
         easy_question_penalty=args.easy_question_penalty,
+        proposer_non_objective_penalty=args.proposer_non_objective_penalty,
+        proposer_require_objective=args.proposer_require_objective,
+        proposer_hardening_on_easy=args.proposer_hardening_on_easy,
+        proposer_hardening_max_retries=args.proposer_hardening_max_retries,
+        solver_skip_update_on_easy=args.solver_skip_update_on_easy,
+        easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
+        entropy_iqr_filter_enabled=args.entropy_iqr_filter_enabled,
+        entropy_iqr_window_size=args.entropy_iqr_window_size,
+        entropy_iqr_min_samples=args.entropy_iqr_min_samples,
+        entropy_iqr_easy_quantile=args.entropy_iqr_easy_quantile,
+        entropy_iqr_easy_iqr_coef=args.entropy_iqr_easy_iqr_coef,
+        entropy_iqr_min_threshold=args.entropy_iqr_min_threshold,
+        entropy_iqr_max_threshold=args.entropy_iqr_max_threshold,
+        entropy_iqr_filter_min_majority_frac=args.entropy_iqr_filter_min_majority_frac,
+        difficulty_sampler_enabled=args.difficulty_sampler_enabled,
+        difficulty_sampler_window_size=args.difficulty_sampler_window_size,
+        difficulty_sampler_min_samples=args.difficulty_sampler_min_samples,
+        difficulty_sampler_max_retries=args.difficulty_sampler_max_retries,
+        difficulty_target_easy=args.difficulty_target_easy,
+        difficulty_target_medium=args.difficulty_target_medium,
+        difficulty_target_hard=args.difficulty_target_hard,
+        difficulty_hard_min_entropy=args.difficulty_hard_min_entropy,
+        difficulty_hard_max_margin=args.difficulty_hard_max_margin,
         kl_coef=args.kl_coef,
         kl_target=args.kl_target,
         kl_adapt_rate=args.kl_adapt_rate,
@@ -371,6 +437,29 @@ def _build_generation_config(args):
         prop_entropy_mu_max=args.prop_entropy_mu_max,
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
         easy_question_penalty=args.easy_question_penalty,
+        proposer_non_objective_penalty=args.proposer_non_objective_penalty,
+        proposer_require_objective=args.proposer_require_objective,
+        proposer_hardening_on_easy=args.proposer_hardening_on_easy,
+        proposer_hardening_max_retries=args.proposer_hardening_max_retries,
+        solver_skip_update_on_easy=args.solver_skip_update_on_easy,
+        easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
+        entropy_iqr_filter_enabled=args.entropy_iqr_filter_enabled,
+        entropy_iqr_window_size=args.entropy_iqr_window_size,
+        entropy_iqr_min_samples=args.entropy_iqr_min_samples,
+        entropy_iqr_easy_quantile=args.entropy_iqr_easy_quantile,
+        entropy_iqr_easy_iqr_coef=args.entropy_iqr_easy_iqr_coef,
+        entropy_iqr_min_threshold=args.entropy_iqr_min_threshold,
+        entropy_iqr_max_threshold=args.entropy_iqr_max_threshold,
+        entropy_iqr_filter_min_majority_frac=args.entropy_iqr_filter_min_majority_frac,
+        difficulty_sampler_enabled=args.difficulty_sampler_enabled,
+        difficulty_sampler_window_size=args.difficulty_sampler_window_size,
+        difficulty_sampler_min_samples=args.difficulty_sampler_min_samples,
+        difficulty_sampler_max_retries=args.difficulty_sampler_max_retries,
+        difficulty_target_easy=args.difficulty_target_easy,
+        difficulty_target_medium=args.difficulty_target_medium,
+        difficulty_target_hard=args.difficulty_target_hard,
+        difficulty_hard_min_entropy=args.difficulty_hard_min_entropy,
+        difficulty_hard_max_margin=args.difficulty_hard_max_margin,
         reward_spec_weight=args.reward_spec_weight,
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
@@ -490,6 +579,29 @@ def _build_unified_config(args):
         prop_entropy_mu_max=args.prop_entropy_mu_max,
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
         easy_question_penalty=args.easy_question_penalty,
+        proposer_non_objective_penalty=args.proposer_non_objective_penalty,
+        proposer_require_objective=args.proposer_require_objective,
+        proposer_hardening_on_easy=args.proposer_hardening_on_easy,
+        proposer_hardening_max_retries=args.proposer_hardening_max_retries,
+        solver_skip_update_on_easy=args.solver_skip_update_on_easy,
+        easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
+        entropy_iqr_filter_enabled=args.entropy_iqr_filter_enabled,
+        entropy_iqr_window_size=args.entropy_iqr_window_size,
+        entropy_iqr_min_samples=args.entropy_iqr_min_samples,
+        entropy_iqr_easy_quantile=args.entropy_iqr_easy_quantile,
+        entropy_iqr_easy_iqr_coef=args.entropy_iqr_easy_iqr_coef,
+        entropy_iqr_min_threshold=args.entropy_iqr_min_threshold,
+        entropy_iqr_max_threshold=args.entropy_iqr_max_threshold,
+        entropy_iqr_filter_min_majority_frac=args.entropy_iqr_filter_min_majority_frac,
+        difficulty_sampler_enabled=args.difficulty_sampler_enabled,
+        difficulty_sampler_window_size=args.difficulty_sampler_window_size,
+        difficulty_sampler_min_samples=args.difficulty_sampler_min_samples,
+        difficulty_sampler_max_retries=args.difficulty_sampler_max_retries,
+        difficulty_target_easy=args.difficulty_target_easy,
+        difficulty_target_medium=args.difficulty_target_medium,
+        difficulty_target_hard=args.difficulty_target_hard,
+        difficulty_hard_min_entropy=args.difficulty_hard_min_entropy,
+        difficulty_hard_max_margin=args.difficulty_hard_max_margin,
         reward_spec_weight=args.reward_spec_weight,
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
@@ -528,8 +640,7 @@ def _build_unified_config(args):
         synthetic_solver_update_freq=args.synthetic_solver_update_freq,
         synthetic_solver_hard_only=args.synthetic_solver_hard_only,
         solver_hardness_min_entropy=args.solver_hardness_min_entropy,
-        # Phase 2: self-evolving feedback loop
-        evolving_phase=args.evolving_phase,
+        # Self-evolving feedback loop
         use_ref_answer_scoring=args.use_ref_answer_scoring,
         replay_buffer_size=args.replay_buffer_size,
         replay_min_reward=args.replay_min_reward,
@@ -537,9 +648,7 @@ def _build_unified_config(args):
         gen_mix_ratio_start=args.gen_mix_ratio_start,
         gen_mix_ratio_max=args.gen_mix_ratio_max,
         gen_mix_ratio_warmup_steps=args.gen_mix_ratio_warmup_steps,
-        phase_transition_reward_threshold=args.phase_transition_reward_threshold,
-        phase_transition_warmup_steps=args.phase_transition_warmup_steps,
-        phase_transition_reward_ema_momentum=args.phase_transition_reward_ema_momentum,
+        reward_ema_momentum=args.reward_ema_momentum,
     )
 
 
