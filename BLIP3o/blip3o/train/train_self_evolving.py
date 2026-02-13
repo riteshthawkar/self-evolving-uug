@@ -210,8 +210,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow_missing_generation_tokens", dest="strict_require_generation_tokens", action="store_false")
     p.set_defaults(strict_require_generation_tokens=True)
     p.add_argument("--generator_missing_trace_strategy", type=str, default="proxy", choices=["proxy", "skip", "error"])
-    p.add_argument("--verification_use_reference_solver", action="store_true", default=True)
-    p.add_argument("--verification_use_trainable_solver", dest="verification_use_reference_solver", action="store_false")
+    # Solver always uses trained LoRA for mutual supervision (understanding ↔ generation).
+    # Legacy flag kept for backward compat but defaults to False (trained solver).
+    p.add_argument("--verification_use_reference_solver", action="store_true", default=False)
     p.add_argument("--generator_update_rule", type=str, default="reinforce", choices=["reinforce", "dpo", "grpo"])
     p.add_argument("--dpo_beta", type=float, default=0.1)
     p.add_argument("--dpo_label_smoothing", type=float, default=0.0)
@@ -236,8 +237,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max_question_words", type=int, default=24)
 
     # Self-evolving feedback loop
-    p.add_argument("--use_ref_answer_scoring", action="store_true", default=False,
-                    help="Use reference-answer log-prob scoring instead of multi-component scoring")
+    p.add_argument("--use_ref_answer_scoring", action="store_true", default=True,
+                    help="Use reference-answer log-prob scoring (default, MODE B)")
+    p.add_argument("--no_ref_answer_scoring", dest="use_ref_answer_scoring", action="store_false",
+                    help="Fall back to multi-component scoring (MODE A)")
     p.add_argument("--replay_buffer_size", type=int, default=1000)
     p.add_argument("--replay_min_reward", type=float, default=0.5)
     p.add_argument("--replay_max_staleness", type=int, default=500)

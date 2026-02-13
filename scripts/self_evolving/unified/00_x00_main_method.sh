@@ -75,7 +75,7 @@ export CLEAR_CACHE_EVERY="${CLEAR_CACHE_EVERY:-10}"
 # Self-evolving feedback loop: generated images mix into understanding training.
 # The mix ratio ramps linearly from START → MAX over WARMUP_STEPS.
 # Replay buffer naturally fills once generation starts producing good images.
-export USE_REF_ANSWER_SCORING="${USE_REF_ANSWER_SCORING:-0}"
+export USE_REF_ANSWER_SCORING="${USE_REF_ANSWER_SCORING:-1}"
 export REPLAY_BUFFER_SIZE="${REPLAY_BUFFER_SIZE:-1000}"
 export REPLAY_MIN_REWARD="${REPLAY_MIN_REWARD:-0.50}"
 export REPLAY_MAX_STALENESS="${REPLAY_MAX_STALENESS:-500}"
@@ -132,9 +132,11 @@ if [[ -n "$INCLUDE_SUBFOLDERS" ]]; then
   SUBFOLDER_FLAGS+=(--include_subfolders "$INCLUDE_SUBFOLDERS")
 fi
 
-REF_SCORING_FLAGS=()
-if [[ "$USE_REF_ANSWER_SCORING" == "1" ]]; then
-  REF_SCORING_FLAGS+=(--use_ref_answer_scoring)
+# Ref-answer scoring (MODE B) is ON by default.
+# Set USE_REF_ANSWER_SCORING=0 to fall back to multi-component scoring (MODE A).
+REF_SCORING_FLAGS=(--use_ref_answer_scoring)
+if [[ "$USE_REF_ANSWER_SCORING" == "0" ]]; then
+  REF_SCORING_FLAGS=(--no_ref_answer_scoring)
 fi
 
 "$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node "$NPROC_PER_NODE" --master_port "$MASTER_PORT" "$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py" \
