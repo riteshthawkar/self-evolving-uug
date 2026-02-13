@@ -185,7 +185,7 @@ class GenerationSelfEvolvingConfig:
     allow_latent_visualization_fallback: bool = False
     strict_require_generation_tokens: bool = True
     generator_missing_trace_strategy: str = "proxy"  # proxy|skip|error
-    verification_use_reference_solver: bool = True
+    verification_use_reference_solver: bool = False  # use trained solver LoRA for mutual supervision
     generator_update_rule: str = "reinforce"  # reinforce|dpo|grpo
     dpo_beta: float = 0.1
     dpo_label_smoothing: float = 0.0
@@ -306,9 +306,11 @@ class UnifiedSelfEvolvingConfig(GenerationSelfEvolvingConfig):
     solver_hardness_min_entropy: float = 0.2
 
     # ---- Self-evolving feedback loop ---- #
-    # Reference-answer log-prob scoring for generation.
-    # When False, uses existing multi-component scoring (spec+cycle+diversity).
-    use_ref_answer_scoring: bool = False
+    # Reference-answer log-prob scoring for generation (MODE B).
+    # Solver answers Qs on real image → logP(ref_answer | candidate, Q).
+    # Continuous reward, no hallucination, mutual supervision.
+    # When False, falls back to multi-component scoring (spec+cycle+diversity).
+    use_ref_answer_scoring: bool = True
 
     # Replay buffer: stores best generated images for mixing into understanding training.
     replay_buffer_size: int = 1000

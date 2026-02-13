@@ -570,8 +570,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             and self.cfg.solver_update_freq > 0
             and (step % self.cfg.solver_update_freq == 0)
         )
+        local_solver_update_applied = bool(solver_update_due)
         solver_update_applied = bool(solver_update_due)
         solver_update_skip_reason: Optional[str] = None
+        solver_update_skip_reason_local: Optional[str] = None
 
         skip_uninformative = bool(
             getattr(self.cfg, "skip_solver_update_when_uninformative", True)
@@ -613,16 +615,19 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 or (maj_frac >= easy_update_majority_frac_threshold)
             )
         )
-        if solver_update_applied and solver_entropy_iqr_blocked:
-            solver_update_applied = False
-            solver_update_skip_reason = "entropy_iqr_filter"
-        elif solver_update_applied and solver_easy_update_blocked:
-            solver_update_applied = False
-            solver_update_skip_reason = "easy_case"
-        elif solver_update_applied and (not always_scale) and skip_uninformative and not solver_informative_gate:
-            solver_update_applied = False
-            solver_update_skip_reason = "uninformative_local"
+        if local_solver_update_applied and solver_entropy_iqr_blocked:
+            local_solver_update_applied = False
+            solver_update_skip_reason_local = "entropy_iqr_filter"
+        elif local_solver_update_applied and solver_easy_update_blocked:
+            local_solver_update_applied = False
+            solver_update_skip_reason_local = "easy_case"
+        elif local_solver_update_applied and (not always_scale) and skip_uninformative and not solver_informative_gate:
+            local_solver_update_applied = False
+            solver_update_skip_reason_local = "uninformative_local"
 
+        # DDP safety: if any rank runs solver updates, all ranks must execute
+        # the same number of updater.forward() calls.
+        solver_update_applied = self._dist_any_bool(local_solver_update_applied)
         if solver_update_applied:
             for sample_idx, (completion, reward) in enumerate(zip(solver_outputs, solver_rewards_soft)):
                 local_can_solver_update = bool(str(completion).strip())
@@ -641,7 +646,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     )
                     continue
                 baseline_before = self.solver_baseline
-                local_skip_update = not local_can_solver_update
+                local_skip_update = (not local_solver_update_applied) or (not local_can_solver_update)
                 completion_for_update = completion if not local_skip_update else ""
                 effective_reward = (
                     reward * solver_update_scale if not local_skip_update else 0.0
@@ -672,9 +677,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 all_skipped = all(bool(s.get("skipped_reason")) for s in solver_stats_list)
                 if all_skipped:
                     solver_update_applied = False
-                    if solver_update_skip_reason is None:
-                        solver_update_skip_reason = "all_solver_samples_skipped"
-        elif solver_update_due and solver_update_skip_reason is not None:
+                    if solver_update_skip_reason_local is None:
+                        solver_update_skip_reason_local = "all_solver_samples_skipped"
+        elif solver_update_due and solver_update_skip_reason_local is not None:
             self._append_jsonl(
                 self.policy_updates_log_path,
                 {
@@ -682,10 +687,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     "role": "solver",
                     "source": "understanding",
                     "skipped": True,
-                    "reason": solver_update_skip_reason,
+                    "reason": solver_update_skip_reason_local,
                     "solver_margin": margin,
                     "entropy_nats": entropy_nats,
                 },
+            )
+        if solver_update_applied:
+            solver_update_skip_reason = None
+        else:
+            solver_update_skip_reason = (
+                solver_update_skip_reason_local
+                if solver_update_skip_reason_local is not None
+                else "all_ranks_solver_update_blocked"
             )
 
         proposer_stats = None

@@ -1655,7 +1655,7 @@ class GenerationSelfEvolvingTrainer:
         rollouts = []
         answers_norm: List[str] = []
         adapter_name: Optional[str] = None
-        if self.cfg.use_lora and not self.cfg.verification_use_reference_solver:
+        if self.cfg.use_lora:
             adapter_name = "default"
 
         for _ in range(self.cfg.num_solver_samples_spec):
@@ -1924,16 +1924,15 @@ class GenerationSelfEvolvingTrainer:
         # reference answer follows as if the model had generated it.
         full_text = solver_prompt_chat + ref_ans_stripped
 
-        # Respect verification_use_reference_solver: when True, use the base
-        # model without LoRA adapters (adapter=None → disables adapters).
-        # This prevents co-adaptation between the reward signal and the
-        # trainable solver, which would weaken anti-reward-hacking.
+        # Use the trained solver LoRA to score candidates so that
+        # understanding improvements flow into generation scoring
+        # (mutual supervision).  The solver is grounded by majority-vote
+        # training on real images, preventing co-adaptation.
         model = self.train_model if hasattr(self, "train_model") else self.model
-        _use_ref_solver = getattr(self.cfg, "verification_use_reference_solver", True)
-        if self.cfg.use_lora and not _use_ref_solver:
-            adapter = "default"  # trainable solver adapter
+        if self.cfg.use_lora:
+            adapter = "default"  # trained solver adapter
         else:
-            adapter = None       # base model (reference solver)
+            adapter = None
         was_training = model.training
 
         try:
@@ -2017,15 +2016,12 @@ class GenerationSelfEvolvingTrainer:
             return scored, [], []
 
         # Step 1: Solver generates reference answers on the REAL image.
-        # Respect verification_use_reference_solver: use base model (no adapters)
-        # when True to prevent co-adaptation with the trainable solver.
+        # Uses the trained solver LoRA — as solver improves through
+        # understanding training, it provides better reference answers,
+        # which means harder/more accurate scoring for generation (mutual supervision).
         device = self.device
         cfg = self.cfg
-        _use_ref_solver = getattr(cfg, "verification_use_reference_solver", True)
-        if cfg.use_lora and not _use_ref_solver:
-            _solver_adapter = "default"  # trainable solver
-        else:
-            _solver_adapter = None       # reference (base model)
+        _solver_adapter = "default" if cfg.use_lora else None
 
         reference_answers: List[str] = []
         temp = max(0.2, min(0.8, cfg.temp))
@@ -2483,6 +2479,12 @@ class GenerationSelfEvolvingTrainer:
         # Best generated image enters the replay buffer for mixing into
         # understanding training. The buffer's quality gate (min_reward)
         # ensures only good images are kept.
+        #
+        # For ref-answer scoring (MODE B), total_reward is a log-prob (negative).
+        # Normalize to [0, 1] so the replay buffer quality gate works uniformly:
+        #   sigmoid(logp) maps (-inf, 0] → (0, 0.5], typical range [-5, 0] → [0.007, 0.5]
+        #   We use sigmoid(logp + 2) to shift the useful range up, so:
+        #     logp = -4 → 0.12,  logp = -2 → 0.5,  logp = -1 → 0.73,  logp = 0 → 0.88
         _replay_buf = getattr(self, "replay_buffer", None)
         if (
             _replay_buf is not None
@@ -2490,14 +2492,21 @@ class GenerationSelfEvolvingTrainer:
         ):
             _rb_questions = _ref_questions or [qa.question for qa in spec.qa_pairs]
             _rb_answers = _ref_answers or [qa.expected for qa in spec.qa_pairs]
+            _raw_reward = float(best["total_reward"])
+            if _use_ref_scoring:
+                # Normalize log-prob to [0, 1] for replay buffer compatibility
+                _rb_reward = 1.0 / (1.0 + math.exp(-(_raw_reward + 2.0)))
+            else:
+                _rb_reward = _raw_reward
             _replay_buf.add(
                 image=best["image"],
                 prompt=spec.prompt,
                 questions=_rb_questions,
                 reference_answers=_rb_answers,
-                reward=float(best["total_reward"]),
+                reward=_rb_reward,
                 step=step,
-                meta={"best_idx": best_idx, "num_candidates": len(candidates)},
+                meta={"best_idx": best_idx, "num_candidates": len(candidates),
+                       "raw_reward": _raw_reward},
             )
 
         proposer_stats = None
