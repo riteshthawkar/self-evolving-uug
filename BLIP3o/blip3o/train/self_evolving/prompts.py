@@ -73,12 +73,53 @@ def build_proposer_hardening_prompt(previous_question: str, reason: str) -> str:
         "Hard constraints:\n"
         "- The answer must be verifiable from the image only.\n"
         "- Use concrete formulations (count, compare, lookup, spatial relation, attribute).\n"
+        "- Avoid trivial single-attribute lookups (e.g., only color/name of obvious object).\n"
+        "- Prefer multi-constraint questions (count + attribute, relation + attribute, compare + value).\n"
         "- Do NOT use: why, might, could, likely, opinion, feel, emotion.\n"
         "- Keep the expected answer short (1-5 words).\n"
         "- Avoid yes/no unless unavoidable.\n"
         "Previous question:\n"
         f"{prev_q}\n"
         "Why rewrite is needed:\n"
+        f"{reason_txt}\n"
+        "Output XML only:\n"
+        "<question>...</question>\n"
+        "<rationale>...</rationale>"
+    )
+
+
+def build_proposer_force_hard_prompt(
+    previous_question: str,
+    reason: str,
+    target_bucket: str = "medium",
+) -> str:
+    """Emergency hardening prompt used when regular retries failed."""
+    prev_q = (previous_question or "").strip()
+    reason_txt = (reason or "question remained too easy").strip()
+    target = (target_bucket or "medium").strip().lower()
+    if target not in {"easy", "medium", "hard"}:
+        target = "medium"
+    if target == "hard":
+        difficulty_hint = (
+            "Aim for HARD difficulty: require at least two visual constraints and a non-trivial comparison."
+        )
+    else:
+        difficulty_hint = (
+            "Aim for at least MEDIUM difficulty: require at least two visual constraints."
+        )
+    return (
+        "You are a Question Proposer.\n"
+        "Create ONE objectively verifiable question from the image.\n"
+        f"{difficulty_hint}\n"
+        "Mandatory rules:\n"
+        "- Do not ask a simple one-hop lookup (single color/name/count of the most obvious object).\n"
+        "- Use one of these forms: (count + attribute), (spatial relation + attribute), (comparison across two entities), (table/chart lookup + comparison).\n"
+        "- The answer must be 1-5 words and directly grounded in image evidence.\n"
+        "- Do NOT use: why, might, could, likely, feel, opinion, purpose, reason.\n"
+        "- Avoid yes/no unless unavoidable.\n"
+        "Previous question:\n"
+        f"{prev_q}\n"
+        "Failure reason:\n"
         f"{reason_txt}\n"
         "Output XML only:\n"
         "<question>...</question>\n"

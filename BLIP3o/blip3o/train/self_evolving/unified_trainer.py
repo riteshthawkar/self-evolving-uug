@@ -21,7 +21,12 @@ from PIL import Image
 from .config import UnifiedSelfEvolvingConfig
 from .generation_helpers import GenerationSpec
 from .generation_trainer import GenerationSelfEvolvingTrainer
-from .prompts import build_proposer_hardening_prompt, build_proposer_prompt, build_solver_prompt
+from .prompts import (
+    build_proposer_force_hard_prompt,
+    build_proposer_hardening_prompt,
+    build_proposer_prompt,
+    build_solver_prompt,
+)
 from .replay_buffer import ReplayBuffer
 from .utils import (
     HAS_WANDB,
@@ -319,6 +324,21 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         max_hardening_retries = max(
             0, int(getattr(self.cfg, "proposer_hardening_max_retries", 0))
         )
+        force_harden_on_failure = bool(
+            getattr(self.cfg, "proposer_force_hardening_on_failure", True)
+        )
+        force_hardening_max_retries = max(
+            0, int(getattr(self.cfg, "proposer_force_hardening_max_retries", 1))
+        )
+        acceptance_require_non_easy = bool(
+            getattr(self.cfg, "acceptance_require_non_easy", True)
+        )
+        acceptance_require_target_bucket = bool(
+            getattr(self.cfg, "acceptance_require_target_bucket", False)
+        )
+        rejected_question_penalty = max(
+            0.0, float(getattr(self.cfg, "rejected_question_penalty", 0.0))
+        )
         entropy_iqr_state = self._entropy_iqr_filter_state()
         entropy_easy_threshold = float(entropy_iqr_state.get("threshold", entropy_min))
         entropy_iqr_filter_active = bool(entropy_iqr_state.get("active", 0.0) > 0.5)
@@ -340,9 +360,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_rationale = ""
         proposer_non_objective_question = False
         hardening_retries_used = 0
+        forced_hardening_retries_used = 0
         hardening_reason = ""
         difficulty_sampler_retries_used = 0
         difficulty_bucket_observed = "unknown"
+        question_rejected = False
+        question_reject_reason = ""
 
         solver_prompt = ""
         solver_outputs: List[str] = []
@@ -459,6 +482,39 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     difficulty_sampler_retries_used += 1
                 proposer_prompt = build_proposer_hardening_prompt(question, hardening_reason)
                 continue
+            can_force_hardening = bool(
+                force_harden_on_failure
+                and (forced_hardening_retries_used < force_hardening_max_retries)
+                and (
+                    retry_due_to_non_objective
+                    or retry_due_to_easy
+                    or (
+                        acceptance_require_target_bucket
+                        and retry_due_to_bucket
+                    )
+                )
+            )
+            if can_force_hardening:
+                if retry_due_to_non_objective and retry_due_to_easy:
+                    hardening_reason = (
+                        "question remained subjective and trivially easy after retries"
+                    )
+                elif retry_due_to_non_objective:
+                    hardening_reason = "question remained non-objective after retries"
+                elif retry_due_to_easy:
+                    hardening_reason = "question remained too easy after retries"
+                else:
+                    hardening_reason = (
+                        "question still missed the requested difficulty bucket "
+                        f"(target={desired_difficulty_bucket}, observed={difficulty_bucket_observed})"
+                    )
+                forced_hardening_retries_used += 1
+                proposer_prompt = build_proposer_force_hard_prompt(
+                    question,
+                    hardening_reason,
+                    desired_difficulty_bucket,
+                )
+                continue
             break
 
         maj_answer, maj_count = majority_vote(solver_answers_norm)
@@ -562,6 +618,23 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_non_objective_penalty = max(0.0, proposer_non_objective_penalty)
         if proposer_non_objective_question and proposer_non_objective_penalty > 0.0:
             proposer_reward -= proposer_non_objective_penalty
+        reject_reasons: List[str] = []
+        if require_objective and proposer_non_objective_question:
+            reject_reasons.append("non_objective")
+        if acceptance_require_non_easy and (difficulty_bucket_observed == "easy"):
+            reject_reasons.append("easy_bucket")
+        if (
+            acceptance_require_target_bucket
+            and difficulty_sampler_enabled
+            and (difficulty_bucket_observed != desired_difficulty_bucket)
+        ):
+            reject_reasons.append(
+                f"bucket_mismatch:{difficulty_bucket_observed}->{desired_difficulty_bucket}"
+            )
+        question_rejected = len(reject_reasons) > 0
+        question_reject_reason = "|".join(reject_reasons)
+        if question_rejected and rejected_question_penalty > 0.0:
+            proposer_reward -= rejected_question_penalty
         proposer_reward = max(-1.0, min(1.0, proposer_reward))
 
         solver_stats_list = []
@@ -615,7 +688,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 or (maj_frac >= easy_update_majority_frac_threshold)
             )
         )
-        if local_solver_update_applied and solver_entropy_iqr_blocked:
+        if local_solver_update_applied and question_rejected:
+            local_solver_update_applied = False
+            solver_update_skip_reason_local = (
+                "question_rejected"
+                if not question_reject_reason
+                else f"question_rejected:{question_reject_reason}"
+            )
+        elif local_solver_update_applied and solver_entropy_iqr_blocked:
             local_solver_update_applied = False
             solver_update_skip_reason_local = "entropy_iqr_filter"
         elif local_solver_update_applied and solver_easy_update_blocked:
@@ -753,7 +833,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_non_objective_question": proposer_non_objective_question,
             "proposer_non_objective_penalty": proposer_non_objective_penalty,
             "proposer_hardening_retries_used": hardening_retries_used,
+            "proposer_forced_hardening_retries_used": forced_hardening_retries_used,
             "proposer_hardening_reason": hardening_reason,
+            "question_rejected": question_rejected,
+            "question_reject_reason": question_reject_reason,
+            "rejected_question_penalty": rejected_question_penalty,
+            "acceptance_require_non_easy": acceptance_require_non_easy,
+            "acceptance_require_target_bucket": acceptance_require_target_bucket,
             "solver_answers_raw": solver_answers_raw,
             "solver_answers_norm": solver_answers_norm,
             "solver_rewards_raw": solver_rewards_raw,
@@ -859,7 +945,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "proposer_non_objective_question": proposer_non_objective_question,
                 "proposer_non_objective_penalty": proposer_non_objective_penalty,
                 "proposer_hardening_retries_used": hardening_retries_used,
+                "proposer_forced_hardening_retries_used": forced_hardening_retries_used,
                 "proposer_hardening_reason": hardening_reason,
+                "question_rejected": question_rejected,
+                "question_reject_reason": question_reject_reason,
+                "rejected_question_penalty": rejected_question_penalty,
+                "acceptance_require_non_easy": acceptance_require_non_easy,
+                "acceptance_require_target_bucket": acceptance_require_target_bucket,
                 "zero_entropy_capped": zero_entropy_capped,
                 "zero_entropy_reward_cap": zero_entropy_cap,
                 "easy_question_detected": easy_question_detected,

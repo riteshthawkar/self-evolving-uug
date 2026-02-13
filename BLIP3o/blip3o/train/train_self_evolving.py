@@ -130,6 +130,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
     p.add_argument("--proposer_hardening_max_retries", type=int, default=2)
+    p.add_argument("--proposer_force_hardening_on_failure", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_force_hardening_on_failure",
+        dest="proposer_force_hardening_on_failure",
+        action="store_false",
+    )
+    p.add_argument("--proposer_force_hardening_max_retries", type=int, default=1)
     p.add_argument("--solver_skip_update_on_easy", action="store_true", default=True)
     p.add_argument(
         "--allow_solver_update_on_easy",
@@ -137,6 +144,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
     p.add_argument("--easy_update_majority_frac_threshold", type=float, default=0.95)
+    p.add_argument("--acceptance_require_non_easy", action="store_true", default=True)
+    p.add_argument(
+        "--disable_acceptance_require_non_easy",
+        dest="acceptance_require_non_easy",
+        action="store_false",
+    )
+    p.add_argument("--acceptance_require_target_bucket", action="store_true", default=False)
+    p.add_argument("--rejected_question_penalty", type=float, default=0.35)
     p.add_argument("--entropy_iqr_filter_enabled", action="store_true", default=True)
     p.add_argument(
         "--disable_entropy_iqr_filter",
@@ -315,8 +330,13 @@ def _build_understanding_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_hardening_on_easy=args.proposer_hardening_on_easy,
         proposer_hardening_max_retries=args.proposer_hardening_max_retries,
+        proposer_force_hardening_on_failure=args.proposer_force_hardening_on_failure,
+        proposer_force_hardening_max_retries=args.proposer_force_hardening_max_retries,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
+        acceptance_require_non_easy=args.acceptance_require_non_easy,
+        acceptance_require_target_bucket=args.acceptance_require_target_bucket,
+        rejected_question_penalty=args.rejected_question_penalty,
         entropy_iqr_filter_enabled=args.entropy_iqr_filter_enabled,
         entropy_iqr_window_size=args.entropy_iqr_window_size,
         entropy_iqr_min_samples=args.entropy_iqr_min_samples,
@@ -444,8 +464,13 @@ def _build_generation_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_hardening_on_easy=args.proposer_hardening_on_easy,
         proposer_hardening_max_retries=args.proposer_hardening_max_retries,
+        proposer_force_hardening_on_failure=args.proposer_force_hardening_on_failure,
+        proposer_force_hardening_max_retries=args.proposer_force_hardening_max_retries,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
+        acceptance_require_non_easy=args.acceptance_require_non_easy,
+        acceptance_require_target_bucket=args.acceptance_require_target_bucket,
+        rejected_question_penalty=args.rejected_question_penalty,
         entropy_iqr_filter_enabled=args.entropy_iqr_filter_enabled,
         entropy_iqr_window_size=args.entropy_iqr_window_size,
         entropy_iqr_min_samples=args.entropy_iqr_min_samples,
@@ -586,8 +611,13 @@ def _build_unified_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_hardening_on_easy=args.proposer_hardening_on_easy,
         proposer_hardening_max_retries=args.proposer_hardening_max_retries,
+        proposer_force_hardening_on_failure=args.proposer_force_hardening_on_failure,
+        proposer_force_hardening_max_retries=args.proposer_force_hardening_max_retries,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
+        acceptance_require_non_easy=args.acceptance_require_non_easy,
+        acceptance_require_target_bucket=args.acceptance_require_target_bucket,
+        rejected_question_penalty=args.rejected_question_penalty,
         entropy_iqr_filter_enabled=args.entropy_iqr_filter_enabled,
         entropy_iqr_window_size=args.entropy_iqr_window_size,
         entropy_iqr_min_samples=args.entropy_iqr_min_samples,
