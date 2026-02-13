@@ -76,8 +76,13 @@ class UnderstandingSelfEvolvingConfig:
     proposer_require_objective: bool = True
     proposer_hardening_on_easy: bool = True
     proposer_hardening_max_retries: int = 2
+    proposer_force_hardening_on_failure: bool = True
+    proposer_force_hardening_max_retries: int = 1
     solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
+    acceptance_require_non_easy: bool = True
+    acceptance_require_target_bucket: bool = False
+    rejected_question_penalty: float = 0.35
     entropy_iqr_filter_enabled: bool = True
     entropy_iqr_window_size: int = 256
     entropy_iqr_min_samples: int = 32
@@ -228,8 +233,13 @@ class GenerationSelfEvolvingConfig:
     proposer_require_objective: bool = True
     proposer_hardening_on_easy: bool = True
     proposer_hardening_max_retries: int = 2
+    proposer_force_hardening_on_failure: bool = True
+    proposer_force_hardening_max_retries: int = 1
     solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
+    acceptance_require_non_easy: bool = True
+    acceptance_require_target_bucket: bool = False
+    rejected_question_penalty: float = 0.35
     entropy_iqr_filter_enabled: bool = True
     entropy_iqr_window_size: int = 256
     entropy_iqr_min_samples: int = 32
