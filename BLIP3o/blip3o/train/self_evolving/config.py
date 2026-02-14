@@ -215,6 +215,15 @@ class GenerationSelfEvolvingConfig:
     unicorn_reconstruction_min_quality: float = 0.55
     unicorn_reconstruction_enable_proposer: bool = True
     unicorn_reconstruction_enable_generator: bool = True
+    dit_update_enabled: bool = False
+    dit_update_freq: int = 1
+    dit_lr: float = 5e-7
+    dit_weight_decay: float = 0.01
+    dit_grad_clip: float = 1.0
+    dit_grad_accum_steps: int = 1
+    dit_conditioning_dropout: float = 0.10
+    dit_loss_weight: float = 1.0
+    dit_prompt_suffix_token_id: int = 151665
 
     # Reward shaping
     solver_soft_gamma: float = 0.7

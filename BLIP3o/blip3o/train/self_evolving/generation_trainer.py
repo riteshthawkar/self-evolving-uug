@@ -27,6 +27,7 @@ from PIL import Image
 from transformers import AutoProcessor
 
 from .config import GenerationSelfEvolvingConfig
+from .dit_updater import DiTUpdater
 from .image_pool import ImagePool, ImagePoolConfig
 from .policy_updater import RolePolicyUpdater
 from .prompts import (
@@ -356,6 +357,21 @@ class GenerationSelfEvolvingTrainer:
         self.cfg.unicorn_reconstruction_updates_per_step = max(
             1, int(getattr(self.cfg, "unicorn_reconstruction_updates_per_step", 2))
         )
+        self.cfg.dit_update_enabled = bool(getattr(self.cfg, "dit_update_enabled", False))
+        self.cfg.dit_update_freq = max(1, int(getattr(self.cfg, "dit_update_freq", 1)))
+        self.cfg.dit_grad_accum_steps = max(1, int(getattr(self.cfg, "dit_grad_accum_steps", 1)))
+        self.cfg.dit_lr = float(getattr(self.cfg, "dit_lr", self.cfg.lr))
+        self.cfg.dit_weight_decay = float(
+            getattr(self.cfg, "dit_weight_decay", self.cfg.weight_decay)
+        )
+        self.cfg.dit_grad_clip = float(getattr(self.cfg, "dit_grad_clip", self.cfg.grad_clip))
+        self.cfg.dit_conditioning_dropout = float(
+            getattr(self.cfg, "dit_conditioning_dropout", 0.10)
+        )
+        self.cfg.dit_loss_weight = float(getattr(self.cfg, "dit_loss_weight", 1.0))
+        self.cfg.dit_prompt_suffix_token_id = int(
+            getattr(self.cfg, "dit_prompt_suffix_token_id", 151665)
+        )
         self._setup_distributed()
         _set_global_seed(config.seed + self.rank, deterministic=config.deterministic)
 
@@ -513,6 +529,25 @@ class GenerationSelfEvolvingTrainer:
                 adapter_name="generator" if config.use_lora else None,
                 reference_model=reference_model,
             )
+        self.dit_updater: Optional[DiTUpdater] = None
+        if bool(getattr(self.cfg, "dit_update_enabled", False)):
+            try:
+                self.dit_updater = DiTUpdater(
+                    model=self.train_model,
+                    processor=self.processor,
+                    config=config,
+                )
+                if self.is_main_process:
+                    print(
+                        "[Generation] DiT updater active: "
+                        f"freq={self.cfg.dit_update_freq}, lr={self.cfg.dit_lr:g}, "
+                        f"grad_accum={self.cfg.dit_grad_accum_steps}"
+                    )
+            except Exception as exc:
+                self.dit_updater = None
+                self.cfg.dit_update_enabled = False
+                if self.is_main_process:
+                    print(f"[Generation] WARNING: failed to initialize DiT updater, disabling it: {exc}")
 
         self.generator_baseline = 0.0
         self.proposer_baseline = 0.0
@@ -521,7 +556,7 @@ class GenerationSelfEvolvingTrainer:
         self.start_step = max(0, int(config.start_step))
 
         self._metric_stats: Dict[str, Dict[str, float]] = {}
-        self._policy_update_counts: Dict[str, int] = {"solver": 0, "proposer": 0, "generator": 0}
+        self._policy_update_counts: Dict[str, int] = {"solver": 0, "proposer": 0, "generator": 0, "dit": 0}
         self._generator_update_mode_counts: Dict[str, int] = {
             "token_trace": 0,
             "proxy_caption": 0,
@@ -739,6 +774,8 @@ class GenerationSelfEvolvingTrainer:
                     "step_id": state.get("generator_updater_step", state.get("step", 0)),
                 }
             )
+        if self.dit_updater is not None and "dit_updater" in state:
+            self.dit_updater.load_state_dict(state["dit_updater"])
 
         self.solver_baseline = float(state.get("solver_baseline", self.solver_baseline))
         self.proposer_baseline = float(state.get("proposer_baseline", self.proposer_baseline))
@@ -801,6 +838,8 @@ class GenerationSelfEvolvingTrainer:
         if self.solver_updater is not None:
             state["solver_updater"] = self.solver_updater.state_dict()
             state["solver_baseline"] = float(self.solver_baseline)
+        if self.dit_updater is not None:
+            state["dit_updater"] = self.dit_updater.state_dict()
         if torch.cuda.is_available():
             try:
                 state["torch_cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
@@ -888,6 +927,25 @@ class GenerationSelfEvolvingTrainer:
                     param.requires_grad_(False)
 
             model.print_trainable_parameters()
+
+        if bool(getattr(self.cfg, "dit_update_enabled", False)):
+            try:
+                core_model = _unwrap_model(model).get_model()
+                dit_module = getattr(core_model, "dit", None)
+                if dit_module is None:
+                    if self.is_main_process:
+                        print("[Generation] WARNING: --dit_update_enabled set but model has no `dit`; disabling DiT updates.")
+                    self.cfg.dit_update_enabled = False
+                else:
+                    if self.is_main_process:
+                        print(
+                            "[Generation] DiT module detected. "
+                            "DiT params will be unfrozen after DDP setup by the DiT updater."
+                        )
+            except Exception as exc:
+                if self.is_main_process:
+                    print(f"[Generation] WARNING: failed to enable DiT training params: {exc}")
+                self.cfg.dit_update_enabled = False
 
         # Activation checkpointing significantly reduces training-time memory.
         gc_enabled = os.environ.get("SE_USE_GRADIENT_CHECKPOINTING", "1").strip().lower() not in {"0", "false", "no"}
@@ -2766,6 +2824,7 @@ class GenerationSelfEvolvingTrainer:
                 "solver_updater_step": self.solver_updater.step_id if self.solver_updater is not None else None,
                 "proposer_updater_step": self.proposer_updater.step_id,
                 "generator_updater_step": self.generator_updater.step_id,
+                "dit_updater_step": self.dit_updater.step_id if self.dit_updater is not None else None,
             },
         )
         with (tmp_dir / "SAVE_OK").open("w", encoding="utf-8") as f:
@@ -2838,6 +2897,7 @@ class GenerationSelfEvolvingTrainer:
         generator_update_mode: Optional[str],
         proposer_stats: Optional[Dict[str, float]],
         generator_stats: Optional[Dict[str, float]],
+        dit_stats: Optional[Dict[str, float]] = None,
         unicorn_spec_meta: Optional[Dict[str, object]] = None,
         unicorn_reconstruction: Optional[Dict[str, object]] = None,
     ):
@@ -2926,6 +2986,13 @@ class GenerationSelfEvolvingTrainer:
                         "generator/advantage": generator_stats.get("advantage"),
                     }
                 )
+        if dit_stats:
+            metrics["train/dit_update_skipped"] = 1.0 if dit_stats.get("skipped_reason") else 0.0
+            metrics["train/dit_update_applied"] = 1.0 if bool(dit_stats.get("did_step", False)) else 0.0
+            metrics["dit/loss"] = float(dit_stats.get("loss", 0.0))
+            metrics["dit/valid_latent_tokens"] = float(dit_stats.get("valid_latent_tokens", 0.0))
+            if dit_stats.get("skipped_reason"):
+                metrics["train/dit_skip_reason"] = str(dit_stats.get("skipped_reason"))
 
         if (
             self.cfg.wandb_log_images_every > 0
@@ -3053,6 +3120,9 @@ class GenerationSelfEvolvingTrainer:
         generator_stats = None
         generator_skipped_reason = None
         generator_update_mode = None
+        dit_stats = None
+        dit_update_due = False
+        dit_skip_reason = None
 
         def _global_update_ready(
             local_ready: bool,
@@ -3683,6 +3753,36 @@ class GenerationSelfEvolvingTrainer:
         unicorn_reconstruction["enqueued_this_step"] = int(unicorn_recon_enqueued)
         unicorn_reconstruction["buffer_size_after_step"] = int(len(self._unicorn_reconstruction_buffer))
 
+        if self.dit_updater is not None and self.cfg.dit_update_freq > 0:
+            dit_update_due = bool(step % int(self.cfg.dit_update_freq) == 0)
+            if dit_update_due:
+                dit_stats = self.dit_updater.step(
+                    image=image,
+                    prompt=str(spec.prompt),
+                    device=self.device,
+                )
+                dit_skip_reason = (
+                    str(dit_stats.get("skipped_reason"))
+                    if dit_stats.get("skipped_reason") is not None
+                    else None
+                )
+                if bool(dit_stats.get("did_step", False)):
+                    self._policy_update_counts["dit"] += 1
+                self._append_jsonl(
+                    self.policy_updates_log_path,
+                    {
+                        "step": step,
+                        "role": "dit",
+                        "update_due": True,
+                        "skipped": bool(dit_skip_reason),
+                        "reason": dit_skip_reason,
+                        "prompt": spec.prompt,
+                        "stats": dit_stats,
+                    },
+                )
+            else:
+                dit_skip_reason = "update_not_due"
+
         self._sync_state_scalars()
 
         self._save_candidate_images(step=step, scored=scored, best_idx=best_idx)
@@ -3764,6 +3864,9 @@ class GenerationSelfEvolvingTrainer:
                 "generator_proxy_ratio": float(self._current_proxy_ratio()),
                 "unicorn_spec_meta": unicorn_spec_meta,
                 "unicorn_reconstruction": unicorn_reconstruction,
+                "dit_update_due": dit_update_due,
+                "dit_skip_reason": dit_skip_reason,
+                "dit_stats": dit_stats,
                 "proposer_update_due": proposer_update_due,
                 "proposer_skip_reason": proposer_skip_reason,
                 "proposer_reward": proposer_reward,
@@ -3789,6 +3892,9 @@ class GenerationSelfEvolvingTrainer:
             "generator_proxy_ratio": float(self._current_proxy_ratio()),
             "unicorn_spec_meta": unicorn_spec_meta,
             "unicorn_reconstruction": unicorn_reconstruction,
+            "dit_update_due": dit_update_due,
+            "dit_skip_reason": dit_skip_reason,
+            "dit_stats": dit_stats,
             "proposer_update_due": proposer_update_due,
             "proposer_skip_reason": proposer_skip_reason,
             "proposer_reward": proposer_reward,
@@ -3988,6 +4094,9 @@ class GenerationSelfEvolvingTrainer:
                         "proposer_kl_coef": self.proposer_updater.kl_coef,
                         "solver_kl_coef": self.solver_updater.kl_coef if self.solver_updater is not None else None,
                         "generator_skipped_reason": out.get("generator_skipped_reason"),
+                        "dit_update_due": out.get("dit_update_due"),
+                        "dit_skip_reason": out.get("dit_skip_reason"),
+                        "dit_stats": out.get("dit_stats"),
                         "unicorn_spec_meta": out.get("unicorn_spec_meta"),
                         "unicorn_reconstruction": out.get("unicorn_reconstruction"),
                         "step_duration_sec": step_duration_sec,
@@ -4013,6 +4122,7 @@ class GenerationSelfEvolvingTrainer:
                     generator_update_mode=out.get("generator_update_mode"),
                     proposer_stats=out["proposer_stats"],
                     generator_stats=out["generator_stats"],
+                    dit_stats=out.get("dit_stats"),
                     unicorn_spec_meta=out.get("unicorn_spec_meta"),
                     unicorn_reconstruction=out.get("unicorn_reconstruction"),
                 )
@@ -4041,6 +4151,18 @@ class GenerationSelfEvolvingTrainer:
                     "unicorn_reconstruction_applied_updates",
                     float(unicorn_recon.get("applied_updates", 0.0)),
                 )
+                dit_stats = out.get("dit_stats") or {}
+                self._update_metric(
+                    "dit_update_applied",
+                    1.0 if bool(dit_stats.get("did_step", False)) else 0.0,
+                )
+                if "loss" in dit_stats:
+                    try:
+                        dit_loss_val = float(dit_stats.get("loss", 0.0))
+                        if math.isfinite(dit_loss_val):
+                            self._update_metric("dit_loss", dit_loss_val)
+                    except Exception:
+                        pass
 
                 if cfg.save_every > 0 and step % cfg.save_every == 0:
                     self._dist_barrier()
