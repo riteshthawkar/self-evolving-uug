@@ -2497,11 +2497,10 @@ class GenerationSelfEvolvingTrainer:
         # reference answer follows as if the model had generated it.
         full_text = solver_prompt_chat + ref_ans_stripped
 
-        # Use the trained solver LoRA to score candidates so that
-        # understanding improvements flow into generation scoring
-        # (mutual supervision).  The solver is grounded by majority-vote
-        # training on real images, preventing co-adaptation.
-        model = self.train_model if hasattr(self, "train_model") else self.model
+        # IMPORTANT: use the local (unwrapped) model for no-grad scoring.
+        # Using DDP-wrapped forward here can deadlock in ref-scoring paths
+        # where per-rank forward counts/timings diverge.
+        model = self.model
         if self.cfg.use_lora:
             adapter = "default"  # trained solver adapter
         else:
@@ -2576,13 +2575,22 @@ class GenerationSelfEvolvingTrainer:
             scored = [
                 {
                     "candidate_idx": idx,
-                    "total_reward": 0.0,
-                    "ref_answer_logps": [],
-                    "image": cand.get("image"),
+                    "backend": cand.get("backend"),
                     "policy_prompt": cand.get("policy_prompt", spec.prompt),
                     "policy_completion": cand.get("policy_completion", ""),
                     "policy_completion_ids": cand.get("policy_completion_ids"),
-                    "backend": cand.get("backend"),
+                    "spec_score": 0.0,
+                    "contradiction_score": 0.0,
+                    "cycle_score": 0.0,
+                    "cycle_caption": "",
+                    "diversity_score": 0.0,
+                    "base_reward": 0.0,
+                    "spec_quality": 1.0,
+                    "qa_confidence": 0.0,
+                    "qa_logs": [],
+                    "total_reward": 0.0,
+                    "ref_answer_logps": [],
+                    "image": cand.get("image"),
                 }
                 for idx, cand in enumerate(candidates)
             ]
@@ -2622,13 +2630,22 @@ class GenerationSelfEvolvingTrainer:
                 scored.append(
                     {
                         "candidate_idx": idx,
-                        "total_reward": -10.0,
-                        "ref_answer_logps": [],
-                        "image": cand_image,
+                        "backend": cand.get("backend"),
                         "policy_prompt": cand.get("policy_prompt", spec.prompt),
                         "policy_completion": cand.get("policy_completion", ""),
                         "policy_completion_ids": cand.get("policy_completion_ids"),
-                        "backend": cand.get("backend"),
+                        "spec_score": 0.0,
+                        "contradiction_score": 0.0,
+                        "cycle_score": 0.0,
+                        "cycle_caption": "",
+                        "diversity_score": 0.0,
+                        "base_reward": -10.0,
+                        "spec_quality": 1.0,
+                        "qa_confidence": 0.0,
+                        "qa_logs": [],
+                        "total_reward": -10.0,
+                        "ref_answer_logps": [],
+                        "image": cand_image,
                     }
                 )
                 continue
@@ -2660,6 +2677,7 @@ class GenerationSelfEvolvingTrainer:
                     # Compat keys for logging (not used in ref-answer mode)
                     "spec_score": 0.0,
                     "cycle_score": 0.0,
+                    "cycle_caption": "",
                     "diversity_score": 0.0,
                     "contradiction_score": 0.0,
                     "base_reward": reward,
@@ -3810,7 +3828,7 @@ class GenerationSelfEvolvingTrainer:
         )
 
         for cand in scored:
-            qa_logs = cand["qa_logs"]
+            qa_logs = cand.get("qa_logs", [])
             self._append_jsonl(
                 self.candidates_log_path,
                 {
@@ -3821,15 +3839,15 @@ class GenerationSelfEvolvingTrainer:
                     "backend": cand.get("backend"),
                     "policy_prompt": cand.get("policy_prompt"),
                     "policy_completion": cand.get("policy_completion"),
-                    "spec_score": cand["spec_score"],
-                    "contradiction_score": cand["contradiction_score"],
-                    "cycle_score": cand["cycle_score"],
-                    "cycle_caption": cand["cycle_caption"],
-                    "diversity_score": cand["diversity_score"],
+                    "spec_score": cand.get("spec_score", 0.0),
+                    "contradiction_score": cand.get("contradiction_score", 0.0),
+                    "cycle_score": cand.get("cycle_score", 0.0),
+                    "cycle_caption": cand.get("cycle_caption", ""),
+                    "diversity_score": cand.get("diversity_score", 0.0),
                     "qa_confidence": cand.get("qa_confidence", 0.0),
-                    "base_reward": cand["base_reward"],
-                    "spec_quality": cand["spec_quality"],
-                    "total_reward": cand["total_reward"],
+                    "base_reward": cand.get("base_reward", 0.0),
+                    "spec_quality": cand.get("spec_quality", 1.0),
+                    "total_reward": cand.get("total_reward", 0.0),
                     "qa_logs": qa_logs,
                 },
             )
