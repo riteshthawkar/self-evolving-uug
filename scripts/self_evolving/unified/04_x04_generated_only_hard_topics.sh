@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Experiment X04
+# No unlabeled real-image pool.
+# Use synthetic seed images to bootstrap generation, then train understanding
+# from generated data only.
+
+REPO_ROOT="/Users/ritesh.thawkar/Ritesh/self-evolving-uug"
+PYTHON_BIN="python3"
+SYNTH_SEED_DIR="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/runs/unified_experiments/synth_seed_pool_x04"
+GENERATED_MIX_DIR="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/runs/unified_experiments/generated_mix_pool_x04"
+OUTPUT_DIR="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/runs/unified_experiments/X04_generated_only_hard_topics"
+RUN_NAME="x04_generated_only_hard_topics_s42_fixed"
+
+cd "$REPO_ROOT"
+mkdir -p "$SYNTH_SEED_DIR"
+mkdir -p "$GENERATED_MIX_DIR"
+mkdir -p "$OUTPUT_DIR"
+# Prevent cross-run contamination from previous seeds/generated pools.
+find "$SYNTH_SEED_DIR" -maxdepth 1 -type f -name "*.png" -delete
+find "$GENERATED_MIX_DIR" -maxdepth 1 -type f \( -name "*.json" -o -name "*.png" \) -delete
+
+# Build synthetic bootstrap pool.
+"$PYTHON_BIN" - <<'PY'
+import random
+from pathlib import Path
+from PIL import Image, ImageDraw
+
+root = Path("/Users/ritesh.thawkar/Ritesh/self-evolving-uug/runs/unified_experiments/synth_seed_pool_x04")
+root.mkdir(parents=True, exist_ok=True)
+random.seed(42)
+for i in range(96):
+    w, h = 1024, 1024
+    bg = tuple(random.randint(20, 235) for _ in range(3))
+    img = Image.new("RGB", (w, h), bg)
+    draw = ImageDraw.Draw(img)
+    for _ in range(7):
+        x0 = random.randint(0, w - 240)
+        y0 = random.randint(0, h - 240)
+        x1 = x0 + random.randint(120, 360)
+        y1 = y0 + random.randint(120, 360)
+        c = tuple(random.randint(10, 245) for _ in range(3))
+        draw.rectangle((x0, y0, x1, y1), outline=c, width=7)
+    draw.text((28, 28), f"SYNTH_SEED_{i:02d}", fill=(255, 255, 255))
+    img.save(root / f"seed_{i:02d}.png")
+PY
+
+export PYTHONPATH="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/BLIP3o"
+export HF_HOME="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
+export HUGGINGFACE_HUB_CACHE="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
+export HF_DATASETS_CACHE="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
+export HF_METRICS_CACHE="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
+export TORCH_HOME="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
+export TRITON_CACHE_DIR="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
+export XDG_CACHE_HOME="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
+export TOKENIZERS_PARALLELISM="false"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256"
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_BLOCKING_WAIT=1
+export TORCH_NCCL_TRACE_BUFFER_SIZE=1048576
+export TORCH_DISTRIBUTED_DEBUG="OFF"
+export NCCL_DEBUG="WARN"
+export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+
+"$PYTHON_BIN" -m torch.distributed.run \
+  --standalone \
+  --nproc_per_node 8 \
+  --master_port 29524 \
+  "/Users/ritesh.thawkar/Ritesh/self-evolving-uug/BLIP3o/blip3o/train/train_self_evolving.py" \
+  --experiment unified_self_evolving \
+  --data_dir "$SYNTH_SEED_DIR" \
+  --data_split all \
+  --model_name BLIP3o/BLIP3o-Model-8B \
+  --output_dir "$OUTPUT_DIR" \
+  --run_name "$RUN_NAME" \
+  --dtype bfloat16 \
+  --attn_implementation sdpa \
+  --device_map single \
+  --cuda_device 0 \
+  --total_steps 10000 \
+  --save_every 500 \
+  --log_every 1 \
+  --max_checkpoints 5 \
+  --save_generated_images_every 500 \
+  --deterministic \
+  --require_decoder_for_blip3o \
+  --use_lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lr 1e-6 \
+  --weight_decay 0.01 \
+  --grad_clip 1.0 \
+  --grad_accum_steps 4 \
+  --proposer_update_freq 1 \
+  --generator_update_freq 1 \
+  --generator_update_rule grpo \
+  --enable_solver_updates \
+  --solver_update_freq 2 \
+  --temp 1.0 \
+  --top_p 1.0 \
+  --max_new_tokens_solver 96 \
+  --max_new_tokens_proposer 192 \
+  --max_new_tokens_caption 64 \
+  --max_new_tokens_generator 512 \
+  --num_solver_samples 7 \
+  --num_solver_samples_spec 2 \
+  --num_generations 3 \
+  --generation_num_inference_steps 20 \
+  --generation_guidance_scale 2.0 \
+  --allow_missing_generation_tokens \
+  --generator_missing_trace_strategy proxy \
+  --generator_proxy_max_ratio 1.0 \
+  --acceptance_require_target_bucket \
+  --disable_difficulty_sampler \
+  --proposer_hardening_max_retries 3 \
+  --proposer_force_hardening_max_retries 2 \
+  --solver_skip_update_on_easy \
+  --reward_spec_weight 0.65 \
+  --reward_cycle_weight 0.20 \
+  --reward_diversity_weight 0.10 \
+  --reward_contradiction_weight 0.20 \
+  --min_spec_quality_for_update 0.35 \
+  --min_spec_qa_pairs 2 \
+  --max_expected_words 8 \
+  --max_question_words 24 \
+  --solver_soft_gamma 0.7 \
+  --solver_use_temperature_mix \
+  --solver_temp_min 0.7 \
+  --solver_temp_max 1.3 \
+  --sc_entropy_min 0.15 \
+  --sc_entropy_max 1.20 \
+  --sc_margin_max 0.90 \
+  --sc_negative_weight 0.25 \
+  --skip_solver_update_when_uninformative \
+  --adaptive_prop_entropy_target \
+  --prop_entropy_ema_momentum 0.90 \
+  --prop_entropy_mu_min 0.40 \
+  --prop_entropy_mu_max 1.50 \
+  --len_penalty_weight 0.10 \
+  --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
+  --prop_entropy_sigma 0.35 \
+  --understanding_steps_per_cycle 3 \
+  --generation_steps_per_cycle 2 \
+  --synthetic_solver_update_freq 2 \
+  --solver_hardness_min_entropy 0.20 \
+  --kl_coef 0.01 \
+  --kl_target 0.02 \
+  --kl_adapt_rate 0.10 \
+  --kl_min 1e-8 \
+  --kl_max 1e2 \
+  --baseline_momentum 0.9 \
+  --clear_cache_every 10 \
+  --use_ref_answer_scoring \
+  --replay_buffer_size 1000 \
+  --replay_min_reward 0.50 \
+  --replay_max_staleness 500 \
+  --gen_mix_source_mode folder \
+  --generated_mix_dir "$GENERATED_MIX_DIR" \
+  --generated_mix_min_reward 0.20 \
+  --generated_mix_max_files 10000 \
+  --generated_mix_refresh_every 2 \
+  --understanding_generated_only \
+  --unicorn_target_difficulty hard \
+  --gen_mix_ratio_start 1.0 \
+  --gen_mix_ratio_max 1.0 \
+  --gen_mix_ratio_warmup_steps 1 \
+  --wandb_mode disabled \
+  --wandb_project self-evolving-uug-unified \
+  --wandb_run_name "$RUN_NAME" \
+  --seed 42

@@ -6,13 +6,15 @@ Extends GenerationSelfEvolvingTrainer with an interleaved understanding phase.
 """
 
 import gc
+import json
 import math
+import pathlib
 import random
 import re
 import time
 import traceback
 from collections import deque
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -89,15 +91,36 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self.ucfg = config
 
         # ---- Self-evolving feedback loop state ---- #
-        # Always create replay buffer — generated images mix into understanding
-        _buf_size = getattr(config, "replay_buffer_size", 1000)
-        _buf_min_r = getattr(config, "replay_min_reward", 0.5)
-        _buf_stale = getattr(config, "replay_max_staleness", 500)
-        self.replay_buffer = ReplayBuffer(
-            max_size=_buf_size,
-            min_reward=_buf_min_r,
-            max_staleness=_buf_stale,
+        # Generated pool mode for understanding mixing.
+        _mode = str(getattr(config, "gen_mix_source_mode", "buffer") or "buffer").strip().lower()
+        if _mode not in {"buffer", "folder"}:
+            _mode = "buffer"
+        self._gen_mix_source_mode = _mode
+        self._understanding_generated_only = bool(
+            getattr(config, "understanding_generated_only", False)
         )
+        # Replay buffer is only active in buffer mode.
+        if self._gen_mix_source_mode == "buffer":
+            _buf_size = getattr(config, "replay_buffer_size", 1000)
+            _buf_min_r = getattr(config, "replay_min_reward", 0.5)
+            _buf_stale = getattr(config, "replay_max_staleness", 500)
+            self.replay_buffer = ReplayBuffer(
+                max_size=_buf_size,
+                min_reward=_buf_min_r,
+                max_staleness=_buf_stale,
+            )
+        else:
+            self.replay_buffer = None
+
+        _generated_dir = getattr(config, "generated_mix_dir", None)
+        if _generated_dir:
+            self._generated_mix_dir = pathlib.Path(_generated_dir).expanduser().resolve()
+        else:
+            self._generated_mix_dir = (self.run_dir / "generated_mix_pool").resolve()
+        self._generated_mix_cache: List[Dict[str, Any]] = []
+        self._generated_mix_last_refresh_step = -10**9
+        if self._gen_mix_source_mode == "folder" or self._understanding_generated_only:
+            self._generated_mix_dir.mkdir(parents=True, exist_ok=True)
 
         # Generator reward EMA for monitoring
         self._gen_reward_ema = float(getattr(self, "_gen_reward_ema", 0.0))
@@ -1021,7 +1044,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         state["unified_difficulty_window"] = list(self._difficulty_window)
         # Replay buffer metadata (not the images — too large for checkpoint;
         # the buffer refills naturally after resume).
-        state["unified_replay_buffer_len"] = len(self.replay_buffer)
+        state["unified_replay_buffer_len"] = len(self.replay_buffer) if self.replay_buffer is not None else 0
+        state["unified_gen_mix_source_mode"] = self._gen_mix_source_mode
+        state["unified_understanding_generated_only"] = self._understanding_generated_only
+        state["unified_generated_mix_dir"] = str(self._generated_mix_dir)
+        state["unified_generated_mix_cache_len"] = len(self._generated_mix_cache)
         return state
 
     def _maybe_resume_state(self):
@@ -1069,7 +1096,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 print(
                     f"[Unified] Restored self-evolving state: "
                     f"gen_reward_ema={self._gen_reward_ema:.4f}, "
-                    f"replay_buf_was={state.get('unified_replay_buffer_len', 0)}"
+                    f"replay_buf_was={state.get('unified_replay_buffer_len', 0)}, "
+                    f"generated_mix_cache_was={state.get('unified_generated_mix_cache_len', 0)}"
                 )
 
         return restored_step
@@ -1092,6 +1120,239 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         elapsed = max(0, step - self.start_step)
         t = min(1.0, elapsed / warmup)
         return start + t * (mx - start)
+
+    @staticmethod
+    def _normalized_mix_reward(raw_reward: float, use_ref_scoring: bool) -> float:
+        """Normalize reward used for generated-image quality gating."""
+        if not use_ref_scoring:
+            return float(raw_reward)
+        # Same mapping used by replay-buffer integration in generation_trainer.
+        try:
+            return float(1.0 / (1.0 + math.exp(-(float(raw_reward) + 2.0))))
+        except OverflowError:
+            return 0.0 if float(raw_reward) < 0.0 else 1.0
+
+    def _generated_mix_min_reward(self) -> float:
+        return float(getattr(self.ucfg, "generated_mix_min_reward", 0.5))
+
+    def _read_generated_mix_meta(self, meta_path: pathlib.Path) -> Optional[Dict[str, Any]]:
+        try:
+            with meta_path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        reward = float(payload.get("reward", -1.0))
+        if reward < self._generated_mix_min_reward():
+            return None
+
+        image_path_raw = str(payload.get("image_path", "")).strip()
+        if not image_path_raw:
+            image_path = meta_path.with_suffix(".png")
+        else:
+            image_path = pathlib.Path(image_path_raw)
+            if not image_path.is_absolute():
+                image_path = (meta_path.parent / image_path).resolve()
+
+        if not image_path.exists():
+            return None
+
+        questions = payload.get("questions", [])
+        reference_answers = payload.get("reference_answers", [])
+        if not isinstance(questions, list) or not isinstance(reference_answers, list):
+            return None
+        if not questions or not reference_answers:
+            return None
+
+        n = min(len(questions), len(reference_answers))
+        if n <= 0:
+            return None
+        questions = [str(q).strip() for q in questions[:n]]
+        reference_answers = [str(a).strip() for a in reference_answers[:n]]
+        if not any(questions) or not any(reference_answers):
+            return None
+
+        return {
+            "meta_path": str(meta_path.resolve()),
+            "image_path": str(image_path.resolve()),
+            "prompt": str(payload.get("prompt", "")),
+            "questions": questions,
+            "reference_answers": reference_answers,
+            "reward": reward,
+            "step_generated": int(payload.get("step_generated", 0)),
+        }
+
+    def _refresh_generated_mix_cache(self, step: int, force: bool = False) -> None:
+        refresh_every = max(1, int(getattr(self.ucfg, "generated_mix_refresh_every", 10)))
+        if (not force) and (step - self._generated_mix_last_refresh_step < refresh_every):
+            return
+
+        entries: List[Dict[str, Any]] = []
+        if self._generated_mix_dir.exists():
+            for meta_path in sorted(self._generated_mix_dir.glob("*.json")):
+                parsed = self._read_generated_mix_meta(meta_path)
+                if parsed is not None:
+                    entries.append(parsed)
+
+        max_files = max(1, int(getattr(self.ucfg, "generated_mix_max_files", 5000)))
+        if len(entries) > max_files:
+            entries = sorted(
+                entries,
+                key=lambda e: (int(e.get("step_generated", 0)), str(e.get("meta_path", ""))),
+            )[-max_files:]
+
+        self._generated_mix_cache = entries
+        self._generated_mix_last_refresh_step = int(step)
+
+    def _sample_generated_mix_from_folder(self, step: int) -> Optional[Dict[str, Any]]:
+        self._refresh_generated_mix_cache(step=step)
+        local_count = len(self._generated_mix_cache)
+        shared_count = self._dist_min_int(local_count)
+        if shared_count <= 0:
+            return None
+
+        chosen_meta_path: Optional[str]
+        if self.is_main_process:
+            rng = random.Random(int(self.cfg.seed) + int(step) * 104729 + 17)
+            chosen_idx = rng.randint(0, shared_count - 1)
+            chosen_meta_path = str(self._generated_mix_cache[chosen_idx]["meta_path"])
+        else:
+            chosen_meta_path = None
+
+        if self.distributed and dist.is_initialized():
+            obj = [chosen_meta_path]
+            dist.broadcast_object_list(obj, src=0)
+            chosen_meta_path = str(obj[0]) if obj[0] else None
+        if not chosen_meta_path:
+            return None
+
+        parsed: Optional[Dict[str, Any]] = None
+        all_ok = False
+        # Mitigate short NFS visibility lag across DDP ranks.
+        for _ in range(3):
+            parsed = self._read_generated_mix_meta(pathlib.Path(chosen_meta_path))
+            local_ok = parsed is not None
+            all_ok = self._dist_all_bool(local_ok)
+            if all_ok and parsed is not None:
+                break
+            time.sleep(0.05)
+        if not all_ok or parsed is None:
+            return None
+
+        try:
+            with Image.open(parsed["image_path"]) as img:
+                image = img.convert("RGB")
+        except Exception:
+            return None
+
+        meta = {
+            "path": parsed["image_path"],
+            "source": "generated_folder",
+            "prompt": parsed.get("prompt", ""),
+            "questions": parsed.get("questions", []),
+            "reference_answers": parsed.get("reference_answers", []),
+            "reward": float(parsed.get("reward", 0.0)),
+            "step_generated": int(parsed.get("step_generated", 0)),
+        }
+        return {"image": image, "meta": meta}
+
+    def _prune_generated_mix_dir(self) -> None:
+        max_files = max(1, int(getattr(self.ucfg, "generated_mix_max_files", 5000)))
+        meta_files = sorted(self._generated_mix_dir.glob("*.json"))
+        if len(meta_files) <= max_files:
+            return
+        # Oldest first by mtime.
+        meta_files = sorted(meta_files, key=lambda p: (p.stat().st_mtime, p.name))
+        remove_count = max(0, len(meta_files) - max_files)
+        for meta_path in meta_files[:remove_count]:
+            image_candidates = [meta_path.with_suffix(".png")]
+            parsed = self._read_generated_mix_meta(meta_path)
+            if parsed is not None:
+                image_candidates.insert(0, pathlib.Path(str(parsed["image_path"])))
+            for image_path in image_candidates:
+                try:
+                    if image_path.exists():
+                        image_path.unlink()
+                except Exception:
+                    pass
+            try:
+                if meta_path.exists():
+                    meta_path.unlink()
+            except Exception:
+                pass
+
+    def _store_best_generated_to_folder(
+        self,
+        *,
+        step: int,
+        spec: GenerationSpec,
+        scored: List[Dict[str, object]],
+        best_idx: int,
+        reference_questions: Optional[List[str]] = None,
+        reference_answers: Optional[List[str]] = None,
+    ) -> None:
+        if not self.is_main_process:
+            return
+        if best_idx < 0 or best_idx >= len(scored):
+            return
+
+        best = scored[best_idx]
+        image = best.get("image")
+        if not isinstance(image, Image.Image):
+            return
+
+        if isinstance(reference_questions, list) and isinstance(reference_answers, list):
+            paired = [
+                (str(q).strip(), str(a).strip())
+                for q, a in zip(reference_questions, reference_answers)
+            ]
+            paired = [(q, a) for q, a in paired if q and a]
+            questions = [q for q, _ in paired]
+            answers = [a for _, a in paired]
+        else:
+            questions = [str(qa.question).strip() for qa in spec.qa_pairs if str(qa.question).strip()]
+            answers = [str(qa.expected).strip() for qa in spec.qa_pairs if str(qa.expected).strip()]
+        n = min(len(questions), len(answers))
+        if n <= 0:
+            return
+        questions = questions[:n]
+        answers = answers[:n]
+
+        use_ref_scoring = bool(getattr(self.ucfg, "use_ref_answer_scoring", False))
+        raw_reward = float(best.get("total_reward", 0.0))
+        reward = self._normalized_mix_reward(raw_reward, use_ref_scoring)
+        if reward < self._generated_mix_min_reward():
+            return
+
+        self._generated_mix_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"s{int(step):07d}_{int(time.time() * 1000)}_{random.randint(0, 999999):06d}"
+        image_path = self._generated_mix_dir / f"{stem}.png"
+        meta_path = self._generated_mix_dir / f"{stem}.json"
+
+        try:
+            image.convert("RGB").save(image_path, format="PNG")
+        except Exception:
+            return
+
+        _json_dump(
+            meta_path,
+            {
+                "step_generated": int(step),
+                "prompt": str(spec.prompt),
+                "questions": questions,
+                "reference_answers": answers,
+                "reward": float(reward),
+                "raw_reward": float(raw_reward),
+                "use_ref_answer_scoring": use_ref_scoring,
+                "best_idx": int(best_idx),
+                "num_candidates": int(len(scored)),
+                "image_path": str(image_path),
+            },
+        )
+        self._generated_mix_last_refresh_step = -10**9
+        self._prune_generated_mix_dir()
 
     def _update_gen_reward_ema(self, reward_mean: float) -> None:
         """Update the exponential moving average of generator reward."""
@@ -1121,8 +1382,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             )
             print(
                 f"[Unified] Ref-answer scoring: {getattr(cfg, 'use_ref_answer_scoring', False)}, "
-                f"Replay buffer: size={getattr(cfg, 'replay_buffer_size', 0)}, "
+                f"Replay buffer: size={len(self.replay_buffer) if self.replay_buffer is not None else 0}, "
                 f"Mix ratio: {getattr(cfg, 'gen_mix_ratio_start', 0)}->{getattr(cfg, 'gen_mix_ratio_max', 0)}"
+            )
+            print(
+                f"[Unified] Gen-mix source mode: {self._gen_mix_source_mode}, "
+                f"generated_only={self._understanding_generated_only}, "
+                f"generated_mix_dir={self._generated_mix_dir}"
             )
 
         last_completed_step = self.start_step
@@ -1137,37 +1403,60 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
 
                 phase_idx = (step - 1) % cycle
                 if phase_idx < cfg.understanding_steps_per_cycle:
-                    # ---- Phase 2: optionally mix generated images ---- #
-                    # Use a step-seeded RNG so ALL DDP ranks make the same
-                    # real-vs-replay decision and pick the same buffer index.
-                    # This prevents rank-divergent training data.
+                    # ---- Understanding phase: optional generated-image mix ---- #
                     _gen_mix = self._current_gen_mix_ratio(step)
-                    if (
-                        _gen_mix > 0
+                    _step_rng = random.Random(cfg.seed + step)
+                    _want_generated = bool(self._understanding_generated_only)
+                    if not _want_generated and _gen_mix > 0.0:
+                        _want_generated = bool(_step_rng.random() < _gen_mix)
+
+                    _used_generated = False
+                    if _want_generated and self._gen_mix_source_mode == "folder":
+                        folder_sample = self._sample_generated_mix_from_folder(step=step)
+                        if folder_sample is not None:
+                            image = folder_sample["image"]
+                            meta = folder_sample["meta"]
+                            _data_source = "generated_folder"
+                            _used_generated = True
+                    elif (
+                        _want_generated
+                        and self._gen_mix_source_mode == "buffer"
                         and self.replay_buffer
                         and len(self.replay_buffer) > 0
                     ):
-                        _step_rng = random.Random(cfg.seed + step)
-                        _use_replay = _step_rng.random() < _gen_mix
-                        if _use_replay:
-                            _buf_idx = _step_rng.randint(0, len(self.replay_buffer) - 1)
-                            _entry = self.replay_buffer._entries[_buf_idx]
-                            image = _entry.image
-                            meta = {
-                                "source": "replay_buffer",
-                                "prompt": _entry.prompt,
-                                "questions": _entry.questions,
-                                "reference_answers": _entry.reference_answers,
-                                "reward": _entry.reward,
-                                "step_generated": _entry.step_generated,
-                            }
-                            _data_source = "replay_buffer"
-                        else:
-                            meta["source"] = "real"
-                    else:
-                        meta["source"] = "real"
+                        _buf_idx = _step_rng.randint(0, len(self.replay_buffer) - 1)
+                        _entry = self.replay_buffer._entries[_buf_idx]
+                        image = _entry.image
+                        meta = {
+                            "path": None,
+                            "source": "replay_buffer",
+                            "prompt": _entry.prompt,
+                            "questions": _entry.questions,
+                            "reference_answers": _entry.reference_answers,
+                            "reward": _entry.reward,
+                            "step_generated": _entry.step_generated,
+                        }
+                        _data_source = "replay_buffer"
+                        _used_generated = True
 
-                    self._understanding_step(step=step, image=image, meta=meta)
+                    if self._understanding_generated_only and not _used_generated:
+                        _data_source = "generated_pool_empty_skip"
+                        self._append_jsonl(
+                            self.iter_log_path,
+                            {
+                                "step": step,
+                                "phase": "understanding",
+                                "image_path": meta.get("path"),
+                                "skip_reason": "generated_pool_empty",
+                                "gen_mix_source_mode": self._gen_mix_source_mode,
+                                "understanding_generated_only": True,
+                            },
+                        )
+                    else:
+                        if not _used_generated:
+                            meta["source"] = "real"
+                            _data_source = "real"
+                        self._understanding_step(step=step, image=image, meta=meta)
                 else:
                     phase_tag = "G"
                     out = self._generation_step(step=step, image=image, meta=meta)
@@ -1176,6 +1465,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     scored: List[Dict[str, object]] = out["scored"]
                     spec_quality = float(out.get("spec_quality", 0.0))
                     best_idx = int(out["best_idx"])
+                    if self._gen_mix_source_mode == "folder":
+                        self._store_best_generated_to_folder(
+                            step=step,
+                            spec=spec,
+                            scored=scored,
+                            best_idx=best_idx,
+                            reference_questions=out.get("reference_questions"),
+                            reference_answers=out.get("reference_answers"),
+                        )
                     if cfg.synthetic_solver_update_freq > 0 and step % cfg.synthetic_solver_update_freq == 0:
                         self._solver_synthetic_update_from_best(step, scored[best_idx])
 
@@ -1214,6 +1512,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             "generator_update_rule": self.cfg.generator_update_rule,
                             "generator_update_mode": out.get("generator_update_mode"),
                             "generator_skipped_reason": out.get("generator_skipped_reason"),
+                            "unicorn_spec_meta": out.get("unicorn_spec_meta"),
+                            "unicorn_reconstruction": out.get("unicorn_reconstruction"),
                             "proposer_update_due": out.get("proposer_update_due"),
                             "proposer_skip_reason": out.get("proposer_skip_reason"),
                             "proposer_stats": out.get("proposer_stats"),
@@ -1242,14 +1542,21 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         generator_update_mode=out.get("generator_update_mode"),
                         proposer_stats=out.get("proposer_stats"),
                         generator_stats=out.get("generator_stats"),
+                        unicorn_spec_meta=out.get("unicorn_spec_meta"),
+                        unicorn_reconstruction=out.get("unicorn_reconstruction"),
                     )
 
                 if self.is_main_process:
                     step_dt = time.perf_counter() - step_t0
                     _src = _data_source if phase_tag == "U" else ""
                     _mix_info = ""
-                    if phase_tag == "U" and _src == "replay_buffer":
-                        _mix_info = f" [replay_buf, mix={self._current_gen_mix_ratio(step):.2f}]"
+                    if phase_tag == "U":
+                        if _src == "replay_buffer":
+                            _mix_info = f" [replay_buf, mix={self._current_gen_mix_ratio(step):.2f}]"
+                        elif _src == "generated_folder":
+                            _mix_info = f" [generated_folder, mix={self._current_gen_mix_ratio(step):.2f}]"
+                        elif _src == "generated_pool_empty_skip":
+                            _mix_info = " [generated_pool_empty -> U-skip]"
                     _ema_info = ""
                     if self._gen_reward_ema_initialized:
                         _ema_info = f" ema_r={self._gen_reward_ema:.4f}"

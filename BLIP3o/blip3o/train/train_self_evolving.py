@@ -129,14 +129,14 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="proposer_hardening_on_easy",
         action="store_false",
     )
-    p.add_argument("--proposer_hardening_max_retries", type=int, default=2)
+    p.add_argument("--proposer_hardening_max_retries", type=int, default=3)
     p.add_argument("--proposer_force_hardening_on_failure", action="store_true", default=True)
     p.add_argument(
         "--disable_proposer_force_hardening_on_failure",
         dest="proposer_force_hardening_on_failure",
         action="store_false",
     )
-    p.add_argument("--proposer_force_hardening_max_retries", type=int, default=1)
+    p.add_argument("--proposer_force_hardening_max_retries", type=int, default=2)
     p.add_argument("--solver_skip_update_on_easy", action="store_true", default=True)
     p.add_argument(
         "--allow_solver_update_on_easy",
@@ -150,7 +150,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="acceptance_require_non_easy",
         action="store_false",
     )
-    p.add_argument("--acceptance_require_target_bucket", action="store_true", default=False)
+    p.add_argument("--acceptance_require_target_bucket", action="store_true", default=True)
+    p.add_argument(
+        "--disable_acceptance_require_target_bucket",
+        dest="acceptance_require_target_bucket",
+        action="store_false",
+    )
     p.add_argument("--rejected_question_penalty", type=float, default=0.35)
     p.add_argument("--entropy_iqr_filter_enabled", action="store_true", default=True)
     p.add_argument(
@@ -165,7 +170,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--entropy_iqr_min_threshold", type=float, default=0.02)
     p.add_argument("--entropy_iqr_max_threshold", type=float, default=1.2)
     p.add_argument("--entropy_iqr_filter_min_majority_frac", type=float, default=0.80)
-    p.add_argument("--difficulty_sampler_enabled", action="store_true", default=True)
+    p.add_argument("--difficulty_sampler_enabled", action="store_true", default=False)
     p.add_argument(
         "--disable_difficulty_sampler",
         dest="difficulty_sampler_enabled",
@@ -173,7 +178,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--difficulty_sampler_window_size", type=int, default=256)
     p.add_argument("--difficulty_sampler_min_samples", type=int, default=32)
-    p.add_argument("--difficulty_sampler_max_retries", type=int, default=1)
+    p.add_argument("--difficulty_sampler_max_retries", type=int, default=2)
     p.add_argument("--difficulty_target_easy", type=float, default=0.20)
     p.add_argument("--difficulty_target_medium", type=float, default=0.60)
     p.add_argument("--difficulty_target_hard", type=float, default=0.20)
@@ -239,6 +244,32 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--generator_proxy_max_ratio", type=float, default=1.0)
     p.add_argument("--grpo_clip_ratio", type=float, default=0.2)
     p.add_argument("--grpo_min_group_std", type=float, default=1e-6)
+    p.add_argument("--unicorn_generation_enabled", action="store_true", default=True)
+    p.add_argument("--disable_unicorn_generation", dest="unicorn_generation_enabled", action="store_false")
+    p.add_argument("--unicorn_target_difficulty", type=str, default="medium", choices=["easy", "medium", "hard"])
+    p.add_argument("--unicorn_spec_rejection_enabled", action="store_true", default=True)
+    p.add_argument("--disable_unicorn_spec_rejection", dest="unicorn_spec_rejection_enabled", action="store_false")
+    p.add_argument("--unicorn_spec_max_retries", type=int, default=2)
+    p.add_argument("--unicorn_spec_min_quality", type=float, default=0.55)
+    p.add_argument("--unicorn_spec_min_alignment", type=float, default=0.55)
+    p.add_argument("--unicorn_reconstruction_sft_enabled", action="store_true", default=True)
+    p.add_argument("--disable_unicorn_reconstruction_sft", dest="unicorn_reconstruction_sft_enabled", action="store_false")
+    p.add_argument("--unicorn_reconstruction_buffer_size", type=int, default=512)
+    p.add_argument("--unicorn_reconstruction_step_freq", type=int, default=1)
+    p.add_argument("--unicorn_reconstruction_updates_per_step", type=int, default=2)
+    p.add_argument("--unicorn_reconstruction_min_quality", type=float, default=0.55)
+    p.add_argument("--unicorn_reconstruction_enable_proposer", action="store_true", default=True)
+    p.add_argument(
+        "--disable_unicorn_reconstruction_proposer",
+        dest="unicorn_reconstruction_enable_proposer",
+        action="store_false",
+    )
+    p.add_argument("--unicorn_reconstruction_enable_generator", action="store_true", default=True)
+    p.add_argument(
+        "--disable_unicorn_reconstruction_generator",
+        dest="unicorn_reconstruction_enable_generator",
+        action="store_false",
+    )
 
     # Unified scheduler
     p.add_argument("--understanding_steps_per_cycle", type=int, default=3)
@@ -259,6 +290,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--replay_buffer_size", type=int, default=1000)
     p.add_argument("--replay_min_reward", type=float, default=0.5)
     p.add_argument("--replay_max_staleness", type=int, default=500)
+    p.add_argument(
+        "--gen_mix_source_mode",
+        type=str,
+        default="buffer",
+        choices=["buffer", "folder"],
+        help="Source for generation->understanding mix: in-memory replay buffer or folder-backed pool.",
+    )
+    p.add_argument(
+        "--generated_mix_dir",
+        type=str,
+        default=None,
+        help="Directory used when --gen_mix_source_mode=folder (defaults to run_dir/generated_mix_pool).",
+    )
+    p.add_argument("--generated_mix_min_reward", type=float, default=0.5)
+    p.add_argument("--generated_mix_max_files", type=int, default=5000)
+    p.add_argument("--generated_mix_refresh_every", type=int, default=10)
+    p.add_argument(
+        "--understanding_generated_only",
+        action="store_true",
+        default=False,
+        help="Use only generated images for understanding phase (skips U step when generated pool is empty).",
+    )
+    p.add_argument(
+        "--disable_understanding_generated_only",
+        dest="understanding_generated_only",
+        action="store_false",
+    )
     p.add_argument("--gen_mix_ratio_start", type=float, default=0.02)
     p.add_argument("--gen_mix_ratio_max", type=float, default=0.25)
     p.add_argument("--gen_mix_ratio_warmup_steps", type=int, default=1000)
@@ -435,6 +493,19 @@ def _build_generation_config(args):
         generator_proxy_max_ratio=args.generator_proxy_max_ratio,
         grpo_clip_ratio=args.grpo_clip_ratio,
         grpo_min_group_std=args.grpo_min_group_std,
+        unicorn_generation_enabled=args.unicorn_generation_enabled,
+        unicorn_target_difficulty=args.unicorn_target_difficulty,
+        unicorn_spec_rejection_enabled=args.unicorn_spec_rejection_enabled,
+        unicorn_spec_max_retries=args.unicorn_spec_max_retries,
+        unicorn_spec_min_quality=args.unicorn_spec_min_quality,
+        unicorn_spec_min_alignment=args.unicorn_spec_min_alignment,
+        unicorn_reconstruction_sft_enabled=args.unicorn_reconstruction_sft_enabled,
+        unicorn_reconstruction_buffer_size=args.unicorn_reconstruction_buffer_size,
+        unicorn_reconstruction_step_freq=args.unicorn_reconstruction_step_freq,
+        unicorn_reconstruction_updates_per_step=args.unicorn_reconstruction_updates_per_step,
+        unicorn_reconstruction_min_quality=args.unicorn_reconstruction_min_quality,
+        unicorn_reconstruction_enable_proposer=args.unicorn_reconstruction_enable_proposer,
+        unicorn_reconstruction_enable_generator=args.unicorn_reconstruction_enable_generator,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,
@@ -582,6 +653,19 @@ def _build_unified_config(args):
         generator_proxy_max_ratio=args.generator_proxy_max_ratio,
         grpo_clip_ratio=args.grpo_clip_ratio,
         grpo_min_group_std=args.grpo_min_group_std,
+        unicorn_generation_enabled=args.unicorn_generation_enabled,
+        unicorn_target_difficulty=args.unicorn_target_difficulty,
+        unicorn_spec_rejection_enabled=args.unicorn_spec_rejection_enabled,
+        unicorn_spec_max_retries=args.unicorn_spec_max_retries,
+        unicorn_spec_min_quality=args.unicorn_spec_min_quality,
+        unicorn_spec_min_alignment=args.unicorn_spec_min_alignment,
+        unicorn_reconstruction_sft_enabled=args.unicorn_reconstruction_sft_enabled,
+        unicorn_reconstruction_buffer_size=args.unicorn_reconstruction_buffer_size,
+        unicorn_reconstruction_step_freq=args.unicorn_reconstruction_step_freq,
+        unicorn_reconstruction_updates_per_step=args.unicorn_reconstruction_updates_per_step,
+        unicorn_reconstruction_min_quality=args.unicorn_reconstruction_min_quality,
+        unicorn_reconstruction_enable_proposer=args.unicorn_reconstruction_enable_proposer,
+        unicorn_reconstruction_enable_generator=args.unicorn_reconstruction_enable_generator,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,
@@ -678,6 +762,12 @@ def _build_unified_config(args):
         replay_buffer_size=args.replay_buffer_size,
         replay_min_reward=args.replay_min_reward,
         replay_max_staleness=args.replay_max_staleness,
+        gen_mix_source_mode=args.gen_mix_source_mode,
+        generated_mix_dir=args.generated_mix_dir,
+        generated_mix_min_reward=args.generated_mix_min_reward,
+        generated_mix_max_files=args.generated_mix_max_files,
+        generated_mix_refresh_every=args.generated_mix_refresh_every,
+        understanding_generated_only=args.understanding_generated_only,
         gen_mix_ratio_start=args.gen_mix_ratio_start,
         gen_mix_ratio_max=args.gen_mix_ratio_max,
         gen_mix_ratio_warmup_steps=args.gen_mix_ratio_warmup_steps,

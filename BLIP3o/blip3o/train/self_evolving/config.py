@@ -75,13 +75,13 @@ class UnderstandingSelfEvolvingConfig:
     proposer_non_objective_penalty: float = 0.20  # subtract from proposer reward when question is subjective/open-ended
     proposer_require_objective: bool = True
     proposer_hardening_on_easy: bool = True
-    proposer_hardening_max_retries: int = 2
+    proposer_hardening_max_retries: int = 3
     proposer_force_hardening_on_failure: bool = True
-    proposer_force_hardening_max_retries: int = 1
+    proposer_force_hardening_max_retries: int = 2
     solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
-    acceptance_require_target_bucket: bool = False
+    acceptance_require_target_bucket: bool = True
     rejected_question_penalty: float = 0.35
     entropy_iqr_filter_enabled: bool = True
     entropy_iqr_window_size: int = 256
@@ -91,10 +91,10 @@ class UnderstandingSelfEvolvingConfig:
     entropy_iqr_min_threshold: float = 0.02
     entropy_iqr_max_threshold: float = 1.2
     entropy_iqr_filter_min_majority_frac: float = 0.80
-    difficulty_sampler_enabled: bool = True
+    difficulty_sampler_enabled: bool = False
     difficulty_sampler_window_size: int = 256
     difficulty_sampler_min_samples: int = 32
-    difficulty_sampler_max_retries: int = 1
+    difficulty_sampler_max_retries: int = 2
     difficulty_target_easy: float = 0.20
     difficulty_target_medium: float = 0.60
     difficulty_target_hard: float = 0.20
@@ -202,6 +202,19 @@ class GenerationSelfEvolvingConfig:
     generator_proxy_max_ratio: float = 1.0
     grpo_clip_ratio: float = 0.2              # PPO-style importance ratio clipping for GRPO
     grpo_min_group_std: float = 1e-6          # skip GRPO update if reward std below this
+    unicorn_generation_enabled: bool = True
+    unicorn_target_difficulty: str = "medium"  # easy|medium|hard
+    unicorn_spec_rejection_enabled: bool = True
+    unicorn_spec_max_retries: int = 2
+    unicorn_spec_min_quality: float = 0.55
+    unicorn_spec_min_alignment: float = 0.55
+    unicorn_reconstruction_sft_enabled: bool = True
+    unicorn_reconstruction_buffer_size: int = 512
+    unicorn_reconstruction_step_freq: int = 1
+    unicorn_reconstruction_updates_per_step: int = 2
+    unicorn_reconstruction_min_quality: float = 0.55
+    unicorn_reconstruction_enable_proposer: bool = True
+    unicorn_reconstruction_enable_generator: bool = True
 
     # Reward shaping
     solver_soft_gamma: float = 0.7
@@ -232,13 +245,13 @@ class GenerationSelfEvolvingConfig:
     proposer_non_objective_penalty: float = 0.20
     proposer_require_objective: bool = True
     proposer_hardening_on_easy: bool = True
-    proposer_hardening_max_retries: int = 2
+    proposer_hardening_max_retries: int = 3
     proposer_force_hardening_on_failure: bool = True
-    proposer_force_hardening_max_retries: int = 1
+    proposer_force_hardening_max_retries: int = 2
     solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
-    acceptance_require_target_bucket: bool = False
+    acceptance_require_target_bucket: bool = True
     rejected_question_penalty: float = 0.35
     entropy_iqr_filter_enabled: bool = True
     entropy_iqr_window_size: int = 256
@@ -248,10 +261,10 @@ class GenerationSelfEvolvingConfig:
     entropy_iqr_min_threshold: float = 0.02
     entropy_iqr_max_threshold: float = 1.2
     entropy_iqr_filter_min_majority_frac: float = 0.80
-    difficulty_sampler_enabled: bool = True
+    difficulty_sampler_enabled: bool = False
     difficulty_sampler_window_size: int = 256
     difficulty_sampler_min_samples: int = 32
-    difficulty_sampler_max_retries: int = 1
+    difficulty_sampler_max_retries: int = 2
     difficulty_target_easy: float = 0.20
     difficulty_target_medium: float = 0.60
     difficulty_target_hard: float = 0.20
@@ -326,6 +339,16 @@ class UnifiedSelfEvolvingConfig(GenerationSelfEvolvingConfig):
     replay_buffer_size: int = 1000
     replay_min_reward: float = 0.5
     replay_max_staleness: int = 500
+
+    # Generated-data source for understanding mixing.
+    # - "buffer": in-memory replay buffer (default)
+    # - "folder": filesystem-backed generated pool with random sampling
+    gen_mix_source_mode: str = "buffer"  # buffer|folder
+    generated_mix_dir: Optional[str] = None
+    generated_mix_min_reward: float = 0.5
+    generated_mix_max_files: int = 5000
+    generated_mix_refresh_every: int = 10
+    understanding_generated_only: bool = False
 
     # Generated-image mixing ratio for understanding step.
     # Linearly ramps from start → max over warmup_steps.

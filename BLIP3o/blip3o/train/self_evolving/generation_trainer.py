@@ -18,6 +18,7 @@ import re
 import shutil
 import time
 import traceback
+from collections import deque
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -28,7 +29,12 @@ from transformers import AutoProcessor
 from .config import GenerationSelfEvolvingConfig
 from .image_pool import ImagePool, ImagePoolConfig
 from .policy_updater import RolePolicyUpdater
-from .prompts import build_proposer_prompt, build_solver_prompt
+from .prompts import (
+    build_generation_spec_prompt,
+    build_generation_spec_retry_prompt,
+    build_proposer_prompt,
+    build_solver_prompt,
+)
 from .utils import (
     HAS_PEFT,
     HAS_WANDB,
@@ -187,6 +193,22 @@ class GenerationSelfEvolvingTrainer:
         dist.all_reduce(tensor, op=dist.ReduceOp.MAX)
         return int(tensor.item())
 
+    def _distributed_update_ready(
+        self,
+        local_ready: bool,
+        local_reason: Optional[str],
+        *,
+        peer_reason: str,
+    ) -> Tuple[bool, Optional[str]]:
+        if not (self.distributed and dist.is_initialized()):
+            return bool(local_ready), local_reason
+        all_ready = self._dist_all_bool(bool(local_ready))
+        if all_ready:
+            return True, local_reason
+        if local_reason:
+            return False, local_reason
+        return False, peer_reason
+
     def _expected_pipeline_device(self) -> torch.device:
         if torch.cuda.is_available():
             return torch.device(f"cuda:{self.local_rank}")
@@ -316,6 +338,24 @@ class GenerationSelfEvolvingTrainer:
                 "generator_proxy_max_ratio must be in [0, 1]. "
                 f"Got {self.cfg.generator_proxy_max_ratio}."
             )
+        self.cfg.unicorn_target_difficulty = str(
+            getattr(self.cfg, "unicorn_target_difficulty", "medium") or "medium"
+        ).strip().lower()
+        if self.cfg.unicorn_target_difficulty not in {"easy", "medium", "hard"}:
+            raise ValueError(
+                "unicorn_target_difficulty must be one of: easy, medium, hard. "
+                f"Got {self.cfg.unicorn_target_difficulty!r}."
+            )
+        self.cfg.unicorn_spec_max_retries = max(0, int(getattr(self.cfg, "unicorn_spec_max_retries", 2)))
+        self.cfg.unicorn_reconstruction_buffer_size = max(
+            1, int(getattr(self.cfg, "unicorn_reconstruction_buffer_size", 512))
+        )
+        self.cfg.unicorn_reconstruction_step_freq = max(
+            1, int(getattr(self.cfg, "unicorn_reconstruction_step_freq", 1))
+        )
+        self.cfg.unicorn_reconstruction_updates_per_step = max(
+            1, int(getattr(self.cfg, "unicorn_reconstruction_updates_per_step", 2))
+        )
         self._setup_distributed()
         _set_global_seed(config.seed + self.rank, deterministic=config.deterministic)
 
@@ -334,6 +374,8 @@ class GenerationSelfEvolvingTrainer:
         self.rewards_log_path = self.logs_dir / "rewards.jsonl"
         self.policy_updates_log_path = self.logs_dir / "policy_updates.jsonl"
         self.dpo_pairs_log_path = self.logs_dir / "dpo_pairs.jsonl"
+        self.unicorn_spec_log_path = self.logs_dir / "unicorn_spec_attempts.jsonl"
+        self.unicorn_reconstruction_log_path = self.logs_dir / "unicorn_reconstruction.jsonl"
         self.summary_path = self.run_dir / "ablation_summary.json"
         self._save_run_metadata()
 
@@ -483,6 +525,14 @@ class GenerationSelfEvolvingTrainer:
         self._generator_update_mode_counts: Dict[str, int] = {
             "token_trace": 0,
             "proxy_caption": 0,
+            "skipped": 0,
+        }
+        self._unicorn_reconstruction_buffer = deque(
+            maxlen=self.cfg.unicorn_reconstruction_buffer_size
+        )
+        self._unicorn_reconstruction_update_counts: Dict[str, int] = {
+            "proposer": 0,
+            "generator": 0,
             "skipped": 0,
         }
         self._diffusion_repair_count: int = 0
@@ -696,6 +746,16 @@ class GenerationSelfEvolvingTrainer:
         self.proposer_entropy_mu_ema = float(
             state.get("proposer_entropy_mu_ema", self.proposer_entropy_mu_ema)
         )
+        recon_counts = state.get("unicorn_reconstruction_update_counts")
+        if isinstance(recon_counts, dict):
+            merged_counts = dict(self._unicorn_reconstruction_update_counts)
+            for key in ("proposer", "generator", "skipped"):
+                if key in recon_counts:
+                    try:
+                        merged_counts[key] = int(recon_counts[key])
+                    except Exception:
+                        pass
+            self._unicorn_reconstruction_update_counts = merged_counts
 
         py_state = state.get("py_random_state")
         if py_state is not None:
@@ -734,6 +794,7 @@ class GenerationSelfEvolvingTrainer:
             "proposer_baseline": float(self.proposer_baseline),
             "generator_baseline": float(self.generator_baseline),
             "proposer_entropy_mu_ema": float(self.proposer_entropy_mu_ema),
+            "unicorn_reconstruction_update_counts": dict(self._unicorn_reconstruction_update_counts),
             "py_random_state": random.getstate(),
             "torch_rng_state": torch.get_rng_state(),
         }
@@ -1132,10 +1193,16 @@ class GenerationSelfEvolvingTrainer:
             caption = "An image with multiple visual elements."
         return caption
 
-    def _propose_generation_spec(self, image: Image.Image) -> GenerationSpec:
+    def _propose_generation_spec(
+        self,
+        image: Image.Image,
+        *,
+        proposer_prompt: Optional[str] = None,
+    ) -> GenerationSpec:
+        prompt_text = str(proposer_prompt or GEN_PROMPT_TEMPLATE)
         raw = self._generate(
             image=image,
-            prompt=GEN_PROMPT_TEMPLATE,
+            prompt=prompt_text,
             adapter_name="proposer" if self.cfg.use_lora else None,
             max_new_tokens=self.cfg.max_new_tokens_proposer,
             temperature=self.cfg.temp,
@@ -1378,6 +1445,454 @@ class GenerationSelfEvolvingTrainer:
             "sanitized_prompt_words": float(len(_tokenize_words(composed_prompt))),
         }
         return sanitized, quality, details
+
+    def _unicorn_spec_attempt(
+        self,
+        image: Image.Image,
+        source_caption: str,
+        proposer_prompt: str,
+        *,
+        attempt_idx: int,
+        max_attempts: int,
+        step: Optional[int] = None,
+        verbose: bool = False,
+        force_alignment_eval: bool = False,
+    ) -> Dict[str, object]:
+        raw_spec = self._propose_generation_spec(image=image, proposer_prompt=proposer_prompt)
+        if raw_spec.fallback_used and source_caption:
+            raw_spec = GenerationSpec(
+                prompt=f"Create an image variation of: {source_caption}",
+                qa_pairs=raw_spec.qa_pairs,
+                raw_output=raw_spec.raw_output,
+                fallback_used=True,
+            )
+
+        sanitized, spec_quality, spec_quality_details = self._sanitize_and_score_spec(
+            raw_spec,
+            source_caption=source_caption,
+        )
+        qa_count = len(sanitized.qa_pairs)
+        min_pairs = max(1, int(self.cfg.min_spec_qa_pairs))
+        min_quality = float(getattr(self.cfg, "unicorn_spec_min_quality", 0.55))
+        min_alignment = float(getattr(self.cfg, "unicorn_spec_min_alignment", 0.55))
+
+        # Run solver-alignment judge only when quality pre-gate passes or when forced.
+        should_eval_alignment = bool(
+            force_alignment_eval
+            or (qa_count >= min_pairs and spec_quality >= min_quality)
+            or (attempt_idx >= (max_attempts - 1))
+        )
+        alignment = 0.0
+        contradiction = 0.0
+        if should_eval_alignment and qa_count > 0:
+            alignment, contradiction, _ = self._score_spec(
+                image=image,
+                qa_pairs=sanitized.qa_pairs,
+                step=step if verbose else None,
+                verbose=False,
+            )
+
+        reject_reason = ""
+        if qa_count < min_pairs:
+            reject_reason = "insufficient_qa_pairs"
+        elif spec_quality < min_quality:
+            reject_reason = "low_spec_quality"
+        elif should_eval_alignment and alignment < min_alignment:
+            reject_reason = "low_self_alignment"
+
+        accepted = (reject_reason == "")
+        combined_score = 0.65 * float(spec_quality) + 0.35 * float(alignment)
+        return {
+            "spec": sanitized,
+            "spec_quality": float(spec_quality),
+            "spec_quality_details": spec_quality_details,
+            "alignment": float(alignment),
+            "contradiction": float(contradiction),
+            "accepted": bool(accepted),
+            "reject_reason": reject_reason,
+            "attempt_idx": int(attempt_idx),
+            "max_attempts": int(max_attempts),
+            "combined_score": float(combined_score),
+            "proposer_prompt": proposer_prompt,
+            "fallback_used": bool(sanitized.fallback_used),
+        }
+
+    def _select_generation_spec_with_unicorn(
+        self,
+        image: Image.Image,
+        source_caption: str,
+        *,
+        step: Optional[int] = None,
+        verbose: bool = False,
+    ) -> Tuple[GenerationSpec, float, Dict[str, float], Dict[str, object]]:
+        unicorn_enabled = bool(getattr(self.cfg, "unicorn_generation_enabled", True))
+        if not unicorn_enabled:
+            raw_spec = self._propose_generation_spec(
+                image=image,
+                proposer_prompt=GEN_PROMPT_TEMPLATE,
+            )
+            if raw_spec.fallback_used and source_caption:
+                raw_spec = GenerationSpec(
+                    prompt=f"Create an image variation of: {source_caption}",
+                    qa_pairs=raw_spec.qa_pairs,
+                    raw_output=raw_spec.raw_output,
+                    fallback_used=True,
+                )
+            spec, quality, details = self._sanitize_and_score_spec(
+                raw_spec,
+                source_caption=source_caption,
+            )
+            details.update(
+                {
+                    "unicorn_enabled": 0.0,
+                    "unicorn_rejection_enabled": 0.0,
+                    "unicorn_spec_attempts": 1.0,
+                    "unicorn_spec_retries_used": 0.0,
+                    "unicorn_spec_alignment": 0.0,
+                    "unicorn_spec_contradiction": 0.0,
+                    "unicorn_spec_selected_accepted": 1.0,
+                }
+            )
+            return spec, float(quality), details, {
+                "enabled": False,
+                "rejection_enabled": False,
+                "attempts": 1,
+                "retries_used": 0,
+                "selected_accepted": True,
+                "selected_reject_reason": "",
+                "selected_alignment": 0.0,
+                "selected_contradiction": 0.0,
+                "selected_quality": float(quality),
+                "attempt_logs": [
+                    {
+                        "attempt_idx": 0,
+                        "max_attempts": 1,
+                        "accepted": True,
+                        "reject_reason": "",
+                        "spec_quality": float(quality),
+                        "alignment": 0.0,
+                        "contradiction": 0.0,
+                        "combined_score": float(quality),
+                        "fallback_used": bool(spec.fallback_used),
+                    }
+                ],
+            }
+
+        rejection_enabled = bool(getattr(self.cfg, "unicorn_spec_rejection_enabled", True))
+        retries = int(getattr(self.cfg, "unicorn_spec_max_retries", 0))
+        max_attempts = 1 + (retries if (unicorn_enabled and rejection_enabled) else 0)
+        max_attempts = max(1, max_attempts)
+
+        target_diff = str(getattr(self.cfg, "unicorn_target_difficulty", "medium") or "medium")
+        proposer_prompt = (
+            build_generation_spec_prompt(target_difficulty=target_diff)
+            if unicorn_enabled
+            else GEN_PROMPT_TEMPLATE
+        )
+
+        attempts: List[Dict[str, object]] = []
+        selected: Optional[Dict[str, object]] = None
+        best_seen: Optional[Dict[str, object]] = None
+
+        for attempt_idx in range(max_attempts):
+            force_alignment_eval = (attempt_idx >= max_attempts - 1)
+            attempt = self._unicorn_spec_attempt(
+                image=image,
+                source_caption=source_caption,
+                proposer_prompt=proposer_prompt,
+                attempt_idx=attempt_idx,
+                max_attempts=max_attempts,
+                step=step,
+                verbose=verbose,
+                force_alignment_eval=force_alignment_eval,
+            )
+            attempts.append(attempt)
+
+            if best_seen is None or float(attempt["combined_score"]) > float(best_seen["combined_score"]):
+                best_seen = attempt
+
+            if bool(attempt["accepted"]):
+                selected = attempt
+                break
+
+            if attempt_idx < (max_attempts - 1):
+                retry_reason = str(attempt["reject_reason"] or "spec did not meet quality gate")
+                proposer_prompt = build_generation_spec_retry_prompt(
+                    previous_prompt=str(attempt["spec"].prompt),
+                    reason=retry_reason,
+                    target_difficulty=target_diff,
+                )
+
+        if selected is None:
+            selected = best_seen if best_seen is not None else attempts[-1]
+
+        retries_used = max(0, len(attempts) - 1)
+        selected_quality = float(selected["spec_quality"])
+        selected_alignment = float(selected["alignment"])
+        selected_contradiction = float(selected["contradiction"])
+        selected_spec: GenerationSpec = selected["spec"]
+
+        details = dict(selected["spec_quality_details"])
+        details.update(
+            {
+                "unicorn_enabled": 1.0 if unicorn_enabled else 0.0,
+                "unicorn_rejection_enabled": 1.0 if rejection_enabled else 0.0,
+                "unicorn_spec_attempts": float(len(attempts)),
+                "unicorn_spec_retries_used": float(retries_used),
+                "unicorn_spec_alignment": float(selected_alignment),
+                "unicorn_spec_contradiction": float(selected_contradiction),
+                "unicorn_spec_selected_accepted": 1.0 if bool(selected.get("accepted", False)) else 0.0,
+            }
+        )
+
+        unicorn_meta = {
+            "enabled": bool(unicorn_enabled),
+            "rejection_enabled": bool(rejection_enabled),
+            "attempts": len(attempts),
+            "retries_used": retries_used,
+            "selected_accepted": bool(selected.get("accepted", False)),
+            "selected_reject_reason": str(selected.get("reject_reason", "")),
+            "selected_alignment": selected_alignment,
+            "selected_contradiction": selected_contradiction,
+            "selected_quality": selected_quality,
+            "attempt_logs": [
+                {
+                    "attempt_idx": int(a["attempt_idx"]),
+                    "max_attempts": int(a["max_attempts"]),
+                    "accepted": bool(a["accepted"]),
+                    "reject_reason": str(a["reject_reason"]),
+                    "spec_quality": float(a["spec_quality"]),
+                    "alignment": float(a["alignment"]),
+                    "contradiction": float(a["contradiction"]),
+                    "combined_score": float(a["combined_score"]),
+                    "fallback_used": bool(a["fallback_used"]),
+                }
+                for a in attempts
+            ],
+        }
+        return selected_spec, selected_quality, details, unicorn_meta
+
+    def _enqueue_unicorn_reconstruction_tasks(
+        self,
+        *,
+        step: int,
+        image: Image.Image,
+        spec: GenerationSpec,
+        best: Dict[str, object],
+        spec_quality: float,
+    ) -> int:
+        if not bool(getattr(self.cfg, "unicorn_reconstruction_sft_enabled", True)):
+            return 0
+        if spec_quality < float(getattr(self.cfg, "unicorn_reconstruction_min_quality", 0.55)):
+            return 0
+
+        enqueued = 0
+        target_diff = str(getattr(self.cfg, "unicorn_target_difficulty", "medium") or "medium")
+        if bool(getattr(self.cfg, "unicorn_reconstruction_enable_proposer", True)):
+            proposer_completion = str(spec.raw_output or "").strip()
+            if proposer_completion:
+                self._unicorn_reconstruction_buffer.append(
+                    {
+                        "role": "proposer",
+                        "step": int(step),
+                        "prompt": build_generation_spec_prompt(target_difficulty=target_diff),
+                        "completion": proposer_completion,
+                        "image": image,
+                        "completion_token_ids": None,
+                        "task": "spec_reconstruction",
+                    }
+                )
+                enqueued += 1
+
+        if bool(getattr(self.cfg, "unicorn_reconstruction_enable_generator", True)):
+            completion = str(best.get("policy_completion", "")).strip()
+            completion_token_ids = best.get("policy_completion_ids")
+            if not isinstance(completion_token_ids, list):
+                completion_token_ids = None
+            prompt = str(best.get("policy_prompt", spec.prompt))
+            update_image: Optional[Image.Image] = None
+            task = "generator_trace_reconstruction"
+
+            if not completion:
+                best_image = best.get("image")
+                if isinstance(best_image, Image.Image):
+                    proxy_completion = self._proxy_generator_completion(best_image)
+                    if proxy_completion:
+                        completion = proxy_completion
+                        prompt = GENERATOR_PROXY_CAPTION_PROMPT
+                        update_image = best_image
+                        completion_token_ids = None
+                        task = "generator_proxy_reconstruction"
+            if completion:
+                self._unicorn_reconstruction_buffer.append(
+                    {
+                        "role": "generator",
+                        "step": int(step),
+                        "prompt": prompt,
+                        "completion": completion,
+                        "image": update_image,
+                        "completion_token_ids": completion_token_ids,
+                        "task": task,
+                    }
+                )
+                enqueued += 1
+
+        return enqueued
+
+    def _unicorn_has_task_for_role(self, role: str) -> bool:
+        return any(str(task.get("role", "")) == role for task in self._unicorn_reconstruction_buffer)
+
+    def _unicorn_pop_task_for_role(self, role: str) -> Optional[Dict[str, object]]:
+        if not self._unicorn_reconstruction_buffer:
+            return None
+        retained: List[Dict[str, object]] = []
+        selected: Optional[Dict[str, object]] = None
+        while self._unicorn_reconstruction_buffer:
+            item = self._unicorn_reconstruction_buffer.pop()
+            if selected is None and str(item.get("role", "")) == role:
+                selected = item
+                break
+            retained.append(item)
+        while retained:
+            self._unicorn_reconstruction_buffer.append(retained.pop())
+        return selected
+
+    def _run_unicorn_reconstruction_sft(self, step: int) -> Dict[str, object]:
+        info: Dict[str, object] = {
+            "enabled": bool(getattr(self.cfg, "unicorn_reconstruction_sft_enabled", True)),
+            "queued": int(len(self._unicorn_reconstruction_buffer)),
+            "attempted_updates": 0,
+            "applied_updates": 0,
+            "skipped_updates": 0,
+            "update_records": [],
+        }
+        if not bool(info["enabled"]):
+            return info
+        if step % int(getattr(self.cfg, "unicorn_reconstruction_step_freq", 1)) != 0:
+            return info
+        if len(self._unicorn_reconstruction_buffer) == 0:
+            return info
+
+        max_updates = int(getattr(self.cfg, "unicorn_reconstruction_updates_per_step", 2))
+        for update_idx in range(max_updates):
+            role_order = ("proposer", "generator") if (update_idx % 2 == 0) else ("generator", "proposer")
+            selected_role: Optional[str] = None
+            for role in role_order:
+                local_has_role = self._unicorn_has_task_for_role(role)
+                has_role_all = local_has_role
+                if self.distributed and dist.is_initialized():
+                    has_role_all = self._dist_all_bool(local_has_role)
+                if has_role_all:
+                    selected_role = role
+                    break
+            if selected_role is None:
+                break
+
+            info["attempted_updates"] += 1
+            task = self._unicorn_pop_task_for_role(selected_role)
+            if task is None:
+                info["skipped_updates"] += 1
+                self._unicorn_reconstruction_update_counts["skipped"] += 1
+                info["update_records"].append(
+                    {
+                        "role": selected_role,
+                        "task": "unknown",
+                        "skipped": True,
+                        "reason": "role_task_missing_local",
+                    }
+                )
+                continue
+            role = str(task.get("role", ""))
+            completion = str(task.get("completion", "")).strip()
+            prompt = str(task.get("prompt", ""))
+            update_image = task.get("image")
+            completion_token_ids = task.get("completion_token_ids")
+            if not isinstance(completion_token_ids, list):
+                completion_token_ids = None
+
+            local_ready = bool(prompt and completion)
+            can_update, skip_reason = self._distributed_update_ready(
+                local_ready,
+                None if local_ready else "empty_prompt_or_completion",
+                peer_reason="distributed_peer_unicorn_skip",
+            )
+            if not can_update:
+                info["skipped_updates"] += 1
+                self._unicorn_reconstruction_update_counts["skipped"] += 1
+                info["update_records"].append(
+                    {"role": role, "task": task.get("task"), "skipped": True, "reason": skip_reason}
+                )
+                continue
+
+            stats: Optional[Dict[str, float]] = None
+            if role == "proposer":
+                if not isinstance(update_image, Image.Image):
+                    skip_reason = "proposer_task_missing_image"
+                else:
+                    stats = self.proposer_updater.step(
+                        image=update_image,
+                        prompt=prompt,
+                        completion=completion,
+                        reward=1.0,
+                        baseline=0.0,
+                        device=self.device,
+                    )
+            elif role == "generator":
+                sft_fn = getattr(self.generator_updater, "sft_step", None)
+                if not callable(sft_fn):
+                    skip_reason = "generator_updater_missing_sft_step"
+                else:
+                    stats = sft_fn(
+                        prompt=prompt,
+                        completion=completion,
+                        device=self.device,
+                        image=update_image if isinstance(update_image, Image.Image) else None,
+                        completion_token_ids=completion_token_ids,
+                    )
+            else:
+                skip_reason = f"unsupported_unicorn_role:{role}"
+
+            if stats is None:
+                info["skipped_updates"] += 1
+                self._unicorn_reconstruction_update_counts["skipped"] += 1
+                info["update_records"].append(
+                    {"role": role, "task": task.get("task"), "skipped": True, "reason": skip_reason}
+                )
+                continue
+
+            did_step = bool(stats.get("did_step", True))
+            if did_step:
+                info["applied_updates"] += 1
+                self._policy_update_counts[role] = self._policy_update_counts.get(role, 0) + 1
+                self._unicorn_reconstruction_update_counts[role] = (
+                    self._unicorn_reconstruction_update_counts.get(role, 0) + 1
+                )
+            else:
+                info["skipped_updates"] += 1
+                self._unicorn_reconstruction_update_counts["skipped"] += 1
+
+            info["update_records"].append(
+                {
+                    "role": role,
+                    "task": task.get("task"),
+                    "did_step": did_step,
+                    "stats": stats,
+                }
+            )
+
+            self._append_jsonl(
+                self.unicorn_reconstruction_log_path,
+                {
+                    "step": int(step),
+                    "role": role,
+                    "task": task.get("task"),
+                    "did_step": did_step,
+                    "stats": stats,
+                },
+            )
+
+        self._sync_state_scalars()
+        return info
 
     def _generate_image_candidate(self, inputs: str, **kwargs) -> Dict[str, Any]:
         prompt = inputs
@@ -2295,6 +2810,8 @@ class GenerationSelfEvolvingTrainer:
                 "error": error,
                 "policy_update_counts": self._policy_update_counts,
                 "generator_update_mode_counts": self._generator_update_mode_counts,
+                "unicorn_reconstruction_update_counts": self._unicorn_reconstruction_update_counts,
+                "unicorn_reconstruction_buffer_size": int(len(self._unicorn_reconstruction_buffer)),
                 "diffusion_repair_count": int(self._diffusion_repair_count),
                 "metrics": self._metrics_summary(),
             },
@@ -2321,6 +2838,8 @@ class GenerationSelfEvolvingTrainer:
         generator_update_mode: Optional[str],
         proposer_stats: Optional[Dict[str, float]],
         generator_stats: Optional[Dict[str, float]],
+        unicorn_spec_meta: Optional[Dict[str, object]] = None,
+        unicorn_reconstruction: Optional[Dict[str, object]] = None,
     ):
         if not self.is_main_process or self.wandb_run is None:
             return
@@ -2363,6 +2882,21 @@ class GenerationSelfEvolvingTrainer:
             metrics["train/generator_skip_reason"] = generator_skipped_reason
         if image_path:
             metrics["data/image_path"] = image_path
+        if unicorn_spec_meta:
+            metrics["train/unicorn_spec_attempts"] = float(unicorn_spec_meta.get("attempts", 1.0))
+            metrics["train/unicorn_spec_retries_used"] = float(unicorn_spec_meta.get("retries_used", 0.0))
+            metrics["train/unicorn_spec_alignment"] = float(unicorn_spec_meta.get("selected_alignment", 0.0))
+            metrics["train/unicorn_spec_selected_accepted"] = (
+                1.0 if bool(unicorn_spec_meta.get("selected_accepted", False)) else 0.0
+            )
+        if unicorn_reconstruction:
+            metrics["train/unicorn_recon_enqueued"] = float(unicorn_reconstruction.get("enqueued_this_step", 0.0))
+            metrics["train/unicorn_recon_attempted"] = float(unicorn_reconstruction.get("attempted_updates", 0.0))
+            metrics["train/unicorn_recon_applied"] = float(unicorn_reconstruction.get("applied_updates", 0.0))
+            metrics["train/unicorn_recon_skipped"] = float(unicorn_reconstruction.get("skipped_updates", 0.0))
+            metrics["train/unicorn_recon_buffer_size"] = float(
+                unicorn_reconstruction.get("buffer_size_after_step", 0.0)
+            )
 
         if proposer_stats:
             metrics.update(
@@ -2415,23 +2949,29 @@ class GenerationSelfEvolvingTrainer:
             print(f"[Step {step:05d}][G] generation phase start")
 
         source_caption = self._caption_image(image)
-        spec = self._propose_generation_spec(image)
-        if spec.fallback_used and source_caption:
-            spec = GenerationSpec(
-                prompt=f"Create an image variation of: {source_caption}",
-                qa_pairs=spec.qa_pairs,
-                raw_output=spec.raw_output,
-                fallback_used=True,
-            )
-
-        spec, spec_quality, spec_quality_details = self._sanitize_and_score_spec(
-            spec,
+        spec, spec_quality, spec_quality_details, unicorn_spec_meta = self._select_generation_spec_with_unicorn(
+            image=image,
             source_caption=source_caption,
+            step=step,
+            verbose=verbose,
+        )
+        self._append_jsonl(
+            self.unicorn_spec_log_path,
+            {
+                "step": int(step),
+                "image_path": meta.get("path"),
+                "selected_prompt": spec.prompt,
+                "spec_quality": float(spec_quality),
+                "spec_quality_details": spec_quality_details,
+                "unicorn_spec_meta": unicorn_spec_meta,
+            },
         )
         if verbose:
             print(
                 f"[Step {step:05d}][G] spec ready: qa_pairs={len(spec.qa_pairs)} "
-                f"quality={spec_quality:.3f} fallback={int(spec.fallback_used)}"
+                f"quality={spec_quality:.3f} fallback={int(spec.fallback_used)} "
+                f"attempts={int(unicorn_spec_meta.get('attempts', 1))} "
+                f"align={float(unicorn_spec_meta.get('selected_alignment', 0.0)):.3f}"
             )
 
         candidates: List[Dict[str, object]] = []
@@ -3095,7 +3635,9 @@ class GenerationSelfEvolvingTrainer:
             if proposer_can_update:
                 proposer_stats = self.proposer_updater.step(
                     image=image,
-                    prompt=GEN_PROMPT_TEMPLATE,
+                    prompt=build_generation_spec_prompt(
+                        target_difficulty=str(getattr(self.cfg, "unicorn_target_difficulty", "medium"))
+                    ),
                     completion=proposer_completion,
                     reward=proposer_reward,
                     baseline=baseline_before,
@@ -3129,6 +3671,17 @@ class GenerationSelfEvolvingTrainer:
             self._sync_state_scalars()
         else:
             proposer_skip_reason = "update_not_due"
+
+        unicorn_recon_enqueued = self._enqueue_unicorn_reconstruction_tasks(
+            step=step,
+            image=image,
+            spec=spec,
+            best=best,
+            spec_quality=float(spec_quality),
+        )
+        unicorn_reconstruction = self._run_unicorn_reconstruction_sft(step)
+        unicorn_reconstruction["enqueued_this_step"] = int(unicorn_recon_enqueued)
+        unicorn_reconstruction["buffer_size_after_step"] = int(len(self._unicorn_reconstruction_buffer))
 
         self._sync_state_scalars()
 
@@ -3209,6 +3762,8 @@ class GenerationSelfEvolvingTrainer:
                 "generator_skipped_reason": generator_skipped_reason,
                 "generator_update_mode": generator_update_mode,
                 "generator_proxy_ratio": float(self._current_proxy_ratio()),
+                "unicorn_spec_meta": unicorn_spec_meta,
+                "unicorn_reconstruction": unicorn_reconstruction,
                 "proposer_update_due": proposer_update_due,
                 "proposer_skip_reason": proposer_skip_reason,
                 "proposer_reward": proposer_reward,
@@ -3224,12 +3779,16 @@ class GenerationSelfEvolvingTrainer:
             "spec_quality_details": spec_quality_details,
             "scored": scored,
             "best_idx": best_idx,
+            "reference_questions": _ref_questions,
+            "reference_answers": _ref_answers,
             "proposer_stats": proposer_stats,
             "generator_stats": generator_stats,
             "generator_update_rule": self.cfg.generator_update_rule,
             "generator_skipped_reason": generator_skipped_reason,
             "generator_update_mode": generator_update_mode,
             "generator_proxy_ratio": float(self._current_proxy_ratio()),
+            "unicorn_spec_meta": unicorn_spec_meta,
+            "unicorn_reconstruction": unicorn_reconstruction,
             "proposer_update_due": proposer_update_due,
             "proposer_skip_reason": proposer_skip_reason,
             "proposer_reward": proposer_reward,
@@ -3429,6 +3988,8 @@ class GenerationSelfEvolvingTrainer:
                         "proposer_kl_coef": self.proposer_updater.kl_coef,
                         "solver_kl_coef": self.solver_updater.kl_coef if self.solver_updater is not None else None,
                         "generator_skipped_reason": out.get("generator_skipped_reason"),
+                        "unicorn_spec_meta": out.get("unicorn_spec_meta"),
+                        "unicorn_reconstruction": out.get("unicorn_reconstruction"),
                         "step_duration_sec": step_duration_sec,
                     },
                 )
@@ -3452,6 +4013,8 @@ class GenerationSelfEvolvingTrainer:
                     generator_update_mode=out.get("generator_update_mode"),
                     proposer_stats=out["proposer_stats"],
                     generator_stats=out["generator_stats"],
+                    unicorn_spec_meta=out.get("unicorn_spec_meta"),
+                    unicorn_reconstruction=out.get("unicorn_reconstruction"),
                 )
 
                 self._update_metric("reward_mean", reward_mean_g)
@@ -3466,6 +4029,18 @@ class GenerationSelfEvolvingTrainer:
                 self._update_metric("proposer_kl_coef", float(self.proposer_updater.kl_coef))
                 self._update_metric("step_duration_sec", step_duration_g)
                 self._update_metric("spec_fallback_used", 1.0 if spec.fallback_used else 0.0)
+                unicorn_meta = out.get("unicorn_spec_meta") or {}
+                self._update_metric("unicorn_spec_attempts", float(unicorn_meta.get("attempts", 1.0)))
+                self._update_metric("unicorn_spec_alignment", float(unicorn_meta.get("selected_alignment", 0.0)))
+                self._update_metric(
+                    "unicorn_spec_selected_accepted",
+                    1.0 if bool(unicorn_meta.get("selected_accepted", False)) else 0.0,
+                )
+                unicorn_recon = out.get("unicorn_reconstruction") or {}
+                self._update_metric(
+                    "unicorn_reconstruction_applied_updates",
+                    float(unicorn_recon.get("applied_updates", 0.0)),
+                )
 
                 if cfg.save_every > 0 and step % cfg.save_every == 0:
                     self._dist_barrier()
