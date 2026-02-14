@@ -45,6 +45,85 @@ def build_generator_prompt(prompt: str) -> str:
     )
 
 
+def build_generation_spec_prompt(target_difficulty: str = "medium") -> str:
+    level = (target_difficulty or "medium").strip().lower()
+    if level not in {"easy", "medium", "hard"}:
+        level = "medium"
+    if level == "hard":
+        diff_hint = (
+            "Target HARD verification: each QA should require at least two visual constraints "
+            "(e.g., relation + attribute, comparison + count)."
+        )
+    elif level == "easy":
+        diff_hint = (
+            "Target EASY-MEDIUM verification: keep QA objective but avoid trivial one-word lookups."
+        )
+    else:
+        diff_hint = (
+            "Target MEDIUM verification: each QA should require at least two visual cues "
+            "(count + attribute, relation + attribute, or comparison)."
+        )
+    return (
+        "You are a generation-spec proposer for self-evolving training.\n"
+        "Given the source image, propose one text-to-image prompt and verification QA pairs.\n"
+        f"{diff_hint}\n"
+        "Rules:\n"
+        "- Prompt must be image-grounded but not a trivial copy.\n"
+        "- Prompt must be declarative (caption/instruction style), not a question.\n"
+        "- Do not use a question mark in the prompt.\n"
+        "- QA pairs must be objective, short-answer, and visually verifiable.\n"
+        "- Avoid subjective wording: why, might, could, likely, feel, opinion.\n"
+        "- Avoid trivial single-attribute QA; prefer compositional checks.\n"
+        "- Expected answers must be concise (1-6 words).\n"
+        "Output XML only:\n"
+        "<prompt>...</prompt>\n"
+        "<spec>\n"
+        "  <qa><question>...</question><expected>...</expected></qa>\n"
+        "  <qa><question>...</question><expected>...</expected></qa>\n"
+        "  <qa><question>...</question><expected>...</expected></qa>\n"
+        "</spec>"
+    )
+
+
+def build_generation_spec_retry_prompt(
+    previous_prompt: str,
+    reason: str,
+    target_difficulty: str = "medium",
+) -> str:
+    prev = (previous_prompt or "").strip()
+    why = (reason or "spec quality was too low").strip()
+    level = (target_difficulty or "medium").strip().lower()
+    if level not in {"easy", "medium", "hard"}:
+        level = "medium"
+    if level == "hard":
+        diff_hint = "Regenerate with HARD verification QA."
+    elif level == "easy":
+        diff_hint = "Regenerate with EASY-MEDIUM verification QA."
+    else:
+        diff_hint = "Regenerate with MEDIUM verification QA."
+    return (
+        "You are a generation-spec proposer for self-evolving training.\n"
+        f"{diff_hint}\n"
+        "Your previous spec was rejected. Produce a better one.\n"
+        "Mandatory rules:\n"
+        "- Prompt must be declarative and image-grounded.\n"
+        "- QA pairs must be objective and visually verifiable.\n"
+        "- Each QA should combine at least two visual signals when possible.\n"
+        "- Avoid trivial single-hop QA and subjective wording.\n"
+        "Previous prompt:\n"
+        f"{prev}\n"
+        "Rejection reason:\n"
+        f"{why}\n"
+        "Output XML only:\n"
+        "<prompt>...</prompt>\n"
+        "<spec>\n"
+        "  <qa><question>...</question><expected>...</expected></qa>\n"
+        "  <qa><question>...</question><expected>...</expected></qa>\n"
+        "  <qa><question>...</question><expected>...</expected></qa>\n"
+        "</spec>"
+    )
+
+
 def build_spec_proposer_prompt() -> str:
     """Prompt for generation-loop proposer: propose a specification
     (questions + expected answers) to verify a generated image."""

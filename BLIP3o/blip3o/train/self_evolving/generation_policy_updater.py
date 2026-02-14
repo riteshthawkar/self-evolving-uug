@@ -59,6 +59,167 @@ def _estimate_completion_token_count(processor, completion_text: str) -> int:
         return 0
 
 
+def _text_supervised_step(
+    updater,
+    *,
+    prompt: str,
+    completion: str,
+    device: torch.device,
+    image: Optional[Image.Image] = None,
+    completion_token_ids: Optional[List[int]] = None,
+) -> Dict[str, float]:
+    """DDP-safe CE-only supervised step for text completion training.
+
+    Reuses each updater's optimizer/accumulation state so SFT and RL-like
+    updates can share the same adapter parameters without optimizer conflicts.
+    """
+    if not completion or not str(completion).strip():
+        raise ValueError("Supervised update requires non-empty completion text.")
+
+    updater.step_id += 1
+    updater.model.train(True)
+
+    if image is None:
+        text_prompt = prompt
+        use_token_ids = bool(completion_token_ids)
+        if use_token_ids:
+            prompt_inputs = _prepare_text_inputs(updater.processor, device, text_prompt)
+            prompt_ids = prompt_inputs["input_ids"]
+            if prompt_ids.ndim != 2 or prompt_ids.shape[0] != 1:
+                raise RuntimeError("Expected single-example prompt batch for token-trace supervised update.")
+            comp_ids = torch.tensor(completion_token_ids, dtype=torch.long, device=prompt_ids.device).view(1, -1)
+            full_ids = torch.cat([prompt_ids, comp_ids], dim=1)
+            full_mask = torch.ones_like(full_ids, dtype=torch.long)
+            prompt_mask = prompt_inputs.get("attention_mask")
+            if prompt_mask is None:
+                prompt_mask = torch.ones_like(prompt_ids, dtype=torch.long)
+            inputs_prompt = {"input_ids": prompt_ids, "attention_mask": prompt_mask}
+            inputs_full = {"input_ids": full_ids, "attention_mask": full_mask}
+        else:
+            text_full = prompt + completion
+            inputs_prompt = _prepare_text_inputs(updater.processor, device, text_prompt)
+            inputs_full = _prepare_text_inputs(updater.processor, device, text_full)
+    else:
+        chat_prompt = _build_chat_text(updater.processor, image, prompt)
+        chat_full = chat_prompt + completion
+        inputs_prompt = _prepare_mm_inputs(updater.processor, device, image, chat_prompt, model=updater.model)
+        inputs_full = _prepare_mm_inputs(updater.processor, device, image, chat_full, model=updater.model)
+
+    input_ids = inputs_full["input_ids"]
+    labels = input_ids.clone()
+    prompt_len = _aligned_prompt_prefix_len(
+        inputs_prompt["input_ids"],
+        input_ids,
+        completion_text=completion,
+    )
+    labels[:, :prompt_len] = -100
+    valid_mask = labels[:, 1:] != -100
+    valid_token_count = int(valid_mask.sum().item())
+    forced_tail_tokens = 0
+    if valid_token_count <= 0 and str(completion or "").strip():
+        full_len = int(input_ids.shape[1])
+        prompt_raw_len = int(inputs_prompt["input_ids"].shape[1])
+        tail_from_len_delta = max(0, full_len - min(prompt_raw_len, full_len))
+        tail_from_completion = _estimate_completion_token_count(updater.processor, completion)
+        forced_tail_tokens = max(tail_from_len_delta, tail_from_completion)
+        forced_tail_tokens = max(0, min(forced_tail_tokens, max(0, full_len - 1)))
+        if forced_tail_tokens > 0:
+            labels[:, : full_len - forced_tail_tokens] = -100
+            valid_mask = labels[:, 1:] != -100
+            valid_token_count = int(valid_mask.sum().item())
+
+    forward_inputs = {k: v for k, v in inputs_full.items() if k not in ("images", "image_sizes")}
+    forward_inputs["labels"] = labels
+    forward_inputs["use_cache"] = False
+    with use_adapter(updater.model, updater.adapter_name):
+        out = updater.model(**forward_inputs)
+    ce_loss = out.loss
+
+    skip_backward = False
+    skipped_reason: Optional[str] = None
+    if valid_token_count <= 0:
+        skip_backward = True
+        skipped_reason = "no_valid_completion_tokens"
+    elif not bool(torch.isfinite(ce_loss.detach()).all().item()):
+        skip_backward = True
+        skipped_reason = "non_finite_ce_loss"
+
+    if skip_backward:
+        total_loss = out.logits.sum() * 0.0
+        if not torch.isfinite(total_loss):
+            total_loss = torch.zeros((), device=out.logits.device, dtype=out.logits.dtype, requires_grad=True)
+    else:
+        total_loss = ce_loss
+
+    has_real_grad = skipped_reason is None
+    if dist.is_available() and dist.is_initialized():
+        t = torch.tensor(
+            [1 if has_real_grad else 0],
+            dtype=torch.int32,
+            device=total_loss.device,
+        )
+        dist.all_reduce(t, op=dist.ReduceOp.MAX)
+        has_real_grad = bool(int(t.item()) == 1)
+
+    scaled_loss = total_loss / updater.grad_accum_steps
+    if updater._accum_count == 0:
+        updater.opt.zero_grad(set_to_none=True)
+        updater._has_real_grad_in_window = False
+    restore_adapter = None
+    model_ref = _unwrap_model(updater.model)
+    if updater.adapter_name is not None and hasattr(model_ref, "set_adapter"):
+        restore_adapter = getattr(model_ref, "active_adapter", None)
+        try:
+            model_ref.set_adapter(updater.adapter_name)
+        except Exception:
+            restore_adapter = None
+    try:
+        scaled_loss.backward()
+    finally:
+        if restore_adapter is not None:
+            try:
+                model_ref.set_adapter(restore_adapter)
+            except Exception:
+                pass
+
+    updater._accum_count += 1
+    if has_real_grad:
+        updater._has_real_grad_in_window = True
+
+    did_step = False
+    if updater._accum_count >= updater.grad_accum_steps:
+        if updater._has_real_grad_in_window:
+            _clip_grad_norm_multi_device(updater.params, updater.config.grad_clip)
+            updater.opt.step()
+            did_step = True
+        else:
+            updater.opt.zero_grad(set_to_none=True)
+        updater._accum_count = 0
+        updater._has_real_grad_in_window = False
+    updater.model.train(False)
+
+    if (
+        torch.cuda.is_available()
+        and updater.config.clear_cache_every > 0
+        and updater.step_id % updater.config.clear_cache_every == 0
+    ):
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+        gc.collect()
+
+    return {
+        "ce_loss": float(ce_loss.detach().item()) if torch.isfinite(ce_loss.detach()).all() else float("nan"),
+        "total_loss": float(total_loss.detach().item()) if torch.isfinite(total_loss.detach()).all() else 0.0,
+        "did_step": bool(did_step),
+        "skipped_reason": skipped_reason,
+        "valid_token_count": float(valid_token_count),
+        "forced_tail_tokens": float(forced_tail_tokens),
+    }
+
+
 class TextPolicyUpdater:
     """KL-regularized REINFORCE updater for text-only trajectories (generator role)."""
 
@@ -409,6 +570,24 @@ class TextPolicyUpdater:
             "valid_token_count": float(valid_token_count),
             "forced_tail_tokens": float(forced_tail_tokens),
         }
+
+    def sft_step(
+        self,
+        *,
+        prompt: str,
+        completion: str,
+        device: torch.device,
+        image: Optional[Image.Image] = None,
+        completion_token_ids: Optional[List[int]] = None,
+    ) -> Dict[str, float]:
+        return _text_supervised_step(
+            self,
+            prompt=prompt,
+            completion=completion,
+            device=device,
+            image=image,
+            completion_token_ids=completion_token_ids,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +948,24 @@ class TextPreferenceDPOUpdater:
             "did_step": bool(did_step),
             "skipped_reason": skipped_reason,
         }
+
+    def sft_step(
+        self,
+        *,
+        prompt: str,
+        completion: str,
+        device: torch.device,
+        image: Optional[Image.Image] = None,
+        completion_token_ids: Optional[List[int]] = None,
+    ) -> Dict[str, float]:
+        return _text_supervised_step(
+            self,
+            prompt=prompt,
+            completion=completion,
+            device=device,
+            image=image,
+            completion_token_ids=completion_token_ids,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1134,3 +1331,21 @@ class TextGRPOUpdater:
             "skipped_reason": skipped_reason,
             "valid_completions": valid_completions,
         }
+
+    def sft_step(
+        self,
+        *,
+        prompt: str,
+        completion: str,
+        device: torch.device,
+        image: Optional[Image.Image] = None,
+        completion_token_ids: Optional[List[int]] = None,
+    ) -> Dict[str, float]:
+        return _text_supervised_step(
+            self,
+            prompt=prompt,
+            completion=completion,
+            device=device,
+            image=image,
+            completion_token_ids=completion_token_ids,
+        )
