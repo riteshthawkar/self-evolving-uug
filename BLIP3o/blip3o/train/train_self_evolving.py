@@ -270,6 +270,16 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="unicorn_reconstruction_enable_generator",
         action="store_false",
     )
+    p.add_argument("--dit_update_enabled", action="store_true", default=False)
+    p.add_argument("--disable_dit_update", dest="dit_update_enabled", action="store_false")
+    p.add_argument("--dit_update_freq", type=int, default=1)
+    p.add_argument("--dit_lr", type=float, default=5e-7)
+    p.add_argument("--dit_weight_decay", type=float, default=0.01)
+    p.add_argument("--dit_grad_clip", type=float, default=1.0)
+    p.add_argument("--dit_grad_accum_steps", type=int, default=1)
+    p.add_argument("--dit_conditioning_dropout", type=float, default=0.10)
+    p.add_argument("--dit_loss_weight", type=float, default=1.0)
+    p.add_argument("--dit_prompt_suffix_token_id", type=int, default=151665)
 
     # Unified scheduler
     p.add_argument("--understanding_steps_per_cycle", type=int, default=3)
@@ -506,6 +516,15 @@ def _build_generation_config(args):
         unicorn_reconstruction_min_quality=args.unicorn_reconstruction_min_quality,
         unicorn_reconstruction_enable_proposer=args.unicorn_reconstruction_enable_proposer,
         unicorn_reconstruction_enable_generator=args.unicorn_reconstruction_enable_generator,
+        dit_update_enabled=args.dit_update_enabled,
+        dit_update_freq=args.dit_update_freq,
+        dit_lr=args.dit_lr,
+        dit_weight_decay=args.dit_weight_decay,
+        dit_grad_clip=args.dit_grad_clip,
+        dit_grad_accum_steps=args.dit_grad_accum_steps,
+        dit_conditioning_dropout=args.dit_conditioning_dropout,
+        dit_loss_weight=args.dit_loss_weight,
+        dit_prompt_suffix_token_id=args.dit_prompt_suffix_token_id,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,
@@ -666,6 +685,15 @@ def _build_unified_config(args):
         unicorn_reconstruction_min_quality=args.unicorn_reconstruction_min_quality,
         unicorn_reconstruction_enable_proposer=args.unicorn_reconstruction_enable_proposer,
         unicorn_reconstruction_enable_generator=args.unicorn_reconstruction_enable_generator,
+        dit_update_enabled=args.dit_update_enabled,
+        dit_update_freq=args.dit_update_freq,
+        dit_lr=args.dit_lr,
+        dit_weight_decay=args.dit_weight_decay,
+        dit_grad_clip=args.dit_grad_clip,
+        dit_grad_accum_steps=args.dit_grad_accum_steps,
+        dit_conditioning_dropout=args.dit_conditioning_dropout,
+        dit_loss_weight=args.dit_loss_weight,
+        dit_prompt_suffix_token_id=args.dit_prompt_suffix_token_id,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,

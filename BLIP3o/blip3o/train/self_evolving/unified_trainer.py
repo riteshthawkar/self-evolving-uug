@@ -1512,6 +1512,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             "generator_update_rule": self.cfg.generator_update_rule,
                             "generator_update_mode": out.get("generator_update_mode"),
                             "generator_skipped_reason": out.get("generator_skipped_reason"),
+                            "dit_update_due": out.get("dit_update_due"),
+                            "dit_skip_reason": out.get("dit_skip_reason"),
+                            "dit_stats": out.get("dit_stats"),
                             "unicorn_spec_meta": out.get("unicorn_spec_meta"),
                             "unicorn_reconstruction": out.get("unicorn_reconstruction"),
                             "proposer_update_due": out.get("proposer_update_due"),
@@ -1542,6 +1545,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         generator_update_mode=out.get("generator_update_mode"),
                         proposer_stats=out.get("proposer_stats"),
                         generator_stats=out.get("generator_stats"),
+                        dit_stats=out.get("dit_stats"),
                         unicorn_spec_meta=out.get("unicorn_spec_meta"),
                         unicorn_reconstruction=out.get("unicorn_reconstruction"),
                     )
