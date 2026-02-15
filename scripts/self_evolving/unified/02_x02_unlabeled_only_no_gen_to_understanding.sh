@@ -5,23 +5,23 @@ set -euo pipefail
 # Only unlabeled/real image data for understanding.
 # No generation data is mixed into understanding.
 
-REPO_ROOT="/Users/ritesh.thawkar/Ritesh/self-evolving-uug"
+REPO_ROOT="/workspace/self-evolving-uug/self-evolving-uug"
 PYTHON_BIN="python3"
-DATA_DIR="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/data/shared_uug_50k_balanced/images"
-OUTPUT_DIR="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/runs/unified_experiments/X02_unlabeled_only_no_gen_to_understanding"
+DATA_DIR="/workspace/self-evolving-uug/data/benchmark_10k/images"
+OUTPUT_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/X02_unlabeled_only_no_gen_to_understanding"
 RUN_NAME="x02_unlabeled_only_s42_fixed"
 
 cd "$REPO_ROOT"
 mkdir -p "$OUTPUT_DIR"
 
-export PYTHONPATH="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/BLIP3o"
-export HF_HOME="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
-export HUGGINGFACE_HUB_CACHE="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
-export HF_DATASETS_CACHE="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
-export HF_METRICS_CACHE="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
-export TORCH_HOME="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
-export TRITON_CACHE_DIR="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
-export XDG_CACHE_HOME="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
+export PYTHONPATH="/workspace/self-evolving-uug/self-evolving-uug/BLIP3o"
+export HF_HOME="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export HUGGINGFACE_HUB_CACHE="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export HF_DATASETS_CACHE="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export HF_METRICS_CACHE="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export TORCH_HOME="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export TRITON_CACHE_DIR="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export XDG_CACHE_HOME="/workspace/self-evolving-uug/self-evolving-uug/cache"
 export TOKENIZERS_PARALLELISM="false"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -44,7 +44,7 @@ fi
   --standalone \
   --nproc_per_node 8 \
   --master_port 29522 \
-  "/Users/ritesh.thawkar/Ritesh/self-evolving-uug/BLIP3o/blip3o/train/train_self_evolving.py" \
+  "/workspace/self-evolving-uug/self-evolving-uug/BLIP3o/blip3o/train/train_self_evolving.py" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
   --data_split all \
@@ -75,7 +75,7 @@ fi
   --generator_update_freq 1 \
   --generator_update_rule grpo \
   --enable_solver_updates \
-  --solver_update_freq 2 \
+  --solver_update_freq 1 \
   --temp 1.0 \
   --top_p 1.0 \
   --max_new_tokens_solver 96 \
@@ -91,9 +91,13 @@ fi
   --generator_missing_trace_strategy proxy \
   --generator_proxy_max_ratio 1.0 \
   --acceptance_require_target_bucket \
-  --disable_difficulty_sampler \
-  --proposer_hardening_max_retries 3 \
-  --proposer_force_hardening_max_retries 2 \
+  --difficulty_sampler_enabled \
+  --difficulty_target_easy 0.0 \
+  --difficulty_target_medium 1.0 \
+  --difficulty_target_hard 0.0 \
+  --difficulty_sampler_max_retries 4 \
+  --proposer_hardening_max_retries 5 \
+  --proposer_force_hardening_max_retries 3 \
   --solver_skip_update_on_easy \
   --reward_spec_weight 0.65 \
   --reward_cycle_weight 0.20 \
@@ -110,16 +114,17 @@ fi
   --sc_entropy_min 0.15 \
   --sc_entropy_max 1.20 \
   --sc_margin_max 0.90 \
+  --entropy_iqr_min_threshold 0.10 \
   --sc_negative_weight 0.25 \
   --skip_solver_update_when_uninformative \
   --adaptive_prop_entropy_target \
   --prop_entropy_ema_momentum 0.90 \
-  --prop_entropy_mu_min 0.40 \
+  --prop_entropy_mu_min 0.65 \
   --prop_entropy_mu_max 1.50 \
   --len_penalty_weight 0.10 \
   --len_penalty_target_words 6 \
   --prop_entropy_mu 0.90 \
-  --prop_entropy_sigma 0.35 \
+  --prop_entropy_sigma 0.25 \
   --understanding_steps_per_cycle 3 \
   --generation_steps_per_cycle 2 \
   --synthetic_solver_update_freq 0 \

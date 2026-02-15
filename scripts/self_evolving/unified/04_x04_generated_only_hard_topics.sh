@@ -6,11 +6,11 @@ set -euo pipefail
 # Use synthetic seed images to bootstrap generation, then train understanding
 # from generated data only.
 
-REPO_ROOT="/Users/ritesh.thawkar/Ritesh/self-evolving-uug"
+REPO_ROOT="/workspace/self-evolving-uug/self-evolving-uug"
 PYTHON_BIN="python3"
-SYNTH_SEED_DIR="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/runs/unified_experiments/synth_seed_pool_x04"
-GENERATED_MIX_DIR="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/runs/unified_experiments/generated_mix_pool_x04"
-OUTPUT_DIR="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/runs/unified_experiments/X04_generated_only_hard_topics"
+SYNTH_SEED_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/synth_seed_pool_x04"
+GENERATED_MIX_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/generated_mix_pool_x04"
+OUTPUT_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/X04_generated_only_hard_topics"
 RUN_NAME="x04_generated_only_hard_topics_s42_fixed"
 
 cd "$REPO_ROOT"
@@ -27,7 +27,7 @@ import random
 from pathlib import Path
 from PIL import Image, ImageDraw
 
-root = Path("/Users/ritesh.thawkar/Ritesh/self-evolving-uug/runs/unified_experiments/synth_seed_pool_x04")
+root = Path("/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/synth_seed_pool_x04")
 root.mkdir(parents=True, exist_ok=True)
 random.seed(42)
 for i in range(96):
@@ -46,14 +46,14 @@ for i in range(96):
     img.save(root / f"seed_{i:02d}.png")
 PY
 
-export PYTHONPATH="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/BLIP3o"
-export HF_HOME="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
-export HUGGINGFACE_HUB_CACHE="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
-export HF_DATASETS_CACHE="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
-export HF_METRICS_CACHE="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
-export TORCH_HOME="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
-export TRITON_CACHE_DIR="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
-export XDG_CACHE_HOME="/Users/ritesh.thawkar/Ritesh/self-evolving-uug/cache"
+export PYTHONPATH="/workspace/self-evolving-uug/self-evolving-uug/BLIP3o"
+export HF_HOME="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export HUGGINGFACE_HUB_CACHE="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export HF_DATASETS_CACHE="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export HF_METRICS_CACHE="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export TORCH_HOME="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export TRITON_CACHE_DIR="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export XDG_CACHE_HOME="/workspace/self-evolving-uug/self-evolving-uug/cache"
 export TOKENIZERS_PARALLELISM="false"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -67,7 +67,7 @@ export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
   --standalone \
   --nproc_per_node 8 \
   --master_port 29524 \
-  "/Users/ritesh.thawkar/Ritesh/self-evolving-uug/BLIP3o/blip3o/train/train_self_evolving.py" \
+  "/workspace/self-evolving-uug/self-evolving-uug/BLIP3o/blip3o/train/train_self_evolving.py" \
   --experiment unified_self_evolving \
   --data_dir "$SYNTH_SEED_DIR" \
   --data_split all \
@@ -98,7 +98,7 @@ export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
   --generator_update_freq 1 \
   --generator_update_rule grpo \
   --enable_solver_updates \
-  --solver_update_freq 2 \
+  --solver_update_freq 1 \
   --temp 1.0 \
   --top_p 1.0 \
   --max_new_tokens_solver 96 \
@@ -114,9 +114,13 @@ export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
   --generator_missing_trace_strategy proxy \
   --generator_proxy_max_ratio 1.0 \
   --acceptance_require_target_bucket \
-  --disable_difficulty_sampler \
-  --proposer_hardening_max_retries 3 \
-  --proposer_force_hardening_max_retries 2 \
+  --difficulty_sampler_enabled \
+  --difficulty_target_easy 0.0 \
+  --difficulty_target_medium 0.0 \
+  --difficulty_target_hard 1.0 \
+  --difficulty_sampler_max_retries 4 \
+  --proposer_hardening_max_retries 5 \
+  --proposer_force_hardening_max_retries 3 \
   --solver_skip_update_on_easy \
   --reward_spec_weight 0.65 \
   --reward_cycle_weight 0.20 \
@@ -133,16 +137,17 @@ export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
   --sc_entropy_min 0.15 \
   --sc_entropy_max 1.20 \
   --sc_margin_max 0.90 \
+  --entropy_iqr_min_threshold 0.10 \
   --sc_negative_weight 0.25 \
   --skip_solver_update_when_uninformative \
   --adaptive_prop_entropy_target \
   --prop_entropy_ema_momentum 0.90 \
-  --prop_entropy_mu_min 0.40 \
+  --prop_entropy_mu_min 0.65 \
   --prop_entropy_mu_max 1.50 \
   --len_penalty_weight 0.10 \
   --len_penalty_target_words 6 \
   --prop_entropy_mu 0.90 \
-  --prop_entropy_sigma 0.35 \
+  --prop_entropy_sigma 0.25 \
   --understanding_steps_per_cycle 3 \
   --generation_steps_per_cycle 2 \
   --synthetic_solver_update_freq 2 \
