@@ -4,15 +4,36 @@ Ported from self_evolving/experiments/understanding.py and generation.py.
 """
 
 
-def build_proposer_prompt() -> str:
+def build_proposer_prompt(target_difficulty: str = "medium") -> str:
+    level = (target_difficulty or "medium").strip().lower()
+    if level not in {"easy", "medium", "hard"}:
+        level = "medium"
+    if level == "hard":
+        diff_hint = (
+            "Target HARD: question should require multi-step reasoning with at least two visual constraints "
+            "(for example: comparison + attribute, relation + count)."
+        )
+    elif level == "easy":
+        diff_hint = (
+            "Target EASY-MEDIUM: keep question objective and avoid trivial one-word lookups."
+        )
+    else:
+        diff_hint = (
+            "Target MEDIUM: question should require at least two visual constraints "
+            "(for example: count + attribute, relation + attribute, or comparison between entities)."
+        )
     return (
         "You are a Question Proposer.\n"
         "Given the image, generate exactly one question that can be answered from the image alone.\n"
+        f"{diff_hint}\n"
         "Rules:\n"
         "- Ask an objective, image-grounded question with a verifiable short answer.\n"
         "- Prefer counting, comparison, lookup, spatial relation, or attribute questions.\n"
+        "- Use a proper interrogative question (must end with '?').\n"
         "- Avoid subjective/speculative wording such as 'why', 'might', 'could', 'likely', 'feel', or 'opinion'.\n"
         "- Avoid open-ended narrative prompts.\n"
+        "- Do not output placeholders/templates like '(count + attribute)'. Use concrete objects from the image.\n"
+        "- Do not include XML tags like <answer> or <rationale> inside the question text.\n"
         "- The answer should be short (a few words) and directly checkable from image evidence.\n"
         "- Do not require external knowledge beyond what is visible.\n"
         "- Output XML only:\n"
@@ -196,6 +217,51 @@ def build_proposer_force_hard_prompt(
         "- The answer must be 1-5 words and directly grounded in image evidence.\n"
         "- Do NOT use: why, might, could, likely, feel, opinion, purpose, reason.\n"
         "- Avoid yes/no unless unavoidable.\n"
+        "Previous question:\n"
+        f"{prev_q}\n"
+        "Failure reason:\n"
+        f"{reason_txt}\n"
+        "Output XML only:\n"
+        "<question>...</question>\n"
+        "<rationale>...</rationale>"
+    )
+
+
+def build_proposer_template_fallback_prompt(
+    previous_question: str,
+    reason: str,
+    target_bucket: str = "medium",
+) -> str:
+    """Template-constrained fallback when standard hardening retries are exhausted."""
+    prev_q = (previous_question or "").strip()
+    reason_txt = (reason or "question remained too easy after retries").strip()
+    target = (target_bucket or "medium").strip().lower()
+    if target not in {"easy", "medium", "hard"}:
+        target = "medium"
+    if target == "hard":
+        diff_hint = (
+            "Choose a HARD template that compares two entities and requires at least two constraints."
+        )
+    else:
+        diff_hint = (
+            "Choose a MEDIUM template that combines at least two visual constraints."
+        )
+    return (
+        "You are a Question Proposer.\n"
+        "Your previous attempts were rejected. Produce one final objective question using a strict template.\n"
+        f"{diff_hint}\n"
+        "Mandatory rules:\n"
+        "- Replace placeholders with concrete objects/values visible in the image.\n"
+        "- The question must end with '?'.\n"
+        "- The answer must be short (1-5 words).\n"
+        "- Do not output placeholders such as '(count + attribute)'.\n"
+        "- Do not output statements; output only a question.\n"
+        "- Do NOT use: why, might, could, likely, opinion, feel, emotion.\n"
+        "Allowed templates (choose one and fill concretely):\n"
+        "1) How many [OBJECT A] are [SPATIAL RELATION] the [OBJECT B]?\n"
+        "2) Which has more [ATTRIBUTE], [ENTITY A] or [ENTITY B]?\n"
+        "3) What is the difference between [VALUE A] and [VALUE B] shown in the chart/table?\n"
+        "4) Is the number of [OBJECT A] greater than the number of [OBJECT B]?\n"
         "Previous question:\n"
         f"{prev_q}\n"
         "Failure reason:\n"

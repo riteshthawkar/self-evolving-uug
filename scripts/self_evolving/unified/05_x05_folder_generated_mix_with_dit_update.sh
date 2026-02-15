@@ -10,20 +10,86 @@ DATA_DIR="/workspace/self-evolving-uug/data/benchmark_10k/images"
 OUTPUT_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/X05_folder_mix_with_dit_update"
 RUN_NAME="x05_folder_mix_with_dit_update_s42_fixed"
 GENERATED_MIX_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/generated_mix_pool_x05"
+TRAIN_STAGE="${TRAIN_STAGE:-warmup}"   # warmup | strict
+NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+ATTN_IMPL="${ATTN_IMPL:-sdpa}"
+
+if [[ "$TRAIN_STAGE" == "warmup" ]]; then
+  RUN_NAME="${RUN_NAME}_warmup"
+  STAGE_ARGS=(
+    --disable_acceptance_require_non_easy
+    --disable_acceptance_require_target_bucket
+    --difficulty_target_easy 0.30
+    --difficulty_target_medium 0.50
+    --difficulty_target_hard 0.20
+    --difficulty_sampler_max_retries 2
+    --rejected_question_penalty 0.10
+    --fixed_prop_entropy_target
+    --prop_entropy_mu 0.90
+    --solver_temp_min 0.70
+    --solver_temp_max 1.60
+    --solver_top_p_min 0.35
+    --solver_top_p_max 1.00
+  )
+elif [[ "$TRAIN_STAGE" == "strict" ]]; then
+  RUN_NAME="${RUN_NAME}_strict"
+  STAGE_ARGS=(
+    --acceptance_require_non_easy
+    --acceptance_require_target_bucket
+    --difficulty_target_easy 0.10
+    --difficulty_target_medium 0.70
+    --difficulty_target_hard 0.20
+    --difficulty_sampler_max_retries 4
+    --rejected_question_penalty 0.35
+    --adaptive_prop_entropy_target
+    --prop_entropy_ema_momentum 0.90
+    --prop_entropy_mu_min 0.65
+    --prop_entropy_mu_max 1.50
+    --solver_temp_min 0.70
+    --solver_temp_max 1.30
+    --solver_top_p_min 0.50
+    --solver_top_p_max 1.00
+  )
+else
+  echo "[X05] ERROR: TRAIN_STAGE must be one of: warmup, strict (got: $TRAIN_STAGE)" >&2
+  exit 1
+fi
 
 cd "$REPO_ROOT"
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$GENERATED_MIX_DIR"
 find "$GENERATED_MIX_DIR" -maxdepth 1 -type f \( -name "*.json" -o -name "*.png" \) -delete
 
+CACHE_ROOT="/workspace/self-evolving-uug/self-evolving-uug/cache"
+CACHE_TMP_DIR="$CACHE_ROOT/tmp"
+CACHE_TORCH_EXT_DIR="$CACHE_ROOT/torch_extensions"
+CACHE_WANDB_DIR="$CACHE_ROOT/wandb"
+CACHE_MIOPEN_DIR="$CACHE_ROOT/miopen"
+CACHE_CUDA_DIR="$CACHE_ROOT/cuda"
+mkdir -p "$CACHE_ROOT" "$CACHE_TMP_DIR" "$CACHE_TORCH_EXT_DIR" "$CACHE_WANDB_DIR" "$CACHE_MIOPEN_DIR" "$CACHE_CUDA_DIR" "$CACHE_ROOT/assets"
+
 export PYTHONPATH="/workspace/self-evolving-uug/self-evolving-uug/BLIP3o"
-export HF_HOME="/workspace/self-evolving-uug/self-evolving-uug/cache"
-export HUGGINGFACE_HUB_CACHE="/workspace/self-evolving-uug/self-evolving-uug/cache"
-export HF_DATASETS_CACHE="/workspace/self-evolving-uug/self-evolving-uug/cache"
-export HF_METRICS_CACHE="/workspace/self-evolving-uug/self-evolving-uug/cache"
-export TORCH_HOME="/workspace/self-evolving-uug/self-evolving-uug/cache"
-export TRITON_CACHE_DIR="/workspace/self-evolving-uug/self-evolving-uug/cache"
-export XDG_CACHE_HOME="/workspace/self-evolving-uug/self-evolving-uug/cache"
+export HF_HOME="$CACHE_ROOT"
+export HUGGINGFACE_HUB_CACHE="$CACHE_ROOT"
+export HF_HUB_CACHE="$CACHE_ROOT"
+export HF_ASSETS_CACHE="$CACHE_ROOT/assets"
+export TRANSFORMERS_CACHE="$CACHE_ROOT"
+export HF_DATASETS_CACHE="$CACHE_ROOT"
+export HF_METRICS_CACHE="$CACHE_ROOT"
+export TORCH_HOME="$CACHE_ROOT"
+export TRITON_CACHE_DIR="$CACHE_ROOT"
+export TORCH_EXTENSIONS_DIR="$CACHE_TORCH_EXT_DIR"
+export XDG_CACHE_HOME="$CACHE_ROOT"
+export TMPDIR="$CACHE_TMP_DIR"
+export TMP="$CACHE_TMP_DIR"
+export TEMP="$CACHE_TMP_DIR"
+export WANDB_DIR="$CACHE_WANDB_DIR"
+export WANDB_CACHE_DIR="$CACHE_WANDB_DIR"
+export WANDB_CONFIG_DIR="$CACHE_WANDB_DIR"
+export WANDB_DATA_DIR="$CACHE_WANDB_DIR"
+export CUDA_CACHE_PATH="$CACHE_CUDA_DIR"
+export MIOPEN_USER_DB_PATH="$CACHE_MIOPEN_DIR"
+export MIOPEN_CUSTOM_CACHE_DIR="$CACHE_MIOPEN_DIR"
 export TOKENIZERS_PARALLELISM="false"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -44,7 +110,7 @@ fi
 
 "$PYTHON_BIN" -m torch.distributed.run \
   --standalone \
-  --nproc_per_node 8 \
+  --nproc_per_node "$NPROC_PER_NODE" \
   --master_port 29525 \
   "/workspace/self-evolving-uug/self-evolving-uug/BLIP3o/blip3o/train/train_self_evolving.py" \
   --experiment unified_self_evolving \
@@ -54,7 +120,7 @@ fi
   --output_dir "$OUTPUT_DIR" \
   --run_name "$RUN_NAME" \
   --dtype bfloat16 \
-  --attn_implementation sdpa \
+  --attn_implementation "$ATTN_IMPL" \
   --device_map single \
   --cuda_device 0 \
   --total_steps 10000 \
@@ -92,12 +158,7 @@ fi
   --allow_missing_generation_tokens \
   --generator_missing_trace_strategy proxy \
   --generator_proxy_max_ratio 1.0 \
-  --acceptance_require_target_bucket \
   --difficulty_sampler_enabled \
-  --difficulty_target_easy 0.0 \
-  --difficulty_target_medium 1.0 \
-  --difficulty_target_hard 0.0 \
-  --difficulty_sampler_max_retries 4 \
   --proposer_hardening_max_retries 5 \
   --proposer_force_hardening_max_retries 3 \
   --solver_skip_update_on_easy \
@@ -111,21 +172,14 @@ fi
   --max_question_words 24 \
   --solver_soft_gamma 0.7 \
   --solver_use_temperature_mix \
-  --solver_temp_min 0.7 \
-  --solver_temp_max 1.3 \
   --sc_entropy_min 0.15 \
   --sc_entropy_max 1.20 \
   --sc_margin_max 0.90 \
   --entropy_iqr_min_threshold 0.10 \
   --sc_negative_weight 0.25 \
   --skip_solver_update_when_uninformative \
-  --adaptive_prop_entropy_target \
-  --prop_entropy_ema_momentum 0.90 \
-  --prop_entropy_mu_min 0.65 \
-  --prop_entropy_mu_max 1.50 \
   --len_penalty_weight 0.10 \
   --len_penalty_target_words 6 \
-  --prop_entropy_mu 0.90 \
   --prop_entropy_sigma 0.25 \
   --understanding_steps_per_cycle 3 \
   --generation_steps_per_cycle 2 \
@@ -162,4 +216,5 @@ fi
   --wandb_mode disabled \
   --wandb_project self-evolving-uug-unified \
   --wandb_run_name "$RUN_NAME" \
+  "${STAGE_ARGS[@]}" \
   --seed 42
