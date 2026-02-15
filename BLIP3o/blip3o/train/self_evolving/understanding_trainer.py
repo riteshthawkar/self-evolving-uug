@@ -33,6 +33,7 @@ from .prompts import (
     build_proposer_force_hard_prompt,
     build_proposer_hardening_prompt,
     build_proposer_prompt,
+    build_proposer_template_fallback_prompt,
     build_solver_prompt,
 )
 from .utils import (
@@ -69,6 +70,18 @@ _OBJECTIVE_QUESTION_RE = re.compile(
     r"total|sum|percent|percentage|value|label|name|color|shape|position|left|right|top|bottom|"
     r"highest|lowest|maximum|minimum"
     r")\b",
+    flags=re.IGNORECASE,
+)
+_MALFORMED_QUESTION_RE = re.compile(
+    r"</?(?:answer|rationale|count|attribute|question)\b|```",
+    flags=re.IGNORECASE,
+)
+_META_PLACEHOLDER_RE = re.compile(
+    r"\(\s*[^)]*(?:count|attribute|spatial relation|comparison|number of|color|shape|position)\s*[^)]*\)",
+    flags=re.IGNORECASE,
+)
+_QUESTION_START_RE = re.compile(
+    r"^(?:what|which|how|where|when|who|is|are|was|were|does|do|did|can|could|should|would|has|have|had)\b",
     flags=re.IGNORECASE,
 )
 
@@ -226,7 +239,18 @@ class UnderstandingSelfEvolvingTrainer:
         q = str(question or "").strip()
         if not q:
             return False
+        q = " ".join(q.split())
+        if _MALFORMED_QUESTION_RE.search(q):
+            return False
+        if _META_PLACEHOLDER_RE.search(q):
+            return False
         if _SUBJECTIVE_QUESTION_RE.search(q):
+            return False
+        if len(q.split()) < 4:
+            return False
+        if not _QUESTION_START_RE.search(q):
+            return False
+        if not q.endswith("?"):
             return False
         return bool(_OBJECTIVE_QUESTION_RE.search(q))
 
@@ -1157,11 +1181,12 @@ class UnderstandingSelfEvolvingTrainer:
                 solver_temperatures = self._solver_temperature_schedule()
                 solver_top_ps = self._solver_top_p_schedule()
 
-                proposer_prompt = build_proposer_prompt()
+                proposer_prompt = build_proposer_prompt(desired_difficulty_bucket)
                 proposer_out = ""
                 parsed_question = ""
                 question = ""
                 fallback_used = False
+                template_fallback_used = False
                 proposer_rationale = ""
                 proposer_non_objective_question = False
                 hardening_retries_used = 0
@@ -1315,6 +1340,42 @@ class UnderstandingSelfEvolvingTrainer:
                             )
                         forced_hardening_retries_used += 1
                         proposer_prompt = build_proposer_force_hard_prompt(
+                            question,
+                            hardening_reason,
+                            desired_difficulty_bucket,
+                        )
+                        continue
+                    can_template_fallback = bool(
+                        (not template_fallback_used)
+                        and (
+                            retry_due_to_non_objective
+                            or retry_due_to_easy
+                            or (
+                                acceptance_require_target_bucket
+                                and retry_due_to_bucket
+                            )
+                        )
+                    )
+                    if can_template_fallback:
+                        if retry_due_to_non_objective and retry_due_to_easy:
+                            hardening_reason = (
+                                "question remained subjective and trivially easy after forced hardening"
+                            )
+                        elif retry_due_to_non_objective:
+                            hardening_reason = (
+                                "question remained non-objective after forced hardening"
+                            )
+                        elif retry_due_to_easy:
+                            hardening_reason = (
+                                "question remained too easy after forced hardening"
+                            )
+                        else:
+                            hardening_reason = (
+                                "question still missed the requested difficulty bucket "
+                                f"(target={desired_difficulty_bucket}, observed={difficulty_bucket_observed})"
+                            )
+                        template_fallback_used = True
+                        proposer_prompt = build_proposer_template_fallback_prompt(
                             question,
                             hardening_reason,
                             desired_difficulty_bucket,
@@ -1743,6 +1804,7 @@ class UnderstandingSelfEvolvingTrainer:
                         "parsed_question": parsed_question,
                         "final_question": question,
                         "fallback_question_used": fallback_used,
+                        "proposer_template_fallback_used": template_fallback_used,
                         "proposer_non_objective_question": proposer_non_objective_question,
                         "proposer_hardening_retries_used": hardening_retries_used,
                         "proposer_forced_hardening_retries_used": forced_hardening_retries_used,
@@ -1851,6 +1913,7 @@ class UnderstandingSelfEvolvingTrainer:
                         "proposer_out": proposer_out,
                         "proposer_rationale": proposer_rationale,
                         "fallback_question_used": fallback_used,
+                        "proposer_template_fallback_used": template_fallback_used,
                         "proposer_non_objective_question": proposer_non_objective_question,
                         "proposer_non_objective_penalty": proposer_non_objective_penalty,
                         "proposer_hardening_retries_used": hardening_retries_used,
