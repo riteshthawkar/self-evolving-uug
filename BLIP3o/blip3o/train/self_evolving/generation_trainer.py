@@ -2480,7 +2480,12 @@ class GenerationSelfEvolvingTrainer:
             # Delegate core verification logic to new public method
             score_vals, per_q_vals = self.verify_with_spec(
                 image=image,
-                spec=GenerationSpec(prompt="", qa_pairs=(qa,)), # Wrap single QA pair
+                spec=GenerationSpec(
+                    prompt="",
+                    qa_pairs=(qa,),
+                    raw_output="",
+                    fallback_used=False,
+                ),
                 n_samples=self.cfg.num_solver_samples_spec
             )
             
