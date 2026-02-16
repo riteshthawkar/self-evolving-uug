@@ -83,7 +83,7 @@ class DiTUpdater:
     def load_state_dict(self, state: Dict):
         if not isinstance(state, dict):
             return
-        if "optimizer" in state:
+        if "optimizer" in state and isinstance(state.get("optimizer"), dict):
             self.opt.load_state_dict(state["optimizer"])
         if "step_id" in state:
             self.step_id = int(state["step_id"])
@@ -303,10 +303,18 @@ class DiTUpdater:
                 inputs_embeds=model_inputs,
                 attention_mask=model_mask,
                 use_cache=False,
-                output_hidden_states=True,
+                output_hidden_states=False,
                 return_dict=True,
             )
-            hidden = outputs.hidden_states[-1]
+            hidden = getattr(outputs, "last_hidden_state", None)
+            if hidden is None:
+                hidden_states = getattr(outputs, "hidden_states", None)
+                if hidden_states is not None and len(hidden_states) > 0:
+                    hidden = hidden_states[-1]
+                elif isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+                    hidden = outputs[0]
+                else:
+                    raise RuntimeError("Core model forward did not return hidden states for DiT conditioning.")
             z_latents = hidden[:, -queries.shape[1] :, :].to(device=device, dtype=dtype)
 
         expected_dim = int(getattr(getattr(self.dit, "config", None), "latent_embedding_size", z_latents.shape[-1]))

@@ -333,6 +333,14 @@ class GenerationSelfEvolvingTrainer:
                 f"Unsupported dpo_pair_selection={self.cfg.dpo_pair_selection!r}. "
                 "Expected one of: best_worst, best_hard_negative."
             )
+        self.cfg.generator_missing_trace_strategy = str(
+            getattr(self.cfg, "generator_missing_trace_strategy", "skip") or "skip"
+        ).strip().lower()
+        if self.cfg.generator_missing_trace_strategy not in {"proxy", "skip", "error"}:
+            raise ValueError(
+                "Unsupported generator_missing_trace_strategy="
+                f"{self.cfg.generator_missing_trace_strategy!r}. Expected one of: proxy, skip, error."
+            )
         self.cfg.generator_proxy_max_ratio = float(getattr(self.cfg, "generator_proxy_max_ratio", 1.0))
         if not (0.0 <= self.cfg.generator_proxy_max_ratio <= 1.0):
             raise ValueError(
@@ -372,7 +380,24 @@ class GenerationSelfEvolvingTrainer:
         self.cfg.dit_prompt_suffix_token_id = int(
             getattr(self.cfg, "dit_prompt_suffix_token_id", 151665)
         )
+        # Generator reward EMA for monitoring
+        self._gen_reward_ema = float(getattr(self, "_gen_reward_ema", 0.0))
+        self._gen_reward_ema_initialized = bool(
+            getattr(self, "_gen_reward_ema_initialized", False)
+        )
         self._setup_distributed()
+
+        # Exp 3: Frozen Judge (Unicorn)
+        # NOTE: initialize after model/updater/resume setup so cloning uses
+        # fully loaded weights and avoids deepcopying a partially-built trainer.
+        self.judge = None
+        if self.cfg.dit_update_enabled and self.cfg.generator_missing_trace_strategy == "proxy":
+            self.cfg.generator_missing_trace_strategy = "skip"
+            if self.is_main_process:
+                print(
+                    "[Generation] DiT updates enabled: forcing "
+                    "generator_missing_trace_strategy=skip (proxy disabled)."
+                )
         _set_global_seed(config.seed + self.rank, deterministic=config.deterministic)
 
         if not config.data_dir:
@@ -577,6 +602,12 @@ class GenerationSelfEvolvingTrainer:
         if loaded_resume_step is not None:
             self.start_step = max(self.start_step, int(loaded_resume_step))
 
+        if getattr(config, "enable_frozen_judge", False):
+            from .judge import FrozenJudge
+            if self.is_main_process:
+                print(f"[GenerationTrainer] Initializing FrozenJudge (ema_decay={config.judge_ema_decay})...")
+            self.judge = FrozenJudge(self, ema_decay=config.judge_ema_decay)
+
     def _init_wandb(self):
         if not self.is_main_process:
             return None
@@ -731,6 +762,46 @@ class GenerationSelfEvolvingTrainer:
             except Exception as exc:
                 if self.is_main_process:
                     print(f"[Generation] WARNING: failed to restore trainable adapter weights: {exc}")
+        else:
+            dit_index_path = resume_dir / "dit_trainable_index.json"
+            dit_dir = resume_dir / "dit_trainable"
+            if dit_index_path.exists() and dit_dir.is_dir():
+                loaded = 0
+                failed = 0
+                missing = 0
+                model_ref = _unwrap_model(self.model)
+                try:
+                    with dit_index_path.open("r", encoding="utf-8") as f:
+                        payload = json.load(f)
+                    items = payload.get("params", {}) if isinstance(payload, dict) else {}
+                    if isinstance(items, dict):
+                        for param_name, file_name in items.items():
+                            shard_path = (dit_dir / str(file_name)).resolve()
+                            if not shard_path.exists():
+                                missing += 1
+                                continue
+                            try:
+                                shard = torch.load(shard_path, map_location="cpu")
+                                missing_keys, unexpected_keys = model_ref.load_state_dict(
+                                    {str(param_name): shard},
+                                    strict=False,
+                                )
+                                if unexpected_keys:
+                                    failed += len(unexpected_keys)
+                                elif missing_keys and str(param_name) in missing_keys:
+                                    failed += 1
+                                else:
+                                    loaded += 1
+                            except Exception:
+                                failed += 1
+                    if self.is_main_process:
+                        print(
+                            f"[Generation] Restored DiT shards from {dit_dir} "
+                            f"(loaded={loaded}, missing={missing}, failed={failed})"
+                        )
+                except Exception as exc:
+                    if self.is_main_process:
+                        print(f"[Generation] WARNING: failed to restore DiT shard weights: {exc}")
 
         state_path = resume_dir / "trainer_state.pt"
         if not state_path.exists():
@@ -839,7 +910,23 @@ class GenerationSelfEvolvingTrainer:
             state["solver_updater"] = self.solver_updater.state_dict()
             state["solver_baseline"] = float(self.solver_baseline)
         if self.dit_updater is not None:
-            state["dit_updater"] = self.dit_updater.state_dict()
+            save_dit_opt_state = os.environ.get("SE_SAVE_DIT_OPT_STATE", "0").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if save_dit_opt_state:
+                state["dit_updater"] = self.dit_updater.state_dict()
+            else:
+                state["dit_updater"] = {
+                    "step_id": int(getattr(self.dit_updater, "step_id", 0)),
+                    "accum_count": int(getattr(self.dit_updater, "_accum_count", 0)),
+                    "has_real_grad_in_window": bool(
+                        getattr(self.dit_updater, "_has_real_grad_in_window", False)
+                    ),
+                    "optimizer": None,
+                }
         if torch.cuda.is_available():
             try:
                 state["torch_cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
@@ -1061,11 +1148,19 @@ class GenerationSelfEvolvingTrainer:
         with use_adapter(self.model, None):
             outputs = self.model(
                 **inputs,
-                output_hidden_states=True,
+                output_hidden_states=False,
                 use_cache=False,
+                return_dict=True,
             )
-        # Last hidden state: [1, seq_len, hidden_dim]
-        hidden = outputs.hidden_states[-1]
+        hidden = getattr(outputs, "last_hidden_state", None)
+        if hidden is None:
+            hidden_states = getattr(outputs, "hidden_states", None)
+            if hidden_states is not None and len(hidden_states) > 0:
+                hidden = hidden_states[-1]
+            elif isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+                hidden = outputs[0]
+            else:
+                raise RuntimeError("Model forward did not return hidden states for text embedding.")
         # Mean-pool over non-padding positions
         mask = inputs.get("attention_mask")
         if mask is not None:
@@ -1090,10 +1185,19 @@ class GenerationSelfEvolvingTrainer:
         with use_adapter(self.model, None):
             outputs = self.model(
                 **forward_inputs,
-                output_hidden_states=True,
+                output_hidden_states=False,
                 use_cache=False,
+                return_dict=True,
             )
-        hidden = outputs.hidden_states[-1]
+        hidden = getattr(outputs, "last_hidden_state", None)
+        if hidden is None:
+            hidden_states = getattr(outputs, "hidden_states", None)
+            if hidden_states is not None and len(hidden_states) > 0:
+                hidden = hidden_states[-1]
+            elif isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+                hidden = outputs[0]
+            else:
+                raise RuntimeError("Model forward did not return hidden states for image-text embedding.")
         mask = inputs.get("attention_mask")
         if mask is not None:
             mask = mask.unsqueeze(-1).to(hidden.dtype)
@@ -2294,6 +2398,58 @@ class GenerationSelfEvolvingTrainer:
             "histogram": hist,
         }
 
+    def verify_with_spec(
+        self,
+        image: Image.Image,
+        spec: GenerationSpec,
+        n_samples: int = 5,
+    ) -> Tuple[float, List[Dict[str, object]]]:
+        """
+        Verify an image against a generation spec (Unicorn-style).
+        Public interface used by FrozenJudge.
+        """
+        if not spec.qa_pairs:
+            return 0.5, []
+
+        per_question_scores = []
+        score_values = []
+
+        # Temporarily override num_solver_samples if requested
+        original_n = self.cfg.num_solver_samples_spec
+        self.cfg.num_solver_samples_spec = n_samples
+
+        try:
+            for qa in spec.qa_pairs:
+                solved = self._solve_question_with_rollouts(image=image, question=qa.question)
+                mode_answer = str(solved["majority_answer"])
+                maj_frac = float(solved["majority_fraction"])
+
+                match_score = _soft_match(mode_answer, qa.expected)
+                combined = 0.7 * match_score + 0.3 * maj_frac
+
+                epol = _yes_no_polarity(qa.expected)
+                apol = _yes_no_polarity(mode_answer)
+                contradiction = 1.0 if (epol != 0 and apol != 0 and epol != apol) else 0.0
+
+                score_values.append(combined)
+                
+                per_question_scores.append({
+                    "question": qa.question,
+                    "expected": qa.expected,
+                    "majority_answer": mode_answer,
+                    "majority_fraction": maj_frac,
+                    "match_score": match_score,
+                    "combined_score": combined,
+                    "contradiction": contradiction,
+                    "solver": solved,
+                })
+        finally:
+            self.cfg.num_solver_samples_spec = original_n
+
+        # Aggregate per-question scores (mean)
+        final_score = sum(score_values) / max(1, len(score_values))
+        return final_score, per_question_scores
+
     def _score_spec(
         self,
         image: Image.Image,
@@ -2321,16 +2477,20 @@ class GenerationSelfEvolvingTrainer:
                     )
                 else:
                     print(f"[Step {step:05d}][G] scoring qa {qa_idx + 1}/{len(qa_pairs)}")
-            solved = self._solve_question_with_rollouts(image=image, question=qa.question)
+            # Delegate core verification logic to new public method
+            score_vals, per_q_vals = self.verify_with_spec(
+                image=image,
+                spec=GenerationSpec(prompt="", qa_pairs=(qa,)), # Wrap single QA pair
+                n_samples=self.cfg.num_solver_samples_spec
+            )
+            
+            # Unpack single-QA result
+            combined = score_vals
+            solved = per_q_vals[0]["solver"]
+            match_score = per_q_vals[0]["match_score"]
+            contradiction = per_q_vals[0]["contradiction"]
+            maj_frac = solved["majority_fraction"]
             mode_answer = str(solved["majority_answer"])
-            maj_frac = float(solved["majority_fraction"])
-
-            match_score = _soft_match(mode_answer, qa.expected)
-            combined = 0.7 * match_score + 0.3 * maj_frac
-
-            epol = _yes_no_polarity(qa.expected)
-            apol = _yes_no_polarity(mode_answer)
-            contradiction = 1.0 if (epol != 0 and apol != 0 and epol != apol) else 0.0
 
             score_values.append(combined)
             contradiction_values.append(contradiction)
@@ -2431,13 +2591,6 @@ class GenerationSelfEvolvingTrainer:
                     f"(backend={backend})"
                 )
             image = cand["image"]
-            spec_score, contradiction_score, qa_logs = self._score_spec(
-                image=image,
-                qa_pairs=qa_pairs,
-                step=step,
-                candidate_count=len(candidates),
-                verbose=verbose,
-            )
             # Support per-candidate specs (Exp 2: Diversity in Prompts)
             current_prompt = prompt
             current_quality = spec_quality
@@ -2446,18 +2599,47 @@ class GenerationSelfEvolvingTrainer:
                 if candidate_spec_qualities is not None and idx < len(candidate_spec_qualities):
                     current_quality = candidate_spec_qualities[idx]
                 # Re-score spec match against the specific QA pairs for this diverse prompt
-                spec_score, contradiction_score, qa_logs = self._score_spec(
-                    image=image,
-                    qa_pairs=candidate_specs[idx].qa_pairs,
-                    step=step,
-                    candidate_idx=idx,
-                    candidate_count=len(candidates),
-                    verbose=verbose,
-                )
-
-            qa_confidence = self._qa_confidence_from_logs(qa_logs)
-            cycle_score, cycle_caption = self._cycle_reward(prompt=current_prompt, image=image)
-
+                if self.judge is not None:
+                    # Use Frozen Judge for scoring (Exp 3)
+                    spec_score, qa_results = self.judge.evaluate(
+                        image=image, spec=candidate_specs[idx], n_samples=self.cfg.num_solver_samples_spec
+                    )
+                    contradiction_score = sum(r["contradiction"] for r in qa_results) / max(1, len(qa_results))
+                    qa_logs = qa_results
+                else:
+                    # Use active solver (baseline)
+                    spec_score, contradiction_score, qa_logs = self._score_spec(
+                        image=image,
+                        qa_pairs=candidate_specs[idx].qa_pairs,
+                        step=step,
+                        candidate_idx=idx,
+                        candidate_count=len(candidates),
+                        verbose=verbose,
+                    )
+            else:
+                # Shared spec (Exp 2 off or base behavior)
+                current_prompt = prompt
+                current_quality = spec_quality
+                
+                if self.judge is not None:
+                     # Use Frozen Judge for scoring (Exp 3)
+                     # We create a temporary spec object since the signature needs one
+                     temp_spec = GenerationSpec(prompt=prompt, qa_pairs=qa_pairs)
+                     spec_score, qa_results = self.judge.evaluate(
+                        image=image, spec=temp_spec, n_samples=self.cfg.num_solver_samples_spec
+                     )
+                     contradiction_score = sum(r["contradiction"] for r in qa_results) / max(1, len(qa_results))
+                     qa_logs = qa_results
+                else:
+                     # Use active solver
+                     spec_score, contradiction_score, qa_logs = self._score_spec(
+                        image=image,
+                        qa_pairs=qa_pairs,
+                        step=step,
+                        candidate_idx=idx,
+                        candidate_count=len(candidates),
+                        verbose=verbose,
+                    )
             pos_sum = (
                 self.cfg.reward_spec_weight
                 + self.cfg.reward_cycle_weight
@@ -2468,6 +2650,9 @@ class GenerationSelfEvolvingTrainer:
             w_spec = self.cfg.reward_spec_weight / pos_sum
             w_cycle = self.cfg.reward_cycle_weight / pos_sum
             w_div = self.cfg.reward_diversity_weight / pos_sum
+
+            qa_confidence = self._qa_confidence_from_logs(qa_logs)
+            cycle_score, cycle_caption = self._cycle_reward(prompt=current_prompt, image=image)
 
             base_reward = (
                 w_spec * spec_score
@@ -2520,11 +2705,12 @@ class GenerationSelfEvolvingTrainer:
         scored: List[Dict[str, object]] = []
         for idx, cand in enumerate(candidates):
             cand_image = cand.get("image")
+            cand_prompt = str(cand.get("policy_prompt", prompt))
             reward = 0.0
             raw_cosine = -1.0
             if isinstance(cand_image, Image.Image):
                 try:
-                    raw_cosine = float(self._image_text_similarity(cand_image, prompt))
+                    raw_cosine = float(self._image_text_similarity(cand_image, cand_prompt))
                     reward = max(0.0, min(1.0, 0.5 * (raw_cosine + 1.0)))
                 except Exception:
                     reward = 0.0
@@ -2534,7 +2720,7 @@ class GenerationSelfEvolvingTrainer:
                 {
                     "candidate_idx": idx,
                     "backend": cand.get("backend"),
-                    "policy_prompt": cand.get("policy_prompt", prompt),
+                    "policy_prompt": cand_prompt,
                     "policy_completion": cand.get("policy_completion", ""),
                     "policy_completion_ids": cand.get("policy_completion_ids"),
                     "spec_score": 0.0,
@@ -2590,58 +2776,122 @@ class GenerationSelfEvolvingTrainer:
 
         solver_prompt = build_solver_prompt(question)
         solver_prompt_chat = _build_chat_text(self.processor, image, solver_prompt)
-        # The chat template ends with the assistant generation prompt; the
-        # reference answer follows as if the model had generated it.
         full_text = solver_prompt_chat + ref_ans_stripped
+
+        def _filter_forward_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                k: v
+                for k, v in payload.items()
+                if k not in ("images", "image_sizes")
+            }
 
         # IMPORTANT: use the local (unwrapped) model for no-grad scoring.
         # Using DDP-wrapped forward here can deadlock in ref-scoring paths
         # where per-rank forward counts/timings diverge.
         model = self.model
-        if self.cfg.use_lora:
-            adapter = "default"  # trained solver adapter
-        else:
-            adapter = None
+        adapter = "default" if self.cfg.use_lora else None
         was_training = model.training
 
         try:
             with use_adapter(model, adapter):
                 model.eval()
                 prompt_inputs = _prepare_mm_inputs(
-                    self.processor, device, image, solver_prompt_chat,
+                    self.processor,
+                    device,
+                    image,
+                    solver_prompt_chat,
                     model=_unwrap_model(model),
                 )
                 full_inputs = _prepare_mm_inputs(
-                    self.processor, device, image, full_text,
+                    self.processor,
+                    device,
+                    image,
+                    full_text,
                     model=_unwrap_model(model),
                 )
 
-                out = model(**full_inputs)
-
-                # Robust prompt length via token alignment (handles edge cases
-                # where prompt/full tokenization differs).
                 prompt_len = _aligned_prompt_prefix_len(
                     prompt_inputs["input_ids"],
                     full_inputs["input_ids"],
                     ref_ans_stripped,
                 )
-                labels = full_inputs["input_ids"].clone()
-                labels[:, :prompt_len] = -100
-                shift_labels = labels[:, 1:]
-                valid_mask = shift_labels != -100
-
-                logp = F.log_softmax(out.logits[:, :-1, :], dim=-1)
-                gathered = logp.gather(
-                    -1, shift_labels.clamp_min(0).unsqueeze(-1)
-                ).squeeze(-1)
-
-                valid_count = int(valid_mask.sum().item())
-                if valid_count > 0:
-                    return float(gathered[valid_mask].mean().item())
-                else:
+                target_ids = full_inputs["input_ids"][:, prompt_len:]
+                target_count = int(target_ids.numel())
+                if target_count <= 0:
                     return -10.0
+
+                prompt_forward = _filter_forward_kwargs(prompt_inputs)
+                try:
+                    out = model(
+                        **prompt_forward,
+                        use_cache=True,
+                        return_dict=True,
+                    )
+                    logits = getattr(out, "logits", None)
+                    if logits is None:
+                        raise RuntimeError("Solver forward returned no logits.")
+                    past_key_values = getattr(out, "past_key_values", None)
+
+                    running_attention = prompt_forward.get("attention_mask")
+                    logp_values: List[torch.Tensor] = []
+                    one_mask: Optional[torch.Tensor] = None
+
+                    for tok_idx in range(target_ids.shape[1]):
+                        tok = target_ids[:, tok_idx : tok_idx + 1]
+                        token_logp = F.log_softmax(logits[:, -1, :], dim=-1).gather(-1, tok).squeeze(-1)
+                        logp_values.append(token_logp)
+
+                        if tok_idx >= (target_ids.shape[1] - 1):
+                            break
+
+                        if past_key_values is None:
+                            raise RuntimeError("Solver forward did not return past_key_values.")
+
+                        if running_attention is not None:
+                            if one_mask is None:
+                                one_mask = torch.ones(
+                                    (running_attention.shape[0], 1),
+                                    dtype=running_attention.dtype,
+                                    device=running_attention.device,
+                                )
+                            running_attention = torch.cat([running_attention, one_mask], dim=1)
+
+                        out = model(
+                            input_ids=tok,
+                            attention_mask=running_attention,
+                            past_key_values=past_key_values,
+                            use_cache=True,
+                            return_dict=True,
+                        )
+                        logits = getattr(out, "logits", None)
+                        if logits is None:
+                            raise RuntimeError("Solver forward returned no logits.")
+                        past_key_values = getattr(out, "past_key_values", None)
+
+                    if logp_values:
+                        return float(torch.stack(logp_values).mean().item())
+                except Exception:
+                    # Fallback path for model variants that do not support
+                    # stable cache-based scoring.
+                    out = model(**_filter_forward_kwargs(full_inputs), use_cache=False, return_dict=True)
+                    logits = getattr(out, "logits", None)
+                    if logits is None:
+                        return -10.0
+                    labels = full_inputs["input_ids"].clone()
+                    labels[:, :prompt_len] = -100
+                    shift_labels = labels[:, 1:]
+                    valid_mask = shift_labels != -100
+                    valid_count = int(valid_mask.sum().item())
+                    if valid_count <= 0:
+                        return -10.0
+                    logp = F.log_softmax(logits[:, :-1, :], dim=-1)
+                    gathered = logp.gather(
+                        -1, shift_labels.clamp_min(0).unsqueeze(-1)
+                    ).squeeze(-1)
+                    return float(gathered[valid_mask].mean().item())
+
+                return -10.0
         finally:
-            # Restore original training/eval state
             model.train(was_training)
 
     def _score_candidates_ref_answer(
@@ -2917,12 +3167,36 @@ class GenerationSelfEvolvingTrainer:
                 pass
 
         model_ref = _unwrap_model(self.model)
-        trainable_state = {
-            name: param.detach().cpu()
-            for name, param in model_ref.named_parameters()
-            if param.requires_grad
-        }
-        torch.save(trainable_state, tmp_dir / "trainable_adapters.pt")
+        save_trainable_snapshot = not (
+            self.cfg.use_lora and bool(getattr(self.cfg, "dit_update_enabled", False))
+        )
+        if save_trainable_snapshot:
+            trainable_state = {
+                name: param.detach().cpu()
+                for name, param in model_ref.named_parameters()
+                if param.requires_grad
+            }
+            torch.save(trainable_state, tmp_dir / "trainable_adapters.pt")
+        elif bool(getattr(self.cfg, "dit_update_enabled", False)):
+            dit_dir = tmp_dir / "dit_trainable"
+            dit_dir.mkdir(parents=True, exist_ok=True)
+            dit_index: Dict[str, str] = {}
+            for idx, (name, param) in enumerate(model_ref.named_parameters()):
+                if not param.requires_grad:
+                    continue
+                if ".dit." not in name and not name.startswith("dit."):
+                    continue
+                shard_name = f"dit_param_{idx:06d}.pt"
+                shard_path = dit_dir / shard_name
+                torch.save(param.detach().cpu(), shard_path)
+                dit_index[name] = shard_name
+            _json_dump(
+                tmp_dir / "dit_trainable_index.json",
+                {
+                    "count": int(len(dit_index)),
+                    "params": dit_index,
+                },
+            )
 
         torch.save(self._trainer_state_dict(step), tmp_dir / "trainer_state.pt")
 
@@ -3137,6 +3411,10 @@ class GenerationSelfEvolvingTrainer:
             step=step,
             verbose=verbose,
         )
+
+        if self.judge is not None:
+            self.judge.update(self)
+
         self._append_jsonl(
             self.unicorn_spec_log_path,
             {
@@ -3156,75 +3434,60 @@ class GenerationSelfEvolvingTrainer:
                 f"align={float(unicorn_spec_meta.get('selected_alignment', 0.0)):.3f}"
             )
 
+        use_diverse_prompts = bool(getattr(self.cfg, "use_diverse_prompts", False))
         candidates: List[Dict[str, object]] = []
-        for cand_idx in range(self.cfg.num_generations):
-            cand_t0 = time.perf_counter()
-            if verbose:
-                print(
-                    f"[Step {step:05d}][G] generating candidate {cand_idx + 1}/{self.cfg.num_generations}"
-                )
-            cand = self._generate_image_candidate(inputs=spec.prompt)
-            candidates.append(cand)
-            if verbose:
-                backend = str(cand.get("backend", "unknown"))
-                cand_dt = time.perf_counter() - cand_t0
-                print(
-                    f"[Step {step:05d}][G] generated candidate {cand_idx + 1}/{self.cfg.num_generations} "
-                    f"in {cand_dt:.1f}s (backend={backend})"
-                )
-
         candidate_specs = None
         candidate_spec_qualities = None
 
-        # --- Exp 2: Diverse Prompts Mode ---
-        if getattr(self.cfg, "use_diverse_prompts", False):
-            # If we just generated "candidates" above using a single spec, DISCARD them (or use them? code above runs loop).
-            # Wait, best to replace the loop entirely.
-            pass
-
-        # To avoid double-generation, we restructure the loop above.
-        # But for minimal diff, we can clear and restart if diverse mode is on.
-        # Actually, let's inject logic *before* the loop or modify the loop structure.
-        # It's cleaner to rewrite the block 3093-3134.
-        # Since I can't rewrite that big block easily without potential drift issues if I misread lines,
-        # I will use the "candidates" list produced above ONLY if NOT diverse mode.
-        # If diverse mode, I clear it and regenerate.
-        if getattr(self.cfg, "use_diverse_prompts", False):
+        if use_diverse_prompts:
             if verbose:
-                print(f"[Step {step:05d}][G] Switching to Diverse Prompts Mode (Exp 2)")
-            candidates = []
-            candidate_specs = []
-            candidate_spec_qualities = []
-            
-            # We already have 1 spec from above (lines 3094-3099). Let's use it as the first one.
-            candidate_specs.append(spec)
-            candidate_spec_qualities.append(spec_quality)
-            
-            # Generate the image for the first spec
-            cand0 = self._generate_image_candidate(inputs=spec.prompt)
-            candidates.append(cand0)
-
-            # Now sample N-1 more diverse prompts
-            for i in range(self.cfg.num_generations - 1):
-                # Propose a NEW random specification
-                new_spec, new_qual, _, _ = self._select_generation_spec_with_unicorn(
-                    image=image,
-                    source_caption=source_caption,
-                    step=step,
-                    verbose=False # reduce spam
-                )
-                candidate_specs.append(new_spec)
-                candidate_spec_qualities.append(new_qual)
-                
-                # Generate image for new spec
-                new_cand = self._generate_image_candidate(inputs=new_spec.prompt)
-                candidates.append(new_cand)
-                
+                print(f"[Step {step:05d}][G] diverse-prompts mode enabled")
+            candidate_specs = [spec]
+            candidate_spec_qualities = [spec_quality]
+            for cand_idx in range(self.cfg.num_generations):
+                if cand_idx == 0:
+                    curr_spec = spec
+                    curr_quality = spec_quality
+                else:
+                    curr_spec, curr_quality, _, _ = self._select_generation_spec_with_unicorn(
+                        image=image,
+                        source_caption=source_caption,
+                        step=step,
+                        verbose=False,
+                    )
+                    candidate_specs.append(curr_spec)
+                    candidate_spec_qualities.append(curr_quality)
+                cand_t0 = time.perf_counter()
                 if verbose:
-                     print(f"[Step {step:05d}][G] Diverse generation {i+2}/{self.cfg.num_generations} (Q={new_qual:.2f})")
-                     
-            # Logging diverse prompts? We logged the first one already.
-            # We could log others too but maybe too much IO.
+                    print(
+                        f"[Step {step:05d}][G] generating candidate {cand_idx + 1}/{self.cfg.num_generations} "
+                        f"(spec_q={curr_quality:.3f})"
+                    )
+                cand = self._generate_image_candidate(inputs=curr_spec.prompt)
+                candidates.append(cand)
+                if verbose:
+                    backend = str(cand.get("backend", "unknown"))
+                    cand_dt = time.perf_counter() - cand_t0
+                    print(
+                        f"[Step {step:05d}][G] generated candidate {cand_idx + 1}/{self.cfg.num_generations} "
+                        f"in {cand_dt:.1f}s (backend={backend})"
+                    )
+        else:
+            for cand_idx in range(self.cfg.num_generations):
+                cand_t0 = time.perf_counter()
+                if verbose:
+                    print(
+                        f"[Step {step:05d}][G] generating candidate {cand_idx + 1}/{self.cfg.num_generations}"
+                    )
+                cand = self._generate_image_candidate(inputs=spec.prompt)
+                candidates.append(cand)
+                if verbose:
+                    backend = str(cand.get("backend", "unknown"))
+                    cand_dt = time.perf_counter() - cand_t0
+                    print(
+                        f"[Step {step:05d}][G] generated candidate {cand_idx + 1}/{self.cfg.num_generations} "
+                        f"in {cand_dt:.1f}s (backend={backend})"
+                    )
 
         # ---- Score candidates (Phase 1 vs Phase 2 scoring) ---- #
         _use_ref_scoring = bool(getattr(self.cfg, "use_ref_answer_scoring", False))

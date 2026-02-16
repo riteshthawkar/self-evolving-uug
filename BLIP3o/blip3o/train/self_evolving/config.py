@@ -189,7 +189,7 @@ class GenerationSelfEvolvingConfig:
     require_decoder_for_blip3o: bool = True
     allow_latent_visualization_fallback: bool = False
     strict_require_generation_tokens: bool = True
-    generator_missing_trace_strategy: str = "proxy"  # proxy|skip|error
+    generator_missing_trace_strategy: str = "skip"  # proxy|skip|error
     verification_use_reference_solver: bool = False  # use trained solver LoRA for mutual supervision
     use_self_clip_reward_scoring: bool = False  # CLIP-style reward from model's own frozen embeddings
     generator_update_rule: str = "reinforce"  # reinforce|dpo|grpo
@@ -204,6 +204,9 @@ class GenerationSelfEvolvingConfig:
     grpo_clip_ratio: float = 0.2              # PPO-style importance ratio clipping for GRPO
     grpo_min_group_std: float = 1e-6          # skip GRPO update if reward std below this
     use_diverse_prompts: bool = False         # Exp 2: generate N diverse prompts per image instead of 1
+    enable_frozen_judge: bool = False         # Exp 3: use EMA-updated frozen solver as judge
+    judge_ema_decay: float = 0.99
+    judge_gpu_id: Optional[int] = None        # offload judge to separate GPU if needed
     unicorn_generation_enabled: bool = True
     unicorn_target_difficulty: str = "medium"  # easy|medium|hard
     unicorn_spec_rejection_enabled: bool = True

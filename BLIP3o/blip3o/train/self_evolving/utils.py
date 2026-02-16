@@ -95,7 +95,7 @@ def _normalize_vl_image_size(image: Image.Image) -> Image.Image:
 
     This reduces sporadic backend failures on extreme resolutions while keeping
     behavior configurable by environment variables:
-      - SE_MAX_IMAGE_SIDE (default: 1536, <=0 disables upper-bound resize)
+      - SE_MAX_IMAGE_SIDE (default: 1024, <=0 disables upper-bound resize)
       - SE_MIN_IMAGE_SIDE (default: 56)
       - SE_IMAGE_SIZE_MULTIPLE (default: 28)
     """
@@ -103,9 +103,9 @@ def _normalize_vl_image_size(image: Image.Image) -> Image.Image:
         return image
 
     try:
-        max_side = int(os.environ.get("SE_MAX_IMAGE_SIDE", "1536"))
+        max_side = int(os.environ.get("SE_MAX_IMAGE_SIDE", "1024"))
     except Exception:
-        max_side = 1536
+        max_side = 1024
     try:
         min_side = int(os.environ.get("SE_MIN_IMAGE_SIDE", "56"))
     except Exception:

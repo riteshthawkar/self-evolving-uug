@@ -4,6 +4,7 @@ set -euo pipefail
 # Experiment X02
 # Only unlabeled/real image data for understanding.
 # No generation data is mixed into understanding.
+# Generation-side learning uses DiT updates only (no proxy text-policy updates).
 
 REPO_ROOT="/workspace/self-evolving-uug/self-evolving-uug"
 PYTHON_BIN="python3"
@@ -89,6 +90,10 @@ export CUDA_CACHE_PATH="$CACHE_CUDA_DIR"
 export MIOPEN_USER_DB_PATH="$CACHE_MIOPEN_DIR"
 export MIOPEN_CUSTOM_CACHE_DIR="$CACHE_MIOPEN_DIR"
 export TOKENIZERS_PARALLELISM="false"
+export SE_MAX_IMAGE_SIDE="${SE_MAX_IMAGE_SIDE:-896}"
+export SE_MIN_IMAGE_SIDE="${SE_MIN_IMAGE_SIDE:-56}"
+export SE_IMAGE_SIZE_MULTIPLE="${SE_IMAGE_SIZE_MULTIPLE:-28}"
+GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_BLOCKING_WAIT=1
@@ -122,10 +127,10 @@ fi
   --device_map single \
   --cuda_device 0 \
   --total_steps 10000 \
-  --save_every 500 \
+  --save_every 2000 \
   --log_every 1 \
   --max_checkpoints 5 \
-  --save_generated_images_every 500 \
+  --save_generated_images_every 2000 \
   --deterministic \
   --require_decoder_for_blip3o \
   --use_lora \
@@ -138,24 +143,23 @@ fi
   --grad_clip 1.0 \
   --grad_accum_steps 4 \
   --proposer_update_freq 1 \
-  --generator_update_freq 1 \
+  --generator_update_freq 0 \
   --generator_update_rule grpo \
   --enable_solver_updates \
   --solver_update_freq 1 \
   --temp 1.0 \
   --top_p 1.0 \
   --max_new_tokens_solver 96 \
-  --max_new_tokens_proposer 192 \
+  --max_new_tokens_proposer 160 \
   --max_new_tokens_caption 64 \
   --max_new_tokens_generator 512 \
-  --num_solver_samples 7 \
+  --num_solver_samples 5 \
   --num_solver_samples_spec 2 \
   --num_generations 3 \
   --generation_num_inference_steps 20 \
   --generation_guidance_scale 2.0 \
-  --allow_missing_generation_tokens \
-  --generator_missing_trace_strategy proxy \
-  --generator_proxy_max_ratio 1.0 \
+  --generation_height "$GENERATION_IMAGE_SIDE" \
+  --generation_width "$GENERATION_IMAGE_SIDE" \
   --difficulty_sampler_enabled \
   --proposer_hardening_max_retries 5 \
   --proposer_force_hardening_max_retries 3 \
@@ -192,13 +196,23 @@ fi
   --clear_cache_every 10 \
   --use_ref_answer_scoring \
   --disable_unicorn_reconstruction_sft \
-  --replay_buffer_size 1000 \
-  --replay_min_reward 0.50 \
-  --replay_max_staleness 500 \
+  --disable_unicorn_reconstruction_generator \
+  --replay_buffer_size 1 \
+  --replay_min_reward 1.10 \
+  --replay_max_staleness 1 \
   --gen_mix_source_mode buffer \
   --gen_mix_ratio_start 0.0 \
   --gen_mix_ratio_max 0.0 \
   --gen_mix_ratio_warmup_steps 1 \
+  --dit_update_enabled \
+  --dit_update_freq 1 \
+  --dit_lr 5e-7 \
+  --dit_weight_decay 0.01 \
+  --dit_grad_clip 1.0 \
+  --dit_grad_accum_steps 1 \
+  --dit_conditioning_dropout 0.10 \
+  --dit_loss_weight 1.0 \
+  --dit_prompt_suffix_token_id 151665 \
   --wandb_mode disabled \
   --wandb_project self-evolving-uug-unified \
   --wandb_run_name "$RUN_NAME" \
