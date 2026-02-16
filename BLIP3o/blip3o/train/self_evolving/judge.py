@@ -6,7 +6,10 @@ Ported from self_evolving/judge.py.
 
 import copy
 import torch
-from typing import Optional
+from typing import Optional, Tuple, Dict, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .utils import GenerationSpec
 
 
 def _clone_solver_lightweight(solver):

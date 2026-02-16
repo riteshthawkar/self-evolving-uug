@@ -229,7 +229,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--strict_require_generation_tokens", dest="strict_require_generation_tokens", action="store_true")
     p.add_argument("--allow_missing_generation_tokens", dest="strict_require_generation_tokens", action="store_false")
     p.set_defaults(strict_require_generation_tokens=True)
-    p.add_argument("--generator_missing_trace_strategy", type=str, default="proxy", choices=["proxy", "skip", "error"])
+    p.add_argument("--generator_missing_trace_strategy", type=str, default="skip", choices=["proxy", "skip", "error"])
     # Solver always uses trained LoRA for mutual supervision (understanding ↔ generation).
     # Legacy flag kept for backward compat but defaults to False (trained solver).
     p.add_argument("--verification_use_reference_solver", action="store_true", default=False)
@@ -349,6 +349,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wandb_entity", type=str, default=os.environ.get("WANDB_ENTITY", None))
     p.add_argument("--wandb_run_name", type=str, default=os.environ.get("WANDB_RUN_NAME", None))
     p.add_argument("--wandb_log_images_every", type=int, default=0)
+
+    # Experiments
+    p.add_argument("--use_diverse_prompts", action="store_true", default=False)
+    p.add_argument("--enable_frozen_judge", action="store_true", default=False)
+    p.add_argument("--judge_ema_decay", type=float, default=0.995)
+    p.add_argument("--judge_gpu_id", type=int, default=None)
 
     return p
 
@@ -623,6 +629,10 @@ def _build_generation_config(args):
         wandb_entity=args.wandb_entity,
         wandb_run_name=args.wandb_run_name,
         wandb_log_images_every=args.wandb_log_images_every,
+        use_diverse_prompts=args.use_diverse_prompts,
+        enable_frozen_judge=args.enable_frozen_judge,
+        judge_ema_decay=args.judge_ema_decay,
+        judge_gpu_id=args.judge_gpu_id,
     )
 
 
@@ -813,6 +823,10 @@ def _build_unified_config(args):
         gen_mix_ratio_max=args.gen_mix_ratio_max,
         gen_mix_ratio_warmup_steps=args.gen_mix_ratio_warmup_steps,
         reward_ema_momentum=args.reward_ema_momentum,
+        use_diverse_prompts=args.use_diverse_prompts,
+        enable_frozen_judge=args.enable_frozen_judge,
+        judge_ema_decay=args.judge_ema_decay,
+        judge_gpu_id=args.judge_gpu_id,
     )
 
 
