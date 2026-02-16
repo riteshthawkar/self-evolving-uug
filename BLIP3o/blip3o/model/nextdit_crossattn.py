@@ -73,7 +73,7 @@ class NextDiTCrossAttn(PreTrainedModel):
         )
 
         if self._gradient_checkpointing:
-            self.model.enable_gradient_checkpointing()
+            self._enable_gradient_checkpointing_compat()
 
         # self.model.requires_grad_(False)
 
@@ -81,6 +81,41 @@ class NextDiTCrossAttn(PreTrainedModel):
             config.dim // config.n_heads,
             384,
             384,
+        )
+
+    def _enable_gradient_checkpointing_compat(self) -> None:
+        model = self.model
+        try:
+            model.enable_gradient_checkpointing()
+            return
+        except TypeError as exc:
+            message = str(exc)
+            if "_set_gradient_checkpointing" not in message:
+                raise
+
+        set_gc = getattr(model, "_set_gradient_checkpointing", None)
+        if callable(set_gc):
+            legacy_calls = (
+                ((), {"enable": True}),
+                ((), {"enabled": True}),
+                ((), {"value": True}),
+                ((model,), {"value": True}),
+                ((model, True), {}),
+            )
+            for args, kwargs in legacy_calls:
+                try:
+                    set_gc(*args, **kwargs)
+                    return
+                except TypeError:
+                    continue
+
+        if hasattr(model, "gradient_checkpointing"):
+            model.gradient_checkpointing = True
+            return
+
+        raise RuntimeError(
+            "Failed to enable gradient checkpointing for LuminaNextDiT2DModel "
+            "with the current diffusers API."
         )
 
     def forward(self, x, timestep, z_latents, **kwargs):

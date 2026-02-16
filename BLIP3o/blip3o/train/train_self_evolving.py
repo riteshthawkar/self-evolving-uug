@@ -233,6 +233,17 @@ def _build_parser() -> argparse.ArgumentParser:
     # Solver always uses trained LoRA for mutual supervision (understanding ↔ generation).
     # Legacy flag kept for backward compat but defaults to False (trained solver).
     p.add_argument("--verification_use_reference_solver", action="store_true", default=False)
+    p.add_argument(
+        "--use_self_clip_reward_scoring",
+        action="store_true",
+        default=False,
+        help="Use CLIP-style reward from model's own frozen embeddings for generated candidate ranking.",
+    )
+    p.add_argument(
+        "--disable_self_clip_reward_scoring",
+        dest="use_self_clip_reward_scoring",
+        action="store_false",
+    )
     p.add_argument("--generator_update_rule", type=str, default="reinforce", choices=["reinforce", "dpo", "grpo"])
     p.add_argument("--dpo_beta", type=float, default=0.1)
     p.add_argument("--dpo_label_smoothing", type=float, default=0.0)
@@ -492,6 +503,7 @@ def _build_generation_config(args):
         strict_require_generation_tokens=args.strict_require_generation_tokens,
         generator_missing_trace_strategy=args.generator_missing_trace_strategy,
         verification_use_reference_solver=args.verification_use_reference_solver,
+        use_self_clip_reward_scoring=args.use_self_clip_reward_scoring,
         generator_update_rule=args.generator_update_rule,
         dpo_beta=args.dpo_beta,
         dpo_label_smoothing=args.dpo_label_smoothing,
@@ -661,6 +673,7 @@ def _build_unified_config(args):
         strict_require_generation_tokens=args.strict_require_generation_tokens,
         generator_missing_trace_strategy=args.generator_missing_trace_strategy,
         verification_use_reference_solver=args.verification_use_reference_solver,
+        use_self_clip_reward_scoring=args.use_self_clip_reward_scoring,
         generator_update_rule=args.generator_update_rule,
         dpo_beta=args.dpo_beta,
         dpo_label_smoothing=args.dpo_label_smoothing,

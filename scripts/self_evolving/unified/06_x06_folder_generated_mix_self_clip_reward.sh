@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Experiment X02
-# Only unlabeled/real image data for understanding.
-# No generation data is mixed into understanding.
+# Experiment X06
+# Real unlabeled images + folder-based generated mixing.
+# Generation candidate ranking uses internal CLIP-style reward from BLIP3o's
+# own frozen embedding path (no external reward model checkpoint).
 
 REPO_ROOT="/workspace/self-evolving-uug/self-evolving-uug"
 PYTHON_BIN="python3"
 DATA_DIR="/workspace/self-evolving-uug/data/benchmark_10k/images"
-OUTPUT_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/X02_unlabeled_only_no_gen_to_understanding"
-RUN_NAME="x02_unlabeled_only_s42_fixed"
+OUTPUT_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/X06_folder_generated_mix_self_clip_reward"
+RUN_NAME="x06_folder_generated_mix_self_clip_reward_s42_fixed"
+GENERATED_MIX_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/generated_mix_pool_x06"
 TRAIN_STAGE="${TRAIN_STAGE:-warmup}"   # warmup | strict
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
@@ -51,12 +53,15 @@ elif [[ "$TRAIN_STAGE" == "strict" ]]; then
     --solver_top_p_max 1.00
   )
 else
-  echo "[X02] ERROR: TRAIN_STAGE must be one of: warmup, strict (got: $TRAIN_STAGE)" >&2
+  echo "[X06] ERROR: TRAIN_STAGE must be one of: warmup, strict (got: $TRAIN_STAGE)" >&2
   exit 1
 fi
 
 cd "$REPO_ROOT"
 mkdir -p "$OUTPUT_DIR"
+mkdir -p "$GENERATED_MIX_DIR"
+# Prevent cross-run contamination from older generated pools.
+find "$GENERATED_MIX_DIR" -maxdepth 1 -type f \( -name "*.json" -o -name "*.png" \) -delete
 
 CACHE_ROOT="/workspace/self-evolving-uug/self-evolving-uug/cache"
 CACHE_TMP_DIR="$CACHE_ROOT/tmp"
@@ -98,18 +103,18 @@ export NCCL_DEBUG="WARN"
 export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 
 if [[ ! -d "$DATA_DIR" ]]; then
-  echo "[X02] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
+  echo "[X06] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
   exit 1
 fi
 if ! find "$DATA_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) -print -quit | grep -q .; then
-  echo "[X02] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
+  echo "[X06] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
   exit 1
 fi
 
 "$PYTHON_BIN" -m torch.distributed.run \
   --standalone \
   --nproc_per_node "$NPROC_PER_NODE" \
-  --master_port 29522 \
+  --master_port 29526 \
   "/workspace/self-evolving-uug/self-evolving-uug/BLIP3o/blip3o/train/train_self_evolving.py" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
@@ -181,7 +186,7 @@ fi
   --prop_entropy_sigma 0.25 \
   --understanding_steps_per_cycle 3 \
   --generation_steps_per_cycle 2 \
-  --synthetic_solver_update_freq 0 \
+  --synthetic_solver_update_freq 2 \
   --solver_hardness_min_entropy 0.20 \
   --kl_coef 0.01 \
   --kl_target 0.02 \
@@ -190,15 +195,19 @@ fi
   --kl_max 1e2 \
   --baseline_momentum 0.9 \
   --clear_cache_every 10 \
-  --use_ref_answer_scoring \
-  --disable_unicorn_reconstruction_sft \
+  --no_ref_answer_scoring \
+  --use_self_clip_reward_scoring \
   --replay_buffer_size 1000 \
   --replay_min_reward 0.50 \
   --replay_max_staleness 500 \
-  --gen_mix_source_mode buffer \
-  --gen_mix_ratio_start 0.0 \
-  --gen_mix_ratio_max 0.0 \
-  --gen_mix_ratio_warmup_steps 1 \
+  --gen_mix_source_mode folder \
+  --generated_mix_dir "$GENERATED_MIX_DIR" \
+  --generated_mix_min_reward 0.50 \
+  --generated_mix_max_files 5000 \
+  --generated_mix_refresh_every 10 \
+  --gen_mix_ratio_start 0.02 \
+  --gen_mix_ratio_max 0.25 \
+  --gen_mix_ratio_warmup_steps 1000 \
   --wandb_mode disabled \
   --wandb_project self-evolving-uug-unified \
   --wandb_run_name "$RUN_NAME" \

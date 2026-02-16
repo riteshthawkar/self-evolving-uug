@@ -50,7 +50,6 @@ venv.bak/
 runs/
 checkpoints/
 outputs/
-models/
 *.pt
 *.pth
 *.bin

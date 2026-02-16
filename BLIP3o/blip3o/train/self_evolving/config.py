@@ -191,6 +191,7 @@ class GenerationSelfEvolvingConfig:
     strict_require_generation_tokens: bool = True
     generator_missing_trace_strategy: str = "proxy"  # proxy|skip|error
     verification_use_reference_solver: bool = False  # use trained solver LoRA for mutual supervision
+    use_self_clip_reward_scoring: bool = False  # CLIP-style reward from model's own frozen embeddings
     generator_update_rule: str = "reinforce"  # reinforce|dpo|grpo
     dpo_beta: float = 0.1
     dpo_label_smoothing: float = 0.0
@@ -202,6 +203,7 @@ class GenerationSelfEvolvingConfig:
     generator_proxy_max_ratio: float = 1.0
     grpo_clip_ratio: float = 0.2              # PPO-style importance ratio clipping for GRPO
     grpo_min_group_std: float = 1e-6          # skip GRPO update if reward std below this
+    use_diverse_prompts: bool = False         # Exp 2: generate N diverse prompts per image instead of 1
     unicorn_generation_enabled: bool = True
     unicorn_target_difficulty: str = "medium"  # easy|medium|hard
     unicorn_spec_rejection_enabled: bool = True
