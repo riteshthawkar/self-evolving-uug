@@ -1,63 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Experiment X02
-# Only unlabeled/real image data for understanding.
-# No generation data is mixed into understanding.
+# Experiment X07 (Exp 2)
+# Diversity in Prompts:
+# The Proposer generates N diverse prompts per image instead of 1.
+# Based on X04 (Generated Only, Hard Topics).
 
 REPO_ROOT="/workspace/self-evolving-uug/self-evolving-uug"
 PYTHON_BIN="python3"
-DATA_DIR="/workspace/self-evolving-uug/data/benchmark_10k/images"
-OUTPUT_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/X02_unlabeled_only_no_gen_to_understanding"
-RUN_NAME="x02_unlabeled_only_s42_fixed"
-TRAIN_STAGE="${TRAIN_STAGE:-warmup}"   # warmup | strict
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
-ATTN_IMPL="${ATTN_IMPL:-sdpa}"
-
-if [[ "$TRAIN_STAGE" == "warmup" ]]; then
-  RUN_NAME="${RUN_NAME}_warmup"
-  STAGE_ARGS=(
-    --disable_acceptance_require_non_easy
-    --disable_acceptance_require_target_bucket
-    --difficulty_target_easy 0.30
-    --difficulty_target_medium 0.50
-    --difficulty_target_hard 0.20
-    --difficulty_sampler_max_retries 2
-    --rejected_question_penalty 0.10
-    --fixed_prop_entropy_target
-    --prop_entropy_mu 0.90
-    --solver_temp_min 0.70
-    --solver_temp_max 1.60
-    --solver_top_p_min 0.35
-    --solver_top_p_max 1.00
-  )
-elif [[ "$TRAIN_STAGE" == "strict" ]]; then
-  RUN_NAME="${RUN_NAME}_strict"
-  STAGE_ARGS=(
-    --acceptance_require_non_easy
-    --acceptance_require_target_bucket
-    --difficulty_target_easy 0.10
-    --difficulty_target_medium 0.70
-    --difficulty_target_hard 0.20
-    --difficulty_sampler_max_retries 4
-    --rejected_question_penalty 0.35
-    --adaptive_prop_entropy_target
-    --prop_entropy_ema_momentum 0.90
-    --prop_entropy_mu_min 0.65
-    --prop_entropy_mu_max 1.50
-    --solver_temp_min 0.70
-    --solver_temp_max 1.30
-    --solver_top_p_min 0.50
-    --solver_top_p_max 1.00
-  )
-else
-  echo "[X02] ERROR: TRAIN_STAGE must be one of: warmup, strict (got: $TRAIN_STAGE)" >&2
-  exit 1
-fi
+SYNTH_SEED_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/synth_seed_pool_x07"
+GENERATED_MIX_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/generated_mix_pool_x07"
+OUTPUT_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/X07_diverse_prompts"
+RUN_NAME="x07_diverse_prompts_s42"
 
 cd "$REPO_ROOT"
+mkdir -p "$SYNTH_SEED_DIR"
+mkdir -p "$GENERATED_MIX_DIR"
 mkdir -p "$OUTPUT_DIR"
-
 CACHE_ROOT="/workspace/self-evolving-uug/self-evolving-uug/cache"
 CACHE_TMP_DIR="$CACHE_ROOT/tmp"
 CACHE_TORCH_EXT_DIR="$CACHE_ROOT/torch_extensions"
@@ -65,6 +24,34 @@ CACHE_WANDB_DIR="$CACHE_ROOT/wandb"
 CACHE_MIOPEN_DIR="$CACHE_ROOT/miopen"
 CACHE_CUDA_DIR="$CACHE_ROOT/cuda"
 mkdir -p "$CACHE_ROOT" "$CACHE_TMP_DIR" "$CACHE_TORCH_EXT_DIR" "$CACHE_WANDB_DIR" "$CACHE_MIOPEN_DIR" "$CACHE_CUDA_DIR" "$CACHE_ROOT/assets"
+# Prevent cross-run contamination from previous seeds/generated pools.
+find "$SYNTH_SEED_DIR" -maxdepth 1 -type f -name "*.png" -delete
+find "$GENERATED_MIX_DIR" -maxdepth 1 -type f \( -name "*.json" -o -name "*.png" \) -delete
+
+# Build synthetic bootstrap pool.
+"$PYTHON_BIN" - <<'PY'
+import random
+from pathlib import Path
+from PIL import Image, ImageDraw
+
+root = Path("/workspace/self-evolving-uug/self-evolving-uug/runs/unified_experiments/synth_seed_pool_x07")
+root.mkdir(parents=True, exist_ok=True)
+random.seed(42)
+for i in range(96):
+    w, h = 1024, 1024
+    bg = tuple(random.randint(20, 235) for _ in range(3))
+    img = Image.new("RGB", (w, h), bg)
+    draw = ImageDraw.Draw(img)
+    for _ in range(7):
+        x0 = random.randint(0, w - 240)
+        y0 = random.randint(0, h - 240)
+        x1 = x0 + random.randint(120, 360)
+        y1 = y0 + random.randint(120, 360)
+        c = tuple(random.randint(10, 245) for _ in range(3))
+        draw.rectangle((x0, y0, x1, y1), outline=c, width=7)
+    draw.text((28, 28), f"SYNTH_SEED_{i:02d}", fill=(255, 255, 255))
+    img.save(root / f"seed_{i:02d}.png")
+PY
 
 export PYTHONPATH="/workspace/self-evolving-uug/self-evolving-uug/BLIP3o"
 export HF_HOME="$CACHE_ROOT"
@@ -97,28 +84,19 @@ export TORCH_DISTRIBUTED_DEBUG="OFF"
 export NCCL_DEBUG="WARN"
 export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 
-if [[ ! -d "$DATA_DIR" ]]; then
-  echo "[X02] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
-  exit 1
-fi
-if ! find "$DATA_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) -print -quit | grep -q .; then
-  echo "[X02] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
-  exit 1
-fi
-
 "$PYTHON_BIN" -m torch.distributed.run \
   --standalone \
-  --nproc_per_node "$NPROC_PER_NODE" \
-  --master_port 29522 \
+  --nproc_per_node 8 \
+  --master_port 29527 \
   "/workspace/self-evolving-uug/self-evolving-uug/BLIP3o/blip3o/train/train_self_evolving.py" \
   --experiment unified_self_evolving \
-  --data_dir "$DATA_DIR" \
+  --data_dir "$SYNTH_SEED_DIR" \
   --data_split all \
   --model_name BLIP3o/BLIP3o-Model-8B \
   --output_dir "$OUTPUT_DIR" \
   --run_name "$RUN_NAME" \
   --dtype bfloat16 \
-  --attn_implementation "$ATTN_IMPL" \
+  --attn_implementation sdpa \
   --device_map single \
   --cuda_device 0 \
   --total_steps 10000 \
@@ -156,7 +134,12 @@ fi
   --allow_missing_generation_tokens \
   --generator_missing_trace_strategy proxy \
   --generator_proxy_max_ratio 1.0 \
+  --acceptance_require_target_bucket \
   --difficulty_sampler_enabled \
+  --difficulty_target_easy 0.0 \
+  --difficulty_target_medium 0.0 \
+  --difficulty_target_hard 1.0 \
+  --difficulty_sampler_max_retries 4 \
   --proposer_hardening_max_retries 5 \
   --proposer_force_hardening_max_retries 3 \
   --solver_skip_update_on_easy \
@@ -170,18 +153,25 @@ fi
   --max_question_words 24 \
   --solver_soft_gamma 0.7 \
   --solver_use_temperature_mix \
+  --solver_temp_min 0.7 \
+  --solver_temp_max 1.3 \
   --sc_entropy_min 0.15 \
   --sc_entropy_max 1.20 \
   --sc_margin_max 0.90 \
   --entropy_iqr_min_threshold 0.10 \
   --sc_negative_weight 0.25 \
   --skip_solver_update_when_uninformative \
+  --adaptive_prop_entropy_target \
+  --prop_entropy_ema_momentum 0.90 \
+  --prop_entropy_mu_min 0.65 \
+  --prop_entropy_mu_max 1.50 \
   --len_penalty_weight 0.10 \
   --len_penalty_target_words 6 \
+  --prop_entropy_mu 0.90 \
   --prop_entropy_sigma 0.25 \
   --understanding_steps_per_cycle 3 \
   --generation_steps_per_cycle 2 \
-  --synthetic_solver_update_freq 0 \
+  --synthetic_solver_update_freq 2 \
   --solver_hardness_min_entropy 0.20 \
   --kl_coef 0.01 \
   --kl_target 0.02 \
@@ -191,16 +181,21 @@ fi
   --baseline_momentum 0.9 \
   --clear_cache_every 10 \
   --use_ref_answer_scoring \
-  --disable_unicorn_reconstruction_sft \
   --replay_buffer_size 1000 \
   --replay_min_reward 0.50 \
   --replay_max_staleness 500 \
-  --gen_mix_source_mode buffer \
-  --gen_mix_ratio_start 0.0 \
-  --gen_mix_ratio_max 0.0 \
+  --gen_mix_source_mode folder \
+  --generated_mix_dir "$GENERATED_MIX_DIR" \
+  --generated_mix_min_reward 0.20 \
+  --generated_mix_max_files 10000 \
+  --generated_mix_refresh_every 2 \
+  --understanding_generated_only \
+  --unicorn_target_difficulty hard \
+  --gen_mix_ratio_start 1.0 \
+  --gen_mix_ratio_max 1.0 \
   --gen_mix_ratio_warmup_steps 1 \
   --wandb_mode disabled \
   --wandb_project self-evolving-uug-unified \
   --wandb_run_name "$RUN_NAME" \
-  "${STAGE_ARGS[@]}" \
+  --use_diverse_prompts \
   --seed 42

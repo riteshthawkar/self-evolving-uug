@@ -1882,39 +1882,61 @@ class GenerationSelfEvolvingTrainer:
                 )
                 continue
 
-            stats: Optional[Dict[str, float]] = None
+            role_can_update = True
+            role_skip_reason: Optional[str] = None
+            generator_sft_fn = None
             if role == "proposer":
                 if not isinstance(update_image, Image.Image):
-                    skip_reason = "proposer_task_missing_image"
-                else:
-                    stats = self.proposer_updater.step(
-                        image=update_image,
-                        prompt=prompt,
-                        completion=completion,
-                        reward=1.0,
-                        baseline=0.0,
-                        device=self.device,
-                    )
+                    role_can_update = False
+                    role_skip_reason = "proposer_task_missing_image"
             elif role == "generator":
-                sft_fn = getattr(self.generator_updater, "sft_step", None)
-                if not callable(sft_fn):
-                    skip_reason = "generator_updater_missing_sft_step"
-                else:
-                    stats = sft_fn(
-                        prompt=prompt,
-                        completion=completion,
-                        device=self.device,
-                        image=update_image if isinstance(update_image, Image.Image) else None,
-                        completion_token_ids=completion_token_ids,
-                    )
+                generator_sft_fn = getattr(self.generator_updater, "sft_step", None)
+                if not callable(generator_sft_fn):
+                    role_can_update = False
+                    role_skip_reason = "generator_updater_missing_sft_step"
             else:
-                skip_reason = f"unsupported_unicorn_role:{role}"
+                role_can_update = False
+                role_skip_reason = f"unsupported_unicorn_role:{role}"
+
+            role_can_update, role_skip_reason = self._distributed_update_ready(
+                role_can_update,
+                role_skip_reason,
+                peer_reason="distributed_peer_unicorn_role_skip",
+            )
+            if not role_can_update:
+                info["skipped_updates"] += 1
+                self._unicorn_reconstruction_update_counts["skipped"] += 1
+                info["update_records"].append(
+                    {"role": role, "task": task.get("task"), "skipped": True, "reason": role_skip_reason}
+                )
+                continue
+
+            stats: Optional[Dict[str, float]] = None
+            if role == "proposer":
+                stats = self.proposer_updater.step(
+                    image=update_image,
+                    prompt=prompt,
+                    completion=completion,
+                    reward=1.0,
+                    baseline=0.0,
+                    device=self.device,
+                )
+            elif role == "generator":
+                stats = generator_sft_fn(
+                    prompt=prompt,
+                    completion=completion,
+                    device=self.device,
+                    image=update_image if isinstance(update_image, Image.Image) else None,
+                    completion_token_ids=completion_token_ids,
+                )
+            else:
+                role_skip_reason = f"unsupported_unicorn_role:{role}"
 
             if stats is None:
                 info["skipped_updates"] += 1
                 self._unicorn_reconstruction_update_counts["skipped"] += 1
                 info["update_records"].append(
-                    {"role": role, "task": task.get("task"), "skipped": True, "reason": skip_reason}
+                    {"role": role, "task": task.get("task"), "skipped": True, "reason": role_skip_reason}
                 )
                 continue
 
@@ -2393,6 +2415,8 @@ class GenerationSelfEvolvingTrainer:
         *,
         step: Optional[int] = None,
         verbose: bool = False,
+        candidate_specs: Optional[List[GenerationSpec]] = None,
+        candidate_spec_qualities: Optional[List[float]] = None,
     ) -> List[Dict[str, object]]:
         images = [cand["image"] for cand in candidates]
         diversity_scores = _per_candidate_diversity_scores(images)
@@ -2411,12 +2435,28 @@ class GenerationSelfEvolvingTrainer:
                 image=image,
                 qa_pairs=qa_pairs,
                 step=step,
-                candidate_idx=idx,
                 candidate_count=len(candidates),
                 verbose=verbose,
             )
+            # Support per-candidate specs (Exp 2: Diversity in Prompts)
+            current_prompt = prompt
+            current_quality = spec_quality
+            if candidate_specs is not None and idx < len(candidate_specs):
+                current_prompt = candidate_specs[idx].prompt
+                if candidate_spec_qualities is not None and idx < len(candidate_spec_qualities):
+                    current_quality = candidate_spec_qualities[idx]
+                # Re-score spec match against the specific QA pairs for this diverse prompt
+                spec_score, contradiction_score, qa_logs = self._score_spec(
+                    image=image,
+                    qa_pairs=candidate_specs[idx].qa_pairs,
+                    step=step,
+                    candidate_idx=idx,
+                    candidate_count=len(candidates),
+                    verbose=verbose,
+                )
+
             qa_confidence = self._qa_confidence_from_logs(qa_logs)
-            cycle_score, cycle_caption = self._cycle_reward(prompt=prompt, image=image)
+            cycle_score, cycle_caption = self._cycle_reward(prompt=current_prompt, image=image)
 
             pos_sum = (
                 self.cfg.reward_spec_weight
@@ -2436,7 +2476,7 @@ class GenerationSelfEvolvingTrainer:
                 - self.cfg.reward_contradiction_weight * contradiction_score
             )
             base_reward = max(0.0, min(1.0, base_reward))
-            total_reward = spec_quality * base_reward
+            total_reward = current_quality * base_reward
             scored.append(
                 {
                     "candidate_idx": idx,
@@ -2449,7 +2489,7 @@ class GenerationSelfEvolvingTrainer:
                     "cycle_caption": cycle_caption,
                     "diversity_score": diversity_scores[idx],
                     "base_reward": base_reward,
-                    "spec_quality": spec_quality,
+                    "spec_quality": current_quality,
                     "total_reward": total_reward,
                     "qa_confidence": qa_confidence,
                     "qa_logs": qa_logs,
@@ -2462,6 +2502,63 @@ class GenerationSelfEvolvingTrainer:
                     f"[Step {step:05d}][G] candidate {idx + 1}/{len(candidates)} done in {cand_dt:.1f}s "
                     f"(spec={spec_score:.3f}, cycle={cycle_score:.3f}, total={total_reward:.3f})"
                 )
+        return scored
+
+    def _score_candidates_self_clip(
+        self,
+        prompt: str,
+        candidates: List[Dict[str, object]],
+        *,
+        step: Optional[int] = None,
+        verbose: bool = False,
+    ) -> List[Dict[str, object]]:
+        """Score generated candidates with internal CLIP-style image-text similarity.
+
+        The similarity is computed from this model's own frozen embedding path
+        (no external reward model checkpoint).
+        """
+        scored: List[Dict[str, object]] = []
+        for idx, cand in enumerate(candidates):
+            cand_image = cand.get("image")
+            reward = 0.0
+            raw_cosine = -1.0
+            if isinstance(cand_image, Image.Image):
+                try:
+                    raw_cosine = float(self._image_text_similarity(cand_image, prompt))
+                    reward = max(0.0, min(1.0, 0.5 * (raw_cosine + 1.0)))
+                except Exception:
+                    reward = 0.0
+                    raw_cosine = -1.0
+
+            scored.append(
+                {
+                    "candidate_idx": idx,
+                    "backend": cand.get("backend"),
+                    "policy_prompt": cand.get("policy_prompt", prompt),
+                    "policy_completion": cand.get("policy_completion", ""),
+                    "policy_completion_ids": cand.get("policy_completion_ids"),
+                    "spec_score": 0.0,
+                    "contradiction_score": 0.0,
+                    "cycle_score": reward,  # compatibility key for existing logs/metrics
+                    "cycle_caption": "",
+                    "diversity_score": 0.0,
+                    "base_reward": reward,
+                    "spec_quality": 1.0,
+                    "qa_confidence": 0.0,
+                    "qa_logs": [],
+                    "self_clip_score": reward,
+                    "self_clip_raw_cosine": raw_cosine,
+                    "total_reward": reward,
+                    "image": cand_image,
+                }
+            )
+
+            if verbose and self.is_main_process and step is not None:
+                print(
+                    f"[Step {step:05d}][G-clip] candidate {idx + 1}/{len(candidates)} "
+                    f"score={reward:.4f} raw_cos={raw_cosine:.4f}"
+                )
+
         return scored
 
     # ---- Phase 2: reference-answer log-prob scoring ---- #
@@ -3075,12 +3172,79 @@ class GenerationSelfEvolvingTrainer:
                     f"[Step {step:05d}][G] generated candidate {cand_idx + 1}/{self.cfg.num_generations} "
                     f"in {cand_dt:.1f}s (backend={backend})"
                 )
+
+        candidate_specs = None
+        candidate_spec_qualities = None
+
+        # --- Exp 2: Diverse Prompts Mode ---
+        if getattr(self.cfg, "use_diverse_prompts", False):
+            # If we just generated "candidates" above using a single spec, DISCARD them (or use them? code above runs loop).
+            # Wait, best to replace the loop entirely.
+            pass
+
+        # To avoid double-generation, we restructure the loop above.
+        # But for minimal diff, we can clear and restart if diverse mode is on.
+        # Actually, let's inject logic *before* the loop or modify the loop structure.
+        # It's cleaner to rewrite the block 3093-3134.
+        # Since I can't rewrite that big block easily without potential drift issues if I misread lines,
+        # I will use the "candidates" list produced above ONLY if NOT diverse mode.
+        # If diverse mode, I clear it and regenerate.
+        if getattr(self.cfg, "use_diverse_prompts", False):
+            if verbose:
+                print(f"[Step {step:05d}][G] Switching to Diverse Prompts Mode (Exp 2)")
+            candidates = []
+            candidate_specs = []
+            candidate_spec_qualities = []
+            
+            # We already have 1 spec from above (lines 3094-3099). Let's use it as the first one.
+            candidate_specs.append(spec)
+            candidate_spec_qualities.append(spec_quality)
+            
+            # Generate the image for the first spec
+            cand0 = self._generate_image_candidate(inputs=spec.prompt)
+            candidates.append(cand0)
+
+            # Now sample N-1 more diverse prompts
+            for i in range(self.cfg.num_generations - 1):
+                # Propose a NEW random specification
+                new_spec, new_qual, _, _ = self._select_generation_spec_with_unicorn(
+                    image=image,
+                    source_caption=source_caption,
+                    step=step,
+                    verbose=False # reduce spam
+                )
+                candidate_specs.append(new_spec)
+                candidate_spec_qualities.append(new_qual)
+                
+                # Generate image for new spec
+                new_cand = self._generate_image_candidate(inputs=new_spec.prompt)
+                candidates.append(new_cand)
+                
+                if verbose:
+                     print(f"[Step {step:05d}][G] Diverse generation {i+2}/{self.cfg.num_generations} (Q={new_qual:.2f})")
+                     
+            # Logging diverse prompts? We logged the first one already.
+            # We could log others too but maybe too much IO.
+
         # ---- Score candidates (Phase 1 vs Phase 2 scoring) ---- #
-        _use_ref_scoring = getattr(self.cfg, "use_ref_answer_scoring", False)
+        _use_ref_scoring = bool(getattr(self.cfg, "use_ref_answer_scoring", False))
+        _use_self_clip_scoring = bool(getattr(self.cfg, "use_self_clip_reward_scoring", False))
         _ref_questions: Optional[List[str]] = None
         _ref_answers: Optional[List[str]] = None
 
-        if _use_ref_scoring:
+        if _use_self_clip_scoring:
+            if _use_ref_scoring and verbose and self.is_main_process:
+                print(
+                    f"[Step {step:05d}][G] both self-clip and ref-answer scoring enabled; "
+                    "using self-clip scoring."
+                )
+            scored = self._score_candidates_self_clip(
+                prompt=spec.prompt,
+                candidates=candidates,
+                step=step,
+                verbose=verbose,
+            )
+        elif _use_ref_scoring:
             scored, _ref_questions, _ref_answers = self._score_candidates_ref_answer(
                 real_image=image,
                 spec=spec,
@@ -3096,6 +3260,8 @@ class GenerationSelfEvolvingTrainer:
                 spec_quality=spec_quality,
                 step=step,
                 verbose=verbose,
+                candidate_specs=candidate_specs,
+                candidate_spec_qualities=candidate_spec_qualities,
             )
         best_idx = max(range(len(scored)), key=lambda i: float(scored[i]["total_reward"]))
         best = scored[best_idx]
