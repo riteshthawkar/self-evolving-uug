@@ -89,6 +89,7 @@ from .generation_helpers import (
     SOURCE_CAPTION_PROMPT,
     _ensure_pil_image,
     _image_diversity_score,
+    _jaccard_similarity,
     _per_candidate_diversity_scores,
     _latent_tensor_to_pil,
     _parse_generation_spec,
@@ -1160,7 +1161,18 @@ class GenerationSelfEvolvingTrainer:
             elif isinstance(outputs, (tuple, list)) and len(outputs) > 0:
                 hidden = outputs[0]
             else:
-                raise RuntimeError("Model forward did not return hidden states for text embedding.")
+                model_ref = _unwrap_model(self.model)
+                embed_layer = None
+                if hasattr(model_ref, "get_input_embeddings"):
+                    try:
+                        embed_layer = model_ref.get_input_embeddings()
+                    except Exception:
+                        embed_layer = None
+                if embed_layer is None:
+                    embed_layer = getattr(getattr(model_ref, "model", None), "embed_tokens", None)
+                if embed_layer is None:
+                    raise RuntimeError("Model forward did not return hidden states for text embedding.")
+                hidden = embed_layer(inputs["input_ids"])
         # Mean-pool over non-padding positions
         mask = inputs.get("attention_mask")
         if mask is not None:
@@ -1197,7 +1209,7 @@ class GenerationSelfEvolvingTrainer:
             elif isinstance(outputs, (tuple, list)) and len(outputs) > 0:
                 hidden = outputs[0]
             else:
-                raise RuntimeError("Model forward did not return hidden states for image-text embedding.")
+                return self._text_embedding(text)
         mask = inputs.get("attention_mask")
         if mask is not None:
             mask = mask.unsqueeze(-1).to(hidden.dtype)
@@ -2629,7 +2641,12 @@ class GenerationSelfEvolvingTrainer:
                 if self.judge is not None:
                      # Use Frozen Judge for scoring (Exp 3)
                      # We create a temporary spec object since the signature needs one
-                     temp_spec = GenerationSpec(prompt=prompt, qa_pairs=qa_pairs)
+                     temp_spec = GenerationSpec(
+                        prompt=prompt,
+                        qa_pairs=qa_pairs,
+                        raw_output="",
+                        fallback_used=False,
+                     )
                      spec_score, qa_results = self.judge.evaluate(
                         image=image, spec=temp_spec, n_samples=self.cfg.num_solver_samples_spec
                      )
