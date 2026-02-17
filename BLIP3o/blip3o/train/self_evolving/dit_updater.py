@@ -6,6 +6,7 @@ diffusion transformer (DiT) using real source images and generation prompts.
 
 import gc
 import math
+import traceback as _traceback
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -399,8 +400,13 @@ class DiTUpdater:
         prompt: str,
         device: torch.device,
     ) -> Dict[str, object]:
+        torch.set_grad_enabled(True)
         self.step_id += 1
         self.dit.train(True)
+
+        for p in self.params:
+            if not p.requires_grad:
+                p.requires_grad_(True)
 
         if self._accum_count == 0:
             self.opt.zero_grad(set_to_none=True)
@@ -423,7 +429,12 @@ class DiTUpdater:
             )
         except Exception as exc:
             local_ready = False
-            local_skip_reason = f"prepare_failed:{type(exc).__name__}"
+            _exc_short = str(exc).replace("\n", " ")[:200]
+            local_skip_reason = f"prepare_failed:{type(exc).__name__}:{_exc_short}"
+            print(
+                f"[DiTUpdater] prepare failed at step {self.step_id}: {type(exc).__name__}: {exc}\n"
+                + _traceback.format_exc()
+            )
 
         ready_all = self._dist_all_bool(local_ready)
         if not ready_all:
@@ -439,6 +450,15 @@ class DiTUpdater:
             noise = torch.randn_like(latents, device=model_device)
             noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
             z_latents = self._condition_with_dropout(z_latents)
+
+            # Lumina DiT uses torch.utils.checkpoint when gradient checkpointing
+            # is enabled. Checkpointed blocks require at least one input tensor
+            # with requires_grad=True; otherwise the output is detached and loss
+            # has no grad_fn. Enable grads on noisy latents in that case.
+            dit_inner = getattr(self.dit, "model", self.dit)
+            gc_active = bool(getattr(dit_inner, "gradient_checkpointing", False))
+            if gc_active and not noisy_latents.requires_grad:
+                noisy_latents = noisy_latents.detach().requires_grad_(True)
 
             noise_pred = self.dit(
                 x=noisy_latents,
@@ -457,8 +477,15 @@ class DiTUpdater:
                 loss = self._build_zero_anchor_loss(device=model_device, dtype=model_dtype)
                 has_real_grad = False
             else:
-                skipped_reason = None
-                has_real_grad = True
+                has_graph = bool(loss.requires_grad)
+                graph_all = self._dist_all_bool(has_graph)
+                if not graph_all:
+                    skipped_reason = "dit_loss_no_grad_graph"
+                    loss = self._build_zero_anchor_loss(device=model_device, dtype=model_dtype)
+                    has_real_grad = False
+                else:
+                    skipped_reason = None
+                    has_real_grad = True
 
         scaled_loss = loss / float(self.grad_accum_steps)
         scaled_loss.backward()
