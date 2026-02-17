@@ -737,7 +737,11 @@ def _build_vision_tower(vision_tower_path: str, embed_dim: int, vision_cfg: CLIP
         # Determine the appropriate norm layer factory based on the configuration
         norm_layer_factory = create_norm_layer_factory(vision_cfg.fusedLN, eps=1e-6)
 
-        # breakpoint()
+        # xattn (xformers memory-efficient attention) requires the xformers package.
+        # Fall back to standard PyTorch scaled-dot-product attention when xformers
+        # is not installed so the model still runs without xformers on the cluster.
+        use_xattn = vision_cfg.xattn and (xops is not None)
+
         visual = EVAVisionTransformer(
             img_size=vision_cfg.image_size,
             patch_size=vision_cfg.patch_size,
@@ -752,7 +756,7 @@ def _build_vision_tower(vision_tower_path: str, embed_dim: int, vision_cfg: CLIP
             qkv_bias=vision_cfg.qkv_bias,
             drop_path_rate=vision_cfg.drop_path_rate,
             norm_layer=norm_layer_factory,
-            xattn=vision_cfg.xattn,
+            xattn=use_xattn,
             rope=vision_cfg.rope,
             postnorm=vision_cfg.postnorm,
             pt_hw_seq_len=vision_cfg.pt_hw_seq_len,  # 224/14
