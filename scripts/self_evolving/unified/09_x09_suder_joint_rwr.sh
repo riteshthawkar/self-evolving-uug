@@ -68,6 +68,15 @@ ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 #         Use this for the first run to let all modules learn the task.
 # strict: tighter difficulty distribution, higher rejected-question penalty.
 #         Use after warmup checkpoint to push performance on hard samples.
+#
+# Fixes applied vs original X02/X09 warmup defaults:
+#   --rejected_question_penalty 0.25  (was 0.10) — stronger signal to push
+#     proposer away from easy/non-objective questions immediately, not after
+#     hundreds of near-zero-advantage steps.
+#   --zero_entropy_reward_cap 0.20    (was 0.10) — harder negative for trivially
+#     unanimous questions so the proposer actually learns to avoid them.
+#   --difficulty_sampler_min_samples 8 (was 32) — curriculum activates after
+#     just 8 difficulty observations (~40 total steps) instead of ~160 steps.
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
   RUN_NAME="${RUN_NAME}_warmup"
   STAGE_ARGS=(
@@ -75,7 +84,9 @@ if [[ "$TRAIN_STAGE" == "warmup" ]]; then
     --difficulty_target_easy   0.30
     --difficulty_target_medium 0.50
     --difficulty_target_hard   0.20
-    --rejected_question_penalty 0.10
+    --rejected_question_penalty 0.25
+    --zero_entropy_reward_cap 0.20
+    --difficulty_sampler_min_samples 8
     --fixed_prop_entropy_target
     --prop_entropy_mu 0.90
     --solver_temp_min  0.70
@@ -91,6 +102,8 @@ elif [[ "$TRAIN_STAGE" == "strict" ]]; then
     --difficulty_target_medium 0.70
     --difficulty_target_hard   0.20
     --rejected_question_penalty 0.35
+    --zero_entropy_reward_cap 0.20
+    --difficulty_sampler_min_samples 8
     --fixed_prop_entropy_target
     --prop_entropy_ema_momentum 0.90
     --prop_entropy_mu_min 0.65
