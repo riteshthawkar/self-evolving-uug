@@ -137,6 +137,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
     p.add_argument("--proposer_force_hardening_max_retries", type=int, default=2)
+    # Single-shot multi-question generation (replaces retry loop)
+    p.add_argument("--proposer_num_candidates", type=int, default=3)
+    p.add_argument("--proposer_spot_check_samples", type=int, default=2)
     p.add_argument("--solver_skip_update_on_easy", action="store_true", default=True)
     p.add_argument(
         "--allow_solver_update_on_easy",
@@ -417,6 +420,8 @@ def _build_understanding_config(args):
         proposer_hardening_max_retries=args.proposer_hardening_max_retries,
         proposer_force_hardening_on_failure=args.proposer_force_hardening_on_failure,
         proposer_force_hardening_max_retries=args.proposer_force_hardening_max_retries,
+        proposer_num_candidates=args.proposer_num_candidates,
+        proposer_spot_check_samples=args.proposer_spot_check_samples,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
@@ -574,6 +579,8 @@ def _build_generation_config(args):
         proposer_hardening_max_retries=args.proposer_hardening_max_retries,
         proposer_force_hardening_on_failure=args.proposer_force_hardening_on_failure,
         proposer_force_hardening_max_retries=args.proposer_force_hardening_max_retries,
+        proposer_num_candidates=args.proposer_num_candidates,
+        proposer_spot_check_samples=args.proposer_spot_check_samples,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
@@ -748,6 +755,8 @@ def _build_unified_config(args):
         proposer_hardening_max_retries=args.proposer_hardening_max_retries,
         proposer_force_hardening_on_failure=args.proposer_force_hardening_on_failure,
         proposer_force_hardening_max_retries=args.proposer_force_hardening_max_retries,
+        proposer_num_candidates=args.proposer_num_candidates,
+        proposer_spot_check_samples=args.proposer_spot_check_samples,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,

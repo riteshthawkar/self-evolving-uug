@@ -876,7 +876,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 effective_reward = proposer_reward if local_can_proposer_update else 0.0
                 proposer_stats = self.proposer_updater.step(
                     image=image,
-                    prompt=proposer_prompt,
+                    prompt=multi_proposer_prompt,
                     completion=completion_for_update,
                     reward=effective_reward,
                     baseline=baseline_before if local_can_proposer_update else 0.0,
