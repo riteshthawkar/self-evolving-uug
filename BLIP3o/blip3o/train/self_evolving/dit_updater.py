@@ -4,6 +4,7 @@ This updater applies an SFT-style denoising objective directly on BLIP3o's
 diffusion transformer (DiT) using real source images and generation prompts.
 """
 
+import contextlib
 import gc
 import math
 import traceback as _traceback
@@ -89,7 +90,60 @@ class DiTUpdater:
 
         lr = float(getattr(config, "dit_lr", getattr(config, "lr", 1e-6)))
         weight_decay = float(getattr(config, "dit_weight_decay", getattr(config, "weight_decay", 0.01)))
-        self.opt = torch.optim.AdamW(self.params, lr=lr, weight_decay=weight_decay)
+
+        # ── Joint LLM+DiT conditioning training (Change 2+3) ────────────────────
+        # When dit_joint_conditioning_train=True, we also train the generator LoRA
+        # (the LLM's conditioning encoder) jointly with the DiT using the same
+        # denoising loss. Gradients flow: MSE → DiT → z_latents → generator LoRA.
+        # This trains BOTH "how to denoise given conditioning" (DiT) AND
+        # "how to encode text into conditioning" (generator LoRA) simultaneously.
+        self.joint_conditioning_train = bool(getattr(config, "dit_joint_conditioning_train", False))
+        self.reward_loss_weight = float(getattr(config, "dit_reward_loss_weight", 0.0))
+        self.generator_lora_params: list = []
+
+        param_groups = [{"params": self.params, "lr": lr, "weight_decay": weight_decay}]
+
+        if self.joint_conditioning_train:
+            # Collect generator LoRA parameters from the LLM backbone.
+            # These are the q/k/v/o/gate/up/down LoRA A+B matrices for "generator" adapter.
+            joint_lr = float(getattr(config, "dit_joint_conditioning_lr", lr))
+            gen_lora_params = []
+            try:
+                from peft import PeftModel
+                model_unwrapped = _unwrap_model(model)
+                # Try PEFT adapter parameter access first
+                if hasattr(model_unwrapped, "peft_config") and "generator" in getattr(model_unwrapped, "peft_config", {}):
+                    for name, p in model_unwrapped.named_parameters():
+                        if "generator" in name and ("lora_A" in name or "lora_B" in name):
+                            p.requires_grad_(True)
+                            gen_lora_params.append(p)
+                elif hasattr(model_unwrapped, "base_model"):
+                    for name, p in model_unwrapped.named_parameters():
+                        if "generator" in name and ("lora_A" in name or "lora_B" in name):
+                            p.requires_grad_(True)
+                            gen_lora_params.append(p)
+            except Exception:
+                pass
+
+            if gen_lora_params:
+                self.generator_lora_params = gen_lora_params
+                param_groups.append({
+                    "params": gen_lora_params,
+                    "lr": joint_lr,
+                    "weight_decay": weight_decay,
+                })
+                print(
+                    f"[DiTUpdater] Joint conditioning training enabled: "
+                    f"{len(gen_lora_params)} generator LoRA params added to optimizer "
+                    f"(lr={joint_lr:.2e})."
+                )
+            else:
+                print(
+                    "[DiTUpdater] WARNING: dit_joint_conditioning_train=True but no "
+                    "generator LoRA params found. Falling back to DiT-only training."
+                )
+
+        self.opt = torch.optim.AdamW(param_groups)
 
         self.distributed = bool(dist.is_available() and dist.is_initialized())
         self.world_size = int(dist.get_world_size()) if self.distributed else 1
@@ -133,7 +187,9 @@ class DiTUpdater:
     def _average_gradients(self):
         if not self.distributed:
             return
-        for param in self.params:
+        # Average gradients for DiT params AND generator LoRA params (if joint training).
+        all_trainable = list(self.params) + list(self.generator_lora_params)
+        for param in all_trainable:
             if param.grad is None:
                 param.grad = torch.zeros_like(param)
             dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
@@ -493,7 +549,12 @@ class DiTUpdater:
         if embed_tokens is None or latent_queries is None:
             raise RuntimeError("Core model does not expose embed_tokens/latent_queries for DiT conditioning.")
 
-        with torch.no_grad():
+        # When joint_conditioning_train=True, we allow gradients to flow through
+        # the LLM forward pass so that the generator LoRA params receive gradient
+        # signal from the DiT denoising loss.  Otherwise freeze the conditioning
+        # encoder with no_grad for efficiency (original behaviour).
+        _cond_ctx = contextlib.nullcontext() if self.joint_conditioning_train else torch.no_grad()
+        with _cond_ctx:
             text_embeds = embed_tokens(input_ids)
             if text_embeds.shape[0] != batch_size:
                 text_embeds = text_embeds.expand(batch_size, -1, -1).contiguous()
@@ -533,7 +594,9 @@ class DiTUpdater:
                     proj_dtype = next(down_projector.parameters()).dtype
                 except Exception:
                     pass
-                with torch.no_grad():
+                # Allow gradients through the down_projector too when joint training.
+                _proj_ctx = contextlib.nullcontext() if self.joint_conditioning_train else torch.no_grad()
+                with _proj_ctx:
                     z_latents = down_projector(z_latents.to(proj_dtype)).to(device=device, dtype=dtype)
         if z_latents.shape[-1] != expected_dim:
             raise RuntimeError(
@@ -625,7 +688,12 @@ class DiTUpdater:
 
     def _build_zero_anchor_loss(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         anchor = torch.zeros((), device=device, dtype=dtype)
-        for p in self.params:
+        # Include both DiT params AND generator LoRA params (when joint training) so
+        # that the gradient graph is consistent across all parameter groups even on
+        # skipped steps.  Without this, distributed all_reduce on LoRA grads would
+        # find None/zero on some ranks and valid grads on others → NCCL divergence.
+        all_trainable = list(self.params) + list(self.generator_lora_params)
+        for p in all_trainable:
             anchor = anchor + (p.sum() * 0.0)
         return anchor
 
@@ -635,12 +703,21 @@ class DiTUpdater:
         image: Image.Image,
         prompt: str,
         device: torch.device,
+        reward: Optional[float] = None,
     ) -> Dict[str, object]:
         torch.set_grad_enabled(True)
         self.step_id += 1
         self.dit.train(True)
+        # When jointly training the LLM conditioning encoder, set the core model to
+        # train mode so that dropout / layer-norm behave correctly during forward.
+        # In the default (frozen) path the core_model forward runs under no_grad
+        # and its train/eval state does not matter for correctness.
+        if self.joint_conditioning_train:
+            self.core_model.train(True)
 
-        for p in self.params:
+        # Restore requires_grad for DiT params AND generator LoRA params.
+        # External code (e.g. FSDP, checkpoint loading) may have disabled grads.
+        for p in list(self.params) + list(self.generator_lora_params):
             if not p.requires_grad:
                 p.requires_grad_(True)
 
@@ -707,6 +784,17 @@ class DiTUpdater:
             target = noise - latents
             mse = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
             loss = mse.to(dtype=model_dtype) * self.loss_weight
+
+            # ── Reward-Weighted Regression (RWR / Change 3) ─────────────────────
+            # Scale denoising loss by (1 + w * reward) so that high-reward
+            # generations are reinforced more strongly.  This implements the
+            # continuous-action analogue of GRPO for the DiT+generator pathway.
+            # reward_loss_weight=0 (default) recovers the original SFT objective.
+            if self.reward_loss_weight > 0.0 and reward is not None:
+                reward_scale = 1.0 + self.reward_loss_weight * float(reward)
+                reward_scale = max(0.0, reward_scale)  # never invert the loss
+                loss = loss * reward_scale
+
             valid_latent_tokens = float(latents.shape[-1] * latents.shape[-2])
 
             local_finite = bool(torch.isfinite(loss.detach()).all().item())
@@ -738,7 +826,10 @@ class DiTUpdater:
         if self._accum_count >= self.grad_accum_steps:
             if self._has_real_grad_in_window:
                 self._average_gradients()
-                _clip_grad_norm_multi_device(self.params, self.grad_clip)
+                # Clip gradients across all jointly-trained params
+                # (DiT params + generator LoRA params if joint_conditioning_train=True).
+                _all_trainable = list(self.params) + list(self.generator_lora_params)
+                _clip_grad_norm_multi_device(_all_trainable, self.grad_clip)
                 self.opt.step()
                 did_step = True
             self.opt.zero_grad(set_to_none=True)
@@ -746,6 +837,12 @@ class DiTUpdater:
             self._has_real_grad_in_window = False
 
         self.dit.train(False)
+        # Restore core_model to eval mode after joint-training forward pass.
+        # The LLM is normally kept in eval mode (frozen inference) everywhere else
+        # in the training loop.  Leaving it in train mode would affect dropout and
+        # batch-norm behavior in subsequent understanding-phase forward passes.
+        if self.joint_conditioning_train:
+            self.core_model.train(False)
         if (
             torch.cuda.is_available()
             and int(getattr(self.config, "clear_cache_every", 0)) > 0
@@ -763,4 +860,6 @@ class DiTUpdater:
             "did_step": bool(did_step),
             "skipped_reason": skipped_reason,
             "valid_latent_tokens": float(valid_latent_tokens),
+            "reward": float(reward) if reward is not None else None,
+            "joint_conditioning": bool(self.joint_conditioning_train),
         }

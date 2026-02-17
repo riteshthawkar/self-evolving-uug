@@ -1,0 +1,2 @@
+export _OUTPUT_IMAGE_PATH="./output_images"
+CUDA_VISIBLE_DEVICES=0  MASTER_PORT=39511 llamafactory-cli train examples/train_vargpt_qwen2vl_1_1/vargpt_full_predict_v1_1_after_dpo_inference_edit.yaml

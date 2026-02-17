@@ -227,6 +227,23 @@ class GenerationSelfEvolvingConfig:
     dit_conditioning_dropout: float = 0.10
     dit_loss_weight: float = 1.0
     dit_prompt_suffix_token_id: int = 151665
+    # Joint LLM+DiT training: remove torch.no_grad() from _prepare_conditioning so
+    # denoising loss gradients flow back through z_latents into the generator LoRA.
+    # This trains the text conditioning encoder jointly with the DiT denoiser.
+    dit_joint_conditioning_train: bool = False
+    # LR for generator LoRA params when trained jointly with DiT (usually same as dit_lr).
+    dit_joint_conditioning_lr: float = 5e-7
+    # Reward-weighted denoising: scale denoising loss by image-quality reward from solver.
+    # loss = reward_weight * MSE(noise_pred, target). Implements RWR (continuous GRPO).
+    # When 0.0, pure SFT denoising (current default). Requires dit_joint_conditioning_train.
+    dit_reward_loss_weight: float = 0.0
+    # Proposer reward in generation phase (SUDER dual-reward).
+    # When True: proposer LoRA is updated during generation steps using the image-quality
+    # reward (best["total_reward"]) as the RL signal, with a separate baseline EMA.
+    proposer_gen_reward_enabled: bool = False
+    # Separate EMA momentum for the proposer generation-phase baseline.
+    # Kept separate from the understanding-phase proposer_baseline to avoid contamination.
+    proposer_gen_baseline_momentum: float = 0.6
 
     # Reward shaping
     solver_soft_gamma: float = 0.7

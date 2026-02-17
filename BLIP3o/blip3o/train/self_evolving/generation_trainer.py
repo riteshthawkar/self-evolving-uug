@@ -311,6 +311,7 @@ class GenerationSelfEvolvingTrainer:
             return
         self.generator_baseline = self._dist_mean(self.generator_baseline)
         self.proposer_baseline = self._dist_mean(self.proposer_baseline)
+        self.proposer_gen_baseline = self._dist_mean(self.proposer_gen_baseline)
         self.proposer_entropy_mu_ema = self._dist_mean(self.proposer_entropy_mu_ema)
         if self.solver_updater is not None:
             self.solver_baseline = self._dist_mean(self.solver_baseline)
@@ -392,13 +393,11 @@ class GenerationSelfEvolvingTrainer:
         # NOTE: initialize after model/updater/resume setup so cloning uses
         # fully loaded weights and avoids deepcopying a partially-built trainer.
         self.judge = None
-        if self.cfg.dit_update_enabled and self.cfg.generator_missing_trace_strategy == "proxy":
-            self.cfg.generator_missing_trace_strategy = "skip"
-            if self.is_main_process:
-                print(
-                    "[Generation] DiT updates enabled: forcing "
-                    "generator_missing_trace_strategy=skip (proxy disabled)."
-                )
+        # Previously this block forced generator_missing_trace_strategy=skip when
+        # dit_update_enabled=True. That was overly conservative — DiT SFT and GRPO
+        # proxy-caption updates operate on different model components (DiT weights vs
+        # generator LoRA text adapter) and do not interfere. Removed so that both can
+        # run simultaneously when explicitly configured via --generator_missing_trace_strategy proxy.
         _set_global_seed(config.seed + self.rank, deterministic=config.deterministic)
 
         if not config.data_dir:
@@ -577,6 +576,7 @@ class GenerationSelfEvolvingTrainer:
 
         self.generator_baseline = 0.0
         self.proposer_baseline = 0.0
+        self.proposer_gen_baseline = 0.0  # separate EMA for generation-phase proposer reward
         self.solver_baseline = 0.0
         self.proposer_entropy_mu_ema = float(config.prop_entropy_mu)
         self.start_step = max(0, int(config.start_step))
@@ -851,6 +851,7 @@ class GenerationSelfEvolvingTrainer:
 
         self.solver_baseline = float(state.get("solver_baseline", self.solver_baseline))
         self.proposer_baseline = float(state.get("proposer_baseline", self.proposer_baseline))
+        self.proposer_gen_baseline = float(state.get("proposer_gen_baseline", self.proposer_gen_baseline))
         self.generator_baseline = float(state.get("generator_baseline", self.generator_baseline))
         self.proposer_entropy_mu_ema = float(
             state.get("proposer_entropy_mu_ema", self.proposer_entropy_mu_ema)
@@ -901,6 +902,7 @@ class GenerationSelfEvolvingTrainer:
             "proposer_updater": self.proposer_updater.state_dict(),
             "generator_updater": self.generator_updater.state_dict(),
             "proposer_baseline": float(self.proposer_baseline),
+            "proposer_gen_baseline": float(self.proposer_gen_baseline),
             "generator_baseline": float(self.generator_baseline),
             "proposer_entropy_mu_ema": float(self.proposer_entropy_mu_ema),
             "unicorn_reconstruction_update_counts": dict(self._unicorn_reconstruction_update_counts),
@@ -4149,67 +4151,87 @@ class GenerationSelfEvolvingTrainer:
             )
             self._sync_state_scalars()
 
-        proposer_reward = float(best["total_reward"])
-        proposer_skip_reason = None
+        # ── Proposer dual-reward update (SUDER-style) ───────────────────────────
+        # The proposer wrote the spec that led to the generated images. Rewarding
+        # it with the image-quality score (spec_score + cycle_score + diversity)
+        # closes the self-evolving loop: better specs → better images → higher reward
+        # → proposer learns to write better specs. This mirrors the SUDER dual-reward
+        # design where understanding and generation supervise each other.
+        #
+        # KEY SAFETY: we use a SEPARATE baseline EMA (proposer_gen_baseline) that is
+        # completely decoupled from self.proposer_baseline (understanding-phase EMA).
+        # This prevents generation rewards (~0 to +1) from contaminating the
+        # understanding-phase advantage computation (-0.4 to +0.9 scale).
+        # The proposer LoRA weights are shared, but their reward signals are
+        # tracked with independent baselines — correct by construction.
         proposer_update_due = False
-        if self.cfg.proposer_update_freq > 0:
-            phase_due_fn = getattr(self, "_is_proposer_update_due", None)
-            if callable(phase_due_fn):
-                try:
-                    proposer_update_due = bool(phase_due_fn(step, phase="generation"))
-                except Exception:
-                    proposer_update_due = bool(step % self.cfg.proposer_update_freq == 0)
-            else:
-                proposer_update_due = bool(step % self.cfg.proposer_update_freq == 0)
-        if proposer_update_due:
-            baseline_before = self.proposer_baseline
-            proposer_completion = str(spec.raw_output or "").strip()
-            local_proposer_can_update = bool(proposer_completion)
-            proposer_can_update, proposer_skip_reason = _global_update_ready(
-                local_proposer_can_update,
-                None if local_proposer_can_update else "proposer_empty_completion",
-                peer_reason="distributed_peer_proposer_skip",
-            )
+        proposer_skip_reason = "disabled_in_generation_phase"
+        proposer_reward = None
+        proposer_stats = None
 
-            if proposer_can_update:
-                proposer_stats = self.proposer_updater.step(
-                    image=image,
-                    prompt=build_generation_spec_prompt(
-                        target_difficulty=str(getattr(self.cfg, "unicorn_target_difficulty", "medium"))
-                    ),
-                    completion=proposer_completion,
-                    reward=proposer_reward,
-                    baseline=baseline_before,
-                    device=self.device,
-                )
-                if proposer_stats.get("did_step", True):
-                    self._policy_update_counts["proposer"] += 1
-                self._update_baseline("proposer", proposer_reward)
-                self._append_jsonl(
-                    self.policy_updates_log_path,
-                    {
-                        "step": step,
-                        "role": "proposer",
-                        "reward": proposer_reward,
-                        "baseline_before": baseline_before,
-                        "baseline_after": self.proposer_baseline,
-                        "stats": proposer_stats,
-                    },
-                )
+        _proposer_gen_reward_enabled = bool(
+            getattr(self.cfg, "proposer_gen_reward_enabled", False)
+        )
+        if _proposer_gen_reward_enabled and best is not None:
+            # Use the best candidate's total reward as the proposer's signal.
+            # The proposer produced the spec; the image quality is its outcome.
+            _gen_proposer_reward = float(best.get("total_reward", 0.0))
+            _gen_proposer_reward = max(-1.0, min(1.0, _gen_proposer_reward))
+
+            # Separate generation-phase baseline (never touches self.proposer_baseline)
+            _gen_baseline_momentum = float(
+                getattr(self.cfg, "proposer_gen_baseline_momentum", 0.6)
+            )
+            self.proposer_gen_baseline = (
+                _gen_baseline_momentum * self.proposer_gen_baseline
+                + (1.0 - _gen_baseline_momentum) * _gen_proposer_reward
+            )
+            _gen_advantage = _gen_proposer_reward - self.proposer_gen_baseline
+
+            # Build a minimal completion for REINFORCE: the spec prompt text the
+            # proposer generated. This is what the proposer's policy produced.
+            _proposer_gen_completion = str(spec.raw_output or spec.prompt or "").strip()
+            _proposer_gen_prompt = str(getattr(spec, "proposer_prompt", spec.prompt) or "").strip()
+
+            if _proposer_gen_completion and spec_quality >= self.cfg.min_spec_quality_for_update:
+                try:
+                    proposer_stats = self.proposer_updater.step(
+                        image=image,
+                        prompt=_proposer_gen_prompt,
+                        completion=_proposer_gen_completion,
+                        reward=_gen_proposer_reward,
+                        baseline=self.proposer_gen_baseline,
+                        device=self.device,
+                    )
+                    proposer_update_due = True
+                    proposer_skip_reason = None
+                    proposer_reward = _gen_proposer_reward
+                    if bool(proposer_stats.get("did_step", False)):
+                        self._policy_update_counts["proposer"] = (
+                            self._policy_update_counts.get("proposer", 0) + 1
+                        )
+                    self._append_jsonl(
+                        self.policy_updates_log_path,
+                        {
+                            "step": step,
+                            "role": "proposer_gen",
+                            "update_due": True,
+                            "reward": _gen_proposer_reward,
+                            "baseline": float(self.proposer_gen_baseline),
+                            "advantage": float(_gen_advantage),
+                            "spec_quality": float(spec_quality),
+                            "stats": proposer_stats,
+                        },
+                    )
+                except Exception as _prop_exc:
+                    proposer_skip_reason = f"proposer_gen_update_error:{type(_prop_exc).__name__}"
+                    proposer_update_due = False
             else:
-                self._append_jsonl(
-                    self.policy_updates_log_path,
-                    {
-                        "step": step,
-                        "role": "proposer",
-                        "skipped": True,
-                        "reason": proposer_skip_reason,
-                        "baseline_before": baseline_before,
-                    },
+                proposer_skip_reason = (
+                    "low_spec_quality_for_proposer_gen"
+                    if not _proposer_gen_completion
+                    else "empty_proposer_completion"
                 )
-            self._sync_state_scalars()
-        else:
-            proposer_skip_reason = "update_not_due"
 
         unicorn_recon_enqueued = self._enqueue_unicorn_reconstruction_tasks(
             step=step,
@@ -4222,13 +4244,80 @@ class GenerationSelfEvolvingTrainer:
         unicorn_reconstruction["enqueued_this_step"] = int(unicorn_recon_enqueued)
         unicorn_reconstruction["buffer_size_after_step"] = int(len(self._unicorn_reconstruction_buffer))
 
-        if self.dit_updater is not None and self.cfg.dit_update_freq > 0:
-            dit_update_due = bool(step % int(self.cfg.dit_update_freq) == 0)
+        # ── Unified image-generator update ──────────────────────────────────────
+        # Architecture-agnostic design: "train the module that produces the image"
+        # maps to two different implementations depending on generation paradigm:
+        #
+        #   Paradigm A — discrete-token AR (Janus, VARGPT, LlamaGen, etc.):
+        #     The LLM backbone directly generates discrete image token IDs.
+        #     policy_completion_ids is non-None → generator GRPO ran above with
+        #     real token traces → the correct module was already trained.
+        #
+        #   Paradigm B — continuous latent + diffusion decoder (BLIP3o, BAGEL, etc.):
+        #     The LLM encodes a spec prompt into continuous features; a separate
+        #     DiT/flow denoiser produces the image from those features.
+        #     policy_completion_ids is always None (no discrete image tokens exist).
+        #     Generator GRPO would only train caption-writing, NOT image generation.
+        #     The correct module to train is the DiT → denoising MSE on real images.
+        #
+        # Routing logic:
+        #   • generator_update_freq controls BOTH paths (single unified knob).
+        #   • If generator GRPO fired successfully (token traces) → DiT skips.
+        #   • If generator GRPO was skipped due to missing token traces AND a DiT
+        #     updater exists → DiT fires as the architecture-appropriate fallback.
+        #   • dit_update_enabled / dit_update_freq still work as explicit overrides
+        #     for running DiT updates independently of generator_update_freq.
+        #
+        # This means: set generator_update_freq=1 for ALL architectures.
+        # The framework automatically routes to GRPO (Janus/VARGPT) or DiT (BLIP3o).
+        _generator_grpo_fired = (
+            generator_update_due
+            and generator_skipped_reason is None
+            and generator_stats is not None
+        )
+        _dit_should_fallback = (
+            generator_update_due
+            and not _generator_grpo_fired
+            and generator_skipped_reason in (
+                "missing_generation_token_trace",
+                "missing_generation_token_trace_strict",
+                "missing_trace_proxy_empty_completion",
+                "missing_trace_proxy_missing_image",
+                "dpo_proxy_empty_completion",
+                "dpo_proxy_missing_image",
+            )
+            and self.dit_updater is not None
+        )
+
+        # Determine if the DiT should fire this step. Two triggers:
+        #   1. Explicit dit_update_freq path (legacy/override, independent frequency).
+        #   2. Unified fallback: generator_update_freq fired but no token traces exist
+        #      (architecture-appropriate fallback for diffusion-based models).
+        # Avoid double updates: if both triggers fire on the same step, run once.
+        if self.dit_updater is not None:
+            _explicit_dit_due = (
+                self.cfg.dit_update_freq > 0
+                and bool(step % int(self.cfg.dit_update_freq) == 0)
+            )
+            dit_update_due = _explicit_dit_due or _dit_should_fallback
+            _dit_trigger = (
+                "generator_fallback" if (_dit_should_fallback and not _explicit_dit_due)
+                else "explicit_dit_update_freq" if _explicit_dit_due
+                else None
+            )
             if dit_update_due:
+                # Pass best-candidate reward for Reward-Weighted Regression (RWR).
+                # When dit_reward_loss_weight > 0, the DiT loss is scaled by
+                # (1 + w * reward) so high-reward generations are reinforced more.
+                # Pass None when reward weighting is disabled to keep original behaviour.
+                _dit_reward = None
+                if float(getattr(self.cfg, "dit_reward_loss_weight", 0.0)) > 0.0 and best is not None:
+                    _dit_reward = float(best.get("total_reward", 0.0))
                 dit_stats = self.dit_updater.step(
                     image=image,
                     prompt=str(spec.prompt),
                     device=self.device,
+                    reward=_dit_reward,
                 )
                 dit_skip_reason = (
                     str(dit_stats.get("skipped_reason"))
@@ -4242,6 +4331,7 @@ class GenerationSelfEvolvingTrainer:
                     {
                         "step": step,
                         "role": "dit",
+                        "trigger": _dit_trigger,
                         "update_due": True,
                         "skipped": bool(dit_skip_reason),
                         "reason": dit_skip_reason,

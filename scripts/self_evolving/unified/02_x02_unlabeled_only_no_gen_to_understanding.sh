@@ -4,7 +4,44 @@ set -euo pipefail
 # Experiment X02
 # Only unlabeled/real image data for understanding.
 # No generation data is mixed into understanding.
-# Generation-side learning uses DiT updates only (no proxy text-policy updates).
+# Generation-side learning uses the unified image-generator update path.
+#
+# Architecture-agnostic image generator training:
+#   generator_update_freq=1 is the single unified knob for ALL architectures.
+#   The trainer auto-routes to the correct implementation:
+#
+#   Paradigm A — discrete-token AR (Janus, VARGPT, LlamaGen, etc.):
+#     LLM generates discrete image token IDs → policy_completion_ids non-None
+#     → generator GRPO fires directly on those token traces (on-task RL).
+#
+#   Paradigm B — continuous latent + diffusion decoder (BLIP3o, BAGEL, etc.):
+#     LLM encodes spec to continuous features; DiT does image denoising.
+#     policy_completion_ids is always None (no discrete image tokens).
+#     → GRPO would train captioning (wrong task), so trainer falls through
+#       to DiT denoising MSE on real images (the correct image-quality signal).
+#
+#   No per-architecture configuration needed — set generator_update_freq=1
+#   and the framework picks GRPO or DiT based on what token traces are available.
+#
+# New features enabled in this run (SUDER-inspired dual-reward + joint training):
+#
+#   1. Proposer dual reward (--proposer_gen_reward_enabled):
+#      Proposer gets reward from BOTH understanding (entropy-based) AND
+#      generation quality (best candidate total_reward). A separate EMA
+#      baseline (proposer_gen_baseline) prevents scale contamination.
+#      This closes the feedback loop: proposer learns if its specs → good images.
+#
+#   2. Joint LLM+DiT conditioning training (--dit_joint_conditioning_train):
+#      Removes torch.no_grad() from the LLM forward pass during DiT updates.
+#      Generator LoRA params (q/k/v/o/gate/up/down lora_A/B for "generator"
+#      adapter) are added to the DiT optimizer at a lower LR (dit_joint_conditioning_lr).
+#      Gradients flow: MSE_loss → DiT → z_latents → generator LoRA.
+#      This trains BOTH "how to denoise" (DiT) AND "how to encode text" (LoRA).
+#
+#   3. Reward-Weighted Regression (--dit_reward_loss_weight 0.5):
+#      DiT denoising loss is scaled by (1 + w * reward) where w=0.5.
+#      High-reward generations are reinforced more strongly — a continuous
+#      analogue of GRPO for diffusion-based image generators.
 
 REPO_ROOT="/workspace/self-evolving-uug/self-evolving-uug"
 PYTHON_BIN="python3"
@@ -139,8 +176,11 @@ fi
   --grad_clip 1.0 \
   --grad_accum_steps 4 \
   --proposer_update_freq 1 \
-  --generator_update_freq 0 \
+  --generator_update_freq 1 \
   --generator_update_rule grpo \
+  --generator_missing_trace_strategy skip \
+  --grpo_clip_ratio 0.2 \
+  --grpo_min_group_std 1e-4 \
   --enable_solver_updates \
   --solver_update_freq 1 \
   --temp 1.0 \
@@ -209,6 +249,11 @@ fi
   --dit_conditioning_dropout 0.10 \
   --dit_loss_weight 1.0 \
   --dit_prompt_suffix_token_id 151665 \
+  --proposer_gen_reward_enabled \
+  --proposer_gen_baseline_momentum 0.6 \
+  --dit_joint_conditioning_train \
+  --dit_joint_conditioning_lr 5e-7 \
+  --dit_reward_loss_weight 0.5 \
   --wandb_mode disabled \
   --wandb_project self-evolving-uug-unified \
   --wandb_run_name "$RUN_NAME" \
