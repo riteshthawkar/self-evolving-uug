@@ -150,19 +150,21 @@ fi
   --temp 1.0 \
   --top_p 1.0 \
   --max_new_tokens_solver 96 \
-  --max_new_tokens_proposer 160 \
+  --max_new_tokens_proposer 320 \
   --max_new_tokens_caption 64 \
   --max_new_tokens_generator 512 \
   --num_solver_samples 5 \
   --num_solver_samples_spec 2 \
   --num_generations 3 \
+  --proposer_num_candidates 3 \
+  --proposer_spot_check_samples 2 \
   --generation_num_inference_steps 20 \
   --generation_guidance_scale 2.0 \
   --generation_height "$GENERATION_IMAGE_SIDE" \
   --generation_width "$GENERATION_IMAGE_SIDE" \
   --difficulty_sampler_enabled \
-  --proposer_hardening_max_retries 5 \
-  --proposer_force_hardening_max_retries 3 \
+  --proposer_hardening_max_retries 0 \
+  --proposer_force_hardening_max_retries 0 \
   --solver_skip_update_on_easy \
   --reward_spec_weight 0.65 \
   --reward_cycle_weight 0.20 \

@@ -123,18 +123,48 @@ class DiTUpdater:
         return tok if tok is not None else self.processor
 
     def _find_image_processor(self):
-        """Return the image_processor from the gen_vision_tower, searching inner wrappers if needed."""
-        # Direct attribute on the tower object (e.g. SigLipVisionTower, EvaClipVisionTower, CLIPVisionTower)
+        """Return the image_processor from the gen_vision_tower, searching inner wrappers if needed.
+
+        Eva-CLIP towers only set self.image_processor inside load_model(), which is
+        skipped when delay_load=True (common in distributed training).  In that case
+        we construct the processor on-the-fly from the tower's always-available config.
+        """
+        # Direct attribute on the tower (set when load_model() was called).
         ip = getattr(self.gen_vision_tower, "image_processor", None)
         if ip is not None:
             return ip
-        # Towers that wrap an inner model under .vision_tower (e.g. SigLipVisionTower wraps SigLipVisionModel)
+
+        # EvaClipVisionTower: self.config is always set in __init__ (even with
+        # delay_load=True), but self.image_processor is only set inside load_model().
+        # Reconstruct the processor directly from the config dict.
+        tower_cls_name = type(self.gen_vision_tower).__name__
+        if "Eva" in tower_cls_name or "EVA" in tower_cls_name or "eva" in tower_cls_name.lower():
+            tower_cfg = getattr(self.gen_vision_tower, "config", None)
+            if tower_cfg is None:
+                tower_cfg = getattr(self.gen_vision_tower, "cfg_only", None)
+            if isinstance(tower_cfg, dict):
+                try:
+                    image_size = int(tower_cfg["vision_cfg"]["image_size"])
+                except (KeyError, TypeError, ValueError):
+                    image_size = 224
+            else:
+                image_size = int(getattr(self.gen_vision_tower, "image_size", 224))
+            try:
+                from blip3o.model.multimodal_encoder.eva_clip.eva_clip_processors import (
+                    EvaClipImageTrainProcessor,
+                )
+                return EvaClipImageTrainProcessor(image_size)
+            except ImportError:
+                pass  # fall through to remaining search paths
+
+        # Towers that wrap an inner model under .vision_tower (e.g. SigLipVisionTower)
         inner = getattr(self.gen_vision_tower, "vision_tower", None)
         if inner is not None:
             ip = getattr(inner, "image_processor", None)
             if ip is not None:
                 return ip
-        # Fallback: check the core_model for a gen-side processor
+
+        # Final fallback: check core_model for a gen-side processor
         ip = getattr(self.core_model, "gen_image_processor", None)
         if ip is not None:
             return ip
@@ -142,12 +172,18 @@ class DiTUpdater:
 
     @staticmethod
     def _call_image_processor(image_processor, image: Image.Image) -> torch.Tensor:
-        """Call the image processor regardless of whether it uses .preprocess() or __call__."""
-        # SigLipImageProcessor and similar custom processors expose .preprocess(images, return_tensors)
+        """Call the image processor regardless of whether it uses .preprocess() or __call__.
+
+        Handles three processor families:
+        1. EvaClipImageTrainProcessor / SigLipImageProcessor — expose .preprocess()
+           but may return pixel_values as a **list of numpy arrays** rather than a tensor.
+        2. Standard HuggingFace BaseImageProcessor — callable with images=[...], returns
+           a BatchFeature with pixel_values already stacked into a tensor.
+        3. Raw torchvision-style callable — returns a tensor directly via __call__.
+        """
         if hasattr(image_processor, "preprocess"):
             out = image_processor.preprocess(image, return_tensors="pt")
         else:
-            # Standard HuggingFace processors are directly callable
             out = image_processor(images=[image], return_tensors="pt")
 
         if isinstance(out, dict):
@@ -157,6 +193,28 @@ class DiTUpdater:
 
         if pixel_values is None:
             raise RuntimeError("Image processor did not return pixel_values.")
+
+        # EvaClipImageTrainProcessor.preprocess() accumulates transformed images
+        # as a list of numpy arrays and wraps them in BatchFeature — the tensor_type="pt"
+        # conversion only works if numpy is available AND the data is already float32.
+        # Guard against receiving a list/ndarray here and convert explicitly.
+        if not torch.is_tensor(pixel_values):
+            import numpy as np
+            if isinstance(pixel_values, (list, tuple)):
+                arrays = []
+                for pv in pixel_values:
+                    if torch.is_tensor(pv):
+                        arrays.append(pv)
+                    elif isinstance(pv, np.ndarray):
+                        arrays.append(torch.from_numpy(np.ascontiguousarray(pv)))
+                    else:
+                        arrays.append(torch.tensor(pv, dtype=torch.float32))
+                pixel_values = torch.stack(arrays, dim=0)
+            elif isinstance(pixel_values, np.ndarray):
+                pixel_values = torch.from_numpy(np.ascontiguousarray(pixel_values))
+            else:
+                pixel_values = torch.tensor(pixel_values, dtype=torch.float32)
+
         return pixel_values
 
     def _prepare_image_tensor(self, image: Image.Image, device: torch.device) -> torch.Tensor:
@@ -264,9 +322,40 @@ class DiTUpdater:
             ).to(dtype=x.dtype)
         return x.to(device=device, dtype=dtype)
 
+    def _ensure_gen_vision_tower_loaded(self):
+        """Lazily call load_model() on the gen vision tower if it was created with delay_load=True.
+
+        EvaClipVisionTower (and similar towers) skip their model construction when
+        delay_load=True, storing only the config dict.  The DiT updater needs the
+        tower to be fully loaded to run inference.  We detect an unloaded tower by
+        checking the is_loaded flag or by confirming vision_tower is absent.
+        """
+        is_loaded = getattr(self.gen_vision_tower, "is_loaded", None)
+        if is_loaded is True:
+            return  # Already loaded; nothing to do.
+
+        has_inner = hasattr(self.gen_vision_tower, "vision_tower")
+        if has_inner:
+            return  # Inner tower exists — treat as loaded even if flag is missing.
+
+        load_fn = getattr(self.gen_vision_tower, "load_model", None)
+        if callable(load_fn):
+            try:
+                load_fn()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to lazy-load gen vision tower "
+                    f"({type(self.gen_vision_tower).__name__}): {e}"
+                ) from e
+
     def _prepare_latents(self, image: Image.Image) -> Tuple[torch.Tensor, torch.device, torch.dtype]:
         model_device = self.params[0].device
         model_dtype = self.params[0].dtype
+
+        # Ensure the gen vision tower is fully initialised before running inference.
+        # Eva-CLIP towers created with delay_load=True need load_model() called first.
+        self._ensure_gen_vision_tower_loaded()
+
         gen_images = self._prepare_image_tensor(image=image, device=model_device)
 
         with torch.no_grad():

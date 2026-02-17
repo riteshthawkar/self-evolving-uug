@@ -310,6 +310,93 @@ def _parse_first_question(text: str) -> str:
     return ""
 
 
+def _parse_all_questions(text: str) -> List[str]:
+    """Parse all candidate questions from a multi-question proposer response.
+
+    Handles the XML format produced by ``build_proposer_multi_prompt``:
+
+        <questions>
+          <question id="1">
+            <solver_failure_reasoning>...</solver_failure_reasoning>
+            <text>...question text...</text>
+            <rationale>...</rationale>
+          </question>
+          ...
+        </questions>
+
+    Falls back gracefully:
+    - If <text> tags are present, extracts their contents in order.
+    - If <question id="N"> blocks are present (no <text> sub-tag), extracts the
+      innermost non-tag content that ends with '?'.
+    - If neither pattern matches, returns [_parse_first_question(text)] so the
+      caller always receives at least one candidate.
+
+    Returns a list of question strings (may be empty strings for failed parses).
+    """
+    # Primary: extract <text>...</text> blocks inside each <question id="N"> block
+    questions: List[str] = []
+
+    # Try to find all <question id="..."> blocks first
+    question_blocks = re.findall(
+        r'<question[^>]*>(.*?)</question>',
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    if question_blocks:
+        for block in question_blocks:
+            # Prefer <text>...</text> sub-tag inside the block
+            text_match = re.search(
+                r'<text>(.*?)</text>',
+                block,
+                re.DOTALL | re.IGNORECASE,
+            )
+            if text_match:
+                q = text_match.group(1).strip().replace("\n", " ")
+                questions.append(q)
+                continue
+
+            # Fall back: strip all XML sub-tags and look for a '?' line
+            stripped = re.sub(r'<[^>]+>', ' ', block).strip()
+            lines = [ln.strip() for ln in stripped.splitlines() if ln.strip()]
+            found = ""
+            for ln in lines:
+                ln_clean = re.sub(r"^\d+[\).\-\s]*", "", ln).strip()
+                if ln_clean.endswith("?"):
+                    found = ln_clean
+                    break
+            if not found and lines:
+                found = lines[0]
+            questions.append(found)
+        # Filter out empty slots but preserve order
+        questions = [q for q in questions if q]
+
+    if questions:
+        return questions
+
+    # Secondary fallback: plain <question>...</question> (no id attribute) — legacy format
+    plain = strip_tags(text, "question")
+    if plain:
+        return [plain.replace("\n", " ").strip()]
+
+    # Tertiary fallback: look for lines ending with '?'
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    candidates: List[str] = []
+    for ln in lines:
+        ln_clean = re.sub(r"^\d+[\).\-\s]*", "", ln).strip()
+        # Skip lines that are only XML tags
+        if re.match(r'^<[^>]+>$', ln_clean):
+            continue
+        if ln_clean.endswith("?"):
+            candidates.append(ln_clean)
+    if candidates:
+        return candidates
+
+    # Ultimate fallback: return single result from _parse_first_question
+    fallback = _parse_first_question(text)
+    return [fallback] if fallback else []
+
+
 def _parse_answer(text: str) -> str:
     tagged = strip_tags(text, "answer")
     if tagged:
