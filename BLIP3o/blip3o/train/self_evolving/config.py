@@ -37,7 +37,7 @@ class UnderstandingSelfEvolvingConfig:
     weight_decay: float = 0.01
     grad_clip: float = 1.0
     grad_accum_steps: int = 4
-    proposer_update_freq: int = 5
+    proposer_update_freq: int = 1  # update proposer every understanding step (was 5 — too sparse)
 
     # Decoding
     temp: float = 1.0
@@ -66,25 +66,21 @@ class UnderstandingSelfEvolvingConfig:
     len_penalty_target_words: int = 6
     prop_entropy_mu: float = 0.90
     prop_entropy_sigma: float = 0.35
-    adaptive_prop_entropy_target: bool = True
+    adaptive_prop_entropy_target: bool = False  # disabled: EMA was chasing entropy=0 (failure mode)
     prop_entropy_ema_momentum: float = 0.90
     prop_entropy_mu_min: float = 0.40
     prop_entropy_mu_max: float = 1.5
-    zero_entropy_reward_cap: float = 0.10  # cap proposer reward when entropy=0 (unanimous)
-    easy_question_penalty: float = 0.15  # subtract from proposer reward for trivially easy questions
+    zero_entropy_reward_cap: float = 0.10  # hard negative magnitude when entropy=0 (trivially easy)
+    proposer_unsolvable_reward_cap: float = 0.10  # hard negative magnitude when question is unsolvable
+    solver_unsolvable_maj_threshold: float = 0.20  # majority fraction at or below this → question treated as unsolvable
     proposer_non_objective_penalty: float = 0.20  # subtract from proposer reward when question is subjective/open-ended
     proposer_require_objective: bool = True
-    proposer_hardening_on_easy: bool = True
-    proposer_hardening_max_retries: int = 3
-    proposer_force_hardening_on_failure: bool = True
-    proposer_force_hardening_max_retries: int = 2
-    # Single-shot multi-question generation (replaces retry loop)
+    # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
     proposer_spot_check_samples: int = 2  # solver samples used to spot-check each candidate
     solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
-    acceptance_require_target_bucket: bool = True
     rejected_question_penalty: float = 0.35
     entropy_iqr_filter_enabled: bool = True
     entropy_iqr_window_size: int = 256
@@ -97,7 +93,6 @@ class UnderstandingSelfEvolvingConfig:
     difficulty_sampler_enabled: bool = False
     difficulty_sampler_window_size: int = 256
     difficulty_sampler_min_samples: int = 32
-    difficulty_sampler_max_retries: int = 2
     difficulty_target_easy: float = 0.20
     difficulty_target_medium: float = 0.60
     difficulty_target_hard: float = 0.20
@@ -112,7 +107,7 @@ class UnderstandingSelfEvolvingConfig:
     kl_max: float = 1e2
 
     # Baselines
-    baseline_momentum: float = 0.9
+    baseline_momentum: float = 0.6  # was 0.9: lower so advantage doesn't collapse when rewards are uniformly negative
 
     # LoRA
     use_lora: bool = True
@@ -168,7 +163,7 @@ class GenerationSelfEvolvingConfig:
     weight_decay: float = 0.01
     grad_clip: float = 1.0
     grad_accum_steps: int = 4
-    proposer_update_freq: int = 5
+    proposer_update_freq: int = 1
     generator_update_freq: int = 1
     enable_solver_updates: bool = False
     solver_update_freq: int = 0
@@ -253,25 +248,21 @@ class GenerationSelfEvolvingConfig:
     len_penalty_target_words: int = 6
     prop_entropy_mu: float = 0.90
     prop_entropy_sigma: float = 0.35
-    adaptive_prop_entropy_target: bool = True
+    adaptive_prop_entropy_target: bool = False  # disabled: EMA was chasing entropy=0 (failure mode)
     prop_entropy_ema_momentum: float = 0.90
     prop_entropy_mu_min: float = 0.40
     prop_entropy_mu_max: float = 1.5
     zero_entropy_reward_cap: float = 0.10
-    easy_question_penalty: float = 0.15
+    proposer_unsolvable_reward_cap: float = 0.10
+    solver_unsolvable_maj_threshold: float = 0.20
     proposer_non_objective_penalty: float = 0.20
     proposer_require_objective: bool = True
-    proposer_hardening_on_easy: bool = True
-    proposer_hardening_max_retries: int = 3
-    proposer_force_hardening_on_failure: bool = True
-    proposer_force_hardening_max_retries: int = 2
-    # Single-shot multi-question generation (replaces retry loop)
+    # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
     proposer_spot_check_samples: int = 2  # solver samples used to spot-check each candidate
     solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
-    acceptance_require_target_bucket: bool = True
     rejected_question_penalty: float = 0.35
     entropy_iqr_filter_enabled: bool = True
     entropy_iqr_window_size: int = 256
@@ -284,7 +275,6 @@ class GenerationSelfEvolvingConfig:
     difficulty_sampler_enabled: bool = False
     difficulty_sampler_window_size: int = 256
     difficulty_sampler_min_samples: int = 32
-    difficulty_sampler_max_retries: int = 2
     difficulty_target_easy: float = 0.20
     difficulty_target_medium: float = 0.60
     difficulty_target_hard: float = 0.20
@@ -307,7 +297,7 @@ class GenerationSelfEvolvingConfig:
     kl_max: float = 1e2
 
     # Baselines
-    baseline_momentum: float = 0.9
+    baseline_momentum: float = 0.6  # was 0.9: lower so advantage doesn't collapse when rewards are uniformly negative
 
     # LoRA
     use_lora: bool = True

@@ -24,11 +24,7 @@ from .config import UnifiedSelfEvolvingConfig
 from .generation_helpers import GenerationSpec
 from .generation_trainer import GenerationSelfEvolvingTrainer
 from .prompts import (
-    build_proposer_force_hard_prompt,
-    build_proposer_hardening_prompt,
     build_proposer_multi_prompt,
-    build_proposer_prompt,
-    build_proposer_template_fallback_prompt,
     build_solver_prompt,
 )
 from .replay_buffer import ReplayBuffer
@@ -369,21 +365,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             entropy_min, entropy_max = entropy_max, entropy_min
         margin_max = float(getattr(self.cfg, "sc_margin_max", 0.9))
         require_objective = bool(getattr(self.cfg, "proposer_require_objective", True))
-        harden_on_easy = bool(getattr(self.cfg, "proposer_hardening_on_easy", True))
-        max_hardening_retries = max(
-            0, int(getattr(self.cfg, "proposer_hardening_max_retries", 0))
-        )
-        force_harden_on_failure = bool(
-            getattr(self.cfg, "proposer_force_hardening_on_failure", True)
-        )
-        force_hardening_max_retries = max(
-            0, int(getattr(self.cfg, "proposer_force_hardening_max_retries", 1))
-        )
         acceptance_require_non_easy = bool(
             getattr(self.cfg, "acceptance_require_non_easy", True)
-        )
-        acceptance_require_target_bucket = bool(
-            getattr(self.cfg, "acceptance_require_target_bucket", False)
         )
         rejected_question_penalty = max(
             0.0, float(getattr(self.cfg, "rejected_question_penalty", 0.0))
@@ -395,9 +378,6 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         difficulty_sampler_enabled = bool(difficulty_target_state.get("enabled", False))
         desired_difficulty_bucket = str(difficulty_target_state.get("desired_bucket", "medium"))
         difficulty_sampler_mode = str(difficulty_target_state.get("mode", "target"))
-        difficulty_sampler_max_retries = max(
-            0, int(getattr(self.cfg, "difficulty_sampler_max_retries", 1))
-        )
         solver_temperatures = self._solver_temperature_schedule()
         solver_top_ps = self._solver_top_p_schedule()
 
@@ -592,11 +572,6 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_non_objective_question = bool(
             require_objective and (not self._is_objective_question(question))
         )
-        # Legacy fields no longer used by the loop-free path; set to safe defaults.
-        hardening_retries_used = 0
-        forced_hardening_retries_used = 0
-        hardening_reason = ""
-        difficulty_sampler_retries_used = 0
         template_fallback_used = False
 
         maj_answer, maj_count = majority_vote(solver_answers_norm)
@@ -639,8 +614,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         solver_informative_gate_global = informative_ratio >= ratio_min
 
         sc_signal = max(1e-4, local_info_score)
-        # Penalize unanimous, low-entropy, high-margin (trivially easy) cases.
+
+        # Classify difficulty bucket.
         easy_solver_case = bool((entropy_nats < entropy_easy_threshold) and (margin > margin_max))
+        # Unsolvable = all solvers disagree at or below random-chance majority.
+        unsolvable_threshold = float(
+            getattr(self.cfg, "solver_unsolvable_maj_threshold",
+                    1.0 / max(1, self.cfg.num_solver_samples))
+        )
+        unsolvable_solver_case = bool(
+            not easy_solver_case and maj_frac <= unsolvable_threshold
+        )
         difficulty_bucket_observed = self._difficulty_bucket(
             entropy_nats,
             margin,
@@ -649,10 +633,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         self._entropy_window.append(float(entropy_nats))
         self._difficulty_window.append(difficulty_bucket_observed)
-        easy_solver_penalty_scale = float(
-            getattr(self.cfg, "easy_solver_penalty_scale", 1.0)
+        easy_solver_penalty_scale = max(
+            0.0, float(getattr(self.cfg, "easy_solver_penalty_scale", 1.0))
         )
-        easy_solver_penalty_scale = max(0.0, easy_solver_penalty_scale)
+
+        # --- Solver rewards ---
         if easy_solver_case:
             solver_rewards_raw = [
                 (-easy_solver_penalty_scale * sc_signal)
@@ -660,11 +645,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 else (neg_weight * sc_signal)
                 for ans in solver_answers_norm
             ]
+        elif unsolvable_solver_case:
+            solver_rewards_raw = [
+                -neg_weight * sc_signal
+                for _ in solver_answers_norm
+            ]
         else:
             solver_rewards_raw = [
                 sc_signal if ans == maj_answer else (-neg_weight * sc_signal)
                 for ans in solver_answers_norm
             ]
+
         target_w = max(1, self.cfg.len_penalty_target_words)
         penalties = [min(1.0, max(0.0, (w - target_w) / float(target_w))) for w in pre_words]
         prob_map = {ans: count / float(self.cfg.num_solver_samples) for ans, count in hist.items()}
@@ -674,6 +665,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             * reward_raw
             for prob, pen, reward_raw in zip(solver_probs, penalties, solver_rewards_raw)
         ]
+
+        # --- Proposer reward: symmetric penalty for too-easy AND too-hard ---
         proposer_entropy_mu_used = self._update_proposer_entropy_target(entropy_nats)
         proposer_reward_raw = gaussian_reward(
             entropy_nats,
@@ -681,38 +674,39 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             self.cfg.prop_entropy_sigma,
         )
         proposer_reward = proposer_reward_raw
-        # Penalize zero-entropy (unanimous) outcomes — the question was too easy.
-        # When all solvers agree perfectly, the proposer gets at most 10% of the
-        # Gaussian reward.  Any disagreement (entropy > 0) removes the penalty.
+
+        # Hard NEGATIVE for trivially easy questions (entropy ≈ 0).
+        # Using min() gave a positive floor (+0.10), making net penalty only -0.25.
+        # Assigning a hard negative makes trivially-easy a genuine punishment.
         zero_entropy_cap = float(getattr(self.cfg, "zero_entropy_reward_cap", 0.10))
         zero_entropy_capped = False
-        if entropy_nats < 1e-6 and zero_entropy_cap < 1.0:
-            proposer_reward = min(proposer_reward, zero_entropy_cap)
+        if entropy_nats < 1e-6:
+            proposer_reward = -zero_entropy_cap  # hard negative, not a positive floor
             zero_entropy_capped = True
-        # Additional easy-question penalty for low-entropy, high-margin cases.
-        easy_question_penalty = float(getattr(self.cfg, "easy_question_penalty", 0.15))
-        easy_question_detected = bool((entropy_nats < entropy_easy_threshold) and (margin > margin_max))
-        if easy_question_detected and easy_question_penalty > 0.0:
-            proposer_reward -= easy_question_penalty
-        proposer_non_objective_penalty = float(
-            getattr(self.cfg, "proposer_non_objective_penalty", 0.0)
+
+        # Hard NEGATIVE for unsolvable questions.
+        unsolvable_capped = False
+        unsolvable_reward_cap = float(
+            getattr(self.cfg, "proposer_unsolvable_reward_cap", zero_entropy_cap)
         )
-        proposer_non_objective_penalty = max(0.0, proposer_non_objective_penalty)
+        if unsolvable_solver_case and not zero_entropy_capped:
+            proposer_reward = -unsolvable_reward_cap  # hard negative, not a positive floor
+            unsolvable_capped = True
+
+        # Non-objective penalty.
+        proposer_non_objective_penalty = max(
+            0.0, float(getattr(self.cfg, "proposer_non_objective_penalty", 0.0))
+        )
         if proposer_non_objective_question and proposer_non_objective_penalty > 0.0:
             proposer_reward -= proposer_non_objective_penalty
+
+        # Rejection: non-objective or too-easy bucket.
+        easy_question_detected = easy_solver_case
         reject_reasons: List[str] = []
         if require_objective and proposer_non_objective_question:
             reject_reasons.append("non_objective")
         if acceptance_require_non_easy and (difficulty_bucket_observed == "easy"):
             reject_reasons.append("easy_bucket")
-        if (
-            acceptance_require_target_bucket
-            and difficulty_sampler_enabled
-            and (difficulty_bucket_observed != desired_difficulty_bucket)
-        ):
-            reject_reasons.append(
-                f"bucket_mismatch:{difficulty_bucket_observed}->{desired_difficulty_bucket}"
-            )
         question_rejected = len(reject_reasons) > 0
         question_reject_reason = "|".join(reject_reasons)
         if question_rejected and rejected_question_penalty > 0.0:
@@ -868,7 +862,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_update_due = self._is_proposer_update_due(step, phase="understanding")
         if proposer_update_due:
             baseline_before = self.proposer_baseline
-            proposer_completion = str(proposer_out or "").strip()
+            # Train only on the selected question text — concentrates the
+            # gradient on the tokens that determine difficulty, not on the
+            # 300+ token XML scaffold that is identical every call.
+            proposer_completion = str(question or proposer_out or "").strip()
             local_can_proposer_update = bool(proposer_completion)
             any_rank_can_proposer_update = self._dist_any_bool(local_can_proposer_update)
             if any_rank_can_proposer_update:
@@ -915,14 +912,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_template_fallback_used": template_fallback_used,
             "proposer_non_objective_question": proposer_non_objective_question,
             "proposer_non_objective_penalty": proposer_non_objective_penalty,
-            "proposer_hardening_retries_used": hardening_retries_used,
-            "proposer_forced_hardening_retries_used": forced_hardening_retries_used,
-            "proposer_hardening_reason": hardening_reason,
             "question_rejected": question_rejected,
             "question_reject_reason": question_reject_reason,
             "rejected_question_penalty": rejected_question_penalty,
             "acceptance_require_non_easy": acceptance_require_non_easy,
-            "acceptance_require_target_bucket": acceptance_require_target_bucket,
             "solver_answers_raw": solver_answers_raw,
             "solver_answers_norm": solver_answers_norm,
             "solver_rewards_raw": solver_rewards_raw,
@@ -961,8 +954,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_reward": proposer_reward,
             "zero_entropy_capped": zero_entropy_capped,
             "zero_entropy_reward_cap": zero_entropy_cap,
+            "unsolvable_solver_case": unsolvable_solver_case,
+            "unsolvable_capped": unsolvable_capped,
             "easy_question_detected": easy_question_detected,
-            "easy_question_penalty": easy_question_penalty,
             "solver_skip_update_on_easy": solver_skip_update_on_easy,
             "solver_entropy_iqr_blocked": solver_entropy_iqr_blocked,
             "entropy_iqr_filter_min_majority_frac": entropy_iqr_filter_min_majority_frac,
@@ -972,8 +966,6 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "difficulty_sampler_mode": difficulty_sampler_mode,
             "difficulty_target_bucket": desired_difficulty_bucket,
             "difficulty_bucket_observed": difficulty_bucket_observed,
-            "difficulty_sampler_retries_used": difficulty_sampler_retries_used,
-            "difficulty_sampler_max_retries": difficulty_sampler_max_retries,
             "difficulty_target_weights": difficulty_target_state.get("target_weights", {}),
             "difficulty_observed_weights": difficulty_target_state.get("observed_weights", {}),
             "difficulty_sampling_weights": difficulty_target_state.get("sampling_weights", {}),
@@ -1027,19 +1019,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "proposer_reward": proposer_reward,
                 "proposer_non_objective_question": proposer_non_objective_question,
                 "proposer_non_objective_penalty": proposer_non_objective_penalty,
-                "proposer_template_fallback_used": template_fallback_used,
-                "proposer_hardening_retries_used": hardening_retries_used,
-                "proposer_forced_hardening_retries_used": forced_hardening_retries_used,
-                "proposer_hardening_reason": hardening_reason,
                 "question_rejected": question_rejected,
                 "question_reject_reason": question_reject_reason,
                 "rejected_question_penalty": rejected_question_penalty,
                 "acceptance_require_non_easy": acceptance_require_non_easy,
-                "acceptance_require_target_bucket": acceptance_require_target_bucket,
                 "zero_entropy_capped": zero_entropy_capped,
                 "zero_entropy_reward_cap": zero_entropy_cap,
+                "unsolvable_solver_case": unsolvable_solver_case,
+                "unsolvable_capped": unsolvable_capped,
                 "easy_question_detected": easy_question_detected,
-                "easy_question_penalty": easy_question_penalty,
                 "solver_skip_update_on_easy": solver_skip_update_on_easy,
                 "solver_entropy_iqr_blocked": solver_entropy_iqr_blocked,
                 "entropy_iqr_filter_min_majority_frac": entropy_iqr_filter_min_majority_frac,
@@ -1049,8 +1037,6 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "difficulty_sampler_mode": difficulty_sampler_mode,
                 "difficulty_target_bucket": desired_difficulty_bucket,
                 "difficulty_bucket_observed": difficulty_bucket_observed,
-                "difficulty_sampler_retries_used": difficulty_sampler_retries_used,
-                "difficulty_sampler_max_retries": difficulty_sampler_max_retries,
                 "difficulty_target_weights": difficulty_target_state.get("target_weights", {}),
                 "difficulty_observed_weights": difficulty_target_state.get("observed_weights", {}),
                 "difficulty_sampling_weights": difficulty_target_state.get("sampling_weights", {}),

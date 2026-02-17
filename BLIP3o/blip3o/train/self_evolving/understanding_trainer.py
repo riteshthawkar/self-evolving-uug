@@ -30,10 +30,7 @@ from .image_pool import ImagePool, ImagePoolConfig
 from .model_api import _load_blip3o_model
 from .policy_updater import RolePolicyUpdater
 from .prompts import (
-    build_proposer_force_hard_prompt,
-    build_proposer_hardening_prompt,
-    build_proposer_prompt,
-    build_proposer_template_fallback_prompt,
+    build_proposer_multi_prompt,
     build_solver_prompt,
 )
 from .utils import (
@@ -44,6 +41,7 @@ from .utils import (
     _decode_tokens,
     _infer_primary_device,
     _json_dump,
+    _parse_all_questions,
     _parse_answer,
     _parse_first_question,
     _prepare_mm_inputs,
@@ -1141,26 +1139,15 @@ class UnderstandingSelfEvolvingTrainer:
                 step_t0 = time.perf_counter()
                 image, meta = self._sample_image_for_step(step)
 
-                # --- Proposer + hardening retries ---
+                # --- Proposer: single multi-candidate call, pick hardest ---
                 entropy_min = float(getattr(cfg, "sc_entropy_min", 0.15))
                 entropy_max = float(getattr(cfg, "sc_entropy_max", 1.2))
                 if entropy_min > entropy_max:
                     entropy_min, entropy_max = entropy_max, entropy_min
                 margin_max = float(getattr(cfg, "sc_margin_max", 0.9))
                 require_objective = bool(getattr(cfg, "proposer_require_objective", True))
-                harden_on_easy = bool(getattr(cfg, "proposer_hardening_on_easy", True))
-                max_hardening_retries = max(0, int(getattr(cfg, "proposer_hardening_max_retries", 0)))
-                force_harden_on_failure = bool(
-                    getattr(cfg, "proposer_force_hardening_on_failure", True)
-                )
-                force_hardening_max_retries = max(
-                    0, int(getattr(cfg, "proposer_force_hardening_max_retries", 1))
-                )
                 acceptance_require_non_easy = bool(
                     getattr(cfg, "acceptance_require_non_easy", True)
-                )
-                acceptance_require_target_bucket = bool(
-                    getattr(cfg, "acceptance_require_target_bucket", False)
                 )
                 rejected_question_penalty = max(
                     0.0, float(getattr(cfg, "rejected_question_penalty", 0.0))
@@ -1174,214 +1161,108 @@ class UnderstandingSelfEvolvingTrainer:
                     difficulty_target_state.get("desired_bucket", "medium")
                 )
                 difficulty_sampler_mode = str(difficulty_target_state.get("mode", "target"))
-                difficulty_sampler_max_retries = max(
-                    0, int(getattr(cfg, "difficulty_sampler_max_retries", 1))
-                )
 
                 solver_temperatures = self._solver_temperature_schedule()
                 solver_top_ps = self._solver_top_p_schedule()
 
-                proposer_prompt = build_proposer_prompt(desired_difficulty_bucket)
-                proposer_out = ""
-                parsed_question = ""
-                question = ""
-                fallback_used = False
-                template_fallback_used = False
-                proposer_rationale = ""
-                proposer_non_objective_question = False
-                hardening_retries_used = 0
-                forced_hardening_retries_used = 0
-                hardening_reason = ""
-                difficulty_sampler_retries_used = 0
-                difficulty_bucket_observed = "unknown"
-                question_rejected = False
-                question_reject_reason = ""
+                num_candidates = max(1, int(getattr(cfg, "proposer_num_candidates", 3)))
+                spot_check_samples = max(1, int(getattr(cfg, "proposer_spot_check_samples", 2)))
 
-                solver_prompt = ""
+                # Single proposer call produces K candidates with adversarial
+                # solver-failure reasoning baked in.
+                proposer_out = self._generate(
+                    image=image,
+                    prompt=build_proposer_multi_prompt(desired_difficulty_bucket, num_candidates),
+                    adapter_name="proposer" if cfg.use_lora else None,
+                    max_new_tokens=cfg.max_new_tokens_proposer,
+                    temperature=cfg.temp,
+                    top_p=cfg.top_p,
+                )
+
+                # Parse all K candidate question strings.
+                raw_candidates = _parse_all_questions(proposer_out)
+                candidates = [c.replace("\n", " ").strip() for c in raw_candidates if c.strip()]
+                if not candidates:
+                    candidates = ["What is the most salient object in the image?"]
+
+                # Spot-check each candidate with a small number of solver samples
+                # and pick the one with the highest entropy (hardest for solver).
+                best_question = candidates[0]
+                best_spot_entropy = -1.0
+                for cand in candidates:
+                    if not self._is_objective_question(cand):
+                        # Skip non-objective candidates entirely; don't waste
+                        # full solver budget on them.
+                        continue
+                    _spot_answers: List[str] = []
+                    for _si in range(spot_check_samples):
+                        _st = (
+                            float(solver_temperatures[_si])
+                            if _si < len(solver_temperatures)
+                            else float(cfg.temp)
+                        )
+                        _sp = (
+                            float(solver_top_ps[_si])
+                            if _si < len(solver_top_ps)
+                            else float(cfg.top_p)
+                        )
+                        _sout = self._generate(
+                            image=image,
+                            prompt=build_solver_prompt(cand),
+                            adapter_name="default" if cfg.use_lora else None,
+                            max_new_tokens=cfg.max_new_tokens_solver,
+                            temperature=_st,
+                            top_p=_sp,
+                        )
+                        _spot_answers.append(normalize_answer(_parse_answer(_sout)))
+                    _spot_hist: Dict[str, int] = {}
+                    for _a in _spot_answers:
+                        _spot_hist[_a] = _spot_hist.get(_a, 0) + 1
+                    _spot_probs = [v / float(spot_check_samples) for v in _spot_hist.values()]
+                    _spot_entropy = shannon_entropy_nats(_spot_probs)
+                    if _spot_entropy > best_spot_entropy:
+                        best_spot_entropy = _spot_entropy
+                        best_question = cand
+
+                question = best_question
+                # Check if the selected question is objective.
+                proposer_non_objective_question = bool(
+                    require_objective and (not self._is_objective_question(question))
+                )
+                proposer_rationale = strip_tags(proposer_out, "rationale")
+                fallback_question_used = question not in raw_candidates
+
+                # --- Full solver rollout on the selected question ---
+                solver_prompt = build_solver_prompt(question)
                 solver_outputs: List[str] = []
                 solver_answers_raw: List[str] = []
                 solver_answers_norm: List[str] = []
                 pre_words: List[int] = []
 
-                while True:
-                    proposer_out = self._generate(
+                for sample_idx in range(cfg.num_solver_samples):
+                    solver_temp = (
+                        float(solver_temperatures[sample_idx])
+                        if sample_idx < len(solver_temperatures)
+                        else float(cfg.temp)
+                    )
+                    solver_top_p = (
+                        float(solver_top_ps[sample_idx])
+                        if sample_idx < len(solver_top_ps)
+                        else float(cfg.top_p)
+                    )
+                    solver_out = self._generate(
                         image=image,
-                        prompt=proposer_prompt,
-                        adapter_name="proposer" if cfg.use_lora else None,
-                        max_new_tokens=cfg.max_new_tokens_proposer,
-                        temperature=cfg.temp,
-                        top_p=cfg.top_p,
+                        prompt=solver_prompt,
+                        adapter_name="default" if cfg.use_lora else None,
+                        max_new_tokens=cfg.max_new_tokens_solver,
+                        temperature=solver_temp,
+                        top_p=solver_top_p,
                     )
-                    parsed_question = _parse_first_question(proposer_out).replace("\n", " ").strip()
-                    question = parsed_question or "What is the most salient object in the image?"
-                    fallback_used = not bool(parsed_question)
-                    proposer_rationale = strip_tags(proposer_out, "rationale")
-                    proposer_non_objective_question = bool(
-                        require_objective and (not self._is_objective_question(question))
-                    )
-
-                    # --- Solver ---
-                    solver_prompt = build_solver_prompt(question)
-                    solver_outputs = []
-                    solver_answers_raw = []
-                    solver_answers_norm = []
-                    pre_words = []
-
-                    for sample_idx in range(cfg.num_solver_samples):
-                        solver_temp = (
-                            float(solver_temperatures[sample_idx])
-                            if sample_idx < len(solver_temperatures)
-                            else float(cfg.temp)
-                        )
-                        solver_top_p = (
-                            float(solver_top_ps[sample_idx])
-                            if sample_idx < len(solver_top_ps)
-                            else float(cfg.top_p)
-                        )
-                        solver_out = self._generate(
-                            image=image,
-                            prompt=solver_prompt,
-                            adapter_name="default" if cfg.use_lora else None,
-                            max_new_tokens=cfg.max_new_tokens_solver,
-                            temperature=solver_temp,
-                            top_p=solver_top_p,
-                        )
-                        answer_raw = _parse_answer(solver_out)
-                        solver_outputs.append(solver_out)
-                        solver_answers_raw.append(answer_raw)
-                        solver_answers_norm.append(normalize_answer(answer_raw))
-                        pre_words.append(pre_answer_word_count(solver_out))
-
-                    # Hardening trigger: easy consensus and/or non-objective wording.
-                    _tmp_hist: Dict[str, int] = {}
-                    for ans in solver_answers_norm:
-                        _tmp_hist[ans] = _tmp_hist.get(ans, 0) + 1
-                    _tmp_probs = [count / float(cfg.num_solver_samples) for count in _tmp_hist.values()]
-                    _tmp_entropy = shannon_entropy_nats(_tmp_probs)
-                    _tmp_sorted = sorted(_tmp_probs, reverse=True)
-                    _tmp_p1 = float(_tmp_sorted[0]) if _tmp_sorted else 0.0
-                    _tmp_p2 = float(_tmp_sorted[1]) if len(_tmp_sorted) > 1 else 0.0
-                    _tmp_margin = max(0.0, _tmp_p1 - _tmp_p2)
-                    _tmp_maj_frac = _tmp_p1
-                    difficulty_bucket_observed = self._difficulty_bucket(
-                        _tmp_entropy,
-                        _tmp_margin,
-                        _tmp_maj_frac,
-                        entropy_easy_threshold,
-                    )
-                    easy_for_hardening = bool(
-                        (_tmp_entropy < entropy_easy_threshold) and (_tmp_margin > margin_max)
-                    )
-                    retry_due_to_easy = bool(harden_on_easy and easy_for_hardening)
-                    retry_due_to_non_objective = bool(proposer_non_objective_question)
-                    retry_due_to_bucket = bool(
-                        difficulty_sampler_enabled
-                        and (difficulty_bucket_observed != desired_difficulty_bucket)
-                    )
-
-                    can_retry_hardening = bool(
-                        hardening_retries_used < max_hardening_retries
-                        and (retry_due_to_easy or retry_due_to_non_objective)
-                    )
-                    can_retry_bucket = bool(
-                        difficulty_sampler_retries_used < difficulty_sampler_max_retries
-                        and retry_due_to_bucket
-                    )
-                    if can_retry_hardening or can_retry_bucket:
-                        if retry_due_to_non_objective and retry_due_to_easy:
-                            hardening_reason = (
-                                "question was subjective/open-ended and produced unanimous easy solver answers"
-                            )
-                        elif retry_due_to_non_objective:
-                            hardening_reason = "question was subjective/open-ended, not objectively verifiable"
-                        elif retry_due_to_easy:
-                            hardening_reason = "question was too easy; solver consensus was near-unanimous"
-                        else:
-                            hardening_reason = (
-                                "question did not match requested difficulty bucket "
-                                f"(target={desired_difficulty_bucket}, observed={difficulty_bucket_observed})"
-                            )
-                        if can_retry_hardening:
-                            hardening_retries_used += 1
-                        if can_retry_bucket:
-                            difficulty_sampler_retries_used += 1
-                        proposer_prompt = build_proposer_hardening_prompt(question, hardening_reason)
-                        continue
-
-                    can_force_hardening = bool(
-                        force_harden_on_failure
-                        and (forced_hardening_retries_used < force_hardening_max_retries)
-                        and (
-                            retry_due_to_non_objective
-                            or retry_due_to_easy
-                            or (
-                                acceptance_require_target_bucket
-                                and retry_due_to_bucket
-                            )
-                        )
-                    )
-                    if can_force_hardening:
-                        if retry_due_to_non_objective and retry_due_to_easy:
-                            hardening_reason = (
-                                "question remained subjective and trivially easy after retries"
-                            )
-                        elif retry_due_to_non_objective:
-                            hardening_reason = (
-                                "question remained non-objective after retries"
-                            )
-                        elif retry_due_to_easy:
-                            hardening_reason = (
-                                "question remained too easy after retries"
-                            )
-                        else:
-                            hardening_reason = (
-                                "question still missed the requested difficulty bucket "
-                                f"(target={desired_difficulty_bucket}, observed={difficulty_bucket_observed})"
-                            )
-                        forced_hardening_retries_used += 1
-                        proposer_prompt = build_proposer_force_hard_prompt(
-                            question,
-                            hardening_reason,
-                            desired_difficulty_bucket,
-                        )
-                        continue
-                    can_template_fallback = bool(
-                        (not template_fallback_used)
-                        and (
-                            retry_due_to_non_objective
-                            or retry_due_to_easy
-                            or (
-                                acceptance_require_target_bucket
-                                and retry_due_to_bucket
-                            )
-                        )
-                    )
-                    if can_template_fallback:
-                        if retry_due_to_non_objective and retry_due_to_easy:
-                            hardening_reason = (
-                                "question remained subjective and trivially easy after forced hardening"
-                            )
-                        elif retry_due_to_non_objective:
-                            hardening_reason = (
-                                "question remained non-objective after forced hardening"
-                            )
-                        elif retry_due_to_easy:
-                            hardening_reason = (
-                                "question remained too easy after forced hardening"
-                            )
-                        else:
-                            hardening_reason = (
-                                "question still missed the requested difficulty bucket "
-                                f"(target={desired_difficulty_bucket}, observed={difficulty_bucket_observed})"
-                            )
-                        template_fallback_used = True
-                        proposer_prompt = build_proposer_template_fallback_prompt(
-                            question,
-                            hardening_reason,
-                            desired_difficulty_bucket,
-                        )
-                        continue
-                    break
+                    answer_raw = _parse_answer(solver_out)
+                    solver_outputs.append(solver_out)
+                    solver_answers_raw.append(answer_raw)
+                    solver_answers_norm.append(normalize_answer(answer_raw))
+                    pre_words.append(pre_answer_word_count(solver_out))
 
                 # --- Reward computation ---
                 maj_answer, maj_count = majority_vote(solver_answers_norm)
@@ -1399,8 +1280,8 @@ class UnderstandingSelfEvolvingTrainer:
                 ratio_min = float(getattr(cfg, "sc_informative_ratio_min", 0.25))
                 ratio_min = max(0.0, min(1.0, ratio_min))
                 neg_weight = float(getattr(cfg, "sc_negative_weight", 0.25))
-                # Informativeness score encourages moderate disagreement and
-                # penalizes collapsed unanimity.
+
+                # Informativeness score: Gaussian centred on the target entropy band.
                 entropy_span = max(1e-6, entropy_max - entropy_min)
                 entropy_mid = 0.5 * (entropy_min + entropy_max)
                 entropy_sigma = max(1e-6, 0.5 * entropy_span)
@@ -1415,16 +1296,12 @@ class UnderstandingSelfEvolvingTrainer:
                 informative_ratio = self._dist_mean(1.0 if solver_informative_local else 0.0)
                 solver_informative_any = informative_ratio > 0.0
                 solver_informative_all = informative_ratio >= (1.0 - 1e-8)
-                # NOTE: Updates are per-rank on per-rank images. Use local
-                # informativeness for gating; keep global ratio for logging.
                 solver_informative_gate = solver_informative_local
                 solver_informative_gate_global = informative_ratio >= ratio_min
 
                 sc_signal = max(1e-4, local_info_score)
-                # Penalize unanimous, low-entropy, high-margin (trivially easy) cases.
-                easy_solver_case = bool(
-                    (entropy_nats < entropy_easy_threshold) and (margin > margin_max)
-                )
+
+                # Classify difficulty bucket.
                 difficulty_bucket_observed = self._difficulty_bucket(
                     entropy_nats,
                     margin,
@@ -1433,22 +1310,50 @@ class UnderstandingSelfEvolvingTrainer:
                 )
                 self._entropy_window.append(float(entropy_nats))
                 self._difficulty_window.append(difficulty_bucket_observed)
-                easy_solver_penalty_scale = float(
-                    getattr(cfg, "easy_solver_penalty_scale", 1.0)
+
+                # --- Solver rewards ---
+                # Too easy  (entropy ≈ 0, all solvers agree): penalise solvers for
+                #   answering correctly — this case should not reinforce them.
+                # Too hard  (all solvers wrong / pure noise): also penalise, because
+                #   the question is unlearnable.
+                # Sweet-spot (moderate disagreement): reward the majority answer.
+                easy_solver_case = bool(
+                    entropy_nats < entropy_easy_threshold and margin > margin_max
                 )
-                easy_solver_penalty_scale = max(0.0, easy_solver_penalty_scale)
+                # "Unsolvable" = every solver gave a *different* answer AND the
+                # majority fraction is at or below random-chance level.  With
+                # num_solver_samples=5 that is ≤ 1/5 = 0.20.
+                unsolvable_threshold = float(
+                    getattr(cfg, "solver_unsolvable_maj_threshold", 1.0 / max(1, cfg.num_solver_samples))
+                )
+                unsolvable_solver_case = bool(
+                    not easy_solver_case and maj_frac <= unsolvable_threshold
+                )
+                easy_solver_penalty_scale = max(
+                    0.0, float(getattr(cfg, "easy_solver_penalty_scale", 1.0))
+                )
                 if easy_solver_case:
+                    # Proposer asked something trivially easy — penalise solvers
+                    # that got it right to discourage memorising easy answers.
                     solver_rewards_raw = [
                         (-easy_solver_penalty_scale * sc_signal)
                         if ans == maj_answer
                         else (neg_weight * sc_signal)
                         for ans in solver_answers_norm
                     ]
+                elif unsolvable_solver_case:
+                    # Question is pure noise to the solver — everyone gets penalised
+                    # equally (small negative) to signal the question is useless.
+                    solver_rewards_raw = [
+                        -neg_weight * sc_signal
+                        for _ in solver_answers_norm
+                    ]
                 else:
                     solver_rewards_raw = [
                         sc_signal if ans == maj_answer else (-neg_weight * sc_signal)
                         for ans in solver_answers_norm
                     ]
+
                 target_w = max(1, cfg.len_penalty_target_words)
                 penalties = [
                     min(1.0, max(0.0, (w - target_w) / float(target_w))) for w in pre_words
@@ -1463,48 +1368,66 @@ class UnderstandingSelfEvolvingTrainer:
                     * reward_raw
                     for prob, pen, reward_raw in zip(solver_probs, penalties, solver_rewards_raw)
                 ]
+
+                # --- Proposer reward: symmetric penalty for too-easy AND too-hard ---
+                #
+                # Target zone: entropy_min ≤ entropy_nats ≤ entropy_max.
+                # The Gaussian reward (gaussian_reward) already gives ~1 at the
+                # target mu and decays for deviations in both directions, so it
+                # naturally penalises both extremes.  We add explicit hard floors
+                # for the two degenerate cases so the gradient signal is strong
+                # enough to overcome the model's prior.
+                #
+                #   easy:       entropy ≈ 0   → all solvers unanimously correct
+                #   unsolvable: entropy >> max → all solvers give different wrong answers
+                #
                 proposer_entropy_mu_used = self._update_proposer_entropy_target(entropy_nats)
                 proposer_reward_raw = gaussian_reward(
                     entropy_nats, proposer_entropy_mu_used, cfg.prop_entropy_sigma
                 )
                 proposer_reward = proposer_reward_raw
-                # Penalize zero-entropy (unanimous) outcomes — question was too easy.
-                zero_entropy_cap = float(getattr(cfg, "zero_entropy_reward_cap", 0.10))
+
+                # Hard NEGATIVE for trivially easy questions (entropy ≈ 0).
+                # Using min() gave a positive floor (+0.10), making net penalty only -0.25.
+                # Assigning a hard negative makes trivially-easy a genuine punishment.
                 zero_entropy_capped = False
-                if entropy_nats < 1e-6 and zero_entropy_cap < 1.0:
-                    proposer_reward = min(proposer_reward, zero_entropy_cap)
+                zero_entropy_cap = float(getattr(cfg, "zero_entropy_reward_cap", 0.10))
+                if entropy_nats < 1e-6:
+                    proposer_reward = -zero_entropy_cap  # hard negative, not a positive floor
                     zero_entropy_capped = True
-                # Additional easy-question penalty for low-entropy, high-margin cases.
-                easy_question_penalty = float(getattr(cfg, "easy_question_penalty", 0.15))
-                easy_question_detected = bool(
-                    (entropy_nats < entropy_easy_threshold) and (margin > margin_max)
+
+                # Hard NEGATIVE for unsolvable questions (solver cannot learn anything).
+                unsolvable_capped = False
+                unsolvable_reward_cap = float(
+                    getattr(cfg, "proposer_unsolvable_reward_cap", zero_entropy_cap)
                 )
-                if easy_question_detected and easy_question_penalty > 0.0:
-                    proposer_reward -= easy_question_penalty
-                proposer_non_objective_penalty = float(
-                    getattr(cfg, "proposer_non_objective_penalty", 0.0)
+                if unsolvable_solver_case and not zero_entropy_capped:
+                    proposer_reward = -unsolvable_reward_cap  # hard negative, not a positive floor
+                    unsolvable_capped = True
+
+                # Non-objective question penalty.
+                proposer_non_objective_penalty = max(
+                    0.0, float(getattr(cfg, "proposer_non_objective_penalty", 0.0))
                 )
-                proposer_non_objective_penalty = max(0.0, proposer_non_objective_penalty)
                 if proposer_non_objective_question and proposer_non_objective_penalty > 0.0:
                     proposer_reward -= proposer_non_objective_penalty
+
+                # Rejection: non-objective or too-easy bucket.
                 reject_reasons: List[str] = []
                 if require_objective and proposer_non_objective_question:
                     reject_reasons.append("non_objective")
                 if acceptance_require_non_easy and (difficulty_bucket_observed == "easy"):
                     reject_reasons.append("easy_bucket")
-                if (
-                    acceptance_require_target_bucket
-                    and difficulty_sampler_enabled
-                    and (difficulty_bucket_observed != desired_difficulty_bucket)
-                ):
-                    reject_reasons.append(
-                        f"bucket_mismatch:{difficulty_bucket_observed}->{desired_difficulty_bucket}"
-                    )
                 question_rejected = len(reject_reasons) > 0
                 question_reject_reason = "|".join(reject_reasons)
                 if question_rejected and rejected_question_penalty > 0.0:
                     proposer_reward -= rejected_question_penalty
+
                 proposer_reward = max(-1.0, min(1.0, proposer_reward))
+
+                fallback_used = fallback_question_used
+                template_fallback_used = False
+                easy_question_detected = easy_solver_case
 
                 # --- Solver policy updates ---
                 solver_baseline_before_step = self.solver_baseline
@@ -1707,15 +1630,23 @@ class UnderstandingSelfEvolvingTrainer:
                 proposer_baseline_after_step = proposer_baseline_before_step
                 proposer_stats = None
                 if step % cfg.proposer_update_freq == 0:
-                    proposer_completion = str(proposer_out or "").strip()
+                    # Train only on the selected question text — concentrates the
+                    # gradient on the tokens that determine difficulty, not on the
+                    # 300+ token XML scaffold that is identical every call.
+                    proposer_completion = str(question or proposer_out or "").strip()
                     local_can_proposer_update = bool(proposer_completion)
                     any_rank_can_proposer_update = self._dist_any_bool(local_can_proposer_update)
                     if any_rank_can_proposer_update:
                         completion_for_update = proposer_completion if local_can_proposer_update else ""
                         effective_reward = proposer_reward if local_can_proposer_update else 0.0
+                        # Use the multi-candidate prompt as the conditioning context.
+                        proposer_prompt_for_update = build_proposer_multi_prompt(
+                            desired_difficulty_bucket,
+                            max(1, int(getattr(cfg, "proposer_num_candidates", 3))),
+                        )
                         proposer_stats = self.proposer_updater.step(
                             image=image,
-                            prompt=proposer_prompt,
+                            prompt=proposer_prompt_for_update,
                             completion=completion_for_update,
                             reward=effective_reward,
                             baseline=proposer_baseline_before_step if local_can_proposer_update else 0.0,
@@ -1798,27 +1729,18 @@ class UnderstandingSelfEvolvingTrainer:
                     {
                         "step": step,
                         "image_path": meta.get("path"),
-                        "proposer_prompt": proposer_prompt,
                         "proposer_output": proposer_out,
                         "proposer_rationale": proposer_rationale,
-                        "parsed_question": parsed_question,
                         "final_question": question,
                         "fallback_question_used": fallback_used,
-                        "proposer_template_fallback_used": template_fallback_used,
                         "proposer_non_objective_question": proposer_non_objective_question,
-                        "proposer_hardening_retries_used": hardening_retries_used,
-                        "proposer_forced_hardening_retries_used": forced_hardening_retries_used,
-                        "proposer_hardening_reason": hardening_reason,
                         "question_rejected": question_rejected,
                         "question_reject_reason": question_reject_reason,
                         "acceptance_require_non_easy": acceptance_require_non_easy,
-                        "acceptance_require_target_bucket": acceptance_require_target_bucket,
                         "difficulty_sampler_enabled": difficulty_sampler_enabled,
                         "difficulty_sampler_mode": difficulty_sampler_mode,
                         "difficulty_target_bucket": desired_difficulty_bucket,
                         "difficulty_bucket_observed": difficulty_bucket_observed,
-                        "difficulty_sampler_retries_used": difficulty_sampler_retries_used,
-                        "difficulty_sampler_max_retries": difficulty_sampler_max_retries,
                         "difficulty_target_weights": difficulty_target_state.get("target_weights", {}),
                         "difficulty_observed_weights": difficulty_target_state.get("observed_weights", {}),
                         "difficulty_sampling_weights": difficulty_target_state.get("sampling_weights", {}),
@@ -1872,18 +1794,15 @@ class UnderstandingSelfEvolvingTrainer:
                         "proposer_reward": proposer_reward,
                         "proposer_non_objective_question": proposer_non_objective_question,
                         "proposer_non_objective_penalty": proposer_non_objective_penalty,
-                        "proposer_hardening_retries_used": hardening_retries_used,
-                        "proposer_forced_hardening_retries_used": forced_hardening_retries_used,
-                        "proposer_hardening_reason": hardening_reason,
                         "question_rejected": question_rejected,
                         "question_reject_reason": question_reject_reason,
                         "rejected_question_penalty": rejected_question_penalty,
                         "acceptance_require_non_easy": acceptance_require_non_easy,
-                        "acceptance_require_target_bucket": acceptance_require_target_bucket,
                         "zero_entropy_capped": zero_entropy_capped,
                         "zero_entropy_reward_cap": zero_entropy_cap,
+                        "unsolvable_solver_case": unsolvable_solver_case,
+                        "unsolvable_capped": unsolvable_capped,
                         "easy_question_detected": easy_question_detected,
-                        "easy_question_penalty": easy_question_penalty,
                         "solver_skip_update_on_easy": solver_skip_update_on_easy,
                         "solver_entropy_iqr_blocked": solver_entropy_iqr_blocked,
                         "entropy_iqr_filter_min_majority_frac": entropy_iqr_filter_min_majority_frac,
@@ -1893,8 +1812,6 @@ class UnderstandingSelfEvolvingTrainer:
                         "difficulty_sampler_mode": difficulty_sampler_mode,
                         "difficulty_target_bucket": desired_difficulty_bucket,
                         "difficulty_bucket_observed": difficulty_bucket_observed,
-                        "difficulty_sampler_retries_used": difficulty_sampler_retries_used,
-                        "difficulty_sampler_max_retries": difficulty_sampler_max_retries,
                         "difficulty_target_weights": difficulty_target_state.get("target_weights", {}),
                         "difficulty_observed_weights": difficulty_target_state.get("observed_weights", {}),
                         "difficulty_sampling_weights": difficulty_target_state.get("sampling_weights", {}),
@@ -1913,17 +1830,12 @@ class UnderstandingSelfEvolvingTrainer:
                         "proposer_out": proposer_out,
                         "proposer_rationale": proposer_rationale,
                         "fallback_question_used": fallback_used,
-                        "proposer_template_fallback_used": template_fallback_used,
                         "proposer_non_objective_question": proposer_non_objective_question,
                         "proposer_non_objective_penalty": proposer_non_objective_penalty,
-                        "proposer_hardening_retries_used": hardening_retries_used,
-                        "proposer_forced_hardening_retries_used": forced_hardening_retries_used,
-                        "proposer_hardening_reason": hardening_reason,
                         "question_rejected": question_rejected,
                         "question_reject_reason": question_reject_reason,
                         "rejected_question_penalty": rejected_question_penalty,
                         "acceptance_require_non_easy": acceptance_require_non_easy,
-                        "acceptance_require_target_bucket": acceptance_require_target_bucket,
                         "solver_answers_raw": solver_answers_raw,
                         "solver_answers_norm": solver_answers_norm,
                         "solver_rewards_raw": solver_rewards_raw,
@@ -1946,6 +1858,7 @@ class UnderstandingSelfEvolvingTrainer:
                         "entropy_iqr_filter_q3": entropy_iqr_state.get("q3"),
                         "entropy_iqr_filter_iqr": entropy_iqr_state.get("iqr"),
                         "easy_solver_case": easy_solver_case,
+                        "unsolvable_solver_case": unsolvable_solver_case,
                         "easy_solver_penalty_scale": easy_solver_penalty_scale,
                         "solver_informative_local": solver_informative_local,
                         "solver_informative_any": solver_informative_any,
@@ -1960,8 +1873,8 @@ class UnderstandingSelfEvolvingTrainer:
                         "proposer_reward": proposer_reward,
                         "zero_entropy_capped": zero_entropy_capped,
                         "zero_entropy_reward_cap": zero_entropy_cap,
+                        "unsolvable_capped": unsolvable_capped,
                         "easy_question_detected": easy_question_detected,
-                        "easy_question_penalty": easy_question_penalty,
                         "solver_skip_update_on_easy": solver_skip_update_on_easy,
                         "solver_entropy_iqr_blocked": solver_entropy_iqr_blocked,
                         "entropy_iqr_filter_min_majority_frac": entropy_iqr_filter_min_majority_frac,
@@ -1971,8 +1884,6 @@ class UnderstandingSelfEvolvingTrainer:
                         "difficulty_sampler_mode": difficulty_sampler_mode,
                         "difficulty_target_bucket": desired_difficulty_bucket,
                         "difficulty_bucket_observed": difficulty_bucket_observed,
-                        "difficulty_sampler_retries_used": difficulty_sampler_retries_used,
-                        "difficulty_sampler_max_retries": difficulty_sampler_max_retries,
                         "difficulty_target_weights": difficulty_target_state.get("target_weights", {}),
                         "difficulty_observed_weights": difficulty_target_state.get("observed_weights", {}),
                         "difficulty_sampling_weights": difficulty_target_state.get("sampling_weights", {}),
