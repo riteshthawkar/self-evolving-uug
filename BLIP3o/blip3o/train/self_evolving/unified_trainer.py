@@ -871,12 +871,21 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             if any_rank_can_proposer_update:
                 completion_for_update = proposer_completion if local_can_proposer_update else ""
                 effective_reward = proposer_reward if local_can_proposer_update else 0.0
+                # Clamp baseline so a stale/deeply-negative EMA can't make
+                # a negative reward look like a positive advantage.
+                # advantage = reward - baseline; if reward < 0, cap baseline at reward
+                # so advantage ≤ 0 (negative reward → non-positive signal).
+                raw_baseline = baseline_before if local_can_proposer_update else 0.0
+                if local_can_proposer_update and effective_reward < 0.0:
+                    clamped_baseline = min(raw_baseline, effective_reward)
+                else:
+                    clamped_baseline = raw_baseline
                 proposer_stats = self.proposer_updater.step(
                     image=image,
                     prompt=multi_proposer_prompt,
                     completion=completion_for_update,
                     reward=effective_reward,
-                    baseline=baseline_before if local_can_proposer_update else 0.0,
+                    baseline=clamped_baseline,
                     device=self.device,
                 )
                 if proposer_stats.get("did_step", True):

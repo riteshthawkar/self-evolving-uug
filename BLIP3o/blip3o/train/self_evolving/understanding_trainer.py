@@ -1644,12 +1644,21 @@ class UnderstandingSelfEvolvingTrainer:
                             desired_difficulty_bucket,
                             max(1, int(getattr(cfg, "proposer_num_candidates", 3))),
                         )
+                        # Clamp baseline so a stale/deeply-negative EMA can't make
+                        # a negative reward look like a positive advantage.
+                        # advantage = reward - baseline; if reward < 0, cap baseline at reward
+                        # so advantage ≤ 0 (negative reward → non-positive signal).
+                        raw_baseline = proposer_baseline_before_step if local_can_proposer_update else 0.0
+                        if local_can_proposer_update and effective_reward < 0.0:
+                            clamped_baseline = min(raw_baseline, effective_reward)
+                        else:
+                            clamped_baseline = raw_baseline
                         proposer_stats = self.proposer_updater.step(
                             image=image,
                             prompt=proposer_prompt_for_update,
                             completion=completion_for_update,
                             reward=effective_reward,
-                            baseline=proposer_baseline_before_step if local_can_proposer_update else 0.0,
+                            baseline=clamped_baseline,
                             device=self.device,
                         )
                         if proposer_stats.get("did_step", True):
