@@ -122,25 +122,81 @@ class DiTUpdater:
         tok = getattr(self.processor, "tokenizer", None)
         return tok if tok is not None else self.processor
 
+    def _find_image_processor(self):
+        """Return the image_processor from the gen_vision_tower, searching inner wrappers if needed."""
+        # Direct attribute on the tower object (e.g. SigLipVisionTower, EvaClipVisionTower, CLIPVisionTower)
+        ip = getattr(self.gen_vision_tower, "image_processor", None)
+        if ip is not None:
+            return ip
+        # Towers that wrap an inner model under .vision_tower (e.g. SigLipVisionTower wraps SigLipVisionModel)
+        inner = getattr(self.gen_vision_tower, "vision_tower", None)
+        if inner is not None:
+            ip = getattr(inner, "image_processor", None)
+            if ip is not None:
+                return ip
+        # Fallback: check the core_model for a gen-side processor
+        ip = getattr(self.core_model, "gen_image_processor", None)
+        if ip is not None:
+            return ip
+        return None
+
+    @staticmethod
+    def _call_image_processor(image_processor, image: Image.Image) -> torch.Tensor:
+        """Call the image processor regardless of whether it uses .preprocess() or __call__."""
+        # SigLipImageProcessor and similar custom processors expose .preprocess(images, return_tensors)
+        if hasattr(image_processor, "preprocess"):
+            out = image_processor.preprocess(image, return_tensors="pt")
+        else:
+            # Standard HuggingFace processors are directly callable
+            out = image_processor(images=[image], return_tensors="pt")
+
+        if isinstance(out, dict):
+            pixel_values = out.get("pixel_values")
+        else:
+            pixel_values = getattr(out, "pixel_values", None)
+
+        if pixel_values is None:
+            raise RuntimeError("Image processor did not return pixel_values.")
+        return pixel_values
+
     def _prepare_image_tensor(self, image: Image.Image, device: torch.device) -> torch.Tensor:
-        image_processor = getattr(self.gen_vision_tower, "image_processor", None)
+        image_processor = self._find_image_processor()
         if image_processor is None:
-            raise RuntimeError("Generation vision tower does not expose image_processor.")
+            raise RuntimeError(
+                "Generation vision tower does not expose image_processor. "
+                f"Tower type: {type(self.gen_vision_tower).__name__}, "
+                f"attrs: {[a for a in dir(self.gen_vision_tower) if not a.startswith('_')][:20]}"
+            )
         model_cfg = getattr(self.core_model, "config", None)
 
-        if _process_images_fn is not None and model_cfg is not None:
+        # Use the shared process_images helper when available, but only when the
+        # image_processor is a standard HF processor that accepts __call__ with
+        # keyword args (images=..., return_tensors=...).  Custom processors such
+        # as SigLipImageProcessor only expose .preprocess(), and process_images
+        # internally calls image_processor(images, return_tensors='pt') which
+        # would fail for those.  We detect HF-style processors by the absence of
+        # a dedicated .preprocess() method (HF processors inherit it from
+        # BaseImageProcessor, but also override __call__ — the distinguishing
+        # sign of a pure-custom processor is that it has .preprocess but no
+        # from_pretrained classmethod).
+        _is_custom_processor = (
+            hasattr(image_processor, "preprocess")
+            and not hasattr(image_processor, "from_pretrained")
+        )
+        use_process_images_fn = (
+            _process_images_fn is not None
+            and model_cfg is not None
+            and not _is_custom_processor
+        )
+        if use_process_images_fn:
             pixel_values = _process_images_fn([image], image_processor, model_cfg)
         else:
-            proc_out = image_processor(images=[image], return_tensors="pt")
-            if isinstance(proc_out, dict):
-                pixel_values = proc_out.get("pixel_values")
-            else:
-                pixel_values = getattr(proc_out, "pixel_values", None)
-            if pixel_values is None:
-                raise RuntimeError("Failed to preprocess image for generation vision tower.")
+            pixel_values = self._call_image_processor(image_processor, image)
 
         if not torch.is_tensor(pixel_values):
-            raise RuntimeError("Image preprocessing did not return a tensor.")
+            raise RuntimeError(
+                f"Image preprocessing did not return a tensor (got {type(pixel_values)})."
+            )
 
         tower_dtype = None
         tower_device = device
@@ -214,7 +270,24 @@ class DiTUpdater:
         gen_images = self._prepare_image_tensor(image=image, device=model_device)
 
         with torch.no_grad():
-            latents = self.gen_vision_tower(gen_images)
+            outputs = self.gen_vision_tower(gen_images)
+            if isinstance(outputs, torch.Tensor):
+                latents = outputs
+            else:
+                latents = getattr(outputs, "last_hidden_state", None)
+                if latents is None:
+                     # Fallback for models that output only pooled embeddings or image_embeds
+                     latents = getattr(outputs, "image_embeds", None)
+                if latents is None and isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+                    latents = outputs[0]
+                if latents is None:
+                    raise RuntimeError(f"Vision tower output type {type(outputs)} has no recognized latents.")
+
+            # Apply the same pooling that the main training forward-pass uses.
+            # For BLIP3o the gen_vision_tower outputs (B, 729, 1152) token features.
+            # pool_img converts this to a 4-D spatial tensor (B, 1152, S, S) via
+            # average-pooling with the configured stride.  The DiT was trained on
+            # these spatial features, so we must pass them through the same path.
             get_pooling = getattr(self.model_ref, "get_gen_pooling", None)
             pool_img = getattr(self.model_ref, "pool_img", None)
             pooling = str(get_pooling() if callable(get_pooling) else "")
@@ -222,26 +295,49 @@ class DiTUpdater:
                 latents = pool_img(latents)
 
         dit_cfg = getattr(self.dit, "config", None)
-        in_channels = int(getattr(dit_cfg, "in_channels", 1792))
-        input_size = int(getattr(dit_cfg, "input_size", 8))
-        if (
-            latents.ndim == 3
-            and latents.shape[-1] != in_channels
-            and latents.shape[1] != in_channels
-        ):
-            down_projector = getattr(self.core_model, "down_projector", None)
-            if down_projector is not None:
-                proj_dtype = latents.dtype
-                try:
-                    proj_dtype = next(down_projector.parameters()).dtype
-                except Exception:
-                    pass
-                with torch.no_grad():
-                    latents = down_projector(latents.to(proj_dtype))
+        # The DiT config's in_channels defaults to 1792 (Lumina pre-training), but
+        # BLIP3o checkpoints are trained with SigLip visual features (hidden_size=1152).
+        # After pool_img the latent is (B, 1152, S, S), so derive in_channels from the
+        # actual latent rather than blindly trusting the config default.
+        if latents.ndim == 4:
+            # 4-D spatial tensor from pool_img: (B, C, H, W)
+            in_channels = int(latents.shape[1])
+            input_size = int(latents.shape[-1])   # use actual spatial size; reshape will interpolate if needed
+        elif latents.ndim == 3:
+            # Still a token tensor (B, N, C) — attempt to resolve from DiT config or latent dims.
+            in_channels = int(getattr(dit_cfg, "in_channels", 1792))
+            input_size = int(getattr(dit_cfg, "input_size", 8))
+            # If neither token axis matches in_channels, try down_projector as last resort.
+            if latents.shape[-1] != in_channels and latents.shape[1] != in_channels:
+                down_projector = getattr(self.core_model, "down_projector", None)
+                if down_projector is not None:
+                    proj_dtype = latents.dtype
+                    try:
+                        proj_dtype = next(down_projector.parameters()).dtype
+                    except Exception:
+                        pass
+                    with torch.no_grad():
+                        latents = down_projector(latents.to(proj_dtype))
+                    # Re-derive in_channels after projection in case it changed shape.
+                    if latents.ndim == 4:
+                        in_channels = int(latents.shape[1])
+                        input_size = int(latents.shape[-1])
+        else:
+            in_channels = int(getattr(dit_cfg, "in_channels", 1792))
+            input_size = int(getattr(dit_cfg, "input_size", 8))
+
+        # Read the target spatial resolution from the DiT config for interpolation purposes.
+        # Only override input_size if the config specifies a different value AND the latent
+        # was not already in 4-D form (where the spatial size is the ground truth).
+        dit_input_size = int(getattr(dit_cfg, "input_size", input_size))
+        print(
+            f"[DiTUpdater] latent shape after pool: {tuple(latents.shape)}, "
+            f"in_channels={in_channels}, dit_input_size={dit_input_size}"
+        )
         latents = self._reshape_latents(
             latents=latents,
             in_channels=in_channels,
-            input_size=input_size,
+            input_size=dit_input_size,
             device=model_device,
             dtype=model_dtype,
         )
@@ -335,7 +431,37 @@ class DiTUpdater:
             )
         return z_latents
 
+    def _ensure_scheduler_timesteps(self):
+        """Ensure the noise scheduler has timesteps set.
+
+        FlowMatchEulerDiscreteScheduler initializes .timesteps to None and
+        requires an explicit set_timesteps() call.  If the training loop has
+        not already done this, we call it here with a default of 1000 steps
+        (matching num_train_timesteps) so that we can sample uniformly across
+        all noise levels during the SFT denoising objective.
+        """
+        timesteps = getattr(self.noise_scheduler, "timesteps", None)
+        if timesteps is not None and torch.is_tensor(timesteps) and timesteps.numel() > 0:
+            return  # Already initialized; nothing to do.
+        total = int(getattr(getattr(self.noise_scheduler, "config", None), "num_train_timesteps", 1000))
+        set_ts = getattr(self.noise_scheduler, "set_timesteps", None)
+        if callable(set_ts):
+            try:
+                import numpy as np
+                # Use a linear sigma schedule matching the training convention.
+                sigmas = np.linspace(1.0, 1.0 / total, total)
+                set_ts(total, sigmas=sigmas)
+            except TypeError:
+                # Some scheduler versions do not accept sigmas kwarg.
+                try:
+                    set_ts(total)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
     def _sample_training_timestep(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        self._ensure_scheduler_timesteps()
         total = int(getattr(getattr(self.noise_scheduler, "config", None), "num_train_timesteps", 1000))
         timesteps = getattr(self.noise_scheduler, "timesteps", None)
         if timesteps is None or not torch.is_tensor(timesteps) or timesteps.numel() <= 0:
@@ -429,11 +555,14 @@ class DiTUpdater:
             )
         except Exception as exc:
             local_ready = False
-            _exc_short = str(exc).replace("\n", " ")[:200]
+            _exc_msg = str(exc)
+            if not _exc_msg:
+                _exc_msg = repr(exc)
+            _exc_short = _exc_msg.replace("\n", " ")[:200]
             local_skip_reason = f"prepare_failed:{type(exc).__name__}:{_exc_short}"
             print(
-                f"[DiTUpdater] prepare failed at step {self.step_id}: {type(exc).__name__}: {exc}\n"
-                + _traceback.format_exc()
+                f"[DiTUpdater] prepare failed at step {self.step_id}: {type(exc).__name__}: {_exc_msg}\n"
+                # + _traceback.format_exc() # Reduce noise in standard logs
             )
 
         ready_all = self._dist_all_bool(local_ready)
