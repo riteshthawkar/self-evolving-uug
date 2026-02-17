@@ -18,7 +18,7 @@ ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
   RUN_NAME="${RUN_NAME}_warmup"
   STAGE_ARGS=(
-    --disable_acceptance_require_non_easy
+    --acceptance_require_non_easy
     --disable_acceptance_require_target_bucket
     --difficulty_target_easy 0.30
     --difficulty_target_medium 0.50
