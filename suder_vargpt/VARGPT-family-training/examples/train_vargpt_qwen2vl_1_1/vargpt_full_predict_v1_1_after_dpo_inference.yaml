@@ -1,0 +1,30 @@
+### model
+model_name_or_path: VARGPT-family/VARGPT-v1.1
+
+
+### method
+stage: sft
+do_predict: true
+finetuning_type: full
+vargpt_version: "qwen2vl-v1.1"
+
+vargpt_train_stage: 0
+
+### dataset
+eval_dataset:  eval_inference_demo 
+
+template: vargpt_qwen2_vl
+cutoff_len: 2048
+max_samples: 100
+overwrite_cache: true
+preprocessing_num_workers: 128
+image_dir: ""
+
+### output
+output_dir: saves/vargpt_qwen2vl-7b-v1-1/full/vargpt_predict_rl_after_dpo_stage7_mid_eval_inference
+overwrite_output_dir: true
+
+### eval
+per_device_eval_batch_size: 1
+predict_with_generate: true
+
