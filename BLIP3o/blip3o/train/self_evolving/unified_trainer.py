@@ -26,6 +26,7 @@ from .generation_trainer import GenerationSelfEvolvingTrainer
 from .prompts import (
     build_proposer_force_hard_prompt,
     build_proposer_hardening_prompt,
+    build_proposer_multi_prompt,
     build_proposer_prompt,
     build_proposer_template_fallback_prompt,
     build_solver_prompt,
@@ -34,6 +35,7 @@ from .replay_buffer import ReplayBuffer
 from .utils import (
     HAS_WANDB,
     _json_dump,
+    _parse_all_questions,
     _parse_answer,
     _parse_first_question,
     gaussian_reward,
@@ -399,18 +401,36 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         solver_temperatures = self._solver_temperature_schedule()
         solver_top_ps = self._solver_top_p_schedule()
 
-        proposer_prompt = build_proposer_prompt(desired_difficulty_bucket)
+        # ------------------------------------------------------------------
+        # Single-shot multi-question generation (no retry loop).
+        #
+        # The adversarial proposer generates K candidate questions in one
+        # forward pass, ordered hardest-first with explicit chain-of-thought
+        # about WHY each question will cause the solver to fail/disagree.
+        # We spot-check each candidate with a small solver sample and accept
+        # the first one that is non-easy (or the best available if all are easy).
+        # This eliminates the while True retry loop entirely.
+        # ------------------------------------------------------------------
+        num_proposer_candidates = max(
+            1, int(getattr(self.cfg, "proposer_num_candidates", 3))
+        )
+        # How many solver samples to use for the spot-check of each candidate.
+        # Fewer samples = faster; 2 is usually sufficient to catch trivially easy.
+        spot_check_samples = max(
+            1, int(getattr(self.cfg, "proposer_spot_check_samples", 2))
+        )
+
+        multi_proposer_prompt = build_proposer_multi_prompt(
+            target_difficulty=desired_difficulty_bucket,
+            num_questions=num_proposer_candidates,
+        )
+
         proposer_out = ""
         parsed_question = ""
         question = ""
         fallback_used = False
-        template_fallback_used = False
         proposer_rationale = ""
         proposer_non_objective_question = False
-        hardening_retries_used = 0
-        forced_hardening_retries_used = 0
-        hardening_reason = ""
-        difficulty_sampler_retries_used = 0
         difficulty_bucket_observed = "unknown"
         question_rejected = False
         question_reject_reason = ""
@@ -421,30 +441,126 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         solver_answers_norm: List[str] = []
         pre_words: List[int] = []
 
-        while True:
-            proposer_out = self._generate(
-                image=image,
-                prompt=proposer_prompt,
-                adapter_name="proposer" if self.cfg.use_lora else None,
-                max_new_tokens=self.cfg.max_new_tokens_proposer,
-                temperature=self.cfg.temp,
-                top_p=self.cfg.top_p,
-            )
-            parsed_question = _parse_first_question(proposer_out).replace("\n", " ").strip()
-            question = parsed_question or "What is the most salient object in the image?"
-            fallback_used = not bool(parsed_question)
-            proposer_rationale = strip_tags(proposer_out, "rationale")
-            proposer_non_objective_question = bool(
-                require_objective and (not self._is_objective_question(question))
+        # --- Single proposer call: generate all K candidates at once ---
+        proposer_out = self._generate(
+            image=image,
+            prompt=multi_proposer_prompt,
+            adapter_name="proposer" if self.cfg.use_lora else None,
+            max_new_tokens=self.cfg.max_new_tokens_proposer,
+            temperature=self.cfg.temp,
+            top_p=self.cfg.top_p,
+        )
+
+        candidate_questions = _parse_all_questions(proposer_out)
+        if not candidate_questions:
+            candidate_questions = ["What is the most salient object in the image?"]
+            fallback_used = True
+
+        # --- Spot-check each candidate; accept first non-easy one ---
+        best_question = ""
+        best_outputs: List[str] = []
+        best_answers_raw: List[str] = []
+        best_answers_norm: List[str] = []
+        best_pre_words: List[int] = []
+        best_entropy = -1.0
+        best_margin = 1.0
+        best_bucket = "easy"
+
+        for cand_idx, cand_q in enumerate(candidate_questions):
+            cand_q = cand_q.replace("\n", " ").strip()
+            if not cand_q:
+                continue
+
+            cand_non_objective = bool(
+                require_objective and (not self._is_objective_question(cand_q))
             )
 
+            cand_solver_prompt = build_solver_prompt(cand_q)
+            cand_outputs: List[str] = []
+            cand_answers_raw: List[str] = []
+            cand_answers_norm: List[str] = []
+            cand_pre_words: List[int] = []
+
+            # Spot-check with a subset of solver samples for speed.
+            for sc_idx in range(spot_check_samples):
+                sc_temp = (
+                    float(solver_temperatures[sc_idx])
+                    if sc_idx < len(solver_temperatures)
+                    else float(self.cfg.temp)
+                )
+                sc_top_p = (
+                    float(solver_top_ps[sc_idx])
+                    if sc_idx < len(solver_top_ps)
+                    else float(self.cfg.top_p)
+                )
+                sc_out = self._generate(
+                    image=image,
+                    prompt=cand_solver_prompt,
+                    adapter_name="default" if self.cfg.use_lora else None,
+                    max_new_tokens=self.cfg.max_new_tokens_solver,
+                    temperature=sc_temp,
+                    top_p=sc_top_p,
+                )
+                sc_ans_raw = _parse_answer(sc_out)
+                cand_outputs.append(sc_out)
+                cand_answers_raw.append(sc_ans_raw)
+                cand_answers_norm.append(normalize_answer(sc_ans_raw))
+                cand_pre_words.append(pre_answer_word_count(sc_out))
+
+            sc_hist: Dict[str, int] = {}
+            for ans in cand_answers_norm:
+                sc_hist[ans] = sc_hist.get(ans, 0) + 1
+            sc_probs = [c / float(spot_check_samples) for c in sc_hist.values()]
+            sc_entropy = shannon_entropy_nats(sc_probs)
+            sc_sorted = sorted(sc_probs, reverse=True)
+            sc_p1 = float(sc_sorted[0]) if sc_sorted else 0.0
+            sc_p2 = float(sc_sorted[1]) if len(sc_sorted) > 1 else 0.0
+            sc_margin = max(0.0, sc_p1 - sc_p2)
+            sc_maj_frac = sc_p1
+            sc_bucket = self._difficulty_bucket(
+                sc_entropy, sc_margin, sc_maj_frac, entropy_easy_threshold
+            )
+            sc_is_easy = bool(
+                (sc_entropy < entropy_easy_threshold) and (sc_margin > margin_max)
+            )
+
+            # Always remember the best candidate seen so far (highest entropy wins).
+            if sc_entropy > best_entropy:
+                best_entropy = sc_entropy
+                best_margin = sc_margin
+                best_bucket = sc_bucket
+                best_question = cand_q
+                best_outputs = cand_outputs
+                best_answers_raw = cand_answers_raw
+                best_answers_norm = cand_answers_norm
+                best_pre_words = cand_pre_words
+
+            # Accept this candidate immediately if it passes the easy gate
+            # and is objective.  Candidates are ordered hardest-first, so
+            # the first acceptable one is typically the best.
+            if (not sc_is_easy) and (not cand_non_objective):
+                question = cand_q
+                solver_outputs = cand_outputs
+                solver_answers_raw = cand_answers_raw
+                solver_answers_norm = cand_answers_norm
+                pre_words = cand_pre_words
+                break
+        else:
+            # No candidate cleared the gate — use the best-entropy one found.
+            question = best_question or candidate_questions[0].replace("\n", " ").strip()
+            if not question:
+                question = "What is the most salient object in the image?"
+                fallback_used = True
+            solver_outputs = best_outputs
+            solver_answers_raw = best_answers_raw
+            solver_answers_norm = best_answers_norm
+            pre_words = best_pre_words
+
+        # If the chosen candidate came from a spot-check (< num_solver_samples),
+        # run the remaining solver samples to reach the full count needed for RL.
+        if len(solver_answers_norm) < self.cfg.num_solver_samples:
             solver_prompt = build_solver_prompt(question)
-            solver_outputs = []
-            solver_answers_raw = []
-            solver_answers_norm = []
-            pre_words = []
-
-            for sample_idx in range(self.cfg.num_solver_samples):
+            for sample_idx in range(len(solver_answers_norm), self.cfg.num_solver_samples):
                 solver_temp = (
                     float(solver_temperatures[sample_idx])
                     if sample_idx < len(solver_temperatures)
@@ -469,134 +585,19 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 solver_answers_norm.append(normalize_answer(answer_raw))
                 pre_words.append(pre_answer_word_count(solver_out))
 
-            _tmp_hist: Dict[str, int] = {}
-            for ans in solver_answers_norm:
-                _tmp_hist[ans] = _tmp_hist.get(ans, 0) + 1
-            _tmp_probs = [
-                count / float(self.cfg.num_solver_samples)
-                for count in _tmp_hist.values()
-            ]
-            _tmp_entropy = shannon_entropy_nats(_tmp_probs)
-            _tmp_sorted = sorted(_tmp_probs, reverse=True)
-            _tmp_p1 = float(_tmp_sorted[0]) if _tmp_sorted else 0.0
-            _tmp_p2 = float(_tmp_sorted[1]) if len(_tmp_sorted) > 1 else 0.0
-            _tmp_margin = max(0.0, _tmp_p1 - _tmp_p2)
-            _tmp_maj_frac = _tmp_p1
-            difficulty_bucket_observed = self._difficulty_bucket(
-                _tmp_entropy,
-                _tmp_margin,
-                _tmp_maj_frac,
-                entropy_easy_threshold,
-            )
-            easy_for_hardening = bool(
-                (_tmp_entropy < entropy_easy_threshold) and (_tmp_margin > margin_max)
-            )
-            retry_due_to_easy = bool(harden_on_easy and easy_for_hardening)
-            retry_due_to_non_objective = bool(proposer_non_objective_question)
-            retry_due_to_bucket = bool(
-                difficulty_sampler_enabled
-                and (difficulty_bucket_observed != desired_difficulty_bucket)
-            )
-
-            can_retry_hardening = bool(
-                hardening_retries_used < max_hardening_retries
-                and (retry_due_to_easy or retry_due_to_non_objective)
-            )
-            can_retry_bucket = bool(
-                difficulty_sampler_retries_used < difficulty_sampler_max_retries
-                and retry_due_to_bucket
-            )
-            if can_retry_hardening or can_retry_bucket:
-                if retry_due_to_non_objective and retry_due_to_easy:
-                    hardening_reason = (
-                        "question was subjective/open-ended and produced unanimous easy solver answers"
-                    )
-                elif retry_due_to_non_objective:
-                    hardening_reason = (
-                        "question was subjective/open-ended, not objectively verifiable"
-                    )
-                elif retry_due_to_easy:
-                    hardening_reason = (
-                        "question was too easy; solver consensus was near-unanimous"
-                    )
-                else:
-                    hardening_reason = (
-                        "question did not match requested difficulty bucket "
-                        f"(target={desired_difficulty_bucket}, observed={difficulty_bucket_observed})"
-                    )
-                if can_retry_hardening:
-                    hardening_retries_used += 1
-                if can_retry_bucket:
-                    difficulty_sampler_retries_used += 1
-                proposer_prompt = build_proposer_hardening_prompt(question, hardening_reason)
-                continue
-            can_force_hardening = bool(
-                force_harden_on_failure
-                and (forced_hardening_retries_used < force_hardening_max_retries)
-                and (
-                    retry_due_to_non_objective
-                    or retry_due_to_easy
-                    or (
-                        acceptance_require_target_bucket
-                        and retry_due_to_bucket
-                    )
-                )
-            )
-            if can_force_hardening:
-                if retry_due_to_non_objective and retry_due_to_easy:
-                    hardening_reason = (
-                        "question remained subjective and trivially easy after retries"
-                    )
-                elif retry_due_to_non_objective:
-                    hardening_reason = "question remained non-objective after retries"
-                elif retry_due_to_easy:
-                    hardening_reason = "question remained too easy after retries"
-                else:
-                    hardening_reason = (
-                        "question still missed the requested difficulty bucket "
-                        f"(target={desired_difficulty_bucket}, observed={difficulty_bucket_observed})"
-                    )
-                forced_hardening_retries_used += 1
-                proposer_prompt = build_proposer_force_hard_prompt(
-                    question,
-                    hardening_reason,
-                    desired_difficulty_bucket,
-                )
-                continue
-            can_template_fallback = bool(
-                (not template_fallback_used)
-                and (
-                    retry_due_to_non_objective
-                    or retry_due_to_easy
-                    or (acceptance_require_target_bucket and retry_due_to_bucket)
-                )
-            )
-            if can_template_fallback:
-                if retry_due_to_non_objective and retry_due_to_easy:
-                    hardening_reason = (
-                        "question remained subjective and trivially easy after forced hardening"
-                    )
-                elif retry_due_to_non_objective:
-                    hardening_reason = (
-                        "question remained non-objective after forced hardening"
-                    )
-                elif retry_due_to_easy:
-                    hardening_reason = (
-                        "question remained too easy after forced hardening"
-                    )
-                else:
-                    hardening_reason = (
-                        "question still missed the requested difficulty bucket "
-                        f"(target={desired_difficulty_bucket}, observed={difficulty_bucket_observed})"
-                    )
-                template_fallback_used = True
-                proposer_prompt = build_proposer_template_fallback_prompt(
-                    question,
-                    hardening_reason,
-                    desired_difficulty_bucket,
-                )
-                continue
-            break
+        # Derive final question metadata from the accepted question.
+        parsed_question = question
+        fallback_used = fallback_used or (not bool(parsed_question))
+        proposer_rationale = strip_tags(proposer_out, "rationale")
+        proposer_non_objective_question = bool(
+            require_objective and (not self._is_objective_question(question))
+        )
+        # Legacy fields no longer used by the loop-free path; set to safe defaults.
+        hardening_retries_used = 0
+        forced_hardening_retries_used = 0
+        hardening_reason = ""
+        difficulty_sampler_retries_used = 0
+        template_fallback_used = False
 
         maj_answer, maj_count = majority_vote(solver_answers_norm)
         maj_frac = maj_count / float(self.cfg.num_solver_samples)

@@ -270,3 +270,83 @@ def build_proposer_template_fallback_prompt(
         "<question>...</question>\n"
         "<rationale>...</rationale>"
     )
+
+
+def build_proposer_multi_prompt(
+    target_difficulty: str = "medium",
+    num_questions: int = 3,
+) -> str:
+    """Single-shot multi-question proposer prompt with adversarial solver-failure framing.
+
+    The proposer's explicit goal is to craft questions that a vision-language
+    solver (a peer model looking at the same image) would FAIL to answer
+    unanimously — i.e. questions where solvers would disagree or make errors.
+    This adversarial framing internalises difficulty estimation, eliminating the
+    need for a retry loop.
+
+    Returns K=num_questions candidate questions ordered hardest-first.
+    Each candidate includes a chain-of-thought block reasoning about WHY the
+    solver will fail before committing to the question text.
+    """
+    level = (target_difficulty or "medium").strip().lower()
+    if level not in {"easy", "medium", "hard"}:
+        level = "medium"
+
+    if level == "hard":
+        diff_hint = (
+            "Target HARD difficulty: each question must require at least two visual constraints "
+            "(e.g., comparison across entities + attribute, relation + count). "
+            "A solver that sees the same image should be uncertain and frequently give DIFFERENT answers."
+        )
+    elif level == "easy":
+        diff_hint = (
+            "Target EASY-MEDIUM difficulty: questions should be objective and non-trivial; "
+            "avoid one-word lookups. A solver should sometimes disagree on the precise answer."
+        )
+    else:
+        diff_hint = (
+            "Target MEDIUM difficulty: each question must require at least two visual cues "
+            "(count + attribute, relation + attribute, or comparison). "
+            "A solver that sees the same image should frequently give different answers."
+        )
+
+    n = max(1, int(num_questions))
+    qa_template = "\n".join(
+        f'  <question id="{i}">\n'
+        f'    <solver_failure_reasoning>...why the solver will fail or disagree here...</solver_failure_reasoning>\n'
+        f'    <text>...the question text ending with "?"...</text>\n'
+        f'    <rationale>...why this question is objective and image-grounded...</rationale>\n'
+        f'  </question>'
+        for i in range(1, n + 1)
+    )
+
+    return (
+        "You are an Adversarial Question Proposer.\n"
+        "Your GOAL is to craft questions that a vision-language solver (a peer model "
+        "viewing the same image) will FAIL to answer unanimously — questions where "
+        "solvers frequently disagree or make errors.\n"
+        f"{diff_hint}\n"
+        f"Generate exactly {n} candidate questions, ordered HARDEST first (question 1 = hardest).\n"
+        "For EACH question you MUST first reason in <solver_failure_reasoning> about:\n"
+        "  - What visual ambiguity, complexity, or multi-step reasoning makes this hard?\n"
+        "  - What wrong answers is the solver likely to produce and why?\n"
+        "  - Why will solvers DISAGREE with each other on this question?\n"
+        "Then write the actual question text and your rationale.\n"
+        "\n"
+        "Hard constraints for every question:\n"
+        "- Ask an objective, image-grounded question with a short, verifiable answer (1-5 words).\n"
+        "- Do NOT make questions trivially easy (single obvious attribute, color of most prominent object, etc.).\n"
+        "- Prefer: counting under occlusion, comparison between similar-looking entities, "
+        "attribute + spatial relation combinations, subtle quantity differences, chart/table lookup + comparison.\n"
+        "- Use a proper interrogative (must end with '?').\n"
+        "- Avoid: why, might, could, likely, feel, opinion, speculative/subjective wording.\n"
+        "- Avoid open-ended narrative prompts.\n"
+        "- Do not output placeholders like '(count + attribute)' — use concrete objects from the image.\n"
+        "- Do not include XML tags inside the question text itself.\n"
+        "- Do not require external knowledge beyond what is visible in the image.\n"
+        "\n"
+        "Output XML only:\n"
+        "<questions>\n"
+        f"{qa_template}\n"
+        "</questions>"
+    )

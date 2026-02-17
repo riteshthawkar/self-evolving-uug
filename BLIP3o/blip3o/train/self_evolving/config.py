@@ -78,6 +78,9 @@ class UnderstandingSelfEvolvingConfig:
     proposer_hardening_max_retries: int = 3
     proposer_force_hardening_on_failure: bool = True
     proposer_force_hardening_max_retries: int = 2
+    # Single-shot multi-question generation (replaces retry loop)
+    proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
+    proposer_spot_check_samples: int = 2  # solver samples used to spot-check each candidate
     solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
@@ -262,6 +265,9 @@ class GenerationSelfEvolvingConfig:
     proposer_hardening_max_retries: int = 3
     proposer_force_hardening_on_failure: bool = True
     proposer_force_hardening_max_retries: int = 2
+    # Single-shot multi-question generation (replaces retry loop)
+    proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
+    proposer_spot_check_samples: int = 2  # solver samples used to spot-check each candidate
     solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
