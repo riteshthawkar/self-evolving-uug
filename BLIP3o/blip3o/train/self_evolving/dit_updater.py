@@ -60,6 +60,27 @@ class DiTUpdater:
         if self.gen_vision_tower is None:
             raise RuntimeError("DiT updater requires a generation vision tower (`get_gen_vision_tower`).")
 
+        # Eagerly load the gen vision tower NOW — before any distributed collectives.
+        # Eva-CLIP towers created with delay_load=True skip weight loading until
+        # load_model() is called.  If we let this happen lazily inside _prepare_latents
+        # (during the first generation step), different ranks may call load_model() at
+        # different times.  Some ranks will then enter DDP buffer-broadcast collectives
+        # while others are still loading weights, causing a NCCL timeout after 10 min.
+        # Loading eagerly in __init__ (before dist collectives start) is safe because
+        # all ranks construct DiTUpdater at the same point in trainer __init__.
+        self._ensure_gen_vision_tower_loaded()
+        # After load_model() the tower weights land on CPU. Move them to the same
+        # device as the DiT parameters so the forward pass doesn't cause device drift.
+        try:
+            _dit_device = next(iter(self.dit.parameters())).device
+            self.gen_vision_tower.to(_dit_device)
+        except Exception:
+            pass
+        # Barrier: make sure ALL ranks have finished loading before any rank proceeds
+        # to construct optimisers / enter the training loop (which may trigger collectives).
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
         for p in self.dit.parameters():
             p.requires_grad_(True)
         self.params = [p for p in self.dit.parameters() if p.requires_grad]
