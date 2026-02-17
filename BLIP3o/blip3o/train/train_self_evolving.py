@@ -115,7 +115,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prop_entropy_mu_min", type=float, default=0.05)
     p.add_argument("--prop_entropy_mu_max", type=float, default=1.5)
     p.add_argument("--zero_entropy_reward_cap", type=float, default=0.10)
-    p.add_argument("--easy_question_penalty", type=float, default=0.15)
     p.add_argument("--proposer_non_objective_penalty", type=float, default=0.20)
     p.add_argument("--proposer_require_objective", action="store_true", default=True)
     p.add_argument(
@@ -123,20 +122,6 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="proposer_require_objective",
         action="store_false",
     )
-    p.add_argument("--proposer_hardening_on_easy", action="store_true", default=True)
-    p.add_argument(
-        "--disable_proposer_hardening_on_easy",
-        dest="proposer_hardening_on_easy",
-        action="store_false",
-    )
-    p.add_argument("--proposer_hardening_max_retries", type=int, default=3)
-    p.add_argument("--proposer_force_hardening_on_failure", action="store_true", default=True)
-    p.add_argument(
-        "--disable_proposer_force_hardening_on_failure",
-        dest="proposer_force_hardening_on_failure",
-        action="store_false",
-    )
-    p.add_argument("--proposer_force_hardening_max_retries", type=int, default=2)
     # Single-shot multi-question generation (replaces retry loop)
     p.add_argument("--proposer_num_candidates", type=int, default=3)
     p.add_argument("--proposer_spot_check_samples", type=int, default=2)
@@ -151,12 +136,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--disable_acceptance_require_non_easy",
         dest="acceptance_require_non_easy",
-        action="store_false",
-    )
-    p.add_argument("--acceptance_require_target_bucket", action="store_true", default=True)
-    p.add_argument(
-        "--disable_acceptance_require_target_bucket",
-        dest="acceptance_require_target_bucket",
         action="store_false",
     )
     p.add_argument("--rejected_question_penalty", type=float, default=0.35)
@@ -181,7 +160,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--difficulty_sampler_window_size", type=int, default=256)
     p.add_argument("--difficulty_sampler_min_samples", type=int, default=32)
-    p.add_argument("--difficulty_sampler_max_retries", type=int, default=2)
     p.add_argument("--difficulty_target_easy", type=float, default=0.20)
     p.add_argument("--difficulty_target_medium", type=float, default=0.60)
     p.add_argument("--difficulty_target_hard", type=float, default=0.20)
@@ -413,19 +391,13 @@ def _build_understanding_config(args):
         prop_entropy_mu_min=args.prop_entropy_mu_min,
         prop_entropy_mu_max=args.prop_entropy_mu_max,
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
-        easy_question_penalty=args.easy_question_penalty,
         proposer_non_objective_penalty=args.proposer_non_objective_penalty,
         proposer_require_objective=args.proposer_require_objective,
-        proposer_hardening_on_easy=args.proposer_hardening_on_easy,
-        proposer_hardening_max_retries=args.proposer_hardening_max_retries,
-        proposer_force_hardening_on_failure=args.proposer_force_hardening_on_failure,
-        proposer_force_hardening_max_retries=args.proposer_force_hardening_max_retries,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
-        acceptance_require_target_bucket=args.acceptance_require_target_bucket,
         rejected_question_penalty=args.rejected_question_penalty,
         entropy_iqr_filter_enabled=args.entropy_iqr_filter_enabled,
         entropy_iqr_window_size=args.entropy_iqr_window_size,
@@ -438,7 +410,6 @@ def _build_understanding_config(args):
         difficulty_sampler_enabled=args.difficulty_sampler_enabled,
         difficulty_sampler_window_size=args.difficulty_sampler_window_size,
         difficulty_sampler_min_samples=args.difficulty_sampler_min_samples,
-        difficulty_sampler_max_retries=args.difficulty_sampler_max_retries,
         difficulty_target_easy=args.difficulty_target_easy,
         difficulty_target_medium=args.difficulty_target_medium,
         difficulty_target_hard=args.difficulty_target_hard,
@@ -572,19 +543,13 @@ def _build_generation_config(args):
         prop_entropy_mu_min=args.prop_entropy_mu_min,
         prop_entropy_mu_max=args.prop_entropy_mu_max,
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
-        easy_question_penalty=args.easy_question_penalty,
         proposer_non_objective_penalty=args.proposer_non_objective_penalty,
         proposer_require_objective=args.proposer_require_objective,
-        proposer_hardening_on_easy=args.proposer_hardening_on_easy,
-        proposer_hardening_max_retries=args.proposer_hardening_max_retries,
-        proposer_force_hardening_on_failure=args.proposer_force_hardening_on_failure,
-        proposer_force_hardening_max_retries=args.proposer_force_hardening_max_retries,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
-        acceptance_require_target_bucket=args.acceptance_require_target_bucket,
         rejected_question_penalty=args.rejected_question_penalty,
         entropy_iqr_filter_enabled=args.entropy_iqr_filter_enabled,
         entropy_iqr_window_size=args.entropy_iqr_window_size,
@@ -597,7 +562,6 @@ def _build_generation_config(args):
         difficulty_sampler_enabled=args.difficulty_sampler_enabled,
         difficulty_sampler_window_size=args.difficulty_sampler_window_size,
         difficulty_sampler_min_samples=args.difficulty_sampler_min_samples,
-        difficulty_sampler_max_retries=args.difficulty_sampler_max_retries,
         difficulty_target_easy=args.difficulty_target_easy,
         difficulty_target_medium=args.difficulty_target_medium,
         difficulty_target_hard=args.difficulty_target_hard,
@@ -748,19 +712,13 @@ def _build_unified_config(args):
         prop_entropy_mu_min=args.prop_entropy_mu_min,
         prop_entropy_mu_max=args.prop_entropy_mu_max,
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
-        easy_question_penalty=args.easy_question_penalty,
         proposer_non_objective_penalty=args.proposer_non_objective_penalty,
         proposer_require_objective=args.proposer_require_objective,
-        proposer_hardening_on_easy=args.proposer_hardening_on_easy,
-        proposer_hardening_max_retries=args.proposer_hardening_max_retries,
-        proposer_force_hardening_on_failure=args.proposer_force_hardening_on_failure,
-        proposer_force_hardening_max_retries=args.proposer_force_hardening_max_retries,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
-        acceptance_require_target_bucket=args.acceptance_require_target_bucket,
         rejected_question_penalty=args.rejected_question_penalty,
         entropy_iqr_filter_enabled=args.entropy_iqr_filter_enabled,
         entropy_iqr_window_size=args.entropy_iqr_window_size,
@@ -773,7 +731,6 @@ def _build_unified_config(args):
         difficulty_sampler_enabled=args.difficulty_sampler_enabled,
         difficulty_sampler_window_size=args.difficulty_sampler_window_size,
         difficulty_sampler_min_samples=args.difficulty_sampler_min_samples,
-        difficulty_sampler_max_retries=args.difficulty_sampler_max_retries,
         difficulty_target_easy=args.difficulty_target_easy,
         difficulty_target_medium=args.difficulty_target_medium,
         difficulty_target_hard=args.difficulty_target_hard,
