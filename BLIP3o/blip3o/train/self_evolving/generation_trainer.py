@@ -4175,7 +4175,18 @@ class GenerationSelfEvolvingTrainer:
         if _proposer_gen_reward_enabled and best is not None:
             # Use the best candidate's total reward as the proposer's signal.
             # The proposer produced the spec; the image quality is its outcome.
-            _gen_proposer_reward = float(best.get("total_reward", 0.0))
+            # Normalize to [0, 1] before clamping — identical logic to the DiT RWR
+            # normalization — so the baseline EMA and advantage stay meaningful
+            # regardless of scoring mode:
+            #   Mode A (weighted):   already in [0,1]  → clamp is identity
+            #   Mode B (ref logp):   in (-inf,0]       → sigmoid(logp+2) → [0,0.88]
+            #   Mode C (self-clip):  already in [0,1]  → clamp is identity
+            _raw_gen_reward = float(best.get("total_reward", 0.0))
+            _use_ref_scoring_gen = bool(getattr(self.cfg, "use_ref_answer_scoring", False))
+            if _use_ref_scoring_gen:
+                _gen_proposer_reward = 1.0 / (1.0 + math.exp(-(_raw_gen_reward + 2.0)))
+            else:
+                _gen_proposer_reward = max(0.0, min(1.0, _raw_gen_reward))
             _gen_proposer_reward = max(-1.0, min(1.0, _gen_proposer_reward))
 
             # Separate generation-phase baseline (never touches self.proposer_baseline)
@@ -4312,7 +4323,21 @@ class GenerationSelfEvolvingTrainer:
                 # Pass None when reward weighting is disabled to keep original behaviour.
                 _dit_reward = None
                 if float(getattr(self.cfg, "dit_reward_loss_weight", 0.0)) > 0.0 and best is not None:
-                    _dit_reward = float(best.get("total_reward", 0.0))
+                    _raw_dit_reward = float(best.get("total_reward", 0.0))
+                    # Normalize reward to [0, 1] before passing to RWR so that the
+                    # loss scale (1 + w * reward) stays in [1.0, 1+w] regardless of
+                    # the scoring mode:
+                    #   Mode A (weighted score):   already in [0, 1] → identity
+                    #   Mode B (ref-answer logp):  in (-inf, 0] → sigmoid(logp + 2)
+                    #     logp = -4 → 0.12, -2 → 0.50, -1 → 0.73, 0 → 0.88
+                    #   Mode C (self-clip cosine):  already in [0, 1] → identity
+                    # Without normalization, Mode B values like -6.76 produce
+                    # scale = 1 + 0.5*(-6.76) = -2.38 → clamped to 0 → no gradient.
+                    _use_ref_scoring = bool(getattr(self.cfg, "use_ref_answer_scoring", False))
+                    if _use_ref_scoring:
+                        _dit_reward = 1.0 / (1.0 + math.exp(-(_raw_dit_reward + 2.0)))
+                    else:
+                        _dit_reward = max(0.0, min(1.0, _raw_dit_reward))
                 dit_stats = self.dit_updater.step(
                     image=image,
                     prompt=str(spec.prompt),
