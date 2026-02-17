@@ -188,7 +188,7 @@ fi
   --kl_adapt_rate 0.10 \
   --kl_min 1e-8 \
   --kl_max 1e2 \
-  --baseline_momentum 0.9 \
+  --baseline_momentum 0.6 \
   --clear_cache_every 10 \
   --use_ref_answer_scoring \
   --disable_unicorn_reconstruction_sft \
