@@ -19,11 +19,9 @@ if [[ "$TRAIN_STAGE" == "warmup" ]]; then
   RUN_NAME="${RUN_NAME}_warmup"
   STAGE_ARGS=(
     --disable_acceptance_require_non_easy
-    --disable_acceptance_require_target_bucket
     --difficulty_target_easy 0.30
     --difficulty_target_medium 0.50
     --difficulty_target_hard 0.20
-    --difficulty_sampler_max_retries 2
     --rejected_question_penalty 0.10
     --fixed_prop_entropy_target
     --prop_entropy_mu 0.90
@@ -36,13 +34,11 @@ elif [[ "$TRAIN_STAGE" == "strict" ]]; then
   RUN_NAME="${RUN_NAME}_strict"
   STAGE_ARGS=(
     --acceptance_require_non_easy
-    --acceptance_require_target_bucket
     --difficulty_target_easy 0.10
     --difficulty_target_medium 0.70
     --difficulty_target_hard 0.20
-    --difficulty_sampler_max_retries 4
     --rejected_question_penalty 0.35
-    --adaptive_prop_entropy_target
+    --fixed_prop_entropy_target
     --prop_entropy_ema_momentum 0.90
     --prop_entropy_mu_min 0.65
     --prop_entropy_mu_max 1.50
@@ -164,8 +160,6 @@ fi
   --generation_height "$GENERATION_IMAGE_SIDE" \
   --generation_width "$GENERATION_IMAGE_SIDE" \
   --difficulty_sampler_enabled \
-  --proposer_hardening_max_retries 5 \
-  --proposer_force_hardening_max_retries 3 \
   --solver_skip_update_on_easy \
   --reward_spec_weight 0.65 \
   --reward_cycle_weight 0.20 \
