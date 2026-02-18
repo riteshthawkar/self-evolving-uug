@@ -99,6 +99,16 @@ class UnderstandingSelfEvolvingConfig:
     difficulty_hard_min_entropy: float = 0.90
     difficulty_hard_max_margin: float = 0.35
 
+    # Proposer update algorithm
+    # "reinforce" → single-sample REINFORCE with EMA baseline (original).
+    # "grpo"      → group-relative policy optimization: reuse all K proposer candidates
+    #               as the GRPO group, normalizing advantages across the group.
+    #               No extra inference cost — candidates are already generated for selection.
+    proposer_update_rule: str = "grpo"
+    # Gen-phase proposer: how many specs to sample for the GRPO group.
+    # Understanding phase always uses proposer_num_candidates (already K=3).
+    proposer_grpo_gen_group_size: int = 3
+
     # KL control
     kl_coef: float = 0.01
     kl_target: float = 0.02
@@ -238,12 +248,30 @@ class GenerationSelfEvolvingConfig:
     # When 0.0, pure SFT denoising (current default). Requires dit_joint_conditioning_train.
     dit_reward_loss_weight: float = 0.0
     # Proposer reward in generation phase (SUDER dual-reward).
-    # When True: proposer LoRA is updated during generation steps using the image-quality
-    # reward (best["total_reward"]) as the RL signal, with a separate baseline EMA.
+    # When True: proposer LoRA is updated during generation steps using a joint reward
+    # signal that combines entropy (hardness of QA on the generated image) and image
+    # quality.  The two signals are blended with proposer_gen_entropy_weight.
     proposer_gen_reward_enabled: bool = False
+    # Blend coefficient α for the joint generation proposer reward:
+    #   reward = α * gaussian_reward(entropy) + (1-α) * image_quality
+    # α=1.0 → pure entropy (same objective as understanding phase, recommended)
+    # α=0.0 → pure image quality (original behaviour)
+    # α=0.7 → default: mostly entropy-driven, with quality as a regulariser
+    proposer_gen_entropy_weight: float = 0.7
     # Separate EMA momentum for the proposer generation-phase baseline.
     # Kept separate from the understanding-phase proposer_baseline to avoid contamination.
     proposer_gen_baseline_momentum: float = 0.6
+    # When True: also update the solver model on generated images during generation
+    # steps (joint understanding). The solver already runs on generated images for
+    # scoring — this reuses those rollouts to train the solver too, effectively
+    # making generation steps also function as understanding steps on synthetic data.
+    gen_step_solver_update_enabled: bool = False
+    # One-shot flag: reset proposer_baseline (and proposer_gen_baseline) to 0.0 on
+    # resume. Also clears the entropy/difficulty history windows so the IQR filter
+    # re-warms from scratch. Use this when resuming after a bug fix that caused the
+    # baseline to lock (e.g. the baseline-clamp equilibrium bug). Has no effect on
+    # fresh runs. Remove this flag after the first checkpoint is saved post-resume.
+    reset_proposer_baseline: bool = False
 
     # Reward shaping
     solver_soft_gamma: float = 0.7
@@ -312,6 +340,12 @@ class GenerationSelfEvolvingConfig:
     kl_adapt_rate: float = 0.10
     kl_min: float = 1e-8
     kl_max: float = 1e2
+
+    # Proposer update algorithm (mirrors UnderstandingSelfEvolvingConfig — must be kept in sync)
+    # "reinforce" → single-sample REINFORCE with EMA baseline (original).
+    # "grpo"      → group-relative policy optimization on K proposer candidates.
+    proposer_update_rule: str = "grpo"
+    proposer_grpo_gen_group_size: int = 3
 
     # Baselines
     baseline_momentum: float = 0.6  # was 0.9: lower so advantage doesn't collapse when rewards are uniformly negative

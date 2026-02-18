@@ -685,6 +685,19 @@ class UnderstandingSelfEvolvingTrainer:
                 b = str(bucket).strip().lower()
                 if b in {"easy", "medium", "hard"}:
                     self._difficulty_window.append(b)
+        # Allow a poisoned/locked proposer baseline to be reset on resume
+        # (e.g. after the baseline-clamp bug fix). When set, also clears the
+        # entropy and difficulty history windows so the IQR filter re-warms
+        # from scratch rather than staying locked at IQR=0 from a stale run.
+        if bool(getattr(self.cfg, "reset_proposer_baseline", False)):
+            if self.is_main_process:
+                print(
+                    f"[Understanding] reset_proposer_baseline=True: resetting proposer_baseline "
+                    f"{self.proposer_baseline:.4f} → 0.0, clearing entropy/difficulty windows"
+                )
+            self.proposer_baseline = 0.0
+            self._entropy_window.clear()
+            self._difficulty_window.clear()
 
         py_state = state.get("py_random_state")
         if py_state is not None:
@@ -1630,10 +1643,12 @@ class UnderstandingSelfEvolvingTrainer:
                 proposer_baseline_after_step = proposer_baseline_before_step
                 proposer_stats = None
                 if step % cfg.proposer_update_freq == 0:
-                    # Train only on the selected question text — concentrates the
-                    # gradient on the tokens that determine difficulty, not on the
-                    # 300+ token XML scaffold that is identical every call.
-                    proposer_completion = str(question or proposer_out or "").strip()
+                    # Train on the full proposer output (proposer_out) so that
+                    # the gradient flows through the rationale and reasoning
+                    # tokens that actually determine question difficulty — not
+                    # just the final 8-12 question tokens. Fall back to
+                    # question-only if proposer_out is unavailable.
+                    proposer_completion = str(proposer_out or question or "").strip()
                     local_can_proposer_update = bool(proposer_completion)
                     any_rank_can_proposer_update = self._dist_any_bool(local_can_proposer_update)
                     if any_rank_can_proposer_update:
@@ -1644,21 +1659,19 @@ class UnderstandingSelfEvolvingTrainer:
                             desired_difficulty_bucket,
                             max(1, int(getattr(cfg, "proposer_num_candidates", 3))),
                         )
-                        # Clamp baseline so a stale/deeply-negative EMA can't make
-                        # a negative reward look like a positive advantage.
-                        # advantage = reward - baseline; if reward < 0, cap baseline at reward
-                        # so advantage ≤ 0 (negative reward → non-positive signal).
-                        raw_baseline = proposer_baseline_before_step if local_can_proposer_update else 0.0
-                        if local_can_proposer_update and effective_reward < 0.0:
-                            clamped_baseline = min(raw_baseline, effective_reward)
-                        else:
-                            clamped_baseline = raw_baseline
+                        # Use the raw baseline without clamping. The previous
+                        # clamp (min(baseline, reward) when reward < 0) caused
+                        # the advantage to collapse to exactly 0.0 at
+                        # equilibrium — eliminating the learning signal. Standard
+                        # REINFORCE advantage = reward - baseline handles negative
+                        # rewards correctly without any clamping.
+                        effective_baseline = proposer_baseline_before_step if local_can_proposer_update else 0.0
                         proposer_stats = self.proposer_updater.step(
                             image=image,
                             prompt=proposer_prompt_for_update,
                             completion=completion_for_update,
                             reward=effective_reward,
-                            baseline=clamped_baseline,
+                            baseline=effective_baseline,
                             device=self.device,
                         )
                         if proposer_stats.get("did_step", True):

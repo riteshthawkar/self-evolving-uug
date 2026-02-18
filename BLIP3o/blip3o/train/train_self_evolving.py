@@ -283,11 +283,30 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Scale denoising loss by image-quality reward (RWR). 0=pure SFT.")
     # Proposer dual reward in generation phase (Change 1 / SUDER)
     p.add_argument("--proposer_gen_reward_enabled", action="store_true", default=False,
-                   help="Update proposer LoRA during generation steps using image-quality reward.")
+                   help="Update proposer LoRA during generation steps using joint entropy+quality reward.")
     p.add_argument("--disable_proposer_gen_reward",
                    dest="proposer_gen_reward_enabled", action="store_false")
+    p.add_argument("--proposer_gen_entropy_weight", type=float, default=0.7,
+                   help="α in: reward = α*gaussian_reward(entropy) + (1-α)*image_quality. "
+                        "1.0 = pure entropy (same objective as understanding), 0.0 = pure quality.")
     p.add_argument("--proposer_gen_baseline_momentum", type=float, default=0.6,
                    help="EMA momentum for the generation-phase proposer baseline (separate from understanding).")
+    p.add_argument("--gen_step_solver_update_enabled", action="store_true", default=False,
+                   help="Also train the solver on generated images during every generation step "
+                        "(joint step). Solver rollouts are already computed for scoring — this "
+                        "reuses them without extra inference cost.")
+    p.add_argument("--reset_proposer_baseline", action="store_true", default=False,
+                   help="Reset proposer_baseline and proposer_gen_baseline to 0.0 on resume. "
+                        "Also clears entropy/difficulty history windows. Use once after bug fixes "
+                        "that caused the baseline to lock. Remove flag after first checkpoint post-resume.")
+    p.add_argument("--proposer_update_rule", type=str, default="grpo",
+                   choices=["grpo", "reinforce"],
+                   help="Proposer optimization algorithm. 'grpo' (default): group-normalized "
+                        "advantages, lower variance, no EMA baseline required. "
+                        "'reinforce': single-sample with EMA baseline (original).")
+    p.add_argument("--proposer_grpo_gen_group_size", type=int, default=3,
+                   help="Number of specs to sample for the GRPO group in generation-phase "
+                        "proposer updates. Understanding phase always uses proposer_num_candidates.")
 
     # Unified scheduler
     p.add_argument("--understanding_steps_per_cycle", type=int, default=3)
@@ -539,7 +558,12 @@ def _build_generation_config(args):
         dit_joint_conditioning_lr=args.dit_joint_conditioning_lr,
         dit_reward_loss_weight=args.dit_reward_loss_weight,
         proposer_gen_reward_enabled=args.proposer_gen_reward_enabled,
+        proposer_gen_entropy_weight=args.proposer_gen_entropy_weight,
         proposer_gen_baseline_momentum=args.proposer_gen_baseline_momentum,
+        gen_step_solver_update_enabled=args.gen_step_solver_update_enabled,
+        reset_proposer_baseline=args.reset_proposer_baseline,
+        proposer_update_rule=args.proposer_update_rule,
+        proposer_grpo_gen_group_size=args.proposer_grpo_gen_group_size,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,
@@ -713,7 +737,12 @@ def _build_unified_config(args):
         dit_joint_conditioning_lr=args.dit_joint_conditioning_lr,
         dit_reward_loss_weight=args.dit_reward_loss_weight,
         proposer_gen_reward_enabled=args.proposer_gen_reward_enabled,
+        proposer_gen_entropy_weight=args.proposer_gen_entropy_weight,
         proposer_gen_baseline_momentum=args.proposer_gen_baseline_momentum,
+        gen_step_solver_update_enabled=args.gen_step_solver_update_enabled,
+        reset_proposer_baseline=args.reset_proposer_baseline,
+        proposer_update_rule=args.proposer_update_rule,
+        proposer_grpo_gen_group_size=args.proposer_grpo_gen_group_size,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,

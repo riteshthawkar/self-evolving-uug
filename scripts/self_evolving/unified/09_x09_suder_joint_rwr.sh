@@ -48,6 +48,27 @@ set -euo pipefail
 #   same understanding setup, same DiT SFT, but WITHOUT the three features
 #   above.  Metrics diff X09-X02 isolates the contribution of SUDER+RWR.
 #
+# Bug fixes applied at step ~500 (v2):
+#   [BUG1] Baseline-clamp advantage collapse:
+#     The proposer update used min(baseline, reward) when reward < 0, which
+#     caused advantage = reward - clamped_baseline = 0.0 at equilibrium.
+#     After ~50 steps the baseline tracked the penalty floor and the proposer
+#     received zero gradient forever. Fixed: use raw baseline (no clamping).
+#     Standard REINFORCE advantage = reward - baseline is correct as-is.
+#
+#   [BUG2] Proposer trained only on final question tokens (8-12 tokens):
+#     completion was set to str(question or proposer_out), so only the final
+#     question text received gradient — not the 300-token rationale that
+#     actually determines difficulty. Fixed: str(proposer_out or question)
+#     so the full XML output (rationale + question) is the training target.
+#
+#   [BUG3] IQR filter locked at IQR=0 blocking all solver updates:
+#     After 256 steps of entropy=0, the filter history was all-zeros →
+#     IQR=0 → threshold=0 → blocked everything. The easy-case gate already
+#     handles this. Fixed: --entropy_iqr_filter_enabled false.
+#
+#   Resume: set RESUME_FROM + RESET_PROPOSER_BASELINE=1 to apply the reset.
+#
 # Architecture routing (unchanged from X02):
 #   generator_update_freq=1  →  auto-routes to correct implementation:
 #     • Discrete-token AR  (Janus, VARGPT) → generator GRPO on token traces.
@@ -118,15 +139,26 @@ else
   exit 1
 fi
 
-# ── Resume from X02 warmup checkpoint (optional) ────────────────────────────
-# If you want to initialise X09 strict from the best X02 warmup checkpoint,
-# set RESUME_FROM before running:
-#   export RESUME_FROM="/workspace/.../X02_.../step_8000"
-#   TRAIN_STAGE=strict bash 09_x09_suder_joint_rwr.sh
+# ── Resume from checkpoint (optional) ───────────────────────────────────────
+# To resume X09 from an existing checkpoint (e.g. after a restart or bug fix):
+#   export RESUME_FROM="/workspace/.../X09_.../step_N"
+#   TRAIN_STAGE=warmup bash 09_x09_suder_joint_rwr.sh
+#
+# RESET_PROPOSER_BASELINE: set to "1" when resuming after the baseline-clamp
+# bug fix (steps 1-500 had advantage≈0). Resets proposer_baseline and
+# proposer_gen_baseline to 0.0 and clears entropy/difficulty history so the
+# IQR filter re-warms from scratch. Remove (set to "") after first checkpoint
+# post-resume, otherwise the baseline resets every restart.
+RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-1}"
+
 RESUME_ARGS=()
 if [[ -n "${RESUME_FROM:-}" ]]; then
   echo "[X09] Resuming from checkpoint: $RESUME_FROM"
   RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM")
+  if [[ "${RESET_PROPOSER_BASELINE}" == "1" ]]; then
+    echo "[X09] reset_proposer_baseline=1: baseline and entropy windows will be reset on resume."
+    RESUME_ARGS+=(--reset_proposer_baseline)
+  fi
 fi
 
 # ── Directory / cache setup ──────────────────────────────────────────────────
@@ -305,6 +337,10 @@ fi
   --len_penalty_weight 0.10 \
   --len_penalty_target_words 6 \
   --solver_hardness_min_entropy 0.20 \
+  `# IQR filter disabled: at step 500 the 256-step history was all entropy=0` \
+  `# so IQR=0, threshold=0 → filter blocked ALL updates redundantly. The    ` \
+  `# easy-case gate (solver_skip_update_on_easy) already handles this.       ` \
+  --entropy_iqr_filter_enabled false \
   \
   `# ── Proposer entropy target ─────────────────────────────────────────────` \
   --prop_entropy_sigma 0.25 \
@@ -320,6 +356,13 @@ fi
   --kl_adapt_rate 0.10 \
   --kl_min 1e-8 \
   --kl_max 1e2 \
+  \
+  `# ── Proposer optimization algorithm ────────────────────────────────────` \
+  `#   grpo: group-normalized advantages, lower variance, no EMA baseline.  ` \
+  `#         Uses proposer_num_candidates=3 as the group in U-steps.         ` \
+  `#   reinforce: single-sample REINFORCE with EMA baseline (legacy).        ` \
+  --proposer_update_rule grpo \
+  --proposer_grpo_gen_group_size 3 \
   \
   `# ── Baselines ───────────────────────────────────────────────────────────` \
   --baseline_momentum 0.6 \
@@ -356,9 +399,16 @@ fi
   `# NEW in X09 — SUDER dual-reward + joint LLM+DiT training + RWR          ` \
   `# ════════════════════════════════════════════════════════════════════════` \
   \
-  `# [1] Proposer dual reward: proposer learns from generation quality too   ` \
+  `# [1] Proposer joint reward: α*gaussian(entropy_on_generated) + (1-α)*quality` \
+  `#   α=0.7 → mostly entropy-driven (same objective as understanding phase),  ` \
+  `#   keeping a 0.3 quality floor so images stay faithful to the spec.        ` \
+  `#   gen_step_solver_update_enabled: also trains solver on generated images   ` \
+  `#   during every G-step (joint step) — solver rollouts already computed for  ` \
+  `#   scoring, so no extra inference cost.                                     ` \
   --proposer_gen_reward_enabled \
+  --proposer_gen_entropy_weight 0.7 \
   --proposer_gen_baseline_momentum 0.6 \
+  --gen_step_solver_update_enabled \
   \
   `# [2] Joint LLM+DiT: remove no_grad from conditioning encoder → LoRA grads` \
   --dit_joint_conditioning_train \

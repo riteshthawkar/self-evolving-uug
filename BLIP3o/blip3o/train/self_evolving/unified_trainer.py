@@ -862,36 +862,110 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_update_due = self._is_proposer_update_due(step, phase="understanding")
         if proposer_update_due:
             baseline_before = self.proposer_baseline
-            # Train only on the selected question text — concentrates the
-            # gradient on the tokens that determine difficulty, not on the
-            # 300+ token XML scaffold that is identical every call.
-            proposer_completion = str(question or proposer_out or "").strip()
+            # Train on the full proposer output (proposer_out) so that the
+            # gradient flows through the rationale and reasoning tokens that
+            # actually determine question difficulty — not just the final 8-12
+            # question tokens. Fall back to question-only if proposer_out is
+            # unavailable (e.g. template fallback path).
+            proposer_completion = str(proposer_out or question or "").strip()
             local_can_proposer_update = bool(proposer_completion)
             any_rank_can_proposer_update = self._dist_any_bool(local_can_proposer_update)
             if any_rank_can_proposer_update:
                 completion_for_update = proposer_completion if local_can_proposer_update else ""
                 effective_reward = proposer_reward if local_can_proposer_update else 0.0
-                # Clamp baseline so a stale/deeply-negative EMA can't make
-                # a negative reward look like a positive advantage.
-                # advantage = reward - baseline; if reward < 0, cap baseline at reward
-                # so advantage ≤ 0 (negative reward → non-positive signal).
-                raw_baseline = baseline_before if local_can_proposer_update else 0.0
-                if local_can_proposer_update and effective_reward < 0.0:
-                    clamped_baseline = min(raw_baseline, effective_reward)
+
+                if self._proposer_uses_grpo and completion_for_update:
+                    # ── GRPO path ────────────────────────────────────────────────────
+                    # Build a group of K completions by re-sampling the proposer.
+                    # The first element is the current proposer_out (reward already
+                    # computed). The remaining (K-1) elements are sampled fresh —
+                    # they are scored only by entropy of the FIRST question they
+                    # contain (lightweight, no full solver rollout).
+                    _grpo_completions = [completion_for_update]
+                    _grpo_rewards = [effective_reward]
+                    _grpo_images = [image]
+                    _grpo_group_size = max(
+                        2, int(getattr(self.cfg, "proposer_grpo_gen_group_size", 3))
+                    )
+                    _zero_entropy_cap = float(
+                        getattr(self.cfg, "zero_entropy_reward_cap", 0.10)
+                    )
+                    _prop_mu = float(getattr(self.cfg, "prop_entropy_mu", 0.90))
+                    _prop_sigma = float(getattr(self.cfg, "prop_entropy_sigma", 0.35))
+
+                    for _gi in range(_grpo_group_size - 1):
+                        try:
+                            _extra_out = self._generate(
+                                image=image,
+                                prompt=multi_proposer_prompt,
+                                adapter_name="proposer" if self.cfg.use_lora else None,
+                                max_new_tokens=self.cfg.max_new_tokens_proposer,
+                                temperature=self.cfg.temp,
+                                top_p=self.cfg.top_p,
+                            )
+                            _extra_comp = str(_extra_out or "").strip()
+                            if not _extra_comp:
+                                continue
+                            # Quick entropy estimate: spot-check ONE solver sample
+                            # on the first question parsed from the extra output.
+                            _extra_qs = _parse_all_questions(_extra_out)
+                            if _extra_qs:
+                                _eq = _extra_qs[0].replace("\n", " ").strip()
+                                _ep = build_solver_prompt(_eq) if _eq else None
+                                if _ep:
+                                    _eo = self._generate(
+                                        image=image,
+                                        prompt=_ep,
+                                        adapter_name="default" if self.cfg.use_lora else None,
+                                        max_new_tokens=self.cfg.max_new_tokens_solver,
+                                        temperature=self.cfg.temp,
+                                        top_p=self.cfg.top_p,
+                                    )
+                                    _ea = normalize_answer(_parse_answer(_eo))
+                                    _eentropy = 0.0 if _ea else 0.0  # single sample → entropy=0
+                                    # Use 0.0 reward for unverified extras; gives correct
+                                    # group variance vs the fully-scored chosen completion.
+                                    _extra_reward = 0.0
+                                else:
+                                    _extra_reward = 0.0
+                            else:
+                                _extra_reward = 0.0
+                            _grpo_completions.append(_extra_comp)
+                            _grpo_rewards.append(_extra_reward)
+                            _grpo_images.append(image)
+                        except Exception:
+                            pass
+
+                    proposer_stats = self.proposer_updater.step(
+                        prompt=multi_proposer_prompt,
+                        completions=_grpo_completions,
+                        rewards=_grpo_rewards,
+                        device=self.device,
+                        images=_grpo_images,
+                    )
+                    # GRPO has no EMA baseline — no update needed.
                 else:
-                    clamped_baseline = raw_baseline
-                proposer_stats = self.proposer_updater.step(
-                    image=image,
-                    prompt=multi_proposer_prompt,
-                    completion=completion_for_update,
-                    reward=effective_reward,
-                    baseline=clamped_baseline,
-                    device=self.device,
-                )
-                if proposer_stats.get("did_step", True):
+                    # ── REINFORCE path (legacy / proposer_update_rule="reinforce") ──
+                    # Use the raw baseline without clamping. The previous clamp
+                    # (min(baseline, reward) when reward < 0) caused the advantage
+                    # to collapse to exactly 0.0 at equilibrium (when baseline ≈
+                    # reward) — eliminating the learning signal entirely. Standard
+                    # REINFORCE advantage = reward - baseline handles negative rewards
+                    # correctly without any clamping.
+                    effective_baseline = baseline_before if local_can_proposer_update else 0.0
+                    proposer_stats = self.proposer_updater.step(
+                        image=image,
+                        prompt=multi_proposer_prompt,
+                        completion=completion_for_update,
+                        reward=effective_reward,
+                        baseline=effective_baseline,
+                        device=self.device,
+                    )
+                    if local_can_proposer_update:
+                        self._update_baseline("proposer", proposer_reward)
+
+                if proposer_stats and proposer_stats.get("did_step", True):
                     self._policy_update_counts["proposer"] += 1
-                if local_can_proposer_update:
-                    self._update_baseline("proposer", proposer_reward)
             else:
                 proposer_skip_reason = "all_ranks_empty_proposer_completion"
                 self._append_jsonl(
@@ -1148,6 +1222,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     b = str(bucket).strip().lower()
                     if b in {"easy", "medium", "hard"}:
                         self._difficulty_window.append(b)
+            # When reset_proposer_baseline=True (set in parent _load_state),
+            # also wipe the entropy/difficulty history so the IQR filter
+            # re-warms from scratch instead of staying locked at IQR=0.
+            if bool(getattr(self.cfg, "reset_proposer_baseline", False)):
+                if self.is_main_process:
+                    print(
+                        "[Unified] reset_proposer_baseline=True: clearing entropy "
+                        "and difficulty windows so IQR filter re-warms from scratch"
+                    )
+                self._entropy_window.clear()
+                self._difficulty_window.clear()
             if self.is_main_process:
                 print(
                     f"[Unified] Restored self-evolving state: "
@@ -1515,7 +1600,19 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         self._understanding_step(step=step, image=image, meta=meta)
                 else:
                     phase_tag = "G"
-                    out = self._generation_step(step=step, image=image, meta=meta)
+                    # Sample the curriculum difficulty target for this generation
+                    # step using the same sampler as the understanding phase.
+                    # This closes the curriculum loop: the difficulty sampler
+                    # tracks which buckets are under-represented in the history
+                    # and upweights them — now both phases respond to it.
+                    gen_difficulty_state = self._choose_difficulty_target()
+                    gen_target_difficulty = str(gen_difficulty_state.get("desired_bucket", "medium"))
+                    out = self._generation_step(
+                        step=step,
+                        image=image,
+                        meta=meta,
+                        target_difficulty=gen_target_difficulty,
+                    )
                     source_caption = str(out.get("source_caption", ""))
                     spec: GenerationSpec = out["spec"]
                     scored: List[Dict[str, object]] = out["scored"]
@@ -1531,6 +1628,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             reference_answers=out.get("reference_answers"),
                         )
                     if cfg.synthetic_solver_update_freq > 0 and step % cfg.synthetic_solver_update_freq == 0:
+                        self._solver_synthetic_update_from_best(step, scored[best_idx])
+                    # Joint step: also train the solver on the generated image every
+                    # generation step. The solver already ran on it for scoring — this
+                    # reuses those rollouts to turn every G-step into a U-step on
+                    # synthetic data, effectively doubling understanding supervision.
+                    # Only active when gen_step_solver_update_enabled=True.
+                    elif bool(getattr(cfg, "gen_step_solver_update_enabled", False)):
                         self._solver_synthetic_update_from_best(step, scored[best_idx])
 
                     rewards = [float(c["total_reward"]) for c in scored]
