@@ -79,8 +79,8 @@ class blip3oQwenForInferenceLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaFor
             text_embeds[und_image_idx] = und_image_embeds.to(text_embeds.device)[:und_image_idx.sum(), :]
 
 
-        text_embeds = torch.cat([text_embeds, latent_queries], dim=1)
-        attention_mask = torch.cat([attention_mask, torch.ones_like(latent_queries[:, :, 0])], dim=1)
+        text_embeds = torch.cat([text_embeds, latent_queries.to(text_embeds.device)], dim=1)
+        attention_mask = torch.cat([attention_mask, torch.ones_like(latent_queries[:, :, 0]).to(attention_mask.device)], dim=1)
 
 
         outputs = self.model(
@@ -111,6 +111,13 @@ class blip3oQwenForInferenceLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaFor
         device = img_hidden_states.device
         dtype = img_hidden_states.dtype
 
+        # Move the entire DiT to a single device to avoid cross-device splits
+        # caused by accelerate's device_map="auto".
+        # We must first remove accelerate's dispatch hooks, which override .to()
+        # and keep weights pinned to their originally assigned GPUs.
+        from accelerate.hooks import remove_hook_from_submodules
+        remove_hook_from_submodules(self.get_model().dit)
+        self.get_model().dit.to(device)
 
         img_hidden_states_null = torch.zeros_like(img_hidden_states, device=device, dtype=dtype)
         img_hidden_states_input = torch.cat([img_hidden_states_null, img_hidden_states], 0)
@@ -215,7 +222,7 @@ class blip3oQwenForInferenceLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaFor
                     negative_prompt[key] = self.encode_images(negative_image)
                 prompt = torch.cat([prompt, negative_prompt[key]], dim=0)
         else:
-            prompt = self.generate_image(text=[text_prompt], image=image_prompt, tokenizer=tokenizer)
+            prompt = self.generate_image(text=[text_prompt], pixel_values=image_prompt, tokenizer=tokenizer)
             if do_classifier_free_guidance:
                 key = ""
                 if key not in negative_prompt:

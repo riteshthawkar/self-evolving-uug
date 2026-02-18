@@ -1,13 +1,26 @@
 #!/bin/bash
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BLIP3O_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 
-conda  activate  blip3o
+export PYTHONPATH="${BLIP3O_ROOT}:${PYTHONPATH:-}"
+
+export CACHE_ROOT="/workspace/self-evolving-uug/cache"
+export HF_HOME="/workspace/self-evolving-uug/cache"
+export HUGGINGFACE_HUB_CACHE="/workspace/self-evolving-uug/cache"
+export TRANSFORMERS_CACHE="/workspace/self-evolving-uug/cache"
+export HF_DATASETS_CACHE="/workspace/self-evolving-uug/cache"
+export HF_METRICS_CACHE="/workspace/self-evolving-uug/cache"
+export TORCH_HOME="/workspace/self-evolving-uug/cache"
+export TRITON_CACHE_DIR="/workspace/self-evolving-uug/cache"
+export XDG_CACHE_HOME="/workspace/self-evolving-uug/cache"
+export TOKENIZERS_PARALLELISM="false"
+export HF_TOKEN="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"
+export CUDA_VISIBLE_DEVICES=0
+export HIP_VISIBLE_DEVICES=0
 
 
-export HF_HOME=/your/HF/home/path
-
-
-MODEL="/your/mode/path/"
+MODEL="/workspace/self-evolving-uug/cache/models--BLIP3o--BLIP3o-Model-8B/snapshots/c2edfc20814d4624c8d73ca3de351ebc3fa86508"
 
 
 
