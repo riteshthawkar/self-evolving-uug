@@ -4281,14 +4281,33 @@ class GenerationSelfEvolvingTrainer:
                             except Exception:
                                 pass
 
+                        # Apply EMA absolute baseline shift (same as understanding phase).
+                        # Use proposer_gen_baseline (separate EMA for generation reward)
+                        # so understanding and generation phases don't contaminate each other.
+                        _gen_ema_baseline = float(self.proposer_gen_baseline)
+                        _grpo_rewards_shifted = [r - _gen_ema_baseline for r in _grpo_rewards]
+
                         proposer_stats = self.proposer_updater.step(
                             prompt=_proposer_gen_prompt,
                             completions=_grpo_completions,
-                            rewards=_grpo_rewards,
+                            rewards=_grpo_rewards_shifted,
                             device=self.device,
                             images=_grpo_images,
                         )
                         _gen_advantage = float(proposer_stats.get("mean_advantage", 0.0))
+
+                        # Update the gen-phase EMA baseline from raw (un-shifted) mean.
+                        _gen_raw_mean = sum(_grpo_rewards) / max(1, len(_grpo_rewards))
+                        _gen_baseline_momentum = float(
+                            getattr(self.cfg, "proposer_gen_baseline_momentum", 0.6)
+                        )
+                        self.proposer_gen_baseline = (
+                            _gen_baseline_momentum * self.proposer_gen_baseline
+                            + (1.0 - _gen_baseline_momentum) * _gen_raw_mean
+                        )
+                        if proposer_stats is not None:
+                            proposer_stats["grpo_ema_baseline"] = _gen_ema_baseline
+                            proposer_stats["grpo_raw_mean_reward"] = _gen_raw_mean
                     else:
                         # ── REINFORCE path (legacy) ───────────────────────────────────────
                         _gen_baseline_momentum = float(

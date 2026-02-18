@@ -298,7 +298,7 @@ fi
   --temp 1.0 \
   --top_p 1.0 \
   --max_new_tokens_solver 96 \
-  --max_new_tokens_proposer 320 \
+  --max_new_tokens_proposer 512 \
   --max_new_tokens_caption 64 \
   --max_new_tokens_generator 512 \
   --num_solver_samples 5 \
@@ -341,6 +341,11 @@ fi
   --len_penalty_weight 0.10 \
   --len_penalty_target_words 6 \
   --solver_hardness_min_entropy 0.20 \
+  `# Lower the majority-fraction gate for blocking easy solver updates:        ` \
+  `# was 0.95 (block only if 5/5 agree). At 0.80 (block only if ≥4/5 agree)  ` \
+  `# the solver still trains on questions where at least 1 sample disagrees,  ` \
+  `# giving real gradient signal rather than purely easy-penalty updates.      ` \
+  --easy_update_majority_frac_threshold 0.80 \
   `# IQR filter disabled: at step 500 the 256-step history was all entropy=0` \
   `# so IQR=0, threshold=0 → filter blocked ALL updates redundantly. The    ` \
   `# easy-case gate (solver_skip_update_on_easy) already handles this.       ` \
