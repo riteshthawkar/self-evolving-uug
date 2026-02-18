@@ -922,12 +922,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     _grpo_group_size = max(
                         2, int(getattr(self.cfg, "proposer_grpo_gen_group_size", 3))
                     )
-                    _zero_entropy_cap = float(
-                        getattr(self.cfg, "zero_entropy_reward_cap", 0.10)
-                    )
-                    _prop_mu = float(getattr(self.cfg, "prop_entropy_mu", 0.90))
-                    _prop_sigma = float(getattr(self.cfg, "prop_entropy_sigma", 0.35))
-                    _rej_penalty = float(getattr(self.cfg, "rejected_question_penalty", 0.25))
+                    # (No per-extra scoring variables needed — extras always get 0.0)
 
                     for _gi in range(_grpo_group_size - 1):
                         try:
@@ -942,57 +937,22 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             _extra_comp = str(_extra_out or "").strip()
                             if not _extra_comp:
                                 continue
-                            # Lightweight scoring of extra candidates:
-                            # Run 2 solver samples on the first parsed question to
-                            # get a real entropy estimate.  This is cheap (2 short
-                            # decodes) and gives a much better group signal than
-                            # assigning 0.0 to every extra (which made one arbitrary
-                            # candidate the "winner" every time).
-                            _extra_reward = 0.0
-                            _extra_qs = _parse_all_questions(_extra_out)
-                            if _extra_qs:
-                                _eq = _extra_qs[0].replace("\n", " ").strip()
-                                _ep = build_solver_prompt(_eq) if _eq else None
-                                if _ep:
-                                    _ea_list = []
-                                    for _si in range(2):
-                                        try:
-                                            _eo = self._generate(
-                                                image=image,
-                                                prompt=_ep,
-                                                adapter_name="default" if self.cfg.use_lora else None,
-                                                max_new_tokens=self.cfg.max_new_tokens_solver,
-                                                temperature=float(solver_temperatures[_si])
-                                                if _si < len(solver_temperatures)
-                                                else self.cfg.temp,
-                                                top_p=float(solver_top_ps[_si])
-                                                if _si < len(solver_top_ps)
-                                                else self.cfg.top_p,
-                                            )
-                                            _ea_list.append(normalize_answer(_parse_answer(_eo)))
-                                        except Exception:
-                                            pass
-                                    if len(_ea_list) >= 2:
-                                        _e_hist = {}
-                                        for _ea in _ea_list:
-                                            _e_hist[_ea] = _e_hist.get(_ea, 0) + 1
-                                        _e_probs = [c / len(_ea_list) for c in _e_hist.values()]
-                                        _e_entropy = shannon_entropy_nats(_e_probs)
-                                        _e_maj_frac = max(_e_probs)
-                                        # Assign gaussian reward exactly as the main question does.
-                                        _e_reward_raw = gaussian_reward(
-                                            _e_entropy, _prop_mu, _prop_sigma
-                                        )
-                                        if _e_entropy < 1e-6:
-                                            _e_reward_raw = -_zero_entropy_cap
-                                        # Apply rejection penalty if it would be easy bucket.
-                                        if bool(
-                                            getattr(self.cfg, "acceptance_require_non_easy", True)
-                                        ) and _e_maj_frac >= 0.95:
-                                            _e_reward_raw -= _rej_penalty
-                                        _extra_reward = max(-1.0, min(1.0, _e_reward_raw))
+                            # Extra candidates always get reward = 0.0 (unverified / neutral).
+                            #
+                            # WHY THIS GUARANTEES NON-ZERO GROUP STD:
+                            # The chosen completion (index 0) has real reward = effective_reward,
+                            # which is almost never exactly 0.0 (it is ±0.45 for easy, +0.66 for
+                            # good, etc.).  After baseline shift:
+                            #   chosen_shifted  = effective_reward - ema_baseline  (non-zero)
+                            #   extras_shifted  = 0.0 - ema_baseline               (different)
+                            # → std > 0 guaranteed as long as effective_reward ≠ 0.
+                            #
+                            # Scoring extras (1-sample solver) caused all three to converge to
+                            # the same -0.45 (each single-sample answer was non-empty → reward=0.0,
+                            # then the rej_penalty applied → all three at -0.45 → std=0 → skip).
+                            # Neutral 0.0 is the correct "reference" reward for unverified outputs.
                             _grpo_completions.append(_extra_comp)
-                            _grpo_rewards.append(_extra_reward)
+                            _grpo_rewards.append(0.0)
                             _grpo_images.append(image)
                         except Exception:
                             pass

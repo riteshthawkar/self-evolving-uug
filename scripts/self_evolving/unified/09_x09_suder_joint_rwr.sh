@@ -298,7 +298,7 @@ fi
   --temp 1.0 \
   --top_p 1.0 \
   --max_new_tokens_solver 96 \
-  --max_new_tokens_proposer 512 \
+  --max_new_tokens_proposer 384 \
   --max_new_tokens_caption 64 \
   --max_new_tokens_generator 512 \
   --num_solver_samples 5 \
