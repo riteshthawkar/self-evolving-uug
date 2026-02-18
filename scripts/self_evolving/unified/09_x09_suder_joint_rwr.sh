@@ -102,6 +102,8 @@ if [[ "$TRAIN_STAGE" == "warmup" ]]; then
   RUN_NAME="${RUN_NAME}_warmup"
   STAGE_ARGS=(
     --acceptance_require_non_easy
+    --disable_proposer_require_objective
+    --proposer_non_objective_penalty 0.0
     --difficulty_target_easy   0.30
     --difficulty_target_medium 0.50
     --difficulty_target_hard   0.20
@@ -119,6 +121,8 @@ elif [[ "$TRAIN_STAGE" == "strict" ]]; then
   RUN_NAME="${RUN_NAME}_strict"
   STAGE_ARGS=(
     --acceptance_require_non_easy
+    --disable_proposer_require_objective
+    --proposer_non_objective_penalty 0.0
     --difficulty_target_easy   0.10
     --difficulty_target_medium 0.70
     --difficulty_target_hard   0.20
@@ -340,7 +344,7 @@ fi
   `# IQR filter disabled: at step 500 the 256-step history was all entropy=0` \
   `# so IQR=0, threshold=0 → filter blocked ALL updates redundantly. The    ` \
   `# easy-case gate (solver_skip_update_on_easy) already handles this.       ` \
-  --entropy_iqr_filter_enabled false \
+  --disable_entropy_iqr_filter \
   \
   `# ── Proposer entropy target ─────────────────────────────────────────────` \
   --prop_entropy_sigma 0.25 \
