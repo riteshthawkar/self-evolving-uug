@@ -400,9 +400,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             1, int(getattr(self.cfg, "proposer_spot_check_samples", 2))
         )
 
+        # Derive image source hint from path so the proposer can apply
+        # dataset-appropriate strategies (COCO=natural scenes, TextVQA=text/signs,
+        # ChartQA/GQA=charts/graphs/relational).  This is a soft hint only —
+        # the proposer still selects the strategy from the library.
+        _img_path = str(meta.get("path", "")).lower()
+        if "textvqa" in _img_path:
+            _src_hint = "textvqa"
+        elif "chartqa" in _img_path or "chart" in _img_path:
+            _src_hint = "chartqa"
+        elif "gqa" in _img_path:
+            _src_hint = "gqa"
+        else:
+            _src_hint = "coco"
+
         multi_proposer_prompt = build_proposer_multi_prompt(
             target_difficulty=desired_difficulty_bucket,
             num_questions=num_proposer_candidates,
+            image_source_hint=_src_hint,
         )
 
         proposer_out = ""
@@ -564,6 +579,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 solver_answers_raw.append(answer_raw)
                 solver_answers_norm.append(normalize_answer(answer_raw))
                 pre_words.append(pre_answer_word_count(solver_out))
+
+        # Ensure solver_prompt is always set (may have been skipped if all
+        # solver samples were collected during spot-checking).
+        if not solver_prompt and question:
+            solver_prompt = build_solver_prompt(question)
 
         # Derive final question metadata from the accepted question.
         parsed_question = question
@@ -764,14 +784,19 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 or (maj_frac >= easy_update_majority_frac_threshold)
             )
         )
-        if local_solver_update_applied and question_rejected:
-            local_solver_update_applied = False
-            solver_update_skip_reason_local = (
-                "question_rejected"
-                if not question_reject_reason
-                else f"question_rejected:{question_reject_reason}"
-            )
-        elif local_solver_update_applied and solver_entropy_iqr_blocked:
+        # NOTE: We intentionally do NOT block the solver update when question_rejected.
+        # The solver should train even on rejected (easy/non-objective) questions:
+        #   - On easy questions: solver_rewards_raw already assigns a NEGATIVE reward
+        #     to the majority answer (penalising unanimous easy agreement) and a small
+        #     positive to minority answers.  This is correct supervision — the solver
+        #     learns "don't be so confident on easy-looking questions".
+        #   - On non-objective questions: the answers are still real outputs with real
+        #     rewards; excluding them starves the solver of data.
+        # The PROPOSER is penalised for rejected questions (via rejected_question_penalty).
+        # The SOLVER should always learn from whatever question it sees.
+        # Block is applied only for the easy_case fast-path (solver_easy_update_blocked)
+        # which uses the already-gated majority_frac threshold.
+        if local_solver_update_applied and solver_entropy_iqr_blocked:
             local_solver_update_applied = False
             solver_update_skip_reason_local = "entropy_iqr_filter"
         elif local_solver_update_applied and solver_easy_update_blocked:
@@ -875,12 +900,22 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 effective_reward = proposer_reward if local_can_proposer_update else 0.0
 
                 if self._proposer_uses_grpo and completion_for_update:
-                    # ── GRPO path ────────────────────────────────────────────────────
-                    # Build a group of K completions by re-sampling the proposer.
-                    # The first element is the current proposer_out (reward already
-                    # computed). The remaining (K-1) elements are sampled fresh —
-                    # they are scored only by entropy of the FIRST question they
-                    # contain (lightweight, no full solver rollout).
+                    # ── GRPO + EMA absolute baseline path ───────────────────────────
+                    # Vanilla GRPO only sees *relative* reward within the group.
+                    # When ALL group members produce easy questions, every member
+                    # gets the same penalty → std≈0.21, mean_advantage≈0 →
+                    # the gradient is noise and the proposer cannot escape the
+                    # easy-question attractor.
+                    #
+                    # Fix: subtract a cross-step EMA baseline from every reward
+                    # BEFORE computing within-group advantages.  This gives an
+                    # *absolute* signal: even the "best" candidate in an all-bad
+                    # group has a negative baseline-adjusted reward, producing a
+                    # consistent push away from the easy attractor.
+                    #
+                    # After the update, feed the raw mean_reward back into the EMA
+                    # so the baseline tracks the proposer's running performance.
+                    # This is the approach used in Dr. GRPO / DAPO / REINFORCE++.
                     _grpo_completions = [completion_for_update]
                     _grpo_rewards = [effective_reward]
                     _grpo_images = [image]
@@ -892,6 +927,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     )
                     _prop_mu = float(getattr(self.cfg, "prop_entropy_mu", 0.90))
                     _prop_sigma = float(getattr(self.cfg, "prop_entropy_sigma", 0.35))
+                    _rej_penalty = float(getattr(self.cfg, "rejected_question_penalty", 0.25))
 
                     for _gi in range(_grpo_group_size - 1):
                         try:
@@ -906,44 +942,84 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             _extra_comp = str(_extra_out or "").strip()
                             if not _extra_comp:
                                 continue
-                            # Quick entropy estimate: spot-check ONE solver sample
-                            # on the first question parsed from the extra output.
+                            # Lightweight scoring of extra candidates:
+                            # Run 2 solver samples on the first parsed question to
+                            # get a real entropy estimate.  This is cheap (2 short
+                            # decodes) and gives a much better group signal than
+                            # assigning 0.0 to every extra (which made one arbitrary
+                            # candidate the "winner" every time).
+                            _extra_reward = 0.0
                             _extra_qs = _parse_all_questions(_extra_out)
                             if _extra_qs:
                                 _eq = _extra_qs[0].replace("\n", " ").strip()
                                 _ep = build_solver_prompt(_eq) if _eq else None
                                 if _ep:
-                                    _eo = self._generate(
-                                        image=image,
-                                        prompt=_ep,
-                                        adapter_name="default" if self.cfg.use_lora else None,
-                                        max_new_tokens=self.cfg.max_new_tokens_solver,
-                                        temperature=self.cfg.temp,
-                                        top_p=self.cfg.top_p,
-                                    )
-                                    _ea = normalize_answer(_parse_answer(_eo))
-                                    _eentropy = 0.0 if _ea else 0.0  # single sample → entropy=0
-                                    # Use 0.0 reward for unverified extras; gives correct
-                                    # group variance vs the fully-scored chosen completion.
-                                    _extra_reward = 0.0
-                                else:
-                                    _extra_reward = 0.0
-                            else:
-                                _extra_reward = 0.0
+                                    _ea_list = []
+                                    for _si in range(2):
+                                        try:
+                                            _eo = self._generate(
+                                                image=image,
+                                                prompt=_ep,
+                                                adapter_name="default" if self.cfg.use_lora else None,
+                                                max_new_tokens=self.cfg.max_new_tokens_solver,
+                                                temperature=float(solver_temperatures[_si])
+                                                if _si < len(solver_temperatures)
+                                                else self.cfg.temp,
+                                                top_p=float(solver_top_ps[_si])
+                                                if _si < len(solver_top_ps)
+                                                else self.cfg.top_p,
+                                            )
+                                            _ea_list.append(normalize_answer(_parse_answer(_eo)))
+                                        except Exception:
+                                            pass
+                                    if len(_ea_list) >= 2:
+                                        _e_hist = {}
+                                        for _ea in _ea_list:
+                                            _e_hist[_ea] = _e_hist.get(_ea, 0) + 1
+                                        _e_probs = [c / len(_ea_list) for c in _e_hist.values()]
+                                        _e_entropy = shannon_entropy_nats(_e_probs)
+                                        _e_maj_frac = max(_e_probs)
+                                        # Assign gaussian reward exactly as the main question does.
+                                        _e_reward_raw = gaussian_reward(
+                                            _e_entropy, _prop_mu, _prop_sigma
+                                        )
+                                        if _e_entropy < 1e-6:
+                                            _e_reward_raw = -_zero_entropy_cap
+                                        # Apply rejection penalty if it would be easy bucket.
+                                        if bool(
+                                            getattr(self.cfg, "acceptance_require_non_easy", True)
+                                        ) and _e_maj_frac >= 0.95:
+                                            _e_reward_raw -= _rej_penalty
+                                        _extra_reward = max(-1.0, min(1.0, _e_reward_raw))
                             _grpo_completions.append(_extra_comp)
                             _grpo_rewards.append(_extra_reward)
                             _grpo_images.append(image)
                         except Exception:
                             pass
 
+                    # Apply EMA absolute baseline shift to all group rewards.
+                    # self.proposer_baseline tracks the running mean reward; when
+                    # the whole group underperforms the baseline the advantage of
+                    # every candidate is negative → consistent push away.
+                    _ema_baseline = float(self.proposer_baseline)
+                    _grpo_rewards_shifted = [r - _ema_baseline for r in _grpo_rewards]
+
                     proposer_stats = self.proposer_updater.step(
                         prompt=multi_proposer_prompt,
                         completions=_grpo_completions,
-                        rewards=_grpo_rewards,
+                        rewards=_grpo_rewards_shifted,
                         device=self.device,
                         images=_grpo_images,
                     )
-                    # GRPO has no EMA baseline — no update needed.
+
+                    # Update EMA baseline from raw (un-shifted) mean reward so
+                    # the baseline tracks absolute performance, not shifted values.
+                    _raw_mean_reward = sum(_grpo_rewards) / max(1, len(_grpo_rewards))
+                    self._update_baseline("proposer", _raw_mean_reward)
+                    # Log the baseline shift for visibility.
+                    if proposer_stats is not None:
+                        proposer_stats["grpo_ema_baseline"] = _ema_baseline
+                        proposer_stats["grpo_raw_mean_reward"] = _raw_mean_reward
                 else:
                     # ── REINFORCE path (legacy / proposer_update_rule="reinforce") ──
                     # Use the raw baseline without clamping. The previous clamp
