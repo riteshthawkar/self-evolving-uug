@@ -222,97 +222,29 @@ def build_proposer_multi_prompt(
             "Do NOT ask about the most obvious/dominant element in the scene."
         )
 
-    # Strategy library — concrete patterns that empirically cause solver disagreement
+    # Strategy library — compact format to minimise prompt input tokens.
+    # Full descriptions are omitted; the model already knows these patterns.
     strategy_block = (
-        "QUESTION STRATEGY LIBRARY (pick one strategy per question, then apply it to a SPECIFIC element in this image):\n"
-        "\n"
-        "HARD tier — highest solver disagreement:\n"
-        "  H1. Occlusion count: Count objects where some are partially hidden or overlapping.\n"
-        '      Example structure: "How many [objects] are fully/partially visible [location]?"\n'
-        "  H2. Boundary comparison: Compare two objects of similar size/position where the answer is not obvious.\n"
-        '      Example structure: "Is [obj A] [larger/closer/higher/left of] [obj B]?"\n'
-        "  H3. Attribute under occlusion: Ask about an attribute of an object that is partially hidden.\n"
-        '      Example structure: "What color/shape is the [object] partially behind [occluder]?"\n'
-        "  H4. Multi-hop relation: Ask about a property of an object identified by its relation to another.\n"
-        '      Example structure: "What is the [attribute] of the [object] that is [relation] the [anchor]?"\n'
-        "  H5. Boundary/edge condition: Ask whether something is on a boundary, inside, or outside.\n"
-        '      Example structure: "Is the [object] on/inside/outside the [boundary]?"\n'
-        "  H6. Non-dominant count: Count a SECONDARY category of object (not the main subject).\n"
-        '      Example structure: "How many [background/secondary objects] are there?"\n'
-        "  H7. Text reading under transformation: Read text that is rotated, small, or partially occluded.\n"
-        '      Example structure: "What does the text on the [specific location] say?"\n'
-        "  H8. Chart delta: Ask about a difference or change between two close values in a chart/table.\n"
-        '      Example structure: "By how much did [metric] change between [year A] and [year B]?"\n'
-        "\n"
-        "MEDIUM tier — moderate solver disagreement:\n"
-        "  M1. Precise count of non-trivial objects (not just '1' or '2').\n"
-        '      Example structure: "How many [objects with shared attribute] are in the image?"\n'
-        "  M2. Relative spatial relation between two non-dominant objects.\n"
-        '      Example structure: "Is [obj A] to the left/right/above/below [obj B]?"\n'
-        "  M3. Comparative attribute across two entities.\n"
-        '      Example structure: "Which [object] is [attribute: larger/darker/taller]?"\n'
-        "  M4. Specific attribute of a secondary (non-salient) object.\n"
-        '      Example structure: "What color/shape/material is the [background/secondary object]?"\n'
-        "  M5. Existence of a non-obvious element.\n"
-        '      Example structure: "Is there a [specific object] in the [specific region]?"\n'
-        "\n"
-        "ANTI-PATTERNS — these always produce easy questions, NEVER use them:\n"
-        "  ✗ Asking what the MAIN SUBJECT/DOMINANT OBJECT is doing (e.g. 'What is the person doing?')\n"
-        "  ✗ Asking what TYPE something obviously is (e.g. 'What type of pizza?', 'What sport?')\n"
-        "  ✗ Asking about the most prominent text in the image\n"
-        "  ✗ Asking about the color/type of the single most salient object\n"
-        "  ✗ Yes/No questions where the answer is visually unambiguous\n"
-        "  ✗ Asking about something that has an obvious single-word answer (e.g. 'What game is being played?')\n"
-        "  ✗ Questions whose answer appears as large visible text in the image\n"
+        "STRATEGIES (pick one per question; apply to a SPECIFIC element in THIS image):\n"
+        "HARD: H1=occlusion-count  H2=boundary-comparison  H3=occluded-attribute\n"
+        "      H4=multi-hop-relation  H5=edge-condition  H6=secondary-count\n"
+        "      H7=occluded-text  H8=chart-delta\n"
+        "MEDIUM: M1=precise-count  M2=relative-spatial  M3=comparative-attr\n"
+        "        M4=secondary-attr  M5=non-obvious-existence\n"
+        "NEVER (always easy): main-subject-action | object-type | dominant-text | "
+        "single-salient-color | unambiguous-yes-no | obvious-single-word-answer\n"
     )
 
-    # Dataset-specific strategy hints: different image sources reward different strategies.
+    # Dataset-specific one-liner hint (kept short to save tokens).
     src = (image_source_hint or "").strip().lower()
     if src == "textvqa":
-        dataset_hint = (
-            "IMAGE TYPE: Scene with embedded text (signs, labels, storefronts, etc.).\n"
-            "Best strategies for this image type:\n"
-            "  → H7 (text under transformation): prefer reading text that is rotated, small, or partially occluded.\n"
-            "  → H5 (boundary condition): e.g. 'Is the text above or below the logo?'\n"
-            "  → H4 (multi-hop relation): 'What is written on the [object] held by [person]?'\n"
-            "  → M2 (spatial): 'Is the [sign/text] to the left or right of [landmark]?'\n"
-            "  AVOID: Asking about the largest/most prominent text visible — that is always easy.\n"
-        )
+        dataset_hint = "IMAGE: text-in-scene. Prefer H7, H4, M2. Avoid largest visible text.\n"
     elif src in {"chartqa", "chart"}:
-        dataset_hint = (
-            "IMAGE TYPE: Chart, graph, or table.\n"
-            "Best strategies for this image type:\n"
-            "  → H8 (chart delta): 'By how much did [metric] change between [year A] and [year B]?' — "
-            "pick years where the difference is small and not immediately obvious.\n"
-            "  → H6 (non-dominant count): 'How many data points are above/below the average line?'\n"
-            "  → M3 (comparative): 'Which [category] had the second highest [metric]?' — NOT the highest.\n"
-            "  → M1 (count): 'How many [bars/lines/segments] show a value between X and Y?'\n"
-            "  AVOID: Asking which year had the highest value (trivially obvious from bar height).\n"
-            "  AVOID: Asking what the chart is titled (single obvious text lookup).\n"
-        )
+        dataset_hint = "IMAGE: chart/graph. Prefer H8 (small delta), H6, M3 (2nd-highest). Avoid peak-bar or title.\n"
     elif src == "gqa":
-        dataset_hint = (
-            "IMAGE TYPE: Natural scene with rich object relationships (GQA-style).\n"
-            "Best strategies for this image type:\n"
-            "  → H4 (multi-hop relation): 'What is the color of the object that is [relation] the [anchor]?'\n"
-            "  → H2 (boundary comparison): compare two similar-sized objects (e.g. 'Is the cup taller than the vase?')\n"
-            "  → H1 (occlusion count): count objects where some are partially obscured\n"
-            "  → M2 (relative spatial): ask about spatial relation of two non-dominant objects\n"
-            "  AVOID: Asking about the single most visible object's type or color.\n"
-        )
+        dataset_hint = "IMAGE: relational scene. Prefer H4, H2, H1, M2. Avoid dominant-object type/color.\n"
     else:
-        # Default: COCO-style natural images
-        dataset_hint = (
-            "IMAGE TYPE: Natural photograph (COCO-style).\n"
-            "Best strategies for this image type:\n"
-            "  → H1 (occlusion count): Count background/secondary objects that are partially hidden.\n"
-            "  → H2 (boundary comparison): Compare two objects of similar apparent size.\n"
-            "  → H3 (attribute under occlusion): Ask about attribute of a partially-hidden object.\n"
-            "  → H6 (non-dominant count): Count objects SECONDARY to the main subject.\n"
-            "  → M2 (relative spatial): 'Is [minor obj A] to the left/right of [minor obj B]?'\n"
-            "  AVOID: Asking what the main person/animal/vehicle is doing — always easy.\n"
-            "  AVOID: Asking the type of food/vehicle/sport in the scene — always easy.\n"
-        )
+        dataset_hint = "IMAGE: natural photo. Prefer H1, H2, H3, H6, M2 on SECONDARY objects. Avoid main-subject action or type.\n"
 
     n = max(1, int(num_questions))
     qa_template = "\n".join(
@@ -327,27 +259,16 @@ def build_proposer_multi_prompt(
 
     return (
         "You are an Adversarial Question Proposer.\n"
-        "Your GOAL: craft questions that a vision-language solver (same model, same image) will "
-        "FAIL to answer unanimously — questions where different solver samples give DIFFERENT answers.\n"
-        "\n"
+        "GOAL: questions a vision-language solver (same model, same image) will FAIL to answer unanimously.\n"
         f"{diff_hint}\n"
-        "\n"
-        f"{dataset_hint}\n"
-        f"{strategy_block}\n"
-        f"Generate exactly {n} candidate questions, ordered HARDEST first (question 1 = hardest).\n"
-        "For EACH question:\n"
-        "  1. State which strategy you used (strategy_used).\n"
-        "  2. Pass the TWO-ANSWER TEST: explicitly name two different answers the solver might give.\n"
-        "     If you cannot name two plausible answers, the question is EASY — pick a different strategy.\n"
-        "  3. Write the question text (must end with '?').\n"
-        "  4. Confirm it is NOT an anti-pattern (rationale).\n"
-        "\n"
-        "Hard constraints:\n"
-        "- Short, verifiable answer (1-5 words). Must be determinable from the image alone.\n"
-        "- Use a proper interrogative. No speculative/subjective wording.\n"
-        "- Use concrete object names from THIS image — never placeholder text.\n"
-        "- Do not include XML tags inside the question text itself.\n"
-        "\n"
+        f"{dataset_hint}"
+        f"{strategy_block}"
+        f"Generate exactly {n} questions, HARDEST first. For each:\n"
+        "  1. <strategy_used>: which strategy (e.g. H2).\n"
+        "  2. <two_answer_test>: two different plausible solver answers. If you can't — it's easy, pick another strategy.\n"
+        "  3. <text>: the question (ends with '?', uses concrete image objects, 1-5 word answer).\n"
+        "  4. <rationale>: why it is objective, image-grounded, NOT an anti-pattern.\n"
+        "Rules: verifiable short answer, no subjective wording, no XML tags inside question text.\n"
         "Output XML only:\n"
         "<questions>\n"
         f"{qa_template}\n"
