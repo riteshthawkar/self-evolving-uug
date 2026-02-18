@@ -137,6 +137,7 @@ class LuminaNextDiTBlock(nn.Module):
 
         # Self-attention
         norm_hidden_states, gate_msa, scale_mlp, gate_mlp = self.norm1(hidden_states, temb)
+        
         self_attn_output = self.attn1(
             hidden_states=norm_hidden_states,
             encoder_hidden_states=norm_hidden_states,
@@ -161,6 +162,8 @@ class LuminaNextDiTBlock(nn.Module):
         mixed_attn_output = mixed_attn_output.flatten(-2)
         # linear proj
         hidden_states = self.attn2.to_out[0](mixed_attn_output)
+        
+
 
         hidden_states = residual + gate_msa.unsqueeze(1).tanh() * self.norm2(hidden_states)
 

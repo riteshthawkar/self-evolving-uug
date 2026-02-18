@@ -32,9 +32,9 @@ def load_pretrained_model(model_path, load_8bit=False, load_4bit=False, device_m
         kwargs['attn_implementation'] = 'flash_attention_2'
 
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
 
-    model = blip3oQwenForInferenceLM.from_pretrained(model_path, low_cpu_mem_usage=True, torch_dtype=torch.float16).to('cuda:0')
+    model = blip3oQwenForInferenceLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
 
     image_processor = None
     mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
@@ -83,7 +83,7 @@ def load_pretrained_model_lmms_eval(model_path, load_8bit=False, load_4bit=False
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-    model = blip3oQwenForInferenceLM.from_pretrained(model_path, low_cpu_mem_usage=True, torch_dtype=torch.float16)
+    model = blip3oQwenForInferenceLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
 
     image_processor = None
     mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
