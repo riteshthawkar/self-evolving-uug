@@ -17,6 +17,7 @@ AVAILABLE_MODELS = {
     "auroracap": "AuroraCap",
     "batch_gpt4": "BatchGPT4",
     "blip3o": "blip3o",
+    "blip3o_our": "blip3o_our",
     "claude": "Claude",
     "cogvlm2": "CogVLM2",
     "from_log": "FromLog",
