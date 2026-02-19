@@ -262,10 +262,10 @@ fi
   \
   `# ── Training schedule ──────────────────────────────────────────────────` \
   --total_steps 10000 \
-  --save_every 2000 \
+  --save_every 50 \
   --log_every 1 \
-  --max_checkpoints 5 \
-  --save_generated_images_every 2000 \
+  --max_checkpoints 20 \
+  --save_generated_images_every 50 \
   --deterministic \
   \
   `# ── Model / LoRA ───────────────────────────────────────────────────────` \
@@ -308,7 +308,7 @@ fi
   --proposer_spot_check_samples 2 \
   \
   `# ── Image generation (Paradigm B — BLIP3o diffusion) ───────────────────` \
-  --generation_num_inference_steps 20 \
+  --generation_num_inference_steps 50 \
   --generation_guidance_scale 2.0 \
   --generation_height "$GENERATION_IMAGE_SIDE" \
   --generation_width  "$GENERATION_IMAGE_SIDE" \

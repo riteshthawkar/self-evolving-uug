@@ -11,7 +11,7 @@ export TORCH_HOME="/workspace/self-evolving-uug/cache"
 export TRITON_CACHE_DIR="/workspace/self-evolving-uug/cache"
 export XDG_CACHE_HOME="/workspace/self-evolving-uug/cache"
 export TOKENIZERS_PARALLELISM="false"
-export HF_TOKEN="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"
+export HF_TOKEN="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"
 export CUDA_VISIBLE_DEVICES=0
 export HIP_VISIBLE_DEVICES=0
 
