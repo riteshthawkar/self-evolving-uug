@@ -116,6 +116,26 @@ def _load_and_merge_lora(model, checkpoint_dir: str, adapter: str = "solver"):
             f"with adapter_config.json and adapter_model files."
         )
 
+    # PEFT's save_pretrained with selected_adapters creates a nested subdirectory
+    # named after the PEFT adapter name (not the folder name). For example:
+    #   solver/default/adapter_config.json   (PEFT name "default" saved into solver/)
+    #   proposer/proposer/adapter_config.json
+    #   generator/generator/adapter_config.json
+    # Search for adapter_config.json at the top level or any immediate subdirectory.
+    if not os.path.isfile(os.path.join(adapter_path, "adapter_config.json")):
+        found = False
+        for subdir in os.listdir(adapter_path):
+            candidate = os.path.join(adapter_path, subdir)
+            if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "adapter_config.json")):
+                eval_logger.info(f"Found nested adapter directory: {adapter}/{subdir}/")
+                adapter_path = candidate
+                found = True
+                break
+        if not found:
+            raise FileNotFoundError(
+                f"adapter_config.json not found in {adapter_path} or any subdirectory."
+            )
+
     eval_logger.info(f"Loading LoRA adapter from {adapter_path}")
     model = PeftModel.from_pretrained(model, adapter_path)
     eval_logger.info("Merging LoRA adapter into base model")
