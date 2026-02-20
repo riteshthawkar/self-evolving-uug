@@ -273,6 +273,15 @@ class GenerationSelfEvolvingConfig:
     # fresh runs. Remove this flag after the first checkpoint is saved post-resume.
     reset_proposer_baseline: bool = False
 
+    # ---- Imageless proposer mode (E5: fully synthetic self-evolving loop) ---- #
+    # When True, the proposer generates specs from text topics/themes instead of
+    # seeing a source image.  This enables a FULLY synthetic self-evolving loop
+    # where no external images are provided at any point:
+    #   topic → proposer (text-only) → prompt + QA spec → generator → image
+    #   → solver answers QA on generated image → rewards → all components update.
+    # The model teaches itself using only its own generations.
+    imageless_proposer_mode: bool = False
+
     # Reward shaping
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True

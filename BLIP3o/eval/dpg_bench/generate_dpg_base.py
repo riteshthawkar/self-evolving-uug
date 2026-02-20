@@ -136,8 +136,9 @@ def main():
             all_imgs.append(img)
 
         # Save as 2x2 grid (DPG-Bench expects this)
+        # padding=0 is critical — DPG-Bench crops at exact (0,0,res,res) boundaries
         tensors = [ToTensor()(img) for img in all_imgs]
-        grid = make_grid(torch.stack(tensors), nrow=2)
+        grid = make_grid(torch.stack(tensors), nrow=2, padding=0)
         grid_img = Image.fromarray(
             (255.0 * grid.permute(1, 2, 0).cpu().numpy()).astype(np.uint8)
         )

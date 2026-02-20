@@ -299,6 +299,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Reset proposer_baseline and proposer_gen_baseline to 0.0 on resume. "
                         "Also clears entropy/difficulty history windows. Use once after bug fixes "
                         "that caused the baseline to lock. Remove flag after first checkpoint post-resume.")
+    # E5: Imageless proposer mode
+    p.add_argument("--imageless_proposer_mode", action="store_true", default=False,
+                   help="E5: Proposer generates specs from text topics/themes, not from images. "
+                        "Enables a fully synthetic self-evolving loop with ZERO external images.")
     p.add_argument("--proposer_update_rule", type=str, default="grpo",
                    choices=["grpo", "reinforce"],
                    help="Proposer optimization algorithm. 'grpo' (default): group-normalized "
@@ -649,6 +653,7 @@ def _build_generation_config(args):
         enable_frozen_judge=args.enable_frozen_judge,
         judge_ema_decay=args.judge_ema_decay,
         judge_gpu_id=args.judge_gpu_id,
+        imageless_proposer_mode=args.imageless_proposer_mode,
     )
 
 
@@ -848,6 +853,7 @@ def _build_unified_config(args):
         enable_frozen_judge=args.enable_frozen_judge,
         judge_ema_decay=args.judge_ema_decay,
         judge_gpu_id=args.judge_gpu_id,
+        imageless_proposer_mode=args.imageless_proposer_mode,
     )
 
 

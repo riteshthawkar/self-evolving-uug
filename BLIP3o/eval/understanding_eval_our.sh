@@ -4,8 +4,8 @@ set -euo pipefail
 # ─── Understanding evaluation for self-evolving trained models (LoRA) ───
 #
 # Usage:
-#   bash understanding_eval_our.sh                          # use defaults
 #   CHECKPOINT_DIR=/path/to/step_00500 bash understanding_eval_our.sh
+#   CHECKPOINT_DIR=/path/to/step_00500 NUM_GPUS=8 bash understanding_eval_our.sh
 #   CHECKPOINT_DIR=/path/to/step_00500 ADAPTER=solver TASKS="realworldqa,textvqa,gqa" bash understanding_eval_our.sh
 
 export CACHE_ROOT="/workspace/self-evolving-uug/cache"
@@ -19,8 +19,14 @@ export TRITON_CACHE_DIR="/workspace/self-evolving-uug/cache"
 export XDG_CACHE_HOME="/workspace/self-evolving-uug/cache"
 export TOKENIZERS_PARALLELISM="false"
 export HF_TOKEN="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"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0}"
+# ─── Multi-GPU configuration ───
+NUM_GPUS="${NUM_GPUS:-8}"
+# Expose all GPUs: build "0,1,2,...,N-1" string
+if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    CUDA_VISIBLE_DEVICES=$(seq -s, 0 $(($NUM_GPUS - 1)))
+fi
+export CUDA_VISIBLE_DEVICES
+export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES}}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BLIP3O_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -45,11 +51,12 @@ echo "  Checkpoint:      ${CHECKPOINT_DIR}"
 echo "  Adapter:         ${ADAPTER}"
 echo "  Tasks:           ${TASKS}"
 echo "  Output:          ${OUTPUT_DIR}"
+echo "  Num GPUs:        ${NUM_GPUS}"
 echo "  Log suffix:      ${LOG_SUFFIX}"
 echo "============================================"
 
 python -m accelerate.commands.launch \
-    --num_processes=1 \
+    --num_processes="${NUM_GPUS}" \
     -m lmms_eval \
     --model blip3o_our \
     --model_args "pretrained=${BASE_MODEL},checkpoint_dir=${CHECKPOINT_DIR},adapter=${ADAPTER}" \

@@ -559,6 +559,82 @@ def _build_chat_text(
     return "<image>\n" + prompt
 
 
+def _build_text_only_chat(processor, prompt: str) -> str:
+    """Build a chat-formatted text string for TEXT-ONLY generation (no image).
+
+    Used by the imageless proposer mode (E5) where the proposer receives only a
+    topic description and generates a spec without any visual input.
+
+    For BLIP3o (bare tokenizer as processor) we use the official
+    ``conv_templates['qwen']`` conversation template but WITHOUT the ``<image>``
+    placeholder, producing a pure text prompt.
+
+    For true multimodal processors we try ``apply_chat_template`` with text-only
+    messages.
+    """
+    _ensure_blip3o_mm_utils()
+
+    # ---- BLIP3o path: use conv_templates to build prompt (no image) ----
+    if _is_bare_tokenizer(processor) and _conv_templates is not None:
+        conv = _conv_templates['qwen'].copy()
+        conv.append_message(conv.roles[0], prompt)
+        conv.append_message(conv.roles[1], None)
+        return conv.get_prompt()
+
+    # ---- Multimodal-processor path (text-only) ----
+    if hasattr(processor, "apply_chat_template"):
+        messages = [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ]
+        try:
+            return processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        except (TypeError, Exception):
+            pass
+    return prompt
+
+
+def _prepare_text_only_inputs(
+    processor,
+    device: torch.device,
+    chat_text: str,
+):
+    """Prepare text-only inputs for model.generate() / model.forward().
+
+    Like ``_prepare_mm_inputs`` but without any image processing.
+    Used by the imageless proposer mode (E5).
+    """
+    _ensure_blip3o_mm_utils()
+
+    if _is_bare_tokenizer(processor):
+        # BLIP3o bare tokenizer: simple tokenization
+        input_ids = processor(
+            chat_text,
+            return_tensors="pt",
+            padding=True,
+        )["input_ids"].to(device)
+        return {"input_ids": input_ids, "attention_mask": torch.ones_like(input_ids)}
+
+    # True multimodal processor: use text-only path
+    try:
+        inputs = processor(
+            text=[chat_text],
+            return_tensors="pt",
+            padding=True,
+        )
+    except TypeError:
+        inputs = processor(
+            chat_text,
+            return_tensors="pt",
+            padding=True,
+        )
+    return {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
+
+
 def _extract_qwen_user_assistant_text(chat_text: str) -> Tuple[str, Optional[str]]:
     """Extract user prompt text and optional assistant completion from CHATML text.
 
