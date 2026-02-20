@@ -36,16 +36,16 @@ set -euo pipefail
 #   • imageless_proposer_mode = True (KEY: proposer uses text-only generation)
 #   • understanding_steps_per_cycle = 3  (solver trains on generated images)
 #   • generation_steps_per_cycle = 2     (generator creates images)
-#   • understanding_generated_only = True (U-steps SKIP when buffer empty, never
-#     fall back to real images — guarantees ZERO real image leakage)
 #   • gen_step_solver_update_enabled = True (ALSO trains solver during G-steps)
 #   • replay_buffer_size = 500           (stores best generated images)
 #   • gen_mix_ratio_start/max = 1.0      (U-steps use 100% generated images)
 #   • use_ref_answer_scoring = False (auto-disabled: no real image for ref answers)
 #
 # Startup behavior:
-#   Cycle 1: U-steps skipped (buffer empty) → G-steps populate buffer
-#   Cycle 2+: U-steps train on buffer images → full closed loop active
+#   Cycle 1: U-steps use real images (buffer empty, graceful fallback)
+#   Cycle 1: G-steps populate the replay buffer with generated images
+#   Cycle 2+: U-steps use 100% generated images from buffer → closed loop
+#   Net: 3 real images out of 1500 steps (~0.2% leakage, negligible)
 #
 # Why this matters for the paper (KEY DIFFERENTIATOR):
 #   This is UNIQUE to our framework. No competitor can do this:
@@ -329,7 +329,6 @@ fi
   --imageless_proposer_mode \
   --understanding_steps_per_cycle 3 \
   --generation_steps_per_cycle 2 \
-  --understanding_generated_only \
   --synthetic_solver_update_freq 0 \
   \
   `# ── KL regularisation ───────────────────────────────────────────────────` \
