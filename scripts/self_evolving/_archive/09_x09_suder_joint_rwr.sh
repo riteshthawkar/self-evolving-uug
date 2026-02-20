@@ -158,7 +158,7 @@ RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-1}"
 RESUME_ARGS=()
 if [[ -n "${RESUME_FROM:-}" ]]; then
   echo "[X09] Resuming from checkpoint: $RESUME_FROM"
-  RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM")
+  RESUME_ARGS=(--resume_from "$RESUME_FROM")
   if [[ "${RESET_PROPOSER_BASELINE}" == "1" ]]; then
     echo "[X09] reset_proposer_baseline=1: baseline and entropy windows will be reset on resume."
     RESUME_ARGS+=(--reset_proposer_baseline)

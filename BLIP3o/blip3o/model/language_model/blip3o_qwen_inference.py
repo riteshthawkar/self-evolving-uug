@@ -54,8 +54,10 @@ class blip3oQwenForInferenceLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaFor
         pixel_values: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.Tensor] = None,
         max_var: Optional[float] = None,
-        # placeholder: str = DEFAULT_IMG_PLACEHOLDER,
+        **kwargs,
     ):  
+        if pixel_values is None and "image" in kwargs:
+            pixel_values = kwargs["image"]
         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained("Alpha-VLLM/Lumina-Next-SFT-diffusers", subfolder="scheduler")
 
 
