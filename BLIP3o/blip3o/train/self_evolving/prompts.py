@@ -151,6 +151,174 @@ def build_generation_spec_retry_prompt(
     )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Imageless proposer (E5): topic list + text-only spec prompt
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Diverse topic themes covering visual capabilities the model should learn.
+# Each entry is a short topic description; the proposer LLM elaborates it into
+# a concrete text-to-image prompt + verification QA pairs.
+IMAGELESS_TOPIC_LIST = [
+    # ---- Counting & arrangement ----
+    "A dining table with several fruits of different colors arranged in a bowl",
+    "A parking lot with multiple cars of varying colors and sizes",
+    "A classroom with students sitting at desks and a teacher at a whiteboard",
+    "A garden with various flowers in different colors and a stone path",
+    "A shelf displaying books of different sizes and colors",
+
+    # ---- Spatial relations ----
+    "A cat sitting on top of a bookshelf next to a potted plant by a window",
+    "A bicycle leaning against a brick wall near a wooden bench",
+    "A bridge over a river with trees on both banks and a boat underneath",
+    "A child standing between two adults in front of a house with a red door",
+    "A lamp on a nightstand beside a bed with a painting on the wall above",
+
+    # ---- Text rendering & signage ----
+    "A storefront with a neon sign displaying the shop name and opening hours",
+    "A road intersection with multiple street signs and a traffic light",
+    "A restaurant menu board listing several dishes with prices",
+    "A library entrance with a banner announcing an upcoming book fair event",
+    "A sports scoreboard showing team names and current scores",
+
+    # ---- Charts & diagrams ----
+    "A bar chart comparing quarterly sales figures for four different products",
+    "A pie chart showing the distribution of energy sources in a country",
+    "A line graph tracking temperature changes across twelve months of a year",
+    "A flow diagram illustrating the steps of a manufacturing process",
+    "A Venn diagram showing the overlap between three scientific categories",
+
+    # ---- Color binding & attributes ----
+    "A person wearing a blue jacket, red scarf, and holding a yellow umbrella",
+    "Three houses in a row: one red with a white fence, one blue with a garden, one green with a balcony",
+    "A sports team photo with players in striped jerseys and numbered shirts",
+    "A market stall with baskets of red tomatoes, green peppers, and orange carrots",
+    "A painting studio with canvases showing different colored abstract art pieces",
+
+    # ---- Multi-object complex scenes ----
+    "A busy kitchen with a chef cooking at a stove, pots on shelves, and ingredients on a counter",
+    "A beach scene with swimmers, a lifeguard tower, surfboards, and a volleyball net",
+    "A construction site with a crane, workers wearing hard hats, and stacked building materials",
+    "An office desk with a computer monitor, coffee mug, stack of papers, and a desk plant",
+    "A farm scene with a red barn, a tractor, cows grazing, and a wooden fence",
+
+    # ---- Nature & landscapes ----
+    "A mountain lake reflecting snow-capped peaks with pine trees on the shore",
+    "A desert landscape with sand dunes, a cactus, and a clear blue sky at sunset",
+    "An underwater coral reef with colorful fish, sea anemones, and a sea turtle",
+    "A rainforest with tall trees, hanging vines, a waterfall, and exotic birds",
+    "A snowy village with wooden cabins, smoke from chimneys, and footprints in the snow",
+
+    # ---- Architecture & interiors ----
+    "A modern glass skyscraper next to a historical stone cathedral in a city square",
+    "A cozy living room with a fireplace, a bookshelf, a sofa, and a coffee table",
+    "A Japanese temple with a curved roof, stone lanterns, and a zen garden",
+    "A subway station platform with trains, passengers, and electronic display boards",
+    "A museum gallery with paintings on white walls, sculptures on pedestals, and visitors",
+
+    # ---- People & activities ----
+    "A group of musicians performing on a stage with different instruments",
+    "A scientist in a laboratory examining samples under a microscope with equipment around",
+    "A family having a picnic in a park with a checkered blanket and a wicker basket",
+    "An artist painting a portrait on an easel in a studio with paint tubes and brushes",
+    "Athletes competing in a track race at a stadium with spectators in the stands",
+
+    # ---- Food & cooking ----
+    "A sushi platter with different types of rolls, nigiri, and garnishes on a wooden board",
+    "A bakery display with cupcakes, croissants, and bread loaves behind glass",
+    "A breakfast table set with pancakes, orange juice, eggs, and a bowl of fruit",
+    "A pizza being prepared with toppings like mushrooms, olives, and bell peppers",
+    "A food truck at a festival serving tacos with customers waiting in line",
+
+    # ---- Technology & machines ----
+    "A robotics lab with mechanical arms, circuit boards, and computer screens",
+    "A vintage car parked next to a modern electric vehicle in a garage",
+    "A weather station on a hilltop with instruments measuring wind and temperature",
+    "A drone flying over farmland capturing aerial images of crop fields",
+    "A space control room with large monitors, satellite imagery, and operators at consoles",
+
+    # ---- Abstract & conceptual ----
+    "An infographic explaining the water cycle with labeled arrows and icons",
+    "A world map highlighting countries with different colors for climate zones",
+    "A timeline diagram showing major historical events across several centuries",
+    "A periodic table poster with color-coded element groups and atomic numbers",
+    "A blueprint of a house floor plan with labeled rooms and measurements",
+
+    # ---- Grounding & object relations ----
+    "A toy store window display with stuffed animals, board games, and action figures",
+    "A workshop bench with hand tools, wood pieces, and a project being assembled",
+    "A greenhouse with rows of seedlings in pots, watering cans, and hanging baskets",
+    "A harbor with fishing boats, nets drying on poles, and seagulls on wooden posts",
+    "A winter market with stalls selling ornaments, hot drinks, and handmade crafts",
+]
+
+
+def _sample_imageless_topic(step: int, seed: int = 42) -> str:
+    """Deterministically sample a topic from the list for a given training step."""
+    import random as _rng
+    r = _rng.Random(seed + step)
+    return r.choice(IMAGELESS_TOPIC_LIST)
+
+
+def build_imageless_spec_prompt(topic: str, target_difficulty: str = "medium") -> str:
+    """Build a text-only proposer prompt for imageless generation spec creation.
+
+    The proposer receives a TOPIC (no image) and must:
+    1. Invent a detailed text-to-image prompt grounded in the topic.
+    2. Create verification QA pairs based on what the image SHOULD contain.
+
+    This enables a fully synthetic self-evolving loop (E5) where no external
+    images are used at any point in training.
+    """
+    level = (target_difficulty or "medium").strip().lower()
+    if level not in {"easy", "medium", "hard"}:
+        level = "medium"
+    if level == "hard":
+        diff_hint = (
+            "Target HARD verification: each QA should require at least two visual constraints "
+            "(e.g., relation + attribute, comparison + count, spatial + color)."
+        )
+    elif level == "easy":
+        diff_hint = (
+            "Target EASY-MEDIUM verification: keep QA objective but avoid trivial one-word lookups."
+        )
+    else:
+        diff_hint = (
+            "Target MEDIUM verification: each QA should require at least two visual cues "
+            "(count + attribute, relation + attribute, or comparison)."
+        )
+    return (
+        "You are a generation-spec proposer for self-evolving image generation training.\n"
+        "You are given a TOPIC DESCRIPTION (not an image). Your task is to:\n"
+        "1. Create a detailed text-to-image prompt that a generator will use to create an image.\n"
+        "2. Create verification QA pairs to check if the generated image is correct.\n"
+        "\n"
+        f"TOPIC: {topic}\n"
+        "\n"
+        f"{diff_hint}\n"
+        "Rules:\n"
+        "- The prompt must be a rich, detailed description suitable for image generation.\n"
+        "- Include specific visual details: object counts, colors, spatial positions, sizes, text content.\n"
+        "- The prompt must be declarative (caption/instruction style), not a question.\n"
+        "- Do not use a question mark in the prompt.\n"
+        "- Every fact checked by the QA pairs MUST appear explicitly in the prompt text.\n"
+        "  The image generator sees ONLY the prompt — it cannot infer missing details.\n"
+        "  Example: if QA asks 'How many apples?' → 'Three', write 'three apples' in the prompt.\n"
+        "- QA pairs must be objective, short-answer, and visually verifiable.\n"
+        "- Focus on: object counting, color identification, spatial relations, text content,\n"
+        "  object attributes, relative sizes, actions, and scene composition.\n"
+        "- Expected answers must be concise (1-6 words).\n"
+        "- Avoid subjective wording: why, might, could, likely, feel, opinion.\n"
+        "- Prefer compositional checks that combine multiple visual elements.\n"
+        "Output XML only:\n"
+        "<prompt>...</prompt>\n"
+        "<spec>\n"
+        "  <qa><question>...</question><expected>...</expected></qa>\n"
+        "  <qa><question>...</question><expected>...</expected></qa>\n"
+        "  <qa><question>...</question><expected>...</expected></qa>\n"
+        "</spec>"
+    )
+
+
 def build_spec_proposer_prompt() -> str:
     """Prompt for generation-loop proposer: propose a specification
     (questions + expected answers) to verify a generated image."""

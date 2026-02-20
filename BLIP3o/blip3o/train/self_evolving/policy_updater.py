@@ -17,9 +17,11 @@ from PIL import Image
 
 from .utils import (
     _build_chat_text,
+    _build_text_only_chat,
     _clip_grad_norm_multi_device,
     _collect_trainable_params,
     _prepare_mm_inputs,
+    _prepare_text_only_inputs,
     _unwrap_model,
     use_adapter,
 )
@@ -143,7 +145,7 @@ class RolePolicyUpdater:
 
     def step(
         self,
-        image: Image.Image,
+        image,  # Image.Image or None (for imageless proposer mode)
         prompt: str,
         completion: str,
         reward: float,
@@ -152,15 +154,27 @@ class RolePolicyUpdater:
     ) -> Dict[str, float]:
         self.step_id += 1
 
-        chat_prompt = _build_chat_text(self.processor, image, prompt)
-        chat_full = chat_prompt + completion
+        if image is not None:
+            chat_prompt = _build_chat_text(self.processor, image, prompt)
+            chat_full = chat_prompt + completion
 
-        inputs_prompt = _prepare_mm_inputs(
-            self.processor, device, image, chat_prompt, model=self.model
-        )
-        inputs_full = _prepare_mm_inputs(
-            self.processor, device, image, chat_full, model=self.model
-        )
+            inputs_prompt = _prepare_mm_inputs(
+                self.processor, device, image, chat_prompt, model=self.model
+            )
+            inputs_full = _prepare_mm_inputs(
+                self.processor, device, image, chat_full, model=self.model
+            )
+        else:
+            # Imageless path: text-only input (E5 imageless proposer mode)
+            chat_prompt = _build_text_only_chat(self.processor, prompt)
+            chat_full = chat_prompt + completion
+
+            inputs_prompt = _prepare_text_only_inputs(
+                self.processor, device, chat_prompt,
+            )
+            inputs_full = _prepare_text_only_inputs(
+                self.processor, device, chat_full,
+            )
 
         input_ids = inputs_full["input_ids"]
         labels = input_ids.clone()

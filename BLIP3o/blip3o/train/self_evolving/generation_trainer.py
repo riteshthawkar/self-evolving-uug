@@ -33,13 +33,16 @@ from .policy_updater import RolePolicyUpdater
 from .prompts import (
     build_generation_spec_prompt,
     build_generation_spec_retry_prompt,
+    build_imageless_spec_prompt,
     build_proposer_prompt,
     build_solver_prompt,
+    _sample_imageless_topic,
 )
 from .utils import (
     HAS_PEFT,
     HAS_WANDB,
     _build_chat_text,
+    _build_text_only_chat,
     _clip_grad_norm_multi_device,
     _collect_git_info,
     _collect_trainable_params,
@@ -49,6 +52,7 @@ from .utils import (
     _parse_answer,
     _parse_first_question,
     _prepare_mm_inputs,
+    _prepare_text_only_inputs,
     _resolve_attn_implementation,
     _safe_dtype,
     _set_global_seed,
@@ -1383,6 +1387,70 @@ class GenerationSelfEvolvingTrainer:
         text = _decode_tokens(self.processor, completion_ids)
         return text.strip()
 
+    def _generate_text_only(
+        self,
+        prompt: str,
+        adapter_name: Optional[str],
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+    ) -> str:
+        """Generate text from a text-only prompt (no image input).
+
+        Used by the imageless proposer mode (E5) where the proposer receives
+        a topic description and generates a generation spec without visual input.
+        """
+        chat_text = _build_text_only_chat(self.processor, prompt)
+        inputs = _prepare_text_only_inputs(self.processor, self.device, chat_text)
+
+        gen_inputs = dict(inputs)
+
+        # Fail fast on corrupted / incompatible token IDs
+        model_cfg = getattr(_unwrap_model(self.model), "config", None)
+        vocab_size = getattr(model_cfg, "vocab_size", None)
+        input_ids = gen_inputs.get("input_ids")
+        if torch.is_tensor(input_ids) and isinstance(vocab_size, int) and vocab_size > 0:
+            min_id = int(input_ids.min().item())
+            max_id = int(input_ids.max().item())
+            if min_id < 0 or max_id >= vocab_size:
+                raise RuntimeError(
+                    "Invalid token ids prepared for text-only generation: "
+                    f"min_id={min_id}, max_id={max_id}, vocab_size={vocab_size}."
+                )
+
+        # Extract pad_token_id
+        _tok = _extract_tokenizer_from_processor(self.processor)
+        _pad_id = getattr(_tok, "eos_token_id", None) if _tok is not None else None
+
+        def _run_generate(curr_inputs: Dict[str, torch.Tensor]):
+            base_kwargs = {
+                "max_new_tokens": max_new_tokens,
+                "do_sample": True,
+                "temperature": temperature,
+                "top_p": top_p,
+                "pad_token_id": _pad_id,
+                "remove_invalid_values": True,
+                "renormalize_logits": True,
+            }
+            try:
+                return self.model.generate(**curr_inputs, **base_kwargs)
+            except TypeError as exc:
+                msg = str(exc)
+                if ("remove_invalid_values" in msg) or ("renormalize_logits" in msg):
+                    base_kwargs.pop("remove_invalid_values", None)
+                    base_kwargs.pop("renormalize_logits", None)
+                    return self.model.generate(**curr_inputs, **base_kwargs)
+                raise
+
+        with torch.no_grad():
+            with use_adapter(self.model, adapter_name):
+                outputs = _run_generate(gen_inputs)
+
+        input_len = gen_inputs["input_ids"].shape[1] if "input_ids" in gen_inputs else 0
+        completion_ids = outputs[0, input_len:]
+        text = _decode_tokens(self.processor, completion_ids)
+        return text.strip()
+
     def _caption_image(self, image: Image.Image) -> str:
         caption = self._generate(
             image=image,
@@ -1407,6 +1475,26 @@ class GenerationSelfEvolvingTrainer:
         raw = self._generate(
             image=image,
             prompt=prompt_text,
+            adapter_name="proposer" if self.cfg.use_lora else None,
+            max_new_tokens=self.cfg.max_new_tokens_proposer,
+            temperature=self.cfg.temp,
+            top_p=self.cfg.top_p,
+        )
+        spec = _parse_generation_spec(raw)
+        return spec
+
+    def _propose_imageless_generation_spec(
+        self,
+        *,
+        proposer_prompt: str,
+    ) -> GenerationSpec:
+        """Generate a generation spec from text-only input (no image).
+
+        Used by imageless proposer mode (E5): the proposer receives a topic/theme
+        as text and generates a prompt + QA pairs purely from text reasoning.
+        """
+        raw = self._generate_text_only(
+            prompt=proposer_prompt,
             adapter_name="proposer" if self.cfg.use_lora else None,
             max_new_tokens=self.cfg.max_new_tokens_proposer,
             temperature=self.cfg.temp,
@@ -1841,13 +1929,16 @@ class GenerationSelfEvolvingTrainer:
         self,
         *,
         step: int,
-        image: Image.Image,
+        image: Optional[Image.Image],
         spec: GenerationSpec,
         best: Dict[str, object],
         spec_quality: float,
         target_difficulty: str = "medium",
     ) -> int:
         if not bool(getattr(self.cfg, "unicorn_reconstruction_sft_enabled", True)):
+            return 0
+        # In imageless mode, skip reconstruction (requires source image for SFT)
+        if image is None:
             return 0
         if spec_quality < float(getattr(self.cfg, "unicorn_reconstruction_min_quality", 0.55)):
             return 0
@@ -3427,23 +3518,62 @@ class GenerationSelfEvolvingTrainer:
     def _generation_step(
         self,
         step: int,
-        image: Image.Image,
+        image: Optional[Image.Image],
         meta: Dict,
         target_difficulty: str = "medium",
     ) -> Dict[str, object]:
         verbose = self.is_main_process and (step % self.cfg.log_every == 0)
         step_t0 = time.perf_counter()
+        _imageless = bool(getattr(self.cfg, "imageless_proposer_mode", False))
         if verbose:
-            print(f"[Step {step:05d}][G] generation phase start (target_difficulty={target_difficulty})")
+            print(
+                f"[Step {step:05d}][G] generation phase start "
+                f"(target_difficulty={target_difficulty}, imageless={_imageless})"
+            )
 
-        source_caption = self._caption_image(image)
-        spec, spec_quality, spec_quality_details, unicorn_spec_meta = self._select_generation_spec_with_unicorn(
-            image=image,
-            source_caption=source_caption,
-            step=step,
-            verbose=verbose,
-            target_difficulty=target_difficulty,
-        )
+        if _imageless:
+            # ── Imageless proposer path (E5): topic → text-only proposer → spec ──
+            topic = _sample_imageless_topic(step=step, seed=self.cfg.seed)
+            source_caption = topic  # use topic as pseudo-caption for logging
+            if verbose:
+                print(f"[Step {step:05d}][G] imageless mode: topic='{topic[:80]}...'")
+
+            proposer_prompt = build_imageless_spec_prompt(
+                topic=topic,
+                target_difficulty=target_difficulty,
+            )
+            raw_spec = self._propose_imageless_generation_spec(
+                proposer_prompt=proposer_prompt,
+            )
+            # Sanitize & score spec (quality only — no alignment since no source image)
+            spec, spec_quality, spec_quality_details = self._sanitize_and_score_spec(
+                raw_spec,
+                source_caption=source_caption,
+            )
+            unicorn_spec_meta = {
+                "enabled": False,
+                "rejection_enabled": False,
+                "imageless_mode": True,
+                "topic": topic,
+                "attempts": 1,
+                "retries_used": 0,
+                "selected_accepted": True,
+                "selected_reject_reason": "",
+                "selected_alignment": 0.0,
+                "selected_contradiction": 0.0,
+                "selected_quality": float(spec_quality),
+                "attempt_logs": [],
+            }
+        else:
+            # ── Standard image-based proposer path ──
+            source_caption = self._caption_image(image)
+            spec, spec_quality, spec_quality_details, unicorn_spec_meta = self._select_generation_spec_with_unicorn(
+                image=image,
+                source_caption=source_caption,
+                step=step,
+                verbose=verbose,
+                target_difficulty=target_difficulty,
+            )
 
         if self.judge is not None:
             self.judge.update(self)
@@ -3468,6 +3598,9 @@ class GenerationSelfEvolvingTrainer:
             )
 
         use_diverse_prompts = bool(getattr(self.cfg, "use_diverse_prompts", False))
+        # Diverse prompts require image-based spec generation — disable in imageless mode
+        if _imageless:
+            use_diverse_prompts = False
         candidates: List[Dict[str, object]] = []
         candidate_specs = None
         candidate_spec_qualities = None
@@ -3525,6 +3658,12 @@ class GenerationSelfEvolvingTrainer:
         # ---- Score candidates (Phase 1 vs Phase 2 scoring) ---- #
         _use_ref_scoring = bool(getattr(self.cfg, "use_ref_answer_scoring", False))
         _use_self_clip_scoring = bool(getattr(self.cfg, "use_self_clip_reward_scoring", False))
+        # In imageless mode, ref-answer scoring requires a real image (which we don't have).
+        # Fall back to spec-based scoring which uses the generated images + QA pairs.
+        if _imageless and _use_ref_scoring:
+            _use_ref_scoring = False
+            if verbose:
+                print(f"[Step {step:05d}][G] imageless mode: disabling ref-answer scoring (no real image)")
         _ref_questions: Optional[List[str]] = None
         _ref_answers: Optional[List[str]] = None
 
@@ -4257,15 +4396,20 @@ class GenerationSelfEvolvingTrainer:
                         )
                         _grpo_completions = [_proposer_gen_completion]
                         _grpo_rewards = [_gen_proposer_reward]
-                        _grpo_images = [image]
+                        _grpo_images = [image]  # None in imageless mode — OK
 
                         # Sample extra specs (lightweight — proposer only, no image gen)
                         for _gi in range(_grpo_group_size - 1):
                             try:
-                                _extra_spec = self._propose_generation_spec(
-                                    image=image,
-                                    proposer_prompt=_proposer_gen_prompt or None,
-                                )
+                                if _imageless:
+                                    _extra_spec = self._propose_imageless_generation_spec(
+                                        proposer_prompt=_proposer_gen_prompt or "",
+                                    )
+                                else:
+                                    _extra_spec = self._propose_generation_spec(
+                                        image=image,
+                                        proposer_prompt=_proposer_gen_prompt or None,
+                                    )
                                 _extra_comp = str(_extra_spec.raw_output or _extra_spec.prompt or "").strip()
                                 if not _extra_comp:
                                     continue

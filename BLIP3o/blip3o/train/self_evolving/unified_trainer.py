@@ -1643,9 +1643,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     # and upweights them — now both phases respond to it.
                     gen_difficulty_state = self._choose_difficulty_target()
                     gen_target_difficulty = str(gen_difficulty_state.get("desired_bucket", "medium"))
+                    # In imageless proposer mode (E5), pass image=None so the
+                    # proposer generates specs from topics instead of images.
+                    _gen_image = None if bool(getattr(cfg, "imageless_proposer_mode", False)) else image
                     out = self._generation_step(
                         step=step,
-                        image=image,
+                        image=_gen_image,
                         meta=meta,
                         target_difficulty=gen_target_difficulty,
                     )
