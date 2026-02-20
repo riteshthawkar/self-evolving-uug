@@ -31,9 +31,9 @@
 | E6 | `E6_single_step.sh` | 0U + 5G† | Solver + Generator + DiT + Proposer | Unified step: all components update simultaneously |
 | *E7* | *(X09 step 650)* | 3U + 2G | Same as E1, easy data | Data difficulty matters |
 
-\* E5 runs 3U+2G like E1, but U-steps use 100% generated images from replay buffer (never real images)
+\* E5 runs 3U+2G like E1, but U-steps use 100% generated images from replay buffer (first cycle falls back to real images until buffer fills — ~0.2% leakage)
 † E6 runs only G-steps, but solver + proposer also train every step via `gen_step_solver_update_enabled` + `proposer_gen_reward_enabled` — all 4 components update per step
-‡ Solver in E5 never sees real images — trains on self-generated images via replay buffer + gen_step_solver_update. Uses `--imageless_proposer_mode` + `--understanding_generated_only`
+‡ Solver in E5 trains primarily on self-generated images via replay buffer + gen_step_solver_update. Uses `--imageless_proposer_mode` + `gen_mix_ratio=1.0`
 
 ## Ablation Matrix
 
@@ -95,13 +95,12 @@ No competitor can claim this:
 
 Key implementation details:
 - `--imageless_proposer_mode` enables text-only proposer generation
-- `--understanding_generated_only` ensures U-steps NEVER fall back to real images
 - `--replay_buffer_size 500` stores best generated images for U-step consumption
 - `--gen_mix_ratio_start 1.0 --gen_mix_ratio_max 1.0` forces 100% generated in U-steps
 - 75 diverse topics cover counting, spatial relations, text, charts, color, objects, etc.
 - Proposer creates QA pairs based on *expectations* of what the image should contain
 - `use_ref_answer_scoring` auto-disabled (no real image to generate reference answers)
-- Startup: Cycle 1 U-steps skip (buffer empty) → G-steps fill buffer → Cycle 2+ runs full loop
+- Startup: Cycle 1 U-steps use real images (buffer empty), G-steps fill buffer, Cycle 2+ → 100% generated
 
 ## Priority Order (Given 10-Day Constraint)
 
