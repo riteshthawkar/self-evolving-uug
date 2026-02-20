@@ -153,6 +153,12 @@ if [[ ! -d "$DATA_DIR" ]]; then
   echo "[E3] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
   exit 1
 fi
+if ! find "$DATA_DIR" -type f \
+    \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) \
+    -print -quit | grep -q .; then
+  echo "[E3] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
+  exit 1
+fi
 
 echo "[E3] Starting experiment E3 (Generation-Only Ablation)"
 echo "[E3]   Stage:       $TRAIN_STAGE"
