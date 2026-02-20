@@ -158,6 +158,12 @@ if [[ ! -d "$DATA_DIR" ]]; then
   echo "[E4] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
   exit 1
 fi
+if ! find "$DATA_DIR" -type f \
+    \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) \
+    -print -quit | grep -q .; then
+  echo "[E4] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
+  exit 1
+fi
 
 echo "[E4] Starting experiment E4 (No DiT RWR Ablation)"
 echo "[E4]   Stage:       $TRAIN_STAGE"

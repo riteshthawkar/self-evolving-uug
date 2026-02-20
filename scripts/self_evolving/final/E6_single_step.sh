@@ -2,40 +2,44 @@
 set -euo pipefail
 
 # ══════════════════════════════════════════════════════════════════════════════
-# E6 — Ablation: Single-Step Joint Training (1U + 1G per cycle)
+# E6 — Ablation: Unified Single-Step Joint Training (ALL components per step)
 # ══════════════════════════════════════════════════════════════════════════════
 #
-# Same as E1 (full joint training) but with a 1:1 cycle ratio instead of 3:2.
-# Every step alternates between understanding and generation:
+# Every training step updates ALL four components simultaneously:
 #
-#   Step 1: Understanding (proposer → solver → GRPO)
-#   Step 2: Generation   (proposer → generator → DiT RWR)
-#   Step 3: Understanding ...
-#   Step 4: Generation   ...
+#   Each step:
+#     1. Proposer writes generation spec (prompt + QA) for a real image
+#     2. Generator creates candidate images from the spec
+#     3. Solver scores candidates by answering QA → combined_score reward
+#     4. Generator LoRA updated via GRPO (generation reward)          ✓
+#     5. DiT weights updated via RWR (denoising reward)               ✓
+#     6. Solver LoRA updated via REINFORCE (combined_score)           ✓
+#     7. Proposer LoRA updated via dual reward (entropy + quality)    ✓
 #
-# In E1 (and X09), the cycle is 3U + 2G:
-#   Steps 1-3: Understanding
-#   Steps 4-5: Generation
-#   Steps 6-8: Understanding
-#   Steps 9-10: Generation ...
+# This is different from E1 (3U + 2G) where understanding and generation
+# happen in SEPARATE steps:
+#   E1: Steps 1-3 train ONLY solver+proposer, Steps 4-5 train ONLY generator+DiT
+#   E6: EVERY step trains solver + generator + DiT + proposer simultaneously
+#
+# Implementation:
+#   • understanding_steps_per_cycle = 0  (no separate U-steps)
+#   • generation_steps_per_cycle = 5     (every step is a G-step)
+#   • gen_step_solver_update_enabled = True (solver trains during G-steps)
+#   • proposer_gen_reward_enabled = True (proposer gets dual reward in G-steps)
+#   → All 4 LoRA/weight updates happen in every single step
 #
 # What this experiment tests:
-#   • Does the U:G ratio matter?
-#   • Is 3:2 better because understanding needs more steps (harder to learn)?
-#   • Or is 1:1 better because it provides more frequent cross-task feedback?
-#
-# Key insight:
-#   With 3:2, the model does 3 understanding steps in a row before switching
-#   to generation. The understanding LoRA changes accumulate before the
-#   generator sees the updated model. With 1:1, the feedback loop is tighter:
-#   each understanding improvement is immediately followed by a generation
-#   step that benefits from the updated conditioning.
+#   • Is dedicated understanding training (separate U-steps with richer reward
+#     signals: 8+ samples, informativeness gating, entropy-IQR filtering)
+#     better than unified steps where solver piggybacks on generation scoring?
+#   • Or is simultaneous all-component training more efficient?
 #
 # What this experiment proves:
-#   ✓ Compare E6 vs E1: optimal cycle ratio for joint training
-#   ✓ If E6 ≈ E1: ratio doesn't matter much → simpler configuration
-#   ✓ If E6 > E1: tighter coupling is better → argues for co-evolution
-#   ✓ If E6 < E1: understanding benefits from consecutive batching
+#   ✓ Compare E6 vs E1: dedicated U-steps vs unified training
+#   ✓ If E6 ≈ E1: dedicated U-steps unnecessary → simpler single-step works
+#   ✓ If E6 > E1: simultaneous training is more efficient
+#   ✓ If E6 < E1: understanding benefits from dedicated steps with richer rewards
+#   ✓ Compare E6 vs E3: adding solver training to G-steps improves understanding
 #
 # Usage:
 #   TRAIN_STAGE=warmup bash E6_single_step.sh
@@ -168,15 +172,21 @@ if [[ ! -d "$DATA_DIR" ]]; then
   echo "[E6] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
   exit 1
 fi
+if ! find "$DATA_DIR" -type f \
+    \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) \
+    -print -quit | grep -q .; then
+  echo "[E6] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
+  exit 1
+fi
 
-echo "[E6] Starting experiment E6 (Single-Step Joint — 1U + 1G per cycle)"
+echo "[E6] Starting experiment E6 (Unified Single-Step — ALL components per step)"
 echo "[E6]   Stage:       $TRAIN_STAGE"
 echo "[E6]   Run name:    $RUN_NAME"
 echo "[E6]   Output dir:  $OUTPUT_DIR"
 echo "[E6]   Data dir:    $DATA_DIR"
 echo "[E6]   GPUs:        $NPROC_PER_NODE"
 echo "[E6]   Attn impl:   $ATTN_IMPL"
-echo "[E6]   Cycle: 1 U-step + 1 G-step (alternating every step)"
+echo "[E6]   MODE: Every step updates Solver + Generator + DiT + Proposer simultaneously"
 if [[ -n "${RESUME_FROM:-}" ]]; then
   echo "[E6]   Resume from: $RESUME_FROM"
 fi
@@ -220,7 +230,7 @@ fi
   --grad_clip 1.0 \
   --grad_accum_steps 4 \
   \
-  `# ── Role update frequencies (same as E1) ───────────────────────────────` \
+  `# ── Role update frequencies (ALL active every step) ─────────────────────` \
   --proposer_update_freq 1 \
   --generator_update_freq 1 \
   --enable_solver_updates \
@@ -285,9 +295,11 @@ fi
   `# ── Proposer entropy target ─────────────────────────────────────────────` \
   --prop_entropy_sigma 0.25 \
   \
-  `# ── Cycle: 1 U-step + 1 G-step (tight alternation) ────────────────────` \
-  --understanding_steps_per_cycle 1 \
-  --generation_steps_per_cycle 1 \
+  `# ── Cycle: ALL generation steps — solver trains via gen_step_solver_update` \
+  `# No separate U-steps. Every step is a G-step where ALL components update:` \
+  `# Generator GRPO + DiT RWR + Solver REINFORCE + Proposer dual reward.    ` \
+  --understanding_steps_per_cycle 0 \
+  --generation_steps_per_cycle 5 \
   --synthetic_solver_update_freq 0 \
   \
   `# ── KL regularisation ───────────────────────────────────────────────────` \
@@ -335,7 +347,10 @@ fi
   --dit_joint_conditioning_lr 5e-7 \
   --dit_reward_loss_weight 0.5 \
   \
-  `# ── Proposer dual reward (same as E1) ──────────────────────────────────` \
+  `# ── Unified step: ALL components update during EVERY G-step ────────────` \
+  `# proposer_gen_reward_enabled: proposer gets dual reward every step      ` \
+  `# gen_step_solver_update_enabled: solver trains on generated images      ` \
+  `# → Together: Solver + Generator + DiT + Proposer all update per step   ` \
   --proposer_gen_reward_enabled \
   --proposer_gen_entropy_weight 0.7 \
   --proposer_gen_baseline_momentum 0.6 \

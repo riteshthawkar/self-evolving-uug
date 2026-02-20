@@ -7,31 +7,45 @@ set -euo pipefail
 #
 # The most radical experiment: NO external images are used at ANY point.
 # The proposer generates specs from TEXT TOPICS/THEMES alone — it never sees
-# a real image. This creates a FULLY synthetic self-evolving loop:
+# a real image. Generated images are fed BACK into understanding steps via
+# the replay buffer, creating a TRUE closed loop where both understanding
+# and generation train on self-generated content.
 #
+# Full cycle:
 #   1. Topic sampled from diverse theme list (no image)
 #   2. Proposer (text-only) → imagines a scene → writes generation prompt + QA
 #      The proposer creates QA pairs based on EXPECTATIONS of what the image
 #      should contain (consistency, alignment, object location, grounding, etc.)
-#   3. Generator creates candidate images from the prompt
-#   4. Best generated image is selected by solver verification
-#   5. Solver answers QA questions about the GENERATED image
-#   6. Solver gets GRPO reward → updates solver LoRA
-#   7. DiT gets RWR reward → updates denoiser
-#   8. Proposer gets dual reward → learns to write more verifiable prompts
+#   3. [G-steps] Generator creates candidate images from the prompt
+#   4. Best generated image → stored in replay buffer (quality-gated)
+#   5. Solver scores generated candidates → GRPO reward → solver LoRA update
+#   6. DiT gets RWR reward → updates denoiser
+#   7. Proposer gets dual reward → learns to write more verifiable prompts
+#   8. [U-steps] Solver trains on replay buffer images (100% generated)
+#      → dedicated understanding steps on self-generated images
+#      → explicit solver LoRA GRPO update from generated visual content
 #
 # The self-evolving loop:
 #   • Better proposer → richer prompts with verifiable details → better images
-#   • Better generator → more faithful images → solver learns real visual grounding
-#   • Better solver → more accurate verification → better reward signal → better generator
+#   • Better generator → more faithful images → replay buffer quality rises
+#   • Better understanding → solver learns from generated images → better reward
+#   • Better solver → more accurate verification → better reward → better generator
 #   • All components improve using ONLY self-generated content
 #
 # Implementation:
 #   • imageless_proposer_mode = True (KEY: proposer uses text-only generation)
-#   • understanding_steps_per_cycle = 0  (NO understanding-only steps)
-#   • generation_steps_per_cycle = 5     (ALL steps are generation)
-#   • gen_step_solver_update_enabled = True (solver trains on generated images)
+#   • understanding_steps_per_cycle = 3  (solver trains on generated images)
+#   • generation_steps_per_cycle = 2     (generator creates images)
+#   • understanding_generated_only = True (U-steps SKIP when buffer empty, never
+#     fall back to real images — guarantees ZERO real image leakage)
+#   • gen_step_solver_update_enabled = True (ALSO trains solver during G-steps)
+#   • replay_buffer_size = 500           (stores best generated images)
+#   • gen_mix_ratio_start/max = 1.0      (U-steps use 100% generated images)
 #   • use_ref_answer_scoring = False (auto-disabled: no real image for ref answers)
+#
+# Startup behavior:
+#   Cycle 1: U-steps skipped (buffer empty) → G-steps populate buffer
+#   Cycle 2+: U-steps train on buffer images → full closed loop active
 #
 # Why this matters for the paper (KEY DIFFERENTIATOR):
 #   This is UNIQUE to our framework. No competitor can do this:
@@ -44,11 +58,11 @@ set -euo pipefail
 #   from its own text reasoning and image generation.
 #
 # What this experiment proves:
-#   ✓ Understanding can improve from purely self-generated images
+#   ✓ Understanding EXPLICITLY trains on self-generated images (not just side-effect)
 #   ✓ Generation improves without any real image reference
 #   ✓ The proposer can learn to write good specs from text alone
 #   ✓ Compare E5 vs E1: quantifies the value of real images
-#   ✓ Compare E5 vs E3: solver training on generated images adds value
+#   ✓ Compare E5 vs E3: dedicated U-steps on generated images add value
 #   ✓ If E5 improves → TRUE self-evolution, strongest novelty claim
 #
 # Usage:
@@ -58,7 +72,7 @@ set -euo pipefail
 
 REPO_ROOT="/workspace/self-evolving-uug/self-evolving-uug"
 PYTHON_BIN="python3"
-# DATA_DIR is needed for pool init but images are NEVER sampled in imageless mode
+# DATA_DIR is needed for pool init; U-steps use 100% replay buffer (generated images)
 DATA_DIR="${DATA_DIR:-/workspace/self-evolving-uug/data/joint_3k/images}"
 OUTPUT_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/final/E5_synthetic_loop"
 RUN_NAME="E5_synthetic_loop_s42"
@@ -184,15 +198,23 @@ if [[ ! -d "$DATA_DIR" ]]; then
   echo "[E5] NOTE: DATA_DIR is needed for pool init but images are NOT sampled in imageless mode." >&2
   exit 1
 fi
+if ! find "$DATA_DIR" -type f \
+    \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) \
+    -print -quit | grep -q .; then
+  echo "[E5] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
+  echo "[E5] NOTE: Pool init requires >=1 image even in imageless mode." >&2
+  exit 1
+fi
 
 echo "[E5] Starting experiment E5 (Fully Imageless Self-Evolving Loop)"
 echo "[E5]   Stage:       $TRAIN_STAGE"
 echo "[E5]   Run name:    $RUN_NAME"
 echo "[E5]   Output dir:  $OUTPUT_DIR"
-echo "[E5]   Data dir:    $DATA_DIR  (pool init only — images NOT sampled)"
+echo "[E5]   Data dir:    $DATA_DIR  (pool init only — U-steps use replay buffer)"
 echo "[E5]   GPUs:        $NPROC_PER_NODE"
 echo "[E5]   Attn impl:   $ATTN_IMPL"
-echo "[E5]   MODE: ZERO external images — proposer generates from TEXT TOPICS"
+echo "[E5]   MODE: ZERO external images — proposer from TEXT, U-steps from replay buffer"
+echo "[E5]   CYCLE: 3U (generated images from buffer) + 2G (imageless proposer)"
 if [[ -n "${RESUME_FROM:-}" ]]; then
   echo "[E5]   Resume from: $RESUME_FROM"
 fi
@@ -305,8 +327,9 @@ fi
   `# IMAGELESS PROPOSER MODE — KEY E5 FLAG                                ` \
   `# ══════════════════════════════════════════════════════════════════════` \
   --imageless_proposer_mode \
-  --understanding_steps_per_cycle 0 \
-  --generation_steps_per_cycle 5 \
+  --understanding_steps_per_cycle 3 \
+  --generation_steps_per_cycle 2 \
+  --understanding_generated_only \
   --synthetic_solver_update_freq 0 \
   \
   `# ── KL regularisation ───────────────────────────────────────────────────` \
@@ -331,13 +354,17 @@ fi
   --disable_unicorn_reconstruction_sft \
   --disable_unicorn_reconstruction_generator \
   \
-  `# ── Replay buffer (disabled) ───────────────────────────────────────────` \
-  --replay_buffer_size 1 \
-  --replay_min_reward 1.10 \
-  --replay_max_staleness 1 \
+  `# ── Replay buffer (ENABLED — feeds generated images to U-steps) ───────` \
+  `# Best generated images from G-steps are stored in the replay buffer.  ` \
+  `# During U-steps, 100% of images come FROM the replay buffer (no real  ` \
+  `# images). This creates the closed loop: G generates → buffer stores → ` \
+  `# U trains on generated → better reward → better G.                    ` \
+  --replay_buffer_size 500 \
+  --replay_min_reward 0.30 \
+  --replay_max_staleness 500 \
   --gen_mix_source_mode buffer \
-  --gen_mix_ratio_start 0.0 \
-  --gen_mix_ratio_max 0.0 \
+  --gen_mix_ratio_start 1.0 \
+  --gen_mix_ratio_max 1.0 \
   --gen_mix_ratio_warmup_steps 1 \
   \
   `# ── DiT SFT + Joint Conditioning + RWR (same as E1) ───────────────────` \

@@ -27,13 +27,13 @@
 | E2 | `E2_understanding_only.sh` | 5U + 0G | Solver + Proposer | Understanding improves in isolation |
 | E3 | `E3_generation_only.sh` | 0U + 5G | Generator + DiT + Proposer | Generation improves in isolation |
 | E4 | `E4_no_dit_rwr.sh` | 3U + 2G | Solver + Generator + Proposer (no DiT) | DiT training is essential for generation |
-| **E5** | `E5_synthetic_loop.sh` | 0U + 5G* | Solver† + Generator + DiT + Proposer | **Fully imageless**: understanding improves from self-generated images |
-| E6 | `E6_single_step.sh` | 1U + 1G | Solver + Generator + DiT + Proposer | Optimal U:G ratio for co-evolution |
+| **E5** | `E5_synthetic_loop.sh` | 3U + 2G* | Solver‡ + Generator + DiT + Proposer | **Fully imageless**: understanding trains on self-generated images |
+| E6 | `E6_single_step.sh` | 0U + 5G† | Solver + Generator + DiT + Proposer | Unified step: all components update simultaneously |
 | *E7* | *(X09 step 650)* | 3U + 2G | Same as E1, easy data | Data difficulty matters |
 
-\* E5 runs only generation steps, but solver trains on generated images via `gen_step_solver_update_enabled`
-† Solver in E5 never sees real images — only model-generated ones
-‡ E5 uses `--imageless_proposer_mode`: proposer generates specs from text topics, never seeing any real image
+\* E5 runs 3U+2G like E1, but U-steps use 100% generated images from replay buffer (never real images)
+† E6 runs only G-steps, but solver + proposer also train every step via `gen_step_solver_update_enabled` + `proposer_gen_reward_enabled` — all 4 components update per step
+‡ Solver in E5 never sees real images — trains on self-generated images via replay buffer + gen_step_solver_update. Uses `--imageless_proposer_mode` + `--understanding_generated_only`
 
 ## Ablation Matrix
 
@@ -45,7 +45,7 @@
 | E1 vs E3 | Understanding's effect on generation | Joint ≥ generation-only |
 | E1 vs E4 | DiT RWR contribution | DiT training is essential for generation quality |
 | **E1 vs E5** | **Real images vs fully imageless loop** | E5 still improves → TRUE self-evolution (zero external images)! |
-| E1 vs E6 | Cycle ratio (3:2 vs 1:1) | Reveals optimal coupling frequency |
+| E1 vs E6 | Dedicated U-steps vs unified single-step | Reveals if separate understanding training is needed |
 | E2 + E3 vs E1 | Synergy of joint training | Joint > sum of independent parts |
 
 ## The E5 Story (Key Differentiator — Fully Imageless)
@@ -55,26 +55,35 @@ The proposer imagines scenes from text topics, the generator creates them, and
 the solver learns to understand them — a fully autonomous learning loop:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Text topic ──→ Proposer (text-only) ──→ generation prompt + QA │
-│  (sampled from     (imagines a scene,      (verifiable specs    │
-│   75 themes)        writes prompt + QA)      for the generator) │
-│                                                                 │
-│  prompt ──→ Generator creates candidate images                  │
-│         ──→ Solver picks best image (verification)              │
-│                                                                 │
-│  Generated image ──→ Solver answers QA ──→ GRPO reward          │
-│       ↑                                        │                │
-│       │              reward signal              ↓                │
-│  DiT RWR update ←────────────────────→ Solver LoRA update       │
-│       ↑                                        │                │
-│       │          dual proposer reward           │                │
-│       └──────── Proposer LoRA update ───────────┘                │
-│                                                                 │
-│  Better proposer → richer prompts → better images               │
-│  Better generator → more faithful images → better solver        │
-│  Better solver → better verification → better reward → loop     │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  ┌──────────────── G-STEPS (2 per cycle) ──────────────────┐        │
+│  │                                                          │        │
+│  │  Text topic → Proposer (text-only) → prompt + QA spec   │        │
+│  │  (75 themes)   (imagines scene)       (verifiable)       │        │
+│  │                                                          │        │
+│  │  prompt → Generator creates candidates                   │        │
+│  │        → Solver scores candidates → GRPO reward          │        │
+│  │        → DiT RWR update                                  │        │
+│  │        → Best image → REPLAY BUFFER (quality-gated)      │        │
+│  │        → Solver LoRA update (gen_step_solver_update)      │        │
+│  │        → Proposer dual reward → Proposer LoRA update     │        │
+│  └──────────────────────────┬───────────────────────────────┘        │
+│                             │                                        │
+│                    replay buffer                                     │
+│                    (generated imgs)                                   │
+│                             │                                        │
+│  ┌──────────────── U-STEPS (3 per cycle) ──────────────────┐        │
+│  │                             ↓                            │        │
+│  │  Sample image from replay buffer (100% generated)        │        │
+│  │  → Proposer writes QA for generated image                │        │
+│  │  → Solver answers QA → GRPO reward → Solver LoRA update  │        │
+│  │  → Proposer reward → Proposer LoRA update                │        │
+│  │                                                          │        │
+│  │  (if buffer empty at start → U-step skipped, not real)   │        │
+│  └──────────────────────────────────────────────────────────┘        │
+│                                                                      │
+│  ZERO real images at any point. True closed-loop self-evolution.     │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 No competitor can claim this:
@@ -86,10 +95,13 @@ No competitor can claim this:
 
 Key implementation details:
 - `--imageless_proposer_mode` enables text-only proposer generation
+- `--understanding_generated_only` ensures U-steps NEVER fall back to real images
+- `--replay_buffer_size 500` stores best generated images for U-step consumption
+- `--gen_mix_ratio_start 1.0 --gen_mix_ratio_max 1.0` forces 100% generated in U-steps
 - 75 diverse topics cover counting, spatial relations, text, charts, color, objects, etc.
 - Proposer creates QA pairs based on *expectations* of what the image should contain
 - `use_ref_answer_scoring` auto-disabled (no real image to generate reference answers)
-- Alignment scoring skipped (no source image to compare against)
+- Startup: Cycle 1 U-steps skip (buffer empty) → G-steps fill buffer → Cycle 2+ runs full loop
 
 ## Priority Order (Given 10-Day Constraint)
 
