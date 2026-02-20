@@ -1629,6 +1629,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                 "understanding_generated_only": True,
                             },
                         )
+                        # ── DDP sync: fire a zero-loss backward so that DDP's
+                        # AllReduce reducer stays in sync across all ranks.
+                        # Without this, the first real backward (e.g. G-step
+                        # solver update) would hit "undefined gradient" errors
+                        # because DDP never saw a backward for the skipped steps.
+                        if self.distributed and hasattr(self, "train_model"):
+                            _dummy = sum(
+                                p.sum() * 0.0
+                                for p in self.train_model.parameters()
+                                if p.requires_grad
+                            )
+                            _dummy.backward()
                     else:
                         if not _used_generated:
                             meta["source"] = "real"

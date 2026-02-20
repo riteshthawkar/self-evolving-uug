@@ -64,9 +64,14 @@ class blip3oQwenForInferenceLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaFor
         device = self.get_model().device
         attention_mask = inputs.attention_mask.to(device)
         input_ids = inputs.input_ids.to(device)  # B x N
-        input_ids = torch.cat([input_ids, torch.tensor([[151665]]).to(device)], dim=1)
-        # breakpoint()
+        input_ids = torch.cat(
+            [input_ids, torch.tensor([[151665]], dtype=torch.long, device=device)],
+            dim=1,
+        )
 
+        # Ensure input_ids is integer dtype for embed_tokens (can be
+        # promoted to float by autocast or mixed-precision contexts).
+        input_ids = input_ids.long()
 
         text_embeds = self.get_model().embed_tokens(input_ids)
         latent_queries = self.get_model().latent_queries.repeat(text_embeds.shape[0], 1, 1)
