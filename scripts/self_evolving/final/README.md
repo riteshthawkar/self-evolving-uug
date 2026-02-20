@@ -116,22 +116,25 @@ If time is tight, drop E6 first, then E4. E1 + E5 + E2 + E3 are the minimum for 
 ## Usage
 
 ```bash
-# Main experiment (HIGHEST PRIORITY)
-TRAIN_STAGE=warmup bash E1_main_joint.sh
+# Main experiment (HIGHEST PRIORITY) — defaults to strict mode
+bash E1_main_joint.sh
 
 # Fully imageless self-evolving loop (KEY NOVELTY — zero external images)
-TRAIN_STAGE=warmup bash E5_synthetic_loop.sh
+bash E5_synthetic_loop.sh
 
 # Component ablations
-TRAIN_STAGE=warmup bash E2_understanding_only.sh
-TRAIN_STAGE=warmup bash E3_generation_only.sh
-TRAIN_STAGE=warmup bash E4_no_dit_rwr.sh
+bash E2_understanding_only.sh
+bash E3_generation_only.sh
+bash E4_no_dit_rwr.sh
 
-# Cycle ratio ablation (nice to have)
-TRAIN_STAGE=warmup bash E6_single_step.sh
+# Unified single-step ablation
+bash E6_single_step.sh
+
+# Override stage if needed (all scripts default to strict)
+TRAIN_STAGE=warmup bash E1_main_joint.sh
 
 # Resume from checkpoint
-RESUME_FROM=/path/to/step_N TRAIN_STAGE=warmup bash E1_main_joint.sh
+RESUME_FROM=/path/to/step_N bash E1_main_joint.sh
 ```
 
 ## Evaluation Benchmarks
