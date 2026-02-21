@@ -505,13 +505,16 @@ class SelfEvolvingTrainer(Trainer):
                 return entry.image, "replay_buffer"
 
         # Try dataset
+        # After LLaMA-Factory's SFT preprocessing, each sample has an "images"
+        # field containing string paths (e.g. "data/vargpt_demo/1.jpg") or
+        # PIL Images. We handle both cases here.
         try:
             if self.train_dataset is not None and len(self.train_dataset) > 0:
                 idx = random.randint(0, len(self.train_dataset) - 1)
                 sample = self.train_dataset[idx]
                 # Try common image key names used by LLaMA-Factory datasets
                 image_obj = None
-                for key in ("image", "images", "pixel_values"):
+                for key in ("images", "image", "pixel_values"):
                     if key in sample and sample[key] is not None:
                         image_obj = sample[key]
                         # Handle lists of images (take first)
@@ -521,6 +524,23 @@ class SelfEvolvingTrainer(Trainer):
                 if image_obj is not None:
                     if isinstance(image_obj, Image.Image):
                         return image_obj, "dataset"
+                    # LLaMA-Factory stores image paths as strings after
+                    # SFT preprocessing — load them to PIL directly.
+                    if isinstance(image_obj, str):
+                        try:
+                            pil_img = Image.open(image_obj).convert("RGB")
+                            return pil_img, "dataset"
+                        except Exception as e_open:
+                            logger.warning(
+                                f"[SelfEvolvingTrainer] Failed to open image "
+                                f"path '{image_obj}': {e_open}"
+                            )
+                            return None, "none"
+                    if isinstance(image_obj, bytes):
+                        from io import BytesIO
+                        pil_img = Image.open(BytesIO(image_obj)).convert("RGB")
+                        return pil_img, "dataset"
+                    # numpy / torch tensor fallback
                     return _ensure_pil_image(image_obj), "dataset"
         except Exception as e:
             logger.warning(f"[SelfEvolvingTrainer] Dataset sampling failed: {e}")
