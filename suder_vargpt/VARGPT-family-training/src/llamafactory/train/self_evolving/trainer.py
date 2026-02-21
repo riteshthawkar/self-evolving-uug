@@ -737,6 +737,22 @@ class SelfEvolvingTrainer(Trainer):
 
         return spec, completion
 
+    @staticmethod
+    def _get_actual_model(model):
+        """Navigate through DDP + PEFT wrappers to get the actual model.
+
+        PeftModel wraps: PeftModel → .base_model (LoraModel) → .model (actual)
+        DDP wraps:       DDP → .module (PeftModel or actual)
+
+        The actual model is VargptQwen2VLForConditionalGeneration, which holds
+        ``past_hidden_states`` and the ``forward(inference_image_gen=...)`` logic.
+        """
+        m = model.module if hasattr(model, "module") else model  # unwrap DDP
+        # Unwrap PEFT: PeftModel.base_model is the tuner, tuner.model is actual
+        if hasattr(m, "base_model") and hasattr(m.base_model, "model"):
+            return m.base_model.model
+        return m
+
     def _generate_image(
         self, prompt: str
     ) -> Tuple[Optional[Image.Image], Optional[torch.Tensor]]:
@@ -744,13 +760,23 @@ class SelfEvolvingTrainer(Trainer):
 
         Uses the model's autoregressive_infer_cfg() method for image generation.
 
+        Key insights for VARGPT image generation:
+          1. The model must be in **eval mode** because forward() only stores
+             ``past_hidden_states`` when ``not self.model.training`` (line 2417).
+          2. ``past_hidden_states`` lives on the **actual** model instance
+             (VargptQwen2VLForConditionalGeneration), not the PEFT wrapper.
+          3. Two-step forward: first populate ``past_hidden_states``, then call
+             with ``inference_image_gen=True`` passing ``past_key_values`` so that
+             the reset guard at line 2246 is skipped.
+
         Returns
         -------
         image : PIL Image or None
         tensor : torch.Tensor (the raw pixel tensor for GRPO training)
         """
         cfg = self.se_config
-        base_model = _unwrap_model(self.model)
+        peft_model = _unwrap_model(self.model)       # PeftModel (DDP-unwrapped)
+        actual_model = self._get_actual_model(self.model)  # VargptQwen2VLForConditionalGeneration
 
         try:
             # Build generation prompt with special tokens
@@ -762,15 +788,27 @@ class SelfEvolvingTrainer(Trainer):
             input_ids = inputs["input_ids"].to(self.device)
             attention_mask = inputs["attention_mask"].to(self.device)
 
+            # Temporarily switch to eval mode so that forward() stores
+            # past_hidden_states (guarded by ``if not self.model.training``).
+            peft_model.eval()
+
             with torch.no_grad():
                 # Step 1: Run a normal forward pass to populate past_hidden_states
-                base_model.past_hidden_states = None
-                outputs = base_model(
+                actual_model.past_hidden_states = None
+                outputs = peft_model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     use_cache=True,
                 )
-                # past_hidden_states is now set via forward() lines 2418-2421
+                # past_hidden_states is now set on actual_model (lines 2418-2421)
+
+                if actual_model.past_hidden_states is None:
+                    logger.warning(
+                        "[SelfEvolvingTrainer] past_hidden_states still None "
+                        "after step-1 forward; image generation cannot proceed."
+                    )
+                    peft_model.train()
+                    return None, None
 
                 # Step 2: Call forward with inference_image_gen=True
                 # Pass past_key_values so past_hidden_states is NOT reset
@@ -781,8 +819,10 @@ class SelfEvolvingTrainer(Trainer):
                     past_kv = outputs[-1]
                 else:
                     logger.warning("[SelfEvolvingTrainer] Cannot extract past_key_values from forward output")
+                    peft_model.train()
                     return None, None
-                gen_result = base_model(
+
+                gen_result = peft_model(
                     input_ids=input_ids[:, -1:],
                     attention_mask=attention_mask,
                     past_key_values=past_kv,
@@ -799,12 +839,16 @@ class SelfEvolvingTrainer(Trainer):
 
                     if img_tensor is not None:
                         pil_image = _ensure_pil_image(img_tensor)
+                        peft_model.train()
                         return pil_image, img_tensor
 
         except Exception as e:
             logger.warning(f"[SelfEvolvingTrainer] Image generation failed: {e}")
             import traceback
             traceback.print_exc()
+        finally:
+            # Always restore training mode
+            peft_model.train()
 
         return None, None
 
