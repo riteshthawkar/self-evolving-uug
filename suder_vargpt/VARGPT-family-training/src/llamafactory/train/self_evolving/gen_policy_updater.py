@@ -294,7 +294,7 @@ class VARImageGenPolicyUpdater:
             return {"gen_grpo_loss": 0.0, "gen_grpo_skipped": True}
 
         # ── Group-normalize rewards (GRPO advantages) ────────────────────
-        r_tensor = torch.tensor(rewards, dtype=torch.float32)
+        r_tensor = torch.tensor(rewards, dtype=torch.float32, device=device)
         r_mean = r_tensor.mean()
         r_std = r_tensor.std()
 
