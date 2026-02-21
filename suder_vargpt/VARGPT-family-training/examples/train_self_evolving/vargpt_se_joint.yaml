@@ -14,7 +14,8 @@ vargpt_version: "qwen2vl-v1.1"
 lora_rank: 16
 lora_alpha: 32
 lora_dropout: 0.05
-lora_target: all
+lora_target: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
+freeze_vision_tower: true
 
 ### dataset
 dataset: train_vargpt_v1_1_demo
