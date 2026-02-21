@@ -151,6 +151,7 @@ class RolePolicyUpdater:
         reward: float,
         baseline: float,
         device: torch.device,
+        ddp_no_sync: bool = False,
     ) -> Dict[str, float]:
         self.step_id += 1
 
@@ -355,8 +356,20 @@ class RolePolicyUpdater:
                 model_ref.set_adapter(self.adapter_name)
             except Exception:
                 restore_adapter = None
+        # When ddp_no_sync=True, this backward is NOT the only backward in the
+        # current training step (e.g. gen_step_solver_update runs after generator
+        # GRPO + proposer updates).  DDP's reducer gets confused by multiple
+        # forward+backward cycles, so we skip DDP allreduce here and manually
+        # sync this adapter's gradients before the optimizer step.
+        import contextlib as _contextlib
+        _no_sync_ctx = (
+            self.model.no_sync()
+            if (ddp_no_sync and hasattr(self.model, "no_sync"))
+            else _contextlib.nullcontext()
+        )
         try:
-            scaled_loss.backward()
+            with _no_sync_ctx:
+                scaled_loss.backward()
         finally:
             if restore_adapter is not None:
                 try:
@@ -369,6 +382,12 @@ class RolePolicyUpdater:
 
         did_step = False
         if self._accum_count >= self.grad_accum_steps:
+            # Manual gradient sync when DDP allreduce was skipped.
+            if ddp_no_sync and dist.is_available() and dist.is_initialized():
+                for p in self.params:
+                    if p.grad is not None:
+                        dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+                        p.grad /= float(dist.get_world_size())
             if self._has_real_grad_in_window:
                 _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
                 self.opt.step()

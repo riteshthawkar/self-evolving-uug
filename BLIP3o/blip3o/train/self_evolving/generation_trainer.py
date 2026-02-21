@@ -5,6 +5,7 @@ Ported from self_evolving/experiments/generation.py.
 Uses native BLIP3o model loading instead of the workaround-heavy path.
 """
 
+import contextlib
 import dataclasses
 import datetime as dt
 import gc
@@ -4431,12 +4432,20 @@ class GenerationSelfEvolvingTrainer:
                         _gen_ema_baseline = float(self.proposer_gen_baseline)
                         _grpo_rewards_shifted = [r - _gen_ema_baseline for r in _grpo_rewards]
 
+                        # When a generator GRPO backward already fired this step,
+                        # the proposer backward is the 2nd DDP backward.  Pass
+                        # ddp_no_sync=True to avoid DDP reducer confusion.
+                        _prop_no_sync = (
+                            generator_update_due
+                            and generator_skipped_reason is None
+                        )
                         proposer_stats = self.proposer_updater.step(
                             prompt=_proposer_gen_prompt,
                             completions=_grpo_completions,
                             rewards=_grpo_rewards_shifted,
                             device=self.device,
                             images=_grpo_images,
+                            ddp_no_sync=_prop_no_sync,
                         )
                         _gen_advantage = float(proposer_stats.get("mean_advantage", 0.0))
 
@@ -4462,6 +4471,10 @@ class GenerationSelfEvolvingTrainer:
                             + (1.0 - _gen_baseline_momentum) * _gen_proposer_reward
                         )
                         _gen_advantage = _gen_proposer_reward - self.proposer_gen_baseline
+                        _prop_no_sync_rf = (
+                            generator_update_due
+                            and generator_skipped_reason is None
+                        )
                         proposer_stats = self.proposer_updater.step(
                             image=image,
                             prompt=_proposer_gen_prompt,
@@ -4469,6 +4482,7 @@ class GenerationSelfEvolvingTrainer:
                             reward=_gen_proposer_reward,
                             baseline=self.proposer_gen_baseline,
                             device=self.device,
+                            ddp_no_sync=_prop_no_sync_rf,
                         )
 
                     proposer_update_due = True
@@ -4605,8 +4619,13 @@ class GenerationSelfEvolvingTrainer:
                         _dit_reward = 1.0 / (1.0 + math.exp(-(_raw_dit_reward + 2.0)))
                     else:
                         _dit_reward = max(0.0, min(1.0, _raw_dit_reward))
+                # In imageless mode (E5), image is None — use the best
+                # generated candidate image for DiT denoising training instead.
+                _dit_image = image
+                if _dit_image is None and best is not None:
+                    _dit_image = best.get("image")
                 dit_stats = self.dit_updater.step(
-                    image=image,
+                    image=_dit_image,
                     prompt=str(spec.prompt),
                     device=self.device,
                     reward=_dit_reward,
@@ -4823,6 +4842,14 @@ class GenerationSelfEvolvingTrainer:
             reward = float(qa.get("combined_score", 0.0)) if (has_local_qa and local_has_completion) else 0.0
 
             baseline_before = self.solver_baseline
+            # When gen_step_solver_update_enabled is True, this solver backward
+            # is the 2nd (or 3rd) backward through the DDP model in the same
+            # G-step (after generator GRPO + optional proposer update).
+            # DDP's reducer gets confused by multiple forward+backward cycles,
+            # raising "gradient which is undefined, but still allreduced".
+            # Fix: pass ddp_no_sync=True so the updater uses no_sync() and
+            # manually allreduces only this adapter's gradients before opt.step.
+            _solver_no_sync = bool(getattr(self.cfg, "gen_step_solver_update_enabled", False))
             stats = self.solver_updater.step(
                 image=image,
                 prompt=build_solver_prompt(question),
@@ -4830,6 +4857,7 @@ class GenerationSelfEvolvingTrainer:
                 reward=reward,
                 baseline=baseline_before if local_has_completion else 0.0,
                 device=self.device,
+                ddp_no_sync=_solver_no_sync,
             )
             if stats.get("did_step", True):
                 self._policy_update_counts["solver"] += 1

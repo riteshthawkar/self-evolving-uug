@@ -1111,6 +1111,7 @@ class TextGRPOUpdater:
         device: torch.device,
         images: Optional[List[Optional[Image.Image]]] = None,
         completion_token_ids: Optional[List[Optional[List[int]]]] = None,
+        ddp_no_sync: bool = False,
     ) -> Dict[str, float]:
         """Run one GRPO update using a group of (completion, reward) pairs."""
         self.step_id += 1
@@ -1273,8 +1274,18 @@ class TextGRPOUpdater:
                 model_ref.set_adapter(self.adapter_name)
             except Exception:
                 restore_adapter = None
+        # When ddp_no_sync=True, skip DDP allreduce during backward to avoid
+        # "gradient undefined but allreduced" errors from multiple backward passes
+        # in the same training step.  Gradients are manually synced before opt.step.
+        import contextlib as _contextlib
+        _no_sync_ctx = (
+            self.model.no_sync()
+            if (ddp_no_sync and hasattr(self.model, "no_sync"))
+            else _contextlib.nullcontext()
+        )
         try:
-            scaled_loss.backward()
+            with _no_sync_ctx:
+                scaled_loss.backward()
         finally:
             if restore_adapter is not None:
                 try:
@@ -1288,6 +1299,12 @@ class TextGRPOUpdater:
 
         did_step = False
         if self._accum_count >= self.grad_accum_steps:
+            # Manual gradient sync when DDP allreduce was skipped.
+            if ddp_no_sync and dist.is_available() and dist.is_initialized():
+                for p in self.params:
+                    if p.grad is not None:
+                        dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+                        p.grad /= float(dist.get_world_size())
             if self._has_real_grad_in_window:
                 _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
                 self.opt.step()
