@@ -199,6 +199,9 @@ class SelfEvolvingConfig:
     wandb_run_name: Optional[str] = None
     wandb_log_images_every: int = 0
 
+    # ── Image Folder Mode ─────────────────────────────────────────────────
+    image_folder: Optional[str] = None  # path to folder of images (bypasses dataset JSON)
+
     # ── Resume ───────────────────────────────────────────────────────────
     resume_from: Optional[str] = None
     start_step: int = 0

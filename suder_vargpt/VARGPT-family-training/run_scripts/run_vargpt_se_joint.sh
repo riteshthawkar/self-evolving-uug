@@ -15,10 +15,18 @@ CONFIG="examples/train_self_evolving/vargpt_se_joint.yaml"
 NPROC_PER_NODE=8
 MASTER_PORT=39600
 
-# ── Data paths (edit these) ──────────────────────────────────────────────────
-DATASET="train_vargpt_v1_1_demo"
-DATASET_DIR="data"
-IMAGE_DIR="data"
+# ══════════════════════════════════════════════════════════════════════════════
+# DATA: Just set IMAGE_FOLDER to your folder of images.
+#       Subfolders are scanned recursively. No JSON needed.
+#       Supports: .jpg .jpeg .png .webp .bmp .tiff
+#
+#       Example folder structure (any nesting works):
+#         /path/to/my/images/
+#           ├── cats/img1.jpg
+#           ├── dogs/img2.png
+#           └── landscapes/sunset.webp
+# ══════════════════════════════════════════════════════════════════════════════
+IMAGE_FOLDER="/path/to/your/images"
 
 # ── Environment setup ────────────────────────────────────────────────────────
 export MASTER_PORT
@@ -49,15 +57,19 @@ if ! command -v llamafactory-cli &>/dev/null; then
     exit 1
 fi
 
+if [[ ! -d "$IMAGE_FOLDER" ]]; then
+    echo "[ERROR] IMAGE_FOLDER not found: $IMAGE_FOLDER" >&2
+    echo "[ERROR] Set IMAGE_FOLDER to your image directory in this script." >&2
+    exit 1
+fi
+
 # ── Print experiment info ────────────────────────────────────────────────────
 echo "═══════════════════════════════════════════════════════════"
 echo "  VARGPT Self-Evolving: Joint (3U+2G) Combined Experiment"
 echo "═══════════════════════════════════════════════════════════"
-echo "  Config      : $CONFIG"
-echo "  GPUs        : $NPROC_PER_NODE"
-echo "  Dataset     : $DATASET"
-echo "  Dataset dir : $DATASET_DIR"
-echo "  Image dir   : $IMAGE_DIR"
+echo "  Config       : $CONFIG"
+echo "  GPUs         : $NPROC_PER_NODE"
+echo "  Image folder : $IMAGE_FOLDER"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 
@@ -68,9 +80,7 @@ NODE_RANK=0 \
 MASTER_ADDR=127.0.0.1 \
 MASTER_PORT="$MASTER_PORT" \
     llamafactory-cli train "$CONFIG" \
-        --dataset "$DATASET" \
-        --dataset_dir "$DATASET_DIR" \
-        --image_dir "$IMAGE_DIR"
+        --se_image_folder "$IMAGE_FOLDER"
 
 echo ""
 echo "═══════════════════════════════════════════════════════════"
