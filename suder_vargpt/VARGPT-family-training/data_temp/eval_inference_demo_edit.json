@@ -1,0 +1,21 @@
+[
+    {
+        "messages": [
+            {
+                "content": "Transform this image <image> to match the style of Bauhaus-Style Poster",
+                "role": "user"
+            },
+            {
+                "content": "The output image is: <image_gen>",
+                "role": "assistant"
+            }
+        ],
+        "images": [
+            "data/vargpt_edit/input_edit.jpg",
+            "data/vargpt_edit/occ_demo.jpg"
+        ],
+        "id": 4765
+    }
+    
+
+]
