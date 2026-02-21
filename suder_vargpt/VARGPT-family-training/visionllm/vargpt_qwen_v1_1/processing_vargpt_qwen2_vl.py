@@ -106,7 +106,6 @@ class VARGPTQwen2VLProcessor(ProcessorMixin):
             - **image_grid_thw** -- List of image 3D grid in LLM. Returned when `images` is not `None`.
             - **video_grid_thw** -- List of video 3D grid in LLM. Returned when `videos` is not `None`.
         """
-        import ipdb; ipdb.set_trace()
         output_kwargs = self._merge_kwargs(
             VARGPTQwen2VLProcessorKwargs,
             tokenizer_init_kwargs=self.tokenizer.init_kwargs,

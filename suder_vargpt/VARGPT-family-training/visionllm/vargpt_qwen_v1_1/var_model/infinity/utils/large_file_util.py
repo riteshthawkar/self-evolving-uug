@@ -50,7 +50,6 @@ def split_large_txt_files(filepath, chunk_id2save_files):
                 chunk = []
                 chunk_id += 1
         if len(chunk):
-            import ipdb; ipdb.set_trace()
         assert not len(chunk)
         for thread in thread_list:
             thread.join()

@@ -489,7 +489,6 @@ def train_one_ep(
                 tokens = text_tokenizer(text=captions, max_length=text_tokenizer.model_max_length, padding='max_length', truncation=True, return_tensors='pt')  # todo: put this into dataset
                 input_ids = tokens.input_ids.cuda(non_blocking=True)
                 mask = tokens.attention_mask.cuda(non_blocking=True)
-                import ipdb; ipdb.set_trace()
                 text_features = text_encoder(input_ids=input_ids, attention_mask=mask)['last_hidden_state'].float()
                 
                 lens: List[int] = mask.sum(dim=-1).tolist()
