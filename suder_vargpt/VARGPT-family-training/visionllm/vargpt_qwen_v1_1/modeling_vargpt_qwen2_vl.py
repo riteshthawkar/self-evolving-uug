@@ -2583,6 +2583,64 @@ class VARGPTQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMi
 
         return loss
 
+    def get_gen_loss_1_1_unreduced(self, labels, other_logits, other_labels, image_gen_logits, image_gen_labels, image_gen_mask_list=None, scale_schedule=None, training_scales=None):
+        """Same as get_gen_loss_1_1 but returns per-sample losses (not batch mean).
+
+        Used by the self-evolving framework for GRPO per-sample reward extraction.
+
+        Returns
+        -------
+        Tuple[Tensor, Tensor] or Tensor
+            (text_loss_per_sample, image_gen_loss_per_sample) if image_gen_logits is not None,
+            else text_loss_per_sample only.
+        """
+        text_loss_per_sample = None
+        image_gen_loss_per_sample = None
+        lambda_loss = 3.0
+
+        if labels is not None:
+            other_logits_f = other_logits.float()
+            shift_other_logits = other_logits_f[..., :-1, :].contiguous()
+            shift_other_labels = other_labels[..., 1:].contiguous()
+            loss_fct = CrossEntropyLoss(reduction='none')
+            B = shift_other_logits.shape[0]
+            shift_other_logits_flat = shift_other_logits.view(-1, self.config.vocab_size)
+            shift_other_labels_flat = shift_other_labels.view(-1).to(shift_other_logits_flat.device)
+            text_loss_flat = loss_fct(shift_other_logits_flat, shift_other_labels_flat)
+            # Per-sample mean: reshape back to (B, seq_len) then mean per sample
+            seq_len = shift_other_logits.shape[1]
+            text_loss_per_sample = text_loss_flat.view(B, seq_len).mean(dim=-1)  # (B,)
+
+            if image_gen_logits is not None:
+                image_gen_logits_f = image_gen_logits.float()
+
+                if self.vargpt_gen_args.use_bit_label:
+                    tmp_bs, tmp_seq_len, tmp_channel = image_gen_logits_f.shape
+                    loss_fct_bit = CrossEntropyLoss(reduction='none')
+                    image_gen_loss_per_sample = loss_fct_bit(
+                        image_gen_logits_f.reshape(tmp_bs, tmp_seq_len, -1, 2).permute(0, 3, 1, 2).float(),
+                        image_gen_labels
+                    )
+                    if self.vargpt_gen_args.bitloss_type == 'mean':
+                        image_gen_loss_per_sample = image_gen_loss_per_sample.mean(dim=-1)  # (B, seq_len)
+                    elif self.vargpt_gen_args.bitloss_type == 'sum':
+                        image_gen_loss_per_sample = image_gen_loss_per_sample.sum(dim=-1)
+                    image_gen_loss_per_sample = image_gen_loss_per_sample.mean(dim=-1)  # (B,)
+                else:
+                    V = self.vargpt_gen.V
+                    loss_fct_gen = CrossEntropyLoss(reduction='none')
+                    gen_B = image_gen_logits_f.shape[0]
+                    gen_L = image_gen_logits_f.shape[1]
+                    gen_loss_flat = loss_fct_gen(
+                        image_gen_logits_f.reshape(-1, V).float(),
+                        image_gen_labels.reshape(-1)
+                    )
+                    image_gen_loss_per_sample = gen_loss_flat.view(gen_B, gen_L).mean(dim=-1)  # (B,)
+
+        if image_gen_loss_per_sample is not None:
+            return text_loss_per_sample, image_gen_loss_per_sample
+        return text_loss_per_sample
+
     def get_gen_loss_1_2(self, labels, other_logits, other_labels, image_gen_logits, image_gen_labels, image_gen_mask_list=None ):
 
         loss = None

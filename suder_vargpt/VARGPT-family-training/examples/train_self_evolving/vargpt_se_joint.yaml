@@ -1,0 +1,52 @@
+### VARGPT Self-Evolving: Joint (3U+2G) Mixed Training
+### Main experiment: alternating understanding + generation steps
+
+### model
+model_name_or_path: VARGPT-family/VARGPT-v1.1
+
+### method
+stage: self_evolving
+do_train: true
+finetuning_type: lora
+vargpt_version: "qwen2vl-v1.1"
+
+### lora
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target: all
+
+### dataset
+dataset: train_vargpt_v1_1_demo
+template: vargpt_qwen2_vl
+cutoff_len: 2048
+
+### output
+output_dir: saves/vargpt_v1_1_se_joint_3U2G
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+learning_rate: 1.0e-6
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+
+### self-evolving config
+se_understanding_steps_per_cycle: 3
+se_generation_steps_per_cycle: 2
+se_total_steps: 10000
+se_replay_buffer_size: 1000
+se_gen_mix_ratio_max: 0.25
+se_imageless_proposer_mode: false
+se_gen_reward_mode: clip
+se_num_generations: 4
+se_lr: 1.0e-6
+se_proposer_gen_reward_enabled: true
+
+### logging
+logging_steps: 10
+save_steps: 500
+plot_loss: true

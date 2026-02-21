@@ -249,20 +249,21 @@ def _setup_lora_tuning(
             )
             model = get_peft_model(model, lora_config)
     # 创建需要设置为可学习的模块名称列表
-    target_modules = ['vargpt_gen', 'image_gen_projector']
+    # For self_evolving stage, adapter_manager.py handles per-role trainability
+    # of vargpt_gen and image_gen_projector. Skip unconditional requires_grad=True.
+    if not (hasattr(finetuning_args, 'stage') and finetuning_args.stage == 'self_evolving'):
+        target_modules = ['vargpt_gen', 'image_gen_projector']
 
-    # 遍历所有参数
-    for name, param in model.named_parameters():
-        # 检查参数是否属于目标模块
-        if any(module in name for module in target_modules):
-            param.requires_grad = True
+        # 遍历所有参数
+        for name, param in model.named_parameters():
+            # 检查参数是否属于目标模块
+            if any(module in name for module in target_modules):
+                param.requires_grad = True
 
-    # 验证设置是否成功
-    for name, param in model.named_parameters():
-        if any(module in name for module in target_modules):
-            print(f"{name}: {param.requires_grad}")
-    
-    # import ipdb; ipdb.set_trace()
+        # 验证设置是否成功
+        for name, param in model.named_parameters():
+            if any(module in name for module in target_modules):
+                print(f"{name}: {param.requires_grad}")
 
     if is_trainable and cast_trainable_params_to_fp32:
         for param in filter(lambda p: p.requires_grad, model.parameters()):

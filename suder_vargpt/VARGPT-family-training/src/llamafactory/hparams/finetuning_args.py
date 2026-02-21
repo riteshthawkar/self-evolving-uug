@@ -314,7 +314,7 @@ class FinetuningArguments(FreezeArguments, LoraArguments, RLHFArguments, GaloreA
         default=False,
         metadata={"help": "Whether or not to train model in purely bf16 precision (without AMP)."},
     )
-    stage: Literal["pt", "sft", "rm", "ppo", "dpo", "kto", "suder"] = field(
+    stage: Literal["pt", "sft", "rm", "ppo", "dpo", "kto", "suder", "self_evolving"] = field(
         default="sft",
         metadata={"help": "Which stage will be performed in training."},
     )
@@ -361,6 +361,48 @@ class FinetuningArguments(FreezeArguments, LoraArguments, RLHFArguments, GaloreA
     vargpt_version: str = field(
         default="qwen2vl-v1.0",
         metadata={"help": "Which stage to perform in Vargpt training."},
+    )
+
+    # ── Self-Evolving Framework Config ──────────────────────────────────
+    se_understanding_steps_per_cycle: int = field(
+        default=3,
+        metadata={"help": "Number of understanding steps per U/G cycle."},
+    )
+    se_generation_steps_per_cycle: int = field(
+        default=2,
+        metadata={"help": "Number of generation steps per U/G cycle."},
+    )
+    se_total_steps: int = field(
+        default=10000,
+        metadata={"help": "Total training steps for self-evolving."},
+    )
+    se_replay_buffer_size: int = field(
+        default=1000,
+        metadata={"help": "Max size of the replay buffer for generated images."},
+    )
+    se_gen_mix_ratio_max: float = field(
+        default=0.25,
+        metadata={"help": "Max ratio of generated images mixed into U-steps."},
+    )
+    se_imageless_proposer_mode: bool = field(
+        default=False,
+        metadata={"help": "Use text-only topics for proposer (no source images)."},
+    )
+    se_gen_reward_mode: str = field(
+        default="clip",
+        metadata={"help": "Reward mode for generation: clip, nll, or combined."},
+    )
+    se_num_generations: int = field(
+        default=4,
+        metadata={"help": "Number of candidate images per G-step."},
+    )
+    se_lr: float = field(
+        default=1e-6,
+        metadata={"help": "Learning rate for self-evolving role updaters."},
+    )
+    se_proposer_gen_reward_enabled: bool = field(
+        default=True,
+        metadata={"help": "Update proposer with generation quality reward."},
     )
 
     def __post_init__(self):

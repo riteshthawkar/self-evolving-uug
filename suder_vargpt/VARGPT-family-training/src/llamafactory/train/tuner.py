@@ -32,6 +32,7 @@ from .pt import run_pt
 from .rm import run_rm
 from .sft import run_sft
 from .suder import run_suder
+from .self_evolving import run_self_evolving
 
 
 if TYPE_CHECKING:
@@ -59,6 +60,8 @@ def run_exp(args: Optional[Dict[str, Any]] = None, callbacks: List["TrainerCallb
         run_kto(model_args, data_args, training_args, finetuning_args, callbacks)
     elif finetuning_args.stage == "suder":
         run_suder(model_args, data_args, training_args, finetuning_args, callbacks)
+    elif finetuning_args.stage == "self_evolving":
+        run_self_evolving(model_args, data_args, training_args, finetuning_args, callbacks)
     else:
         raise ValueError(f"Unknown task: {finetuning_args.stage}.")
 
