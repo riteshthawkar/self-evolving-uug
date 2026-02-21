@@ -38,6 +38,8 @@ DATA_DIR="${DATA_DIR:-/workspace/self-evolving-uug/data/joint_3k/images}"
 OUTPUT_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/final/E4_no_dit_rwr"
 RUN_NAME="E4_no_dit_rwr_s42"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
+RESUME_FROM="${RESUME_FROM:-}"
+RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
@@ -92,7 +94,7 @@ fi
 RESUME_ARGS=()
 if [[ -n "${RESUME_FROM:-}" ]]; then
   echo "[E4] Resuming from checkpoint: $RESUME_FROM"
-  RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM")
+  RESUME_ARGS=(--resume_from "$RESUME_FROM")
   if [[ "${RESET_PROPOSER_BASELINE:-0}" == "1" ]]; then
     echo "[E4] Resetting proposer baseline on resume."
     RESUME_ARGS+=(--reset_proposer_baseline)

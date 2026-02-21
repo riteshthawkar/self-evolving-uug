@@ -76,7 +76,7 @@ TRAIN_ENTRY="/workspace/self-evolving-uug/self-evolving-uug/BLIP3o/blip3o/train/
 RESUME_ARGS=()
 if [[ -n "${RESUME_FROM:-}" ]]; then
   echo "[COMMON] Resuming from checkpoint: $RESUME_FROM"
-  RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM")
+  RESUME_ARGS=(--resume_from "$RESUME_FROM")
   if [[ "${RESET_PROPOSER_BASELINE:-0}" == "1" ]]; then
     echo "[COMMON] Resetting proposer baseline on resume."
     RESUME_ARGS+=(--reset_proposer_baseline)
