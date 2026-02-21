@@ -1,0 +1,63 @@
+[
+    {
+        "messages": [
+            {
+                "content": "I need a designed image of a cute gray puppy is running on the green grass, with colorful flowers on the grass..",
+                "role": "user"
+            },
+            {
+                "content": "I have designed a drawing of a cute gray puppy is running on the green grass, with colorful flowers on the grass.<image_gen>",
+                "role": "assistant"
+            }
+        ],
+        "images": [
+            "data/vargpt_edit/occ_demo.jpg"
+        ]
+    },
+    {
+        "messages": [
+            {
+                "content": "I need a designed image of a cute gray cat is running on the green grass, with colorful flowers on the grass.",
+                "role": "user"
+            },
+            {
+                "content": "I have designed a drawing of a cute gray puppy is running on the green grass, with colorful flowers on the grass.<image_gen>",
+                "role": "assistant"
+            }
+        ],
+        "images": [
+            "data/vargpt_edit/occ_demo.jpg"
+        ]
+    },
+    {
+        "messages": [
+            {
+                "content": "I need a designed image of a panoramic view of a vibrant valley with realistic and vivid imagery.",
+                "role": "user"
+            },
+            {
+                "content": "I have designed a drawing of a panoramic view of a vibrant valley with realistic and vivid imagery.<image_gen>",
+                "role": "assistant"
+            }
+        ],
+        "images": [
+            "data/vargpt_edit/occ_demo.jpg"
+        ]
+    },
+    {
+        "messages": [
+            {
+                "content": "Can you depict a scene of A power metalalbum cover featuring a fantasy-style illustration witha white falcon.",
+                "role": "user"
+            },
+            {
+                "content": "Here's a rendered painting of Apower metal album cover featuring a fantasy-styleillustration with a white falcon.<image_gen>",
+                "role": "assistant"
+            }
+        ],
+        "images": [
+            "data/vargpt_edit/occ_demo.jpg"
+        ]
+    }
+
+]
