@@ -811,21 +811,20 @@ class SelfEvolvingTrainer(Trainer):
                     return None, None
 
                 # Step 2: Call forward with inference_image_gen=True
-                # Pass past_key_values so past_hidden_states is NOT reset
-                # (forward() line 2246 only resets when past_key_values is None)
-                if hasattr(outputs, "past_key_values"):
-                    past_kv = outputs.past_key_values
-                elif isinstance(outputs, (tuple, list)) and len(outputs) > 1:
-                    past_kv = outputs[-1]
-                else:
-                    logger.warning("[SelfEvolvingTrainer] Cannot extract past_key_values from forward output")
-                    peft_model.train()
-                    return None, None
+                #
+                # CRITICAL: Switch back to TRAINING mode before step 2.
+                # The model's forward() line 2246 resets past_hidden_states when:
+                #   (past_key_values is None or len(past_key_values)==0) AND not self.model.training
+                # Even though we pass past_kv, len() can be 0 due to PEFT/cache
+                # interactions. By switching to train mode, the "not training"
+                # guard is False → past_hidden_states is preserved.
+                # The inference_image_gen branch (line 2345) runs regardless of
+                # training mode, so this is safe.
+                peft_model.train()
 
                 gen_result = peft_model(
                     input_ids=input_ids[:, -1:],
                     attention_mask=attention_mask,
-                    past_key_values=past_kv,
                     inference_image_gen=True,
                 )
 
