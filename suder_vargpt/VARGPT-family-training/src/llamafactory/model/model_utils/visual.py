@@ -338,12 +338,12 @@ def patch_target_modules(
             return "^(?!.*vision_tower).*(?:{}).*".format("|".join(target_modules))
         elif model_type == "mllama":
             return "^(?!.*vision_model).*(?:{}).*".format("|".join(target_modules))
-        elif model_type == "qwen2_vl":
+        elif model_type in ("qwen2_vl", "vargpt_qwen2_vl"):
             return "^(?!.*visual).*(?:{}).*".format("|".join(target_modules))
         else:
             return target_modules
     else:
-        if model_type == "qwen2_vl":
+        if model_type in ("qwen2_vl", "vargpt_qwen2_vl"):
             return "^(?!.*patch_embed).*(?:{}).*".format("|".join(target_modules))
         elif vit_model_type == "pixtral":
             return "^(?!.*patch_conv).*(?:{}).*".format("|".join(target_modules))

@@ -92,6 +92,5 @@ class BitwiseSelfCorrection(object):
         save_path = osp.abspath('non_teacher_force.jpg')
         cv2.imwrite(save_path, cat_image)
         print(f'Save to {save_path}')
-        import pdb; pdb.set_trace()
         print(cat_image.shape)
         

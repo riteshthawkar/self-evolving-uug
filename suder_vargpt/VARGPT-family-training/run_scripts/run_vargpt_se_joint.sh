@@ -29,9 +29,17 @@ MASTER_PORT=39600
 IMAGE_FOLDER="/path/to/your/images"
 
 # ── Environment setup ────────────────────────────────────────────────────────
+export PYTHONPATH="$REPO_ROOT:$REPO_ROOT/src:${PYTHONPATH:-}"
 export MASTER_PORT
 export TOKENIZERS_PARALLELISM="false"
 export WANDB_MODE="${WANDB_MODE:-disabled}"
+
+# ── Auto-create missing __init__.py in visionllm + symlink vargpt ───────────
+find "$REPO_ROOT/visionllm" -type d ! -name '__pycache__' \
+    -exec sh -c 'test -f "$1/__init__.py" || touch "$1/__init__.py"' _ {} \;
+if [[ ! -e "$REPO_ROOT/visionllm/vargpt" ]]; then
+    ln -sfn vargpt_llava "$REPO_ROOT/visionllm/vargpt"
+fi
 
 # VARGPT image size constraints
 export SE_MAX_IMAGE_SIDE=1024

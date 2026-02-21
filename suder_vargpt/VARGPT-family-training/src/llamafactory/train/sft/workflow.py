@@ -87,9 +87,7 @@ def run_sft(
             print("Input text:", tokenizer.decode(batch['input_ids'][i]))
             print("Label text:", tokenizer.decode(batch['labels'][i]))
 
-        
-        import pdb; pdb.set_trace()
-        
+
         return batch
 
     # Override the decoding parameters of Seq2SeqTrainer

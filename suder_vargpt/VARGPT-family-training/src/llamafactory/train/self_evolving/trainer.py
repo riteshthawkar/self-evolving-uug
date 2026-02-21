@@ -89,12 +89,13 @@ class SelfEvolvingTrainer(Trainer):
         finetuning_args=None,
         **kwargs,
     ):
+        self._processor = kwargs.pop("processor", None)
         super().__init__(model=model, args=args, **kwargs)
         self.se_config = se_config
         self.finetuning_args = finetuning_args
 
         # Get processor/tokenizer
-        self.processor = kwargs.get("tokenizer", None) or self.tokenizer
+        self.processor = self._processor or self.tokenizer
 
         # Device
         self.device = (
@@ -759,41 +760,37 @@ class SelfEvolvingTrainer(Trainer):
             attention_mask = inputs["attention_mask"].to(self.device)
 
             with torch.no_grad():
-                # Use VARGPT's autoregressive_infer_cfg for image generation
-                if hasattr(base_model, "autoregressive_infer_cfg"):
-                    # This returns generated images as tensors
-                    gen_result = base_model.autoregressive_infer_cfg(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        cfg_scale=cfg.var_cfg_scale,
-                        tau=cfg.var_tau,
-                        top_k=cfg.var_top_k,
-                        top_p=cfg.var_top_p,
-                    )
+                # Step 1: Run a normal forward pass to populate past_hidden_states
+                base_model.past_hidden_states = None
+                outputs = base_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=True,
+                )
+                # past_hidden_states is now set via forward() lines 2418-2421
 
-                    if gen_result is not None:
-                        if isinstance(gen_result, torch.Tensor):
-                            img_tensor = gen_result
-                        elif isinstance(gen_result, (list, tuple)):
-                            img_tensor = gen_result[0] if gen_result else None
-                        else:
-                            img_tensor = gen_result
+                # Step 2: Call forward with inference_image_gen=True
+                # Pass past_key_values so past_hidden_states is NOT reset
+                # (forward() line 2246 only resets when past_key_values is None)
+                past_kv = outputs.past_key_values if hasattr(outputs, "past_key_values") else outputs[-1]
+                gen_result = base_model(
+                    input_ids=input_ids[:, -1:],
+                    attention_mask=attention_mask,
+                    past_key_values=past_kv,
+                    inference_image_gen=True,
+                )
 
-                        if img_tensor is not None:
-                            pil_image = _ensure_pil_image(img_tensor)
-                            return pil_image, img_tensor
-                else:
-                    # Fallback: use model.generate() with image generation mode
-                    gen_ids = base_model.generate(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        max_new_tokens=1024,
-                        do_sample=True,
-                        temperature=cfg.var_tau,
-                        top_p=cfg.var_top_p,
-                        inference_image_gen=True,
-                    )
-                    logger.info("[SelfEvolvingTrainer] Used fallback generate() for image gen")
+                if gen_result is not None:
+                    if isinstance(gen_result, torch.Tensor):
+                        img_tensor = gen_result
+                    elif isinstance(gen_result, (list, tuple)):
+                        img_tensor = gen_result[0] if gen_result else None
+                    else:
+                        img_tensor = gen_result
+
+                    if img_tensor is not None:
+                        pil_image = _ensure_pil_image(img_tensor)
+                        return pil_image, img_tensor
 
         except Exception as e:
             logger.warning(f"[SelfEvolvingTrainer] Image generation failed: {e}")

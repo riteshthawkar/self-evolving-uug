@@ -1033,7 +1033,6 @@ class Infinity_old(nn.Module):
         label_B_or_BLT: label_B or (kv_compact, cu_seqlens_k, max_seqlen_k)
         :return: logits BLV, V is vocab_size
         """
-        import ipdb; ipdb.set_trace()
         if cfg_infer:
             return self.autoregressive_infer_cfg(label_B_or_BLT=label_B_or_BLT, scale_schedule=scale_schedule, **kwargs)
         

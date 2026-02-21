@@ -154,7 +154,6 @@ class InfinityTrainer(object):
         inp_B3HW: FTen, text_cond_tuple: Union[ITen, FTen], args: arg_util.Args,
     ) -> Tuple[torch.Tensor, Optional[float]]:
         
-        import ipdb; ipdb.set_trace()
         B = inp_B3HW.shape[0]  # if isinstance(inp_B3HW, torch.Tensor) else inp_B3HW[0].shape[0] torch.Size([2, 3, 256, 256])
         T = 1 if inp_B3HW.dim() == 4 else inp_B3HW.shape[2]
         V = self.vae_local.vocab_size
