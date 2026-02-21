@@ -140,6 +140,20 @@ class SelfEvolvingTrainer(Trainer):
         # ── DDP detection ────────────────────────────────────────────────
         self._is_ddp = dist.is_available() and dist.is_initialized()
 
+        # ── Image folder mode ────────────────────────────────────────────
+        # When se_image_folder is set, scan the folder for images at init
+        # so _sample_image() can pick random images without a JSON dataset.
+        self._image_folder_paths: List[str] = []
+        if se_config.image_folder:
+            self._image_folder_paths = self._scan_image_folder(
+                se_config.image_folder
+            )
+            logger.info(
+                f"[SelfEvolvingTrainer] Image folder mode: "
+                f"found {len(self._image_folder_paths)} images in "
+                f"{se_config.image_folder}"
+            )
+
         logger.info(
             f"[SelfEvolvingTrainer] Initialized with "
             f"U={se_config.understanding_steps_per_cycle}, "
@@ -488,8 +502,23 @@ class SelfEvolvingTrainer(Trainer):
 
     # ── Helper Methods ──────────────────────────────────────────────────
 
+    @staticmethod
+    def _scan_image_folder(folder_path: str) -> List[str]:
+        """Recursively scan a folder for image files. Returns sorted list of paths."""
+        IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
+        folder = pathlib.Path(folder_path)
+        if not folder.is_dir():
+            logger.warning(f"[SelfEvolvingTrainer] image_folder not found: {folder_path}")
+            return []
+        paths = []
+        for p in folder.rglob("*"):
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS:
+                paths.append(str(p))
+        paths.sort()
+        return paths
+
     def _sample_image(self, step: int) -> Tuple[Optional[Image.Image], str]:
-        """Sample an image: real dataset or replay buffer."""
+        """Sample an image: image folder, replay buffer, or dataset."""
         cfg = self.se_config
 
         # Gen-mix ratio: linearly ramp from start to max
@@ -498,49 +527,53 @@ class SelfEvolvingTrainer(Trainer):
             cfg.gen_mix_ratio_max - cfg.gen_mix_ratio_start
         ) * min(1.0, step / warmup)
 
-        # Try replay buffer
+        # Try replay buffer first (for generated image mixing)
         if random.random() < ratio and self.replay_buffer:
             entry = self.replay_buffer.sample()
             if entry is not None:
                 return entry.image, "replay_buffer"
 
-        # Try dataset
-        # After LLaMA-Factory's SFT preprocessing, each sample has an "images"
-        # field containing string paths (e.g. "data/vargpt_demo/1.jpg") or
-        # PIL Images. We handle both cases here.
+        # ── Image folder mode (preferred when set) ────────────────────
+        if self._image_folder_paths:
+            path = random.choice(self._image_folder_paths)
+            try:
+                pil_img = Image.open(path).convert("RGB")
+                return pil_img, "image_folder"
+            except Exception as e:
+                logger.warning(
+                    f"[SelfEvolvingTrainer] Failed to load {path}: {e}"
+                )
+                return None, "none"
+
+        # ── Fallback: LLaMA-Factory dataset ───────────────────────────
         try:
             if self.train_dataset is not None and len(self.train_dataset) > 0:
                 idx = random.randint(0, len(self.train_dataset) - 1)
                 sample = self.train_dataset[idx]
-                # Try common image key names used by LLaMA-Factory datasets
                 image_obj = None
                 for key in ("images", "image", "pixel_values"):
                     if key in sample and sample[key] is not None:
                         image_obj = sample[key]
-                        # Handle lists of images (take first)
                         if isinstance(image_obj, (list, tuple)) and image_obj:
                             image_obj = image_obj[0]
                         break
                 if image_obj is not None:
                     if isinstance(image_obj, Image.Image):
                         return image_obj, "dataset"
-                    # LLaMA-Factory stores image paths as strings after
-                    # SFT preprocessing — load them to PIL directly.
                     if isinstance(image_obj, str):
                         try:
                             pil_img = Image.open(image_obj).convert("RGB")
                             return pil_img, "dataset"
                         except Exception as e_open:
                             logger.warning(
-                                f"[SelfEvolvingTrainer] Failed to open image "
-                                f"path '{image_obj}': {e_open}"
+                                f"[SelfEvolvingTrainer] Failed to open "
+                                f"'{image_obj}': {e_open}"
                             )
                             return None, "none"
                     if isinstance(image_obj, bytes):
                         from io import BytesIO
                         pil_img = Image.open(BytesIO(image_obj)).convert("RGB")
                         return pil_img, "dataset"
-                    # numpy / torch tensor fallback
                     return _ensure_pil_image(image_obj), "dataset"
         except Exception as e:
             logger.warning(f"[SelfEvolvingTrainer] Dataset sampling failed: {e}")

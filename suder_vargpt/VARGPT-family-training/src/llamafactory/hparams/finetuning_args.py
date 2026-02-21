@@ -404,6 +404,17 @@ class FinetuningArguments(FreezeArguments, LoraArguments, RLHFArguments, GaloreA
         default=True,
         metadata={"help": "Update proposer with generation quality reward."},
     )
+    se_image_folder: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Path to a folder of images (with optional subfolders). "
+                "When set, the self-evolving trainer loads images directly "
+                "from this folder instead of requiring a JSON dataset. "
+                "Supports .jpg, .jpeg, .png, .webp, .bmp, .tiff."
+            )
+        },
+    )
 
     def __post_init__(self):
         def split_arg(arg):
