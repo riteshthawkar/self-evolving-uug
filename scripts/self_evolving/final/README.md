@@ -132,9 +132,43 @@ bash E6_single_step.sh
 # Override stage if needed (all scripts default to strict)
 TRAIN_STAGE=warmup bash E1_main_joint.sh
 
-# Resume from checkpoint
+# Resume from checkpoint (point to any step_NNNNN directory or its parent)
 RESUME_FROM=/path/to/step_N bash E1_main_joint.sh
+
+# Resume with proposer baseline reset (useful if reward distribution shifted)
+RESUME_FROM=/path/to/step_N RESET_PROPOSER_BASELINE=1 bash E1_main_joint.sh
 ```
+
+### Resuming Terminated Experiments
+
+Checkpoints are saved every **50 steps** (`--save_every 50`) under the experiment's
+`OUTPUT_DIR` (e.g. `/workspace/.../runs/final/E1_main_joint/`).  Each checkpoint
+is a directory named `step_NNNNN/` containing LoRA adapters, optimizer states,
+baselines, and RNG states.
+
+**Step 1 — Find the latest valid checkpoint:**
+```bash
+# List checkpoints (look for SAVE_OK marker = completed save)
+ls -d /workspace/.../runs/final/E1_main_joint/step_* | while read d; do
+  [[ -f "$d/SAVE_OK" ]] && echo "OK: $d" || echo "INCOMPLETE: $d"
+done
+```
+
+**Step 2 — Resume:**
+```bash
+# Point RESUME_FROM to the latest complete checkpoint
+RESUME_FROM=/workspace/.../runs/final/E1_main_joint/step_00250 bash E1_main_joint.sh
+
+# Or just point to the parent dir — the trainer auto-picks the newest valid checkpoint
+RESUME_FROM=/workspace/.../runs/final/E1_main_joint bash E1_main_joint.sh
+```
+
+**What gets restored:** LoRA adapter weights (solver/proposer/generator), DiT
+trainable params, optimizer states, KL coefficients, reward baselines,
+entropy/difficulty windows, and RNG states for deterministic resumption.
+
+**Note:** The replay buffer (E5) is **not** persisted to disk — it refills
+naturally within the first few G-steps after resume.
 
 ## Evaluation Benchmarks
 
