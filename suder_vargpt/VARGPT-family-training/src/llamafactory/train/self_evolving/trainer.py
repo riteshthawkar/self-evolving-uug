@@ -822,11 +822,28 @@ class SelfEvolvingTrainer(Trainer):
                 # training mode, so this is safe.
                 peft_model.train()
 
+                # Cast VAR generation modules to float32.
+                # The VAR model (vargpt_gen, image_gen_projector, etc.) was
+                # designed for float32, but the whole model is loaded in bf16.
+                # autoregressive_infer_cfg does .float() on inputs before
+                # passing to these modules, causing dtype mismatches.
+                _gen_modules = []
+                for name in ("vargpt_gen", "image_gen_projector",
+                             "image_gen_projector_out", "vae_local"):
+                    mod = getattr(actual_model, name, None)
+                    if mod is not None:
+                        _gen_modules.append((name, mod))
+                        mod.float()
+
                 gen_result = peft_model(
                     input_ids=input_ids[:, -1:],
                     attention_mask=attention_mask,
                     inference_image_gen=True,
                 )
+
+                # Restore bf16 on the generation modules
+                for name, mod in _gen_modules:
+                    mod.to(torch.bfloat16)
 
                 if gen_result is not None:
                     if isinstance(gen_result, torch.Tensor):
