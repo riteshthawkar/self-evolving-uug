@@ -97,15 +97,46 @@ def setup_multi_adapter(
     generator_adapter_name = existing_adapters[0] if existing_adapters else "default"
     logger.info(f"[AdapterManager] Generator adapter: {generator_adapter_name}")
 
-    # Build LoRA config matching the existing adapter
+    # Build LoRA config matching the existing adapter.
+    # IMPORTANT: existing_config.target_modules may be a regex string
+    # (from patch_target_modules in visual.py) like
+    # "^(?!.*visual).*(?:q_proj|k_proj|...).*"
+    # After PEFT wraps the first adapter, the module tree now contains
+    # ModuleDict (for dropout) and LoRA-wrapped layers. Reusing the regex
+    # causes PEFT's add_adapter() to match these wrapped modules and fail
+    # with "ModuleDict is not supported".
+    # Fix: use an explicit list of module short-names instead.
     existing_config = base_model.peft_config[generator_adapter_name]
+
+    # Extract clean module names: if target_modules is a regex, parse out
+    # the module names from the (?:...) group; otherwise use as-is.
+    raw_targets = existing_config.target_modules
+    if isinstance(raw_targets, str):
+        import re
+        match = re.search(r'\(\?:([^)]+)\)', raw_targets)
+        if match:
+            target_modules = list(set(match.group(1).split('|')))
+        else:
+            # Fallback: use the well-known LLM linear module names
+            target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
+                              "gate_proj", "up_proj", "down_proj"]
+    elif isinstance(raw_targets, set):
+        target_modules = list(raw_targets)
+    else:
+        target_modules = list(raw_targets) if raw_targets else [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ]
+
+    logger.info(f"[AdapterManager] target_modules for new adapters: {target_modules}")
+
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         inference_mode=False,
         r=existing_config.r,
         lora_alpha=existing_config.lora_alpha,
         lora_dropout=existing_config.lora_dropout,
-        target_modules=existing_config.target_modules,
+        target_modules=target_modules,
     )
 
     # Add proposer and solver adapters

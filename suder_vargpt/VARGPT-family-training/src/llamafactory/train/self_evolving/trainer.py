@@ -352,6 +352,8 @@ class SelfEvolvingTrainer(Trainer):
         stats = {}
 
         # ── 1. Proposer generates spec ──────────────────────────────────
+        topic = None
+        image = None
         if cfg.imageless_proposer_mode:
             topic = _sample_imageless_topic(step, cfg.seed)
             spec, spec_completion = self._generate_imageless_spec(topic, step)
@@ -445,7 +447,7 @@ class SelfEvolvingTrainer(Trainer):
 
             if cfg.imageless_proposer_mode:
                 prop_prompt = build_imageless_spec_prompt(
-                    topic if cfg.imageless_proposer_mode else "",
+                    topic or "",
                     target_difficulty=self._current_difficulty(step),
                 )
                 prop_stats = self.proposer_updater.step(
@@ -548,8 +550,9 @@ class SelfEvolvingTrainer(Trainer):
 
         # ── Fallback: LLaMA-Factory dataset ───────────────────────────
         try:
-            if self.train_dataset is not None and len(self.train_dataset) > 0:
-                idx = random.randint(0, len(self.train_dataset) - 1)
+            ds_len = len(self.train_dataset) if self.train_dataset is not None else 0
+            if ds_len > 0:
+                idx = random.randint(0, ds_len - 1)
                 sample = self.train_dataset[idx]
                 image_obj = None
                 for key in ("images", "image", "pixel_values"):
@@ -772,7 +775,13 @@ class SelfEvolvingTrainer(Trainer):
                 # Step 2: Call forward with inference_image_gen=True
                 # Pass past_key_values so past_hidden_states is NOT reset
                 # (forward() line 2246 only resets when past_key_values is None)
-                past_kv = outputs.past_key_values if hasattr(outputs, "past_key_values") else outputs[-1]
+                if hasattr(outputs, "past_key_values"):
+                    past_kv = outputs.past_key_values
+                elif isinstance(outputs, (tuple, list)) and len(outputs) > 1:
+                    past_kv = outputs[-1]
+                else:
+                    logger.warning("[SelfEvolvingTrainer] Cannot extract past_key_values from forward output")
+                    return None, None
                 gen_result = base_model(
                     input_ids=input_ids[:, -1:],
                     attention_mask=attention_mask,
