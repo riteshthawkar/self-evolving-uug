@@ -835,6 +835,12 @@ class SelfEvolvingTrainer(Trainer):
                         _gen_modules.append((name, mod))
                         mod.float()
 
+                # Also cast past_hidden_states to float32 — it was stored
+                # during step 1 in bf16, but now flows into the float32
+                # VAR modules via get_ca_kv_cross → image_gen_projector_out.
+                if actual_model.past_hidden_states is not None:
+                    actual_model.past_hidden_states = actual_model.past_hidden_states.float()
+
                 gen_result = peft_model(
                     input_ids=input_ids[:, -1:],
                     attention_mask=attention_mask,
