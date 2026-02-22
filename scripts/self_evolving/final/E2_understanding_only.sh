@@ -247,8 +247,10 @@ fi
   --generation_height "$GENERATION_IMAGE_SIDE" \
   --generation_width  "$GENERATION_IMAGE_SIDE" \
   \
-  `# ── Difficulty curriculum (easy-skipping REMOVED) ─────────────────────` \
+  `# ── Difficulty curriculum (easy-skipping DISABLED) ────────────────────` \
   --difficulty_sampler_enabled \
+  --allow_solver_update_on_easy \
+  --disable_acceptance_require_non_easy \
   \
   `# ── Reward weights ──────────────────────────────────────────────────────` \
   --reward_spec_weight 0.65 \
