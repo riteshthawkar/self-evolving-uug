@@ -17,24 +17,60 @@ def _aligned_prompt_prefix_len(
     prompt_ids: torch.Tensor,
     full_ids: torch.Tensor,
     completion_text: str,
+    processor=None,
 ) -> int:
-    """Return a robust prompt-prefix length for completion masking."""
+    """Return a robust prompt-prefix length for completion masking.
+
+    In multimodal chat templates, ``prompt`` and ``prompt+completion`` can be
+    serialized with different image-token counts (e.g. Qwen2-VL dynamic
+    resolution).  This function uses multiple strategies to find the correct
+    prompt/completion boundary.
+    """
     prompt_len = int(prompt_ids.shape[1])
     full_len = int(full_ids.shape[1])
     if full_len <= 0:
         return 0
+
+    # Case 1: normal — prompt is shorter than full.
     if prompt_len < full_len:
         return prompt_len
-    if not str(completion_text or "").strip():
+
+    # Case 2: empty completion — mask everything.
+    completion_str = str(completion_text or "").strip()
+    if not completion_str:
         return min(prompt_len, full_len)
 
-    max_len = min(prompt_len, full_len)
-    lcp = 0
-    p = prompt_ids[0]
-    f = full_ids[0]
-    while lcp < max_len and int(p[lcp].item()) == int(f[lcp].item()):
-        lcp += 1
-    return min(lcp, full_len)
+    # ── prompt_len >= full_len but completion is non-empty ──
+
+    # Strategy A: estimate completion tokens and subtract from full_len.
+    est_comp_tokens = _estimate_completion_token_count(processor, completion_text)
+    if est_comp_tokens > 0:
+        boundary = max(0, full_len - est_comp_tokens)
+        boundary = max(1, boundary)
+        return boundary
+
+    # Strategy B: reverse suffix matching.
+    if prompt_len > 0 and full_len > 0:
+        p = prompt_ids[0]
+        f = full_ids[0]
+        suffix_match = 0
+        max_suffix = min(prompt_len, full_len)
+        while suffix_match < max_suffix:
+            pi = prompt_len - 1 - suffix_match
+            fi = full_len - 1 - suffix_match
+            if int(p[pi].item()) == int(f[fi].item()):
+                suffix_match += 1
+            else:
+                break
+        if suffix_match > 0:
+            lcp = 0
+            cmp_len = min(prompt_len, full_len - suffix_match) if suffix_match < full_len else 0
+            while lcp < cmp_len and int(p[lcp].item()) == int(f[lcp].item()):
+                lcp += 1
+            return max(1, min(lcp, full_len - 1))
+
+    # Final fallback: leave at least the last 10% of tokens unmasked.
+    return max(1, full_len - max(1, full_len // 10))
 
 
 def _estimate_completion_token_count(processor, completion_text: str) -> int:
@@ -45,18 +81,25 @@ def _estimate_completion_token_count(processor, completion_text: str) -> int:
     tok = getattr(processor, "tokenizer", None)
     if tok is None:
         tok = processor
-    if tok is None or not hasattr(tok, "encode"):
-        return 0
-    try:
-        ids = tok.encode(text, add_special_tokens=False)
-    except TypeError:
-        ids = tok.encode(text)
-    except Exception:
-        return 0
-    try:
-        return int(len(ids))
-    except Exception:
-        return 0
+    if tok is not None and hasattr(tok, "encode"):
+        try:
+            ids = tok.encode(text, add_special_tokens=False)
+            count = int(len(ids))
+            if count > 0:
+                return count
+        except TypeError:
+            try:
+                ids = tok.encode(text)
+                count = int(len(ids))
+                if count > 0:
+                    return count
+            except Exception:
+                pass
+        except Exception:
+            pass
+    # Heuristic fallback: ~1.3 tokens per word for English text.
+    word_count = len(text.split())
+    return max(1, int(word_count * 1.3))
 
 
 def _text_supervised_step(
@@ -111,6 +154,7 @@ def _text_supervised_step(
         inputs_prompt["input_ids"],
         input_ids,
         completion_text=completion,
+        processor=updater.processor,
     )
     labels[:, :prompt_len] = -100
     valid_mask = labels[:, 1:] != -100
@@ -318,6 +362,7 @@ class TextPolicyUpdater:
             inputs_prompt["input_ids"],
             input_ids,
             completion_text=completion,
+            processor=self.processor,
         )
         labels[:, :prompt_len] = -100
         valid_mask = labels[:, 1:] != -100
@@ -743,6 +788,7 @@ class TextPreferenceDPOUpdater:
                     inputs_prompt["input_ids"],
                     forward_inputs["input_ids"],
                     completion_text=completion_text,
+                    processor=self.processor,
                 )
                 seq_logp, token_count = self._sequence_logp_from_logits(
                     logits=out.logits,
@@ -1082,6 +1128,7 @@ class TextGRPOUpdater:
             prompt_inputs["input_ids"],
             forward_inputs["input_ids"],
             completion_text=completion_text,
+            processor=self.processor,
         )
         input_ids = forward_inputs["input_ids"]
         labels = input_ids.clone()
