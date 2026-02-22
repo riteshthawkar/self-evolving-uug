@@ -37,29 +37,66 @@ def _aligned_prompt_prefix_len(
     prompt_ids: torch.Tensor,
     full_ids: torch.Tensor,
     completion_text: str,
+    processor=None,
 ) -> int:
     """Return a robust prompt-prefix length for loss masking.
 
-    In multimodal chat templates, prompt and prompt+completion can have
-    slightly different control-token layouts. We use longest-common-prefix
-    as a robust fallback.
+    In multimodal chat templates (e.g. Qwen2-VL), the prompt-only and
+    prompt+completion tokenizations can have different lengths even for
+    the same prompt, because vision token expansion may vary. We use
+    multiple strategies to find the right boundary:
+
+    1. If prompt_len < full_len: use prompt_len directly (ideal case).
+    2. Otherwise: estimate completion token count from text and subtract
+       from full_len (handles multimodal token length mismatches).
+    3. Fallback to LCP (longest-common-prefix) from the END of the
+       sequences, which is more reliable for finding where the
+       completion starts.
     """
     prompt_len = int(prompt_ids.shape[1])
     full_len = int(full_ids.shape[1])
     if full_len <= 0:
         return 0
+
+    completion_text = str(completion_text or "").strip()
+
+    # Case 1: prompt shorter than full — the simple/ideal case
     if prompt_len < full_len:
         return prompt_len
-    if not str(completion_text or "").strip():
+
+    # Case 2: prompt >= full (common with multimodal tokenizers)
+    # Estimate completion tokens and subtract from full_len
+    if completion_text:
+        est_comp = _estimate_completion_token_count(processor, completion_text)
+        if est_comp > 0:
+            # Add a small margin (2 tokens) for special tokens like </s>
+            boundary = max(0, full_len - est_comp - 2)
+            # Sanity: don't mask more than 80% of the sequence
+            boundary = max(boundary, full_len // 5)
+            return boundary
+
+    # Case 3: no completion text → mask everything as prompt
+    if not completion_text:
         return min(prompt_len, full_len)
 
-    max_len = min(prompt_len, full_len)
-    lcp = 0
+    # Case 4: fallback — match from the END of the sequences backwards
+    # to find where they start diverging (i.e., where completion begins)
     p = prompt_ids[0]
     f = full_ids[0]
-    while lcp < max_len and int(p[lcp].item()) == int(f[lcp].item()):
-        lcp += 1
-    return min(lcp, full_len)
+    common_suffix = 0
+    max_check = min(prompt_len, full_len)
+    while common_suffix < max_check:
+        pi = prompt_len - 1 - common_suffix
+        fi = full_len - 1 - common_suffix
+        if int(p[pi].item()) == int(f[fi].item()):
+            common_suffix += 1
+        else:
+            break
+    # The completion starts where the suffix matching stops
+    boundary = max(0, full_len - common_suffix - 1)
+    # Sanity: ensure at least 1 completion token
+    boundary = min(boundary, full_len - 1)
+    return boundary
 
 
 def _estimate_completion_token_count(processor, completion_text: str) -> int:
@@ -70,18 +107,25 @@ def _estimate_completion_token_count(processor, completion_text: str) -> int:
     tok = getattr(processor, "tokenizer", None)
     if tok is None:
         tok = processor
-    if tok is None or not hasattr(tok, "encode"):
-        return 0
-    try:
-        ids = tok.encode(text, add_special_tokens=False)
-    except TypeError:
-        ids = tok.encode(text)
-    except Exception:
-        return 0
-    try:
-        return int(len(ids))
-    except Exception:
-        return 0
+    if tok is not None and hasattr(tok, "encode"):
+        try:
+            ids = tok.encode(text, add_special_tokens=False)
+            count = int(len(ids))
+            if count > 0:
+                return count
+        except TypeError:
+            try:
+                ids = tok.encode(text)
+                count = int(len(ids))
+                if count > 0:
+                    return count
+            except Exception:
+                pass
+        except Exception:
+            pass
+    # Heuristic fallback: ~1.3 tokens per word for English text.
+    word_count = len(text.split())
+    return max(1, int(word_count * 1.3))
 
 
 class RolePolicyUpdater:
@@ -225,6 +269,7 @@ class RolePolicyUpdater:
             inputs_prompt["input_ids"],
             input_ids,
             completion_text=completion,
+            processor=self.processor,
         )
         labels[:, :prompt_len] = -100
         valid_mask = labels[:, 1:] != -100
