@@ -7,23 +7,23 @@ set -euo pipefail
 #
 # Trains ONLY the understanding pathway (solver + proposer).
 # Generation phase is completely disabled:
-#   • No generator LoRA updates (generator_update_freq=0)
-#   • No DiT RWR updates (dit_update_freq=0)
-#   • No generation-phase proposer reward
+#   * No generator LoRA updates (generator_update_freq=0)
+#   * No DiT RWR updates (dit_update_freq=0)
+#   * No generation-phase proposer reward
 #
 # Only the proposer-solver loop runs:
-#   • Proposer generates questions about images
-#   • Solver answers with multiple samples (self-consistency)
-#   • Solver LoRA is updated via GRPO on non-easy questions
-#   • Proposer is updated via GRPO to produce harder questions
+#   * Proposer generates questions about images
+#   * Solver answers with multiple samples (self-consistency)
+#   * Solver LoRA is updated via REINFORCE on ALL questions (easy included)
+#   * Proposer is updated via GRPO to produce harder questions
 #
 # Data: Can use chart-heavy 50k pool since there are NO generation steps.
 #   Override: DATA_DIR=/workspace/.../shared_uug_50k_balanced/images bash E2_...
 #
 # What this experiment proves:
-#   ✓ Understanding improves when trained in isolation
-#   ✓ Compare E2 vs E1 to see if joint training helps or hurts understanding
-#   ✓ Compare E2 vs E3 to show understanding-only doesn't help generation
+#   * Understanding improves when trained in isolation
+#   * Compare E2 vs E1 to see if joint training helps or hurts understanding
+#   * Compare E2 vs E3 to show understanding-only doesn't help generation
 #
 # Usage:
 #   TRAIN_STAGE=warmup bash E2_understanding_only.sh
@@ -32,9 +32,9 @@ set -euo pipefail
 
 REPO_ROOT="/workspace/self-evolving-uug/self-evolving-uug"
 PYTHON_BIN="python3"
-DATA_DIR="${DATA_DIR:-/workspace/self-evolving-uug/data/joint_3k/images}"
+DATA_DIR="/workspace/self-evolving-uug/data/data_3k/images"
 OUTPUT_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/final/E2_understanding_only"
-RUN_NAME="E2_understanding_only_s42"
+RUN_NAME="E2_understanding_only_s42_newly-updated"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
 RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
@@ -46,7 +46,6 @@ GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
   RUN_NAME="${RUN_NAME}_warmup"
   STAGE_ARGS=(
-    --acceptance_require_non_easy
     --disable_proposer_require_objective
     --proposer_non_objective_penalty 0.0
     --difficulty_target_easy   0.30
@@ -65,7 +64,6 @@ if [[ "$TRAIN_STAGE" == "warmup" ]]; then
 elif [[ "$TRAIN_STAGE" == "strict" ]]; then
   RUN_NAME="${RUN_NAME}_strict"
   STAGE_ARGS=(
-    --acceptance_require_non_easy
     --disable_proposer_require_objective
     --proposer_non_objective_penalty 0.0
     --difficulty_target_easy   0.10
@@ -173,6 +171,7 @@ echo "[E2]   Data dir:    $DATA_DIR"
 echo "[E2]   GPUs:        $NPROC_PER_NODE"
 echo "[E2]   Attn impl:   $ATTN_IMPL"
 echo "[E2]   NOTE: Generation training DISABLED"
+echo "[E2]   NOTE: Easy-question skipping DISABLED (solver trains on all questions)"
 if [[ -n "${RESUME_FROM:-}" ]]; then
   echo "[E2]   Resume from: $RESUME_FROM"
 fi
@@ -248,9 +247,8 @@ fi
   --generation_height "$GENERATION_IMAGE_SIDE" \
   --generation_width  "$GENERATION_IMAGE_SIDE" \
   \
-  `# ── Difficulty curriculum ───────────────────────────────────────────────` \
+  `# ── Difficulty curriculum (easy-skipping REMOVED) ─────────────────────` \
   --difficulty_sampler_enabled \
-  --solver_skip_update_on_easy \
   \
   `# ── Reward weights ──────────────────────────────────────────────────────` \
   --reward_spec_weight 0.65 \
