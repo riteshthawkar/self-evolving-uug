@@ -360,6 +360,8 @@ def build_proposer_multi_prompt(
        boundary conditions — not just "complex to describe".
     4. TWO-ANSWER TEST: Each question must pass the internal test "could a reasonable
        person looking at this image give TWO different answers?" If not, it is easy.
+    5. FINE-GRAINED FOCUS: Questions must target small, peripheral, or partially
+       visible details — never the dominant/salient subject.
 
     Returns K=num_questions candidate questions ordered hardest-first.
     Each candidate includes a chain-of-thought block reasoning about WHY each
@@ -374,7 +376,9 @@ def build_proposer_multi_prompt(
             "TARGET: HARD — the solver should be genuinely uncertain.\n"
             "Required: pick a question strategy from the HARD tier below and apply it to a specific "
             "visual element in this image where the answer is genuinely ambiguous.\n"
-            "The correct answer should NOT be immediately obvious from the most salient part of the image."
+            "The correct answer should NOT be immediately obvious from the most salient part of the image.\n"
+            "FOCUS ON: tiny background text, partially hidden objects, objects at image edges, "
+            "ambiguous boundaries between similar objects, fine texture details, or reflections."
         )
     elif level == "easy":
         diff_hint = (
@@ -387,55 +391,113 @@ def build_proposer_multi_prompt(
             "TARGET: MEDIUM — the solver should frequently disagree on the precise answer.\n"
             "Required: pick a question strategy from the MEDIUM or HARD tier below and apply it to "
             "a non-salient or ambiguous visual element in this image.\n"
-            "Do NOT ask about the most obvious/dominant element in the scene."
+            "Do NOT ask about the most obvious/dominant element in the scene.\n"
+            "FOCUS ON: secondary objects, background details, partially visible items, "
+            "small text, ambiguous counts, or subtle color differences."
         )
 
-    # Strategy library — compact format to minimise prompt input tokens.
-    # Full descriptions are omitted; the model already knows these patterns.
+    # Strategy library with expanded descriptions to guide fine-grained question writing.
     strategy_block = (
-        "STRATEGIES (pick one per question; apply to a SPECIFIC element in THIS image):\n"
-        "HARD: H1=occlusion-count  H2=boundary-comparison  H3=occluded-attribute\n"
-        "      H4=multi-hop-relation  H5=edge-condition  H6=secondary-count\n"
-        "      H7=occluded-text  H8=chart-delta\n"
-        "MEDIUM: M1=precise-count  M2=relative-spatial  M3=comparative-attr\n"
-        "        M4=secondary-attr  M5=non-obvious-existence\n"
-        "NEVER (always easy): main-subject-action | object-type | dominant-text | "
-        "single-salient-color | unambiguous-yes-no | obvious-single-word-answer\n"
+        "STRATEGIES (pick one per question; apply to a SPECIFIC fine-grained element in THIS image):\n"
+        "HARD:\n"
+        "  H1=occlusion-count: Count objects that overlap or are partially hidden behind others.\n"
+        "     Ask about SMALL or BACKGROUND objects (not the main subject).\n"
+        "     Example: 'How many chairs are partially visible behind the table?' (NOT 'How many people?')\n"
+        "  H2=boundary-comparison: Compare sizes, distances, or positions of two similar objects.\n"
+        "     Example: 'Is the left window wider than the right window?' (NOT 'What color is the car?')\n"
+        "  H3=occluded-attribute: Ask about an attribute of an object that is partially hidden.\n"
+        "     Example: 'What color is the shoe of the person whose legs are behind the counter?'\n"
+        "  H4=multi-hop-relation: Chain two spatial or logical relations.\n"
+        "     Example: 'What is to the left of the object that is on top of the bookshelf?'\n"
+        "  H5=edge-condition: Ask about objects at the very edge of the image (cropped/cut off).\n"
+        "     Example: 'Is the object at the right edge of the image a car or a truck?'\n"
+        "  H6=secondary-count: Count small or background objects (NOT the main subject).\n"
+        "     Example: 'How many bottles are on the shelf in the background?'\n"
+        "  H7=occluded-text: Ask about small, partially visible, or distant text.\n"
+        "     Example: 'What is the last word on the small sign in the background?' (NOT 'What brand is on the banner?')\n"
+        "  H8=chart-delta: Ask about small differences between bars/lines in a chart.\n"
+        "MEDIUM:\n"
+        "  M1=precise-count: Count non-obvious objects requiring careful scanning.\n"
+        "     Example: 'How many buttons are on the shirt?' (NOT 'How many people are in the image?')\n"
+        "  M2=relative-spatial: Ask about relative position of non-dominant objects.\n"
+        "     Example: 'Is the cup to the left or right of the napkin?'\n"
+        "  M3=comparative-attr: Compare attributes of secondary objects.\n"
+        "     Example: 'Which is taller, the lamp or the vase on the table?'\n"
+        "  M4=secondary-attr: Ask about an attribute of a non-salient object.\n"
+        "     Example: 'What pattern is on the tablecloth?' (NOT 'What color is the main object?')\n"
+        "  M5=non-obvious-existence: Ask whether a small or non-obvious object exists.\n"
+        "     Example: 'Is there a clock visible anywhere in the image?'\n"
+        "\n"
+        "BANNED PATTERNS (these ALWAYS produce easy/unanimous answers — NEVER use them):\n"
+        "  X main-subject-identity: 'What animal is this?' 'What sport is being played?'\n"
+        "  X dominant-text-reading: 'What brand name is on the banner?' 'What does the sign say?'\n"
+        "  X single-salient-color: 'What color is the car?' 'What color is the helmet?'\n"
+        "  X main-subject-count: 'How many people are in the image?' 'How many dogs?'\n"
+        "  X obvious-yes-no: 'Is there a person in the image?' 'Is the sky blue?'\n"
+        "  X main-action: 'What is the person doing?' 'What sport is being played?'\n"
     )
 
     # Dataset-specific one-liner hint (kept short to save tokens).
     src = (image_source_hint or "").strip().lower()
     if src == "textvqa":
-        dataset_hint = "IMAGE: text-in-scene. Prefer H7, H4, M2. Avoid largest visible text.\n"
+        dataset_hint = (
+            "IMAGE: text-in-scene. Target the SMALLEST or most distant text, "
+            "NOT the largest/clearest text. Prefer H7, H4, M2.\n"
+        )
     elif src in {"chartqa", "chart"}:
-        dataset_hint = "IMAGE: chart/graph. Prefer H8 (small delta), H6, M3 (2nd-highest). Avoid peak-bar or title.\n"
+        dataset_hint = (
+            "IMAGE: chart/graph. Ask about the SMALLEST bar, the 2nd or 3rd ranked value, "
+            "or a close comparison. Prefer H8, H6, M3. Avoid peak-bar or title.\n"
+        )
     elif src == "gqa":
-        dataset_hint = "IMAGE: relational scene. Prefer H4, H2, H1, M2. Avoid dominant-object type/color.\n"
+        dataset_hint = (
+            "IMAGE: relational scene. Ask about BACKGROUND objects, secondary actors, "
+            "or partially visible items. Prefer H4, H2, H1, M2. Avoid the main subject.\n"
+        )
     else:
-        dataset_hint = "IMAGE: natural photo. Prefer H1, H2, H3, H6, M2 on SECONDARY objects. Avoid main-subject action or type.\n"
+        dataset_hint = (
+            "IMAGE: natural photo. Ask about BACKGROUND details, secondary objects, "
+            "partially visible items, or fine-grained attributes of non-dominant objects. "
+            "Prefer H1, H3, H6, M4, M5. NEVER ask about the main subject.\n"
+        )
 
     n = max(1, int(num_questions))
     qa_template = "\n".join(
         f'  <question id="{i}">\n'
         f'    <strategy_used>...which strategy from the library above (e.g. H2, M3)...</strategy_used>\n'
-        f'    <two_answer_test>...two plausible but DIFFERENT answers the solver might give and why...</two_answer_test>\n'
+        f'    <visual_target>...which SPECIFIC small/secondary/background element in the image you are targeting (must NOT be the main subject)...</visual_target>\n'
+        f'    <two_answer_test>...two genuinely DIFFERENT answers the solver might give. '
+        f'If both answers are the same or one is obviously wrong, this question is TOO EASY — pick a harder target...</two_answer_test>\n'
         f'    <text>...the question text ending with "?"...</text>\n'
-        f'    <rationale>...why this is objective, image-grounded, and NOT an anti-pattern...</rationale>\n'
+        f'    <rationale>...why this targets a fine-grained detail that is hard to answer with certainty...</rationale>\n'
         f'  </question>'
         for i in range(1, n + 1)
     )
 
     return (
-        "You are an Adversarial Question Proposer.\n"
-        "GOAL: questions a vision-language solver (same model, same image) will FAIL to answer unanimously.\n"
+        "You are an Adversarial Fine-Grained Question Proposer.\n"
+        "GOAL: generate questions about SMALL, SUBTLE, or BACKGROUND details in the image "
+        "that a vision-language solver will FAIL to answer unanimously.\n"
+        "\n"
+        "CRITICAL RULES:\n"
+        "- NEVER ask about the main/dominant subject, object, or text in the image.\n"
+        "- ALWAYS target secondary objects, background elements, partially visible items, "
+        "small text, fine textures, edge-of-frame objects, or ambiguous boundaries.\n"
+        "- The question must probe a SPECIFIC fine-grained visual detail where "
+        "reasonable observers could genuinely disagree.\n"
+        "- If you cannot identify TWO genuinely different plausible answers, "
+        "your question is too easy — find a harder visual target.\n"
+        "\n"
         f"{diff_hint}\n"
         f"{dataset_hint}"
         f"{strategy_block}"
         f"Generate exactly {n} questions, HARDEST first. For each:\n"
-        "  1. <strategy_used>: which strategy (e.g. H2).\n"
-        "  2. <two_answer_test>: two different plausible solver answers. If you can't — it's easy, pick another strategy.\n"
-        "  3. <text>: the question (ends with '?', uses concrete image objects, 1-5 word answer).\n"
-        "  4. <rationale>: why it is objective, image-grounded, NOT an anti-pattern.\n"
+        "  1. <strategy_used>: which strategy (e.g. H3).\n"
+        "  2. <visual_target>: the specific small/background/secondary element you are asking about.\n"
+        "  3. <two_answer_test>: two genuinely DIFFERENT plausible answers. "
+        "If you write the same answer twice or one is obviously absurd, STOP and pick a harder target.\n"
+        "  4. <text>: the question (ends with '?', uses concrete image objects, 1-5 word answer).\n"
+        "  5. <rationale>: why this fine-grained detail is hard to answer with certainty.\n"
         "Rules: verifiable short answer, no subjective wording, no XML tags inside question text.\n"
         "Output XML only:\n"
         "<questions>\n"
