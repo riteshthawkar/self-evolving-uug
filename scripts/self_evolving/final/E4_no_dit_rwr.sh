@@ -242,7 +242,6 @@ fi
   --num_generations 3 \
   --proposer_num_candidates 3 \
   --proposer_spot_check_samples 2 \
-  --use_confidence_reward \
   \
   `# ── Image generation (BLIP3o diffusion) ─────────────────────────────────` \
   --generation_num_inference_steps 50 \
@@ -299,6 +298,7 @@ fi
   `# ── Proposer optimization ──────────────────────────────────────────────` \
   --proposer_update_rule grpo \
   --proposer_grpo_gen_group_size 3 \
+  --proposer_grpo_unverified_extra_margin 0.02 \
   \
   `# ── Baselines ──────────────────────────────────────────────────────────` \
   --baseline_momentum 0.6 \

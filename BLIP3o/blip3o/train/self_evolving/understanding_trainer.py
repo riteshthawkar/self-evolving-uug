@@ -910,6 +910,7 @@ class UnderstandingSelfEvolvingTrainer:
         max_new_tokens: int,
         temperature: float,
         top_p: float,
+        do_sample: bool = True,
     ) -> str:
         chat_text = _build_chat_text(self.processor, image, prompt)
         inputs = _prepare_mm_inputs(self.processor, self.device, image, chat_text, model=self.model)
@@ -923,7 +924,7 @@ class UnderstandingSelfEvolvingTrainer:
                 outputs = self.model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
-                    do_sample=True,
+                    do_sample=do_sample,
                     temperature=temperature,
                     top_p=top_p,
                     pad_token_id=_pad_id,
@@ -1400,6 +1401,11 @@ class UnderstandingSelfEvolvingTrainer:
                 )
                 proposer_reward = proposer_reward_raw
 
+                # NOTE: This hard-negative reward logic is NOT used by current
+                # experiments (E1-E6), which all run via UnifiedSelfEvolvingTrainer
+                # with V-Zero dual-track shaping (see unified_trainer.py L728-741).
+                # This code path only activates with --experiment understanding_self_evolving.
+                #
                 # Hard NEGATIVE for trivially easy questions (entropy ≈ 0).
                 # Using min() gave a positive floor (+0.10), making net penalty only -0.25.
                 # Assigning a hard negative makes trivially-easy a genuine punishment.
@@ -1573,7 +1579,10 @@ class UnderstandingSelfEvolvingTrainer:
                         if stats.get("did_step", True):
                             self._policy_update_counts["solver"] += 1
                         if not local_skip_update:
-                            self._update_baseline("solver", reward)
+                            # Track the SCALED reward that the updater actually receives,
+                            # not the raw reward.  Otherwise baseline > effective_reward
+                            # when scale < 1, causing systematic negative advantage bias.
+                            self._update_baseline("solver", effective_reward)
                         self._sync_state_scalars()
                         baseline_after = self.solver_baseline
 

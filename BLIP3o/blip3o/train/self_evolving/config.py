@@ -117,14 +117,12 @@ class UnderstandingSelfEvolvingConfig:
     # increase diversity, making it more likely that at least one extra produces
     # a non-easy question with a different reward → real gradient signal.
     grpo_extra_temp_multiplier: float = 1.5
+    # Generation-phase proposer GRPO: unverified extras are assigned
+    # (chosen_reward - margin), clamped to [-1, 1], so they cannot outrank
+    # the verified chosen candidate.
+    proposer_grpo_unverified_extra_margin: float = 0.02
     # Confidence-based proposer reward: instead of binary -cap for entropy=0,
     # use the solver's mean logprob as a continuous penalty scaler.
-    # When all solvers agree but confidence is LOW → smaller penalty.
-    # When confidence is HIGH → full penalty (truly easy).
-    use_confidence_reward: bool = False
-    # Floor logprob: solver logprobs below this are clipped.
-    confidence_logprob_floor: float = -3.0
-
     # KL control
     kl_coef: float = 0.01
     kl_target: float = 0.02
@@ -375,10 +373,10 @@ class GenerationSelfEvolvingConfig:
     score_grpo_extras: bool = True
     # Temperature multiplier for extra GRPO candidate generation.
     grpo_extra_temp_multiplier: float = 1.5
-    # Confidence-based proposer reward (mirrors UnderstandingSelfEvolvingConfig).
-    use_confidence_reward: bool = False
-    confidence_logprob_floor: float = -3.0
-
+    # Generation-phase proposer GRPO: unverified extras are assigned
+    # (chosen_reward - margin), clamped to [-1, 1], so they cannot outrank
+    # the verified chosen candidate.
+    proposer_grpo_unverified_extra_margin: float = 0.02
     # Baselines
     baseline_momentum: float = 0.6  # was 0.9: lower so advantage doesn't collapse when rewards are uniformly negative
 

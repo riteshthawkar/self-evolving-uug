@@ -1281,6 +1281,7 @@ class GenerationSelfEvolvingTrainer:
         max_new_tokens: int,
         temperature: float,
         top_p: float,
+        do_sample: bool = True,
     ) -> str:
         chat_text = _build_chat_text(self.processor, image, prompt)
         inputs = _prepare_mm_inputs(self.processor, self.device, image, chat_text, model=self.model)
@@ -1340,7 +1341,7 @@ class GenerationSelfEvolvingTrainer:
         def _run_generate(curr_inputs: Dict[str, torch.Tensor]):
             base_kwargs = {
                 "max_new_tokens": max_new_tokens,
-                "do_sample": True,
+                "do_sample": do_sample,
                 "temperature": temperature,
                 "top_p": top_p,
                 "pad_token_id": _pad_id,
@@ -1395,6 +1396,7 @@ class GenerationSelfEvolvingTrainer:
         max_new_tokens: int,
         temperature: float,
         top_p: float,
+        do_sample: bool = True,
     ) -> str:
         """Generate text from a text-only prompt (no image input).
 
@@ -1426,7 +1428,7 @@ class GenerationSelfEvolvingTrainer:
         def _run_generate(curr_inputs: Dict[str, torch.Tensor]):
             base_kwargs = {
                 "max_new_tokens": max_new_tokens,
-                "do_sample": True,
+                "do_sample": do_sample,
                 "temperature": temperature,
                 "top_p": top_p,
                 "pad_token_id": _pad_id,
@@ -4400,6 +4402,13 @@ class GenerationSelfEvolvingTrainer:
                         _grpo_images = [image]  # None in imageless mode — OK
 
                         # Sample extra specs (lightweight — proposer only, no image gen)
+                        # Unverified extras must NEVER outrank the verified chosen spec.
+                        # Use a small margin below chosen reward so GRPO has a stable
+                        # ordering signal without expensive extra image scoring.
+                        _extra_margin = max(
+                            2.0 * float(getattr(self.cfg, "grpo_min_group_std", 1e-6)),
+                            float(getattr(self.cfg, "proposer_grpo_unverified_extra_margin", 0.02)),
+                        )
                         for _gi in range(_grpo_group_size - 1):
                             try:
                                 if _imageless:
@@ -4414,12 +4423,13 @@ class GenerationSelfEvolvingTrainer:
                                 _extra_comp = str(_extra_spec.raw_output or _extra_spec.prompt or "").strip()
                                 if not _extra_comp:
                                     continue
-                                # Score extra spec with same reward formula but zero entropy
-                                # (we don't generate images for extras — use quality=0 as floor)
-                                # This gives GRPO group variance without extra image inference.
-                                # The reward is set to 0.0 to represent "unverified spec" —
-                                # lower than the verified spec's reward, giving correct advantage.
-                                _extra_reward = 0.0
+                                # Use a strict proxy lower than the chosen reward.
+                                # This prevents unverified extras from tying/outperforming
+                                # the verified candidate in baseline-shifted GRPO.
+                                _extra_reward = max(
+                                    -1.0,
+                                    min(1.0, _gen_proposer_reward - _extra_margin),
+                                )
                                 _grpo_completions.append(_extra_comp)
                                 _grpo_rewards.append(_extra_reward)
                                 _grpo_images.append(image)
@@ -4464,6 +4474,7 @@ class GenerationSelfEvolvingTrainer:
                         if proposer_stats is not None:
                             proposer_stats["grpo_ema_baseline"] = _gen_ema_baseline
                             proposer_stats["grpo_baseline_input"] = _gen_proposer_reward
+                            proposer_stats["grpo_unverified_extra_margin"] = _extra_margin
                     else:
                         # ── REINFORCE path (legacy) ───────────────────────────────────────
                         _gen_baseline_momentum = float(

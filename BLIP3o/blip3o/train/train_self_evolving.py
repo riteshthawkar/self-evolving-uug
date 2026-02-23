@@ -125,8 +125,6 @@ def _build_parser() -> argparse.ArgumentParser:
     # Single-shot multi-question generation (replaces retry loop)
     p.add_argument("--proposer_num_candidates", type=int, default=3)
     p.add_argument("--proposer_spot_check_samples", type=int, default=2)
-    p.add_argument("--use_confidence_reward", action="store_true", default=False)
-    p.add_argument("--confidence_logprob_floor", type=float, default=-3.0)
     p.add_argument("--solver_skip_update_on_easy", action="store_true", default=True)
     p.add_argument(
         "--allow_solver_update_on_easy",
@@ -313,6 +311,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--proposer_grpo_gen_group_size", type=int, default=3,
                    help="Number of specs to sample for the GRPO group in generation-phase "
                         "proposer updates. Understanding phase always uses proposer_num_candidates.")
+    p.add_argument(
+        "--proposer_grpo_unverified_extra_margin",
+        type=float,
+        default=0.02,
+        help="Generation-phase proposer GRPO: margin subtracted from chosen reward when "
+             "assigning proxy rewards to unverified extra specs.",
+    )
 
     # Unified scheduler
     p.add_argument("--understanding_steps_per_cycle", type=int, default=3)
@@ -436,8 +441,6 @@ def _build_understanding_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
-        use_confidence_reward=args.use_confidence_reward,
-        confidence_logprob_floor=args.confidence_logprob_floor,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
@@ -572,6 +575,7 @@ def _build_generation_config(args):
         reset_proposer_baseline=args.reset_proposer_baseline,
         proposer_update_rule=args.proposer_update_rule,
         proposer_grpo_gen_group_size=args.proposer_grpo_gen_group_size,
+        proposer_grpo_unverified_extra_margin=args.proposer_grpo_unverified_extra_margin,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,
@@ -600,8 +604,6 @@ def _build_generation_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
-        use_confidence_reward=args.use_confidence_reward,
-        confidence_logprob_floor=args.confidence_logprob_floor,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
@@ -754,6 +756,7 @@ def _build_unified_config(args):
         reset_proposer_baseline=args.reset_proposer_baseline,
         proposer_update_rule=args.proposer_update_rule,
         proposer_grpo_gen_group_size=args.proposer_grpo_gen_group_size,
+        proposer_grpo_unverified_extra_margin=args.proposer_grpo_unverified_extra_margin,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
         solver_temp_min=args.solver_temp_min,
@@ -782,8 +785,6 @@ def _build_unified_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
-        use_confidence_reward=args.use_confidence_reward,
-        confidence_logprob_floor=args.confidence_logprob_floor,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
