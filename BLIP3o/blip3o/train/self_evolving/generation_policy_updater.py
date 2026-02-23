@@ -1202,7 +1202,22 @@ class TextGRPOUpdater:
             r_abs_max = max(abs(float(r)) for r in rewards) if rewards else 1.0
             skip_low_std = r_abs_max < self.min_group_std
             if skip_low_std:
-                advantages = [0.0] * n
+                # NGRPO (arXiv:2509.18851): inject virtual max-reward sample
+                # to create non-zero negative advantages for degenerate groups.
+                # Without this, all-zero rewards → zero gradient → deadlock.
+                _r_virtual = 1.0
+                _r_aug = [float(r) for r in rewards] + [_r_virtual]
+                _mu_aug = sum(_r_aug) / len(_r_aug)
+                _var_aug = sum((x - _mu_aug) ** 2 for x in _r_aug) / len(_r_aug)
+                _std_aug = _var_aug ** 0.5
+                if _std_aug > 1e-8:
+                    advantages = [(float(r) - _mu_aug) / (_std_aug + 1e-8) for r in rewards]
+                    # NGRPO produced valid non-zero advantages → allow backward pass.
+                    # Without this, the later `elif skip_low_std:` gate would force
+                    # skip_backward=True, zeroing the gradient we just computed.
+                    skip_low_std = False
+                else:
+                    advantages = [0.0] * n
             else:
                 advantages = [float(r) / (r_abs_max + 1e-8) for r in rewards]
         else:
@@ -1211,7 +1226,18 @@ class TextGRPOUpdater:
             # when rewards span a range (some good, some bad candidates).
             skip_low_std = r_std < self.min_group_std
             if skip_low_std:
-                advantages = [0.0] * n
+                # NGRPO virtual max-reward for degenerate standard groups
+                _r_virtual = 1.0
+                _r_aug = [float(r) for r in rewards] + [_r_virtual]
+                _mu_aug = sum(_r_aug) / len(_r_aug)
+                _var_aug = sum((x - _mu_aug) ** 2 for x in _r_aug) / len(_r_aug)
+                _std_aug = _var_aug ** 0.5
+                if _std_aug > 1e-8:
+                    advantages = [(float(r) - _mu_aug) / (_std_aug + 1e-8) for r in rewards]
+                    # NGRPO produced valid non-zero advantages → allow backward pass.
+                    skip_low_std = False
+                else:
+                    advantages = [0.0] * n
             else:
                 advantages = [(r - r_mean) / (r_std + 1e-8) for r in rewards]
 

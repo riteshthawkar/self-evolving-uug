@@ -30,20 +30,16 @@ from .prompts import (
 from .replay_buffer import ReplayBuffer
 from .utils import (
     HAS_WANDB,
-    _build_chat_text,
     _json_dump,
     _parse_all_questions,
     _parse_answer,
     _parse_first_question,
-    _prepare_mm_inputs,
-    _unwrap_model,
     gaussian_reward,
     majority_vote,
     normalize_answer,
     pre_answer_word_count,
     shannon_entropy_nats,
     strip_tags,
-    use_adapter,
 )
 
 _SUBJECTIVE_QUESTION_RE = re.compile(
@@ -195,71 +191,6 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if abs(tmax - tmin) < 1e-8:
             return [tmin] * n
         return [tmin + (tmax - tmin) * (float(i) / float(n - 1)) for i in range(n)]
-
-    @torch.no_grad()
-    def _solver_answer_confidence(
-        self, image, question: str, answer_text: str
-    ) -> float:
-        """Get solver's mean per-token log-probability for *answer_text*.
-
-        Runs one forward pass with the solver adapter.  Returns a negative
-        float (closer to 0 → more confident).  Used by the confidence-based
-        proposer reward (Fix E) to give a continuous penalty for entropy=0
-        questions instead of a hard binary cap.
-
-        On failure, returns 0.0 (= maximally confident) so that the caller
-        falls back to the full penalty.  This is the safe default because the
-        question already has entropy=0 (trivially easy).
-        """
-        _floor = float(getattr(self.cfg, "confidence_logprob_floor", -3.0))
-        try:
-            solver_prompt = build_solver_prompt(question)
-            full_text = solver_prompt + " " + answer_text
-            chat_text = _build_chat_text(self.processor, image, full_text)
-            inputs = _prepare_mm_inputs(
-                self.processor, self.device, image, chat_text, model=self.model
-            )
-
-            input_ids = inputs.get("input_ids")
-            if input_ids is None:
-                return 0.0  # failure → assume maximally confident → full penalty
-
-            # Tokenise prompt-only to find where answer tokens start
-            prompt_chat = _build_chat_text(self.processor, image, solver_prompt)
-            prompt_inputs = _prepare_mm_inputs(
-                self.processor, self.device, image, prompt_chat, model=self.model
-            )
-            prompt_len = (
-                prompt_inputs["input_ids"].shape[1]
-                if "input_ids" in prompt_inputs
-                else input_ids.shape[1]
-            )
-
-            if prompt_len >= input_ids.shape[1]:
-                return 0.0  # answer is empty after tokenisation → full penalty
-
-            adapter_name = "default" if self.cfg.use_lora else None
-            with use_adapter(self.model, adapter_name):
-                outputs = self.model(
-                    **{k: v for k, v in inputs.items()},
-                    output_hidden_states=False,
-                )
-                logits = outputs.logits  # [1, seq_len, vocab_size]
-
-            # logits[t] predicts token[t+1]
-            answer_logits = logits[0, prompt_len - 1 : -1, :]  # [answer_len, V]
-            answer_ids = input_ids[0, prompt_len:]  # [answer_len]
-
-            log_probs = torch.nn.functional.log_softmax(
-                answer_logits.float(), dim=-1
-            )
-            token_log_probs = log_probs.gather(
-                1, answer_ids.unsqueeze(1)
-            ).squeeze(1)
-            mean_lp = float(token_log_probs.mean().item())
-            return max(mean_lp, _floor)
-        except Exception:
-            return 0.0  # failure → assume maximally confident → full penalty
 
     def _update_proposer_entropy_target(self, entropy_nats: float) -> float:
         if not bool(getattr(self.cfg, "adaptive_prop_entropy_target", True)):
@@ -755,7 +686,35 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             for prob, pen, reward_raw in zip(solver_probs, penalties, solver_rewards_raw)
         ]
 
-        # --- Proposer reward: symmetric penalty for too-easy AND too-hard ---
+        # --- Intuitive answer: one greedy solver call (V-Zero fast track) ---
+        # Reference: "V-Zero: Self-Improving Multimodal Reasoning with Zero
+        # Annotation" (arXiv:2601.10094)
+        _intuitive_answer = ""
+        _intuitive_generation_failed = False
+        _intuitive_attempted = False
+        if question and solver_prompt:
+            _intuitive_attempted = True
+            try:
+                _intuitive_out = self._generate(
+                    image=image,
+                    prompt=solver_prompt,
+                    adapter_name="default" if self.cfg.use_lora else None,
+                    max_new_tokens=self.cfg.max_new_tokens_solver,
+                    temperature=0.01,   # near-greedy
+                    top_p=1.0,
+                    do_sample=False,    # truly greedy (V-Zero intuitive track)
+                )
+                _intuitive_answer = normalize_answer(_parse_answer(_intuitive_out))
+            except Exception:
+                _intuitive_answer = ""
+                _intuitive_generation_failed = True
+
+        # --- Proposer reward: V-Zero dual-track learnability ---
+        # The proposer is rewarded when the solver's "intuitive" (greedy)
+        # answer DISAGREES with the "reasoned" (majority-voted, multi-temp)
+        # answer.  This gives non-zero signal even when the solver is
+        # unanimous on the reasoned track — the key to breaking the
+        # same-model proposer-solver deadlock.
         proposer_entropy_mu_used = self._update_proposer_entropy_target(entropy_nats)
         proposer_reward_raw = gaussian_reward(
             entropy_nats,
@@ -764,33 +723,28 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         proposer_reward = proposer_reward_raw
 
-        # Hard NEGATIVE for trivially easy questions (entropy ≈ 0).
-        # With use_confidence_reward, scale penalty by solver confidence instead
-        # of applying a flat cap.  Low confidence → smaller penalty (borderline hard).
         zero_entropy_cap = float(getattr(self.cfg, "zero_entropy_reward_cap", 0.10))
         zero_entropy_capped = False
-        _confidence_logprob = None
-        if entropy_nats < 1e-6:
-            if getattr(self.cfg, "use_confidence_reward", False) and question and maj_answer:
-                _confidence_logprob = self._solver_answer_confidence(
-                    image, question, maj_answer
-                )
-                _floor = float(getattr(self.cfg, "confidence_logprob_floor", -3.0))
-                # logprob=0 → confidence=1 (full penalty), logprob=floor → confidence=0
-                _confidence = max(0.0, min(1.0, 1.0 - (_confidence_logprob / _floor)))
-                proposer_reward = -zero_entropy_cap * _confidence
-            else:
-                proposer_reward = -zero_entropy_cap
-            zero_entropy_capped = True
-
-        # Hard NEGATIVE for unsolvable questions.
+        _confidence_logprob = None  # kept for log-record compatibility
         unsolvable_capped = False
-        unsolvable_reward_cap = float(
-            getattr(self.cfg, "proposer_unsolvable_reward_cap", zero_entropy_cap)
-        )
-        if unsolvable_solver_case and not zero_entropy_capped:
-            proposer_reward = -unsolvable_reward_cap  # hard negative, not a positive floor
+
+        _tracks_agree = bool(_intuitive_answer == maj_answer) if _intuitive_answer else True
+
+        if unsolvable_solver_case:
+            # Unsolvable → zero reward (AZ: r_propose = 0 when mean_solve = 0)
+            proposer_reward = 0.0
             unsolvable_capped = True
+        elif entropy_nats < 1e-6 or maj_frac >= 1.0:
+            # Solver unanimous on reasoned track → check dual-track gap
+            if not _tracks_agree and _intuitive_answer:
+                # Intuitive ≠ reasoned → "gotcha" question (V-Zero case 2)
+                # Reward = 0.5 * confidence (higher confidence → better gotcha)
+                proposer_reward = 0.5 * maj_frac
+            else:
+                # Both tracks agree unanimously → truly trivial → zero reward
+                proposer_reward = 0.0
+            zero_entropy_capped = True
+        # else: non-unanimous → gaussian reward (already set above)
 
         # Non-objective penalty.
         proposer_non_objective_penalty = max(
@@ -881,6 +835,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         elif local_solver_update_applied and solver_easy_update_blocked:
             local_solver_update_applied = False
             solver_update_skip_reason_local = "easy_case"
+        # NOTE: With solver_always_update_with_informative_scaling=True (default),
+        # `not always_scale` is False, making this branch unreachable.  The solver
+        # always gets scaled updates (scale >= min_update_scale=0.20) rather than
+        # full skips.  --skip_solver_update_when_uninformative only takes effect
+        # when solver_always_update_with_informative_scaling is explicitly False.
         elif local_solver_update_applied and (not always_scale) and skip_uninformative and not solver_informative_gate:
             local_solver_update_applied = False
             solver_update_skip_reason_local = "uninformative_local"
@@ -923,7 +882,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 if stats.get("did_step", True):
                     self._policy_update_counts["solver"] += 1
                 if not local_skip_update:
-                    self._update_baseline("solver", reward)
+                    # Track the SCALED reward that the updater actually receives,
+                    # not the raw reward.  Otherwise baseline > effective_reward
+                    # when scale < 1, causing systematic negative advantage bias.
+                    self._update_baseline("solver", effective_reward)
                 self._sync_state_scalars()
 
                 # Aggressive cleanup after each solver update step to avoid OOM
@@ -1022,6 +984,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
 
                             _extra_reward = 0.0  # default: neutral / unverified
                             _extra_entropy_val = -1.0
+                            _extra_intuitive_failed = False
+                            _extra_intuitive_attempted = False
 
                             if _score_extras:
                                 # ── Score extra candidate with 2-sample solver spot-check ──
@@ -1076,28 +1040,52 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                             self.cfg.prop_entropy_sigma,
                                         )
                                         _extra_reward = _extra_reward_raw
+                                        # V-Zero dual-track for extras
                                         if _extra_entropy_val < 1e-6:
-                                            if getattr(self.cfg, "use_confidence_reward", False) and _extra_q:
-                                                _extra_maj = max(
-                                                    set(_extra_answers_norm),
-                                                    key=_extra_answers_norm.count,
-                                                ) if _extra_answers_norm else ""
-                                                if _extra_maj:
-                                                    _extra_conf_lp = self._solver_answer_confidence(
-                                                        image, _extra_q, _extra_maj
-                                                    )
-                                                    _e_floor = float(getattr(
-                                                        self.cfg, "confidence_logprob_floor", -3.0
-                                                    ))
-                                                    _extra_conf = max(
-                                                        0.0, min(1.0, 1.0 - (_extra_conf_lp / _e_floor))
-                                                    )
-                                                    _extra_reward = -zero_entropy_cap * _extra_conf
-                                                else:
-                                                    _extra_reward = -zero_entropy_cap
+                                            # Unanimous on spot-check → get intuitive answer
+                                            _extra_intuitive = ""
+                                            _extra_intuitive_attempted = True
+                                            try:
+                                                _ei_out = self._generate(
+                                                    image=image,
+                                                    prompt=_extra_solver_prompt,
+                                                    adapter_name="default" if self.cfg.use_lora else None,
+                                                    max_new_tokens=self.cfg.max_new_tokens_solver,
+                                                    temperature=0.01,
+                                                    top_p=1.0,
+                                                    do_sample=False,  # truly greedy (V-Zero intuitive track)
+                                                )
+                                                _extra_intuitive = normalize_answer(
+                                                    _parse_answer(_ei_out)
+                                                )
+                                            except Exception:
+                                                _extra_intuitive_failed = True
+                                            _extra_maj = max(
+                                                set(_extra_answers_norm),
+                                                key=_extra_answers_norm.count,
+                                            ) if _extra_answers_norm else ""
+                                            if _extra_intuitive and _extra_maj and _extra_intuitive != _extra_maj:
+                                                # Dual-track disagree → gotcha reward (consistent with chosen: 0.5 * maj_frac)
+                                                _extra_maj_frac = _extra_answers_norm.count(_extra_maj) / max(1, len(_extra_answers_norm))
+                                                _extra_reward = 0.5 * _extra_maj_frac
                                             else:
-                                                _extra_reward = -zero_entropy_cap
-                                        _extra_reward = max(-1.0, min(1.0, _extra_reward))
+                                                _extra_reward = 0.0
+
+                                    # ── Penalties for extras (mirror chosen at L745-762) ──
+                                    # Applied regardless of whether spot-check answers are
+                                    # available — chosen candidate always gets penalties too.
+                                    # Non-objective penalty.
+                                    if require_objective:
+                                        if not self._is_objective_question(_extra_q) and proposer_non_objective_penalty > 0.0:
+                                            _extra_reward -= proposer_non_objective_penalty
+                                    # Easy-bucket rejection penalty.
+                                    # Only when valid entropy was computed (_extra_entropy_val >= 0);
+                                    # default is -1.0, so skip when solver spot-check failed entirely.
+                                    if acceptance_require_non_easy and _extra_entropy_val >= 0 and _extra_entropy_val < 1e-6:
+                                        if rejected_question_penalty > 0.0:
+                                            _extra_reward -= rejected_question_penalty
+
+                                    _extra_reward = max(-1.0, min(1.0, _extra_reward))
 
                             _grpo_completions.append(_extra_comp)
                             _grpo_rewards.append(_extra_reward)
@@ -1108,6 +1096,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                 proposer_stats = {}
                             proposer_stats[f"grpo_extra_{_gi}_reward"] = _extra_reward
                             proposer_stats[f"grpo_extra_{_gi}_entropy"] = _extra_entropy_val
+                            proposer_stats[f"grpo_extra_{_gi}_intuitive_attempted"] = _extra_intuitive_attempted
+                            proposer_stats[f"grpo_extra_{_gi}_intuitive_failed"] = _extra_intuitive_failed
                         except Exception:
                             pass
 
@@ -1237,7 +1227,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_reward": proposer_reward,
             "zero_entropy_capped": zero_entropy_capped,
             "zero_entropy_reward_cap": zero_entropy_cap,
-            "solver_confidence_logprob": float(_confidence_logprob) if _confidence_logprob is not None else -999.0,
+            "intuitive_answer": _intuitive_answer,
+            "dual_track_agree": _tracks_agree,
+            "intuitive_attempted": _intuitive_attempted,
+            "intuitive_generation_failed": _intuitive_generation_failed,
             "unsolvable_solver_case": unsolvable_solver_case,
             "unsolvable_capped": unsolvable_capped,
             "easy_question_detected": easy_question_detected,
@@ -1309,6 +1302,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "acceptance_require_non_easy": acceptance_require_non_easy,
                 "zero_entropy_capped": zero_entropy_capped,
                 "zero_entropy_reward_cap": zero_entropy_cap,
+                "intuitive_answer": _intuitive_answer,
+                "dual_track_agree": _tracks_agree,
+                "intuitive_attempted": _intuitive_attempted,
+                "intuitive_generation_failed": _intuitive_generation_failed,
                 "unsolvable_solver_case": unsolvable_solver_case,
                 "unsolvable_capped": unsolvable_capped,
                 "easy_question_detected": easy_question_detected,
