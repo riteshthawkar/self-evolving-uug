@@ -4450,18 +4450,20 @@ class GenerationSelfEvolvingTrainer:
                         )
                         _gen_advantage = float(proposer_stats.get("mean_advantage", 0.0))
 
-                        # Update the gen-phase EMA baseline from raw (un-shifted) mean.
-                        _gen_raw_mean = sum(_grpo_rewards) / max(1, len(_grpo_rewards))
+                        # Update the gen-phase EMA baseline from the CHOSEN
+                        # candidate's reward only (not the group mean including
+                        # unverified extras at 0.0).  Tracking chosen-only prevents
+                        # shifted rewards from summing to zero at EMA equilibrium.
                         _gen_baseline_momentum = float(
                             getattr(self.cfg, "proposer_gen_baseline_momentum", 0.6)
                         )
                         self.proposer_gen_baseline = (
                             _gen_baseline_momentum * self.proposer_gen_baseline
-                            + (1.0 - _gen_baseline_momentum) * _gen_raw_mean
+                            + (1.0 - _gen_baseline_momentum) * _gen_proposer_reward
                         )
                         if proposer_stats is not None:
                             proposer_stats["grpo_ema_baseline"] = _gen_ema_baseline
-                            proposer_stats["grpo_raw_mean_reward"] = _gen_raw_mean
+                            proposer_stats["grpo_baseline_input"] = _gen_proposer_reward
                     else:
                         # ── REINFORCE path (legacy) ───────────────────────────────────────
                         _gen_baseline_momentum = float(

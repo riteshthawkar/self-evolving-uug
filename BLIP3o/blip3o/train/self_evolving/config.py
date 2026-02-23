@@ -108,6 +108,15 @@ class UnderstandingSelfEvolvingConfig:
     # Gen-phase proposer: how many specs to sample for the GRPO group.
     # Understanding phase always uses proposer_num_candidates (already K=3).
     proposer_grpo_gen_group_size: int = 3
+    # Score extra GRPO candidates with a 2-sample solver spot-check instead of
+    # assigning them a neutral reward of 0.0.  This gives real differential
+    # signal between candidates, preventing the GRPO loss from collapsing to
+    # zero at EMA equilibrium.  Costs ~4 extra solver forward passes per step.
+    score_grpo_extras: bool = True
+    # Temperature multiplier for extra GRPO candidate generation.  Higher values
+    # increase diversity, making it more likely that at least one extra produces
+    # a non-easy question with a different reward → real gradient signal.
+    grpo_extra_temp_multiplier: float = 1.5
 
     # KL control
     kl_coef: float = 0.01
@@ -355,6 +364,10 @@ class GenerationSelfEvolvingConfig:
     # "grpo"      → group-relative policy optimization on K proposer candidates.
     proposer_update_rule: str = "grpo"
     proposer_grpo_gen_group_size: int = 3
+    # Score extra GRPO candidates with a 2-sample solver spot-check.
+    score_grpo_extras: bool = True
+    # Temperature multiplier for extra GRPO candidate generation.
+    grpo_extra_temp_multiplier: float = 1.5
 
     # Baselines
     baseline_momentum: float = 0.6  # was 0.9: lower so advantage doesn't collapse when rewards are uniformly negative

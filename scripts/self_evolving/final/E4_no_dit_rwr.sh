@@ -216,7 +216,7 @@ fi
   --lr 1e-6 \
   --weight_decay 0.01 \
   --grad_clip 1.0 \
-  --grad_accum_steps 4 \
+  --grad_accum_steps 1 \
   \
   `# ── Role update frequencies (all active, same as E1) ───────────────────` \
   --proposer_update_freq 1 \
