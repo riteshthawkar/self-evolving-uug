@@ -60,7 +60,7 @@ if [[ "$TRAIN_STAGE" == "warmup" ]]; then
     --fixed_prop_entropy_target
     --prop_entropy_mu 0.90
     --solver_temp_min  0.70
-    --solver_temp_max  1.60
+    --solver_temp_max  2.00
     --solver_top_p_min 0.35
     --solver_top_p_max 1.00
   )
@@ -81,7 +81,7 @@ elif [[ "$TRAIN_STAGE" == "strict" ]]; then
     --prop_entropy_mu_min 0.65
     --prop_entropy_mu_max 1.50
     --solver_temp_min  0.50
-    --solver_temp_max  1.80
+    --solver_temp_max  2.50
     --solver_top_p_min 0.30
     --solver_top_p_max 1.00
   )
@@ -231,17 +231,18 @@ fi
   --grpo_min_group_std 1e-6 \
   \
   `# ── Sampling ────────────────────────────────────────────────────────────` \
-  --temp 1.0 \
+  --temp 1.3 \
   --top_p 1.0 \
   --max_new_tokens_solver 96 \
   --max_new_tokens_proposer 384 \
   --max_new_tokens_caption 64 \
   --max_new_tokens_generator 512 \
-  --num_solver_samples 5 \
+  --num_solver_samples 7 \
   --num_solver_samples_spec 2 \
   --num_generations 3 \
   --proposer_num_candidates 3 \
   --proposer_spot_check_samples 2 \
+  --use_confidence_reward \
   \
   `# ── Image generation (BLIP3o diffusion) ─────────────────────────────────` \
   --generation_num_inference_steps 50 \
@@ -277,7 +278,7 @@ fi
   --len_penalty_weight 0.10 \
   --len_penalty_target_words 6 \
   --solver_hardness_min_entropy 0.20 \
-  --easy_update_majority_frac_threshold 0.80 \
+  --easy_update_majority_frac_threshold 1.00 \
   --disable_entropy_iqr_filter \
   \
   `# ── Proposer entropy target ─────────────────────────────────────────────` \
