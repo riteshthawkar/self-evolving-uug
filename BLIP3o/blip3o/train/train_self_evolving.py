@@ -125,6 +125,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # Single-shot multi-question generation (replaces retry loop)
     p.add_argument("--proposer_num_candidates", type=int, default=3)
     p.add_argument("--proposer_spot_check_samples", type=int, default=2)
+    p.add_argument("--use_confidence_reward", action="store_true", default=False)
+    p.add_argument("--confidence_logprob_floor", type=float, default=-3.0)
     p.add_argument("--solver_skip_update_on_easy", action="store_true", default=True)
     p.add_argument(
         "--allow_solver_update_on_easy",
@@ -434,6 +436,8 @@ def _build_understanding_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
+        use_confidence_reward=args.use_confidence_reward,
+        confidence_logprob_floor=args.confidence_logprob_floor,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
@@ -596,6 +600,8 @@ def _build_generation_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
+        use_confidence_reward=args.use_confidence_reward,
+        confidence_logprob_floor=args.confidence_logprob_floor,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
@@ -776,6 +782,8 @@ def _build_unified_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
+        use_confidence_reward=args.use_confidence_reward,
+        confidence_logprob_floor=args.confidence_logprob_floor,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,

@@ -30,16 +30,20 @@ from .prompts import (
 from .replay_buffer import ReplayBuffer
 from .utils import (
     HAS_WANDB,
+    _build_chat_text,
     _json_dump,
     _parse_all_questions,
     _parse_answer,
     _parse_first_question,
+    _prepare_mm_inputs,
+    _unwrap_model,
     gaussian_reward,
     majority_vote,
     normalize_answer,
     pre_answer_word_count,
     shannon_entropy_nats,
     strip_tags,
+    use_adapter,
 )
 
 _SUBJECTIVE_QUESTION_RE = re.compile(
@@ -191,6 +195,67 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if abs(tmax - tmin) < 1e-8:
             return [tmin] * n
         return [tmin + (tmax - tmin) * (float(i) / float(n - 1)) for i in range(n)]
+
+    @torch.no_grad()
+    def _solver_answer_confidence(
+        self, image, question: str, answer_text: str
+    ) -> float:
+        """Get solver's mean per-token log-probability for *answer_text*.
+
+        Runs one forward pass with the solver adapter.  Returns a negative
+        float (closer to 0 → more confident).  Used by the confidence-based
+        proposer reward (Fix E) to give a continuous penalty for entropy=0
+        questions instead of a hard binary cap.
+        """
+        _floor = float(getattr(self.cfg, "confidence_logprob_floor", -3.0))
+        try:
+            solver_prompt = build_solver_prompt(question)
+            full_text = solver_prompt + " " + answer_text
+            chat_text = _build_chat_text(self.processor, image, full_text)
+            inputs = _prepare_mm_inputs(
+                self.processor, self.device, image, chat_text, model=self.model
+            )
+
+            input_ids = inputs.get("input_ids")
+            if input_ids is None:
+                return _floor
+
+            # Tokenise prompt-only to find where answer tokens start
+            prompt_chat = _build_chat_text(self.processor, image, solver_prompt)
+            prompt_inputs = _prepare_mm_inputs(
+                self.processor, self.device, image, prompt_chat, model=self.model
+            )
+            prompt_len = (
+                prompt_inputs["input_ids"].shape[1]
+                if "input_ids" in prompt_inputs
+                else input_ids.shape[1]
+            )
+
+            if prompt_len >= input_ids.shape[1]:
+                return _floor  # answer is empty after tokenisation
+
+            adapter_name = "default" if self.cfg.use_lora else None
+            with use_adapter(self.model, adapter_name):
+                outputs = self.model(
+                    **{k: v for k, v in inputs.items()},
+                    output_hidden_states=False,
+                )
+                logits = outputs.logits  # [1, seq_len, vocab_size]
+
+            # logits[t] predicts token[t+1]
+            answer_logits = logits[0, prompt_len - 1 : -1, :]  # [answer_len, V]
+            answer_ids = input_ids[0, prompt_len:]  # [answer_len]
+
+            log_probs = torch.nn.functional.log_softmax(
+                answer_logits.float(), dim=-1
+            )
+            token_log_probs = log_probs.gather(
+                1, answer_ids.unsqueeze(1)
+            ).squeeze(1)
+            mean_lp = float(token_log_probs.mean().item())
+            return max(mean_lp, _floor)
+        except Exception:
+            return _floor
 
     def _update_proposer_entropy_target(self, entropy_nats: float) -> float:
         if not bool(getattr(self.cfg, "adaptive_prop_entropy_target", True)):
@@ -696,12 +761,22 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_reward = proposer_reward_raw
 
         # Hard NEGATIVE for trivially easy questions (entropy ≈ 0).
-        # Using min() gave a positive floor (+0.10), making net penalty only -0.25.
-        # Assigning a hard negative makes trivially-easy a genuine punishment.
+        # With use_confidence_reward, scale penalty by solver confidence instead
+        # of applying a flat cap.  Low confidence → smaller penalty (borderline hard).
         zero_entropy_cap = float(getattr(self.cfg, "zero_entropy_reward_cap", 0.10))
         zero_entropy_capped = False
+        _confidence_logprob = None
         if entropy_nats < 1e-6:
-            proposer_reward = -zero_entropy_cap  # hard negative, not a positive floor
+            if getattr(self.cfg, "use_confidence_reward", False) and question and maj_answer:
+                _confidence_logprob = self._solver_answer_confidence(
+                    image, question, maj_answer
+                )
+                _floor = float(getattr(self.cfg, "confidence_logprob_floor", -3.0))
+                # logprob=0 → confidence=1 (full penalty), logprob=floor → confidence=0
+                _confidence = max(0.0, min(1.0, 1.0 - (_confidence_logprob / _floor)))
+                proposer_reward = -zero_entropy_cap * _confidence
+            else:
+                proposer_reward = -zero_entropy_cap
             zero_entropy_capped = True
 
         # Hard NEGATIVE for unsolvable questions.
@@ -998,7 +1073,26 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                         )
                                         _extra_reward = _extra_reward_raw
                                         if _extra_entropy_val < 1e-6:
-                                            _extra_reward = -zero_entropy_cap
+                                            if getattr(self.cfg, "use_confidence_reward", False) and _extra_q:
+                                                _extra_maj = max(
+                                                    set(_extra_answers_norm),
+                                                    key=_extra_answers_norm.count,
+                                                ) if _extra_answers_norm else ""
+                                                if _extra_maj:
+                                                    _extra_conf_lp = self._solver_answer_confidence(
+                                                        image, _extra_q, _extra_maj
+                                                    )
+                                                    _e_floor = float(getattr(
+                                                        self.cfg, "confidence_logprob_floor", -3.0
+                                                    ))
+                                                    _extra_conf = max(
+                                                        0.0, min(1.0, 1.0 - (_extra_conf_lp / _e_floor))
+                                                    )
+                                                    _extra_reward = -zero_entropy_cap * _extra_conf
+                                                else:
+                                                    _extra_reward = -zero_entropy_cap
+                                            else:
+                                                _extra_reward = -zero_entropy_cap
                                         _extra_reward = max(-1.0, min(1.0, _extra_reward))
 
                             _grpo_completions.append(_extra_comp)
@@ -1139,6 +1233,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_reward": proposer_reward,
             "zero_entropy_capped": zero_entropy_capped,
             "zero_entropy_reward_cap": zero_entropy_cap,
+            "solver_confidence_logprob": float(_confidence_logprob) if _confidence_logprob is not None else -999.0,
             "unsolvable_solver_case": unsolvable_solver_case,
             "unsolvable_capped": unsolvable_capped,
             "easy_question_detected": easy_question_detected,
