@@ -206,6 +206,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         float (closer to 0 → more confident).  Used by the confidence-based
         proposer reward (Fix E) to give a continuous penalty for entropy=0
         questions instead of a hard binary cap.
+
+        On failure, returns 0.0 (= maximally confident) so that the caller
+        falls back to the full penalty.  This is the safe default because the
+        question already has entropy=0 (trivially easy).
         """
         _floor = float(getattr(self.cfg, "confidence_logprob_floor", -3.0))
         try:
@@ -218,7 +222,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
 
             input_ids = inputs.get("input_ids")
             if input_ids is None:
-                return _floor
+                return 0.0  # failure → assume maximally confident → full penalty
 
             # Tokenise prompt-only to find where answer tokens start
             prompt_chat = _build_chat_text(self.processor, image, solver_prompt)
@@ -232,7 +236,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             )
 
             if prompt_len >= input_ids.shape[1]:
-                return _floor  # answer is empty after tokenisation
+                return 0.0  # answer is empty after tokenisation → full penalty
 
             adapter_name = "default" if self.cfg.use_lora else None
             with use_adapter(self.model, adapter_name):
@@ -255,7 +259,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             mean_lp = float(token_log_probs.mean().item())
             return max(mean_lp, _floor)
         except Exception:
-            return _floor
+            return 0.0  # failure → assume maximally confident → full penalty
 
     def _update_proposer_entropy_target(self, entropy_nats: float) -> float:
         if not bool(getattr(self.cfg, "adaptive_prop_entropy_target", True)):
