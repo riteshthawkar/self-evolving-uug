@@ -922,7 +922,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     _grpo_group_size = max(
                         2, int(getattr(self.cfg, "proposer_grpo_gen_group_size", 3))
                     )
-                    # (No per-extra scoring variables needed — extras always get 0.0)
+                    _score_extras = bool(getattr(self.cfg, "score_grpo_extras", True))
+                    _extra_temp_mult = float(getattr(self.cfg, "grpo_extra_temp_multiplier", 1.5))
+                    _extra_temp = min(2.0, self.cfg.temp * _extra_temp_mult)
+                    _extra_sc_samples = min(2, spot_check_samples)  # 2-sample spot-check
 
                     for _gi in range(_grpo_group_size - 1):
                         try:
@@ -931,40 +934,93 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                 prompt=multi_proposer_prompt,
                                 adapter_name="proposer" if self.cfg.use_lora else None,
                                 max_new_tokens=self.cfg.max_new_tokens_proposer,
-                                temperature=self.cfg.temp,
+                                temperature=_extra_temp,
                                 top_p=self.cfg.top_p,
                             )
                             _extra_comp = str(_extra_out or "").strip()
                             if not _extra_comp:
                                 continue
-                            # Extra candidates always get reward = 0.0 (unverified / neutral).
-                            #
-                            # WHY THIS GUARANTEES NON-ZERO GROUP STD:
-                            # The chosen completion (index 0) has real reward = effective_reward,
-                            # which is almost never exactly 0.0 (it is ±0.45 for easy, +0.66 for
-                            # good, etc.).  After baseline shift:
-                            #   chosen_shifted  = effective_reward - ema_baseline  (non-zero)
-                            #   extras_shifted  = 0.0 - ema_baseline               (different)
-                            # → std > 0 guaranteed as long as effective_reward ≠ 0.
-                            #
-                            # Scoring extras (1-sample solver) caused all three to converge to
-                            # the same -0.45 (each single-sample answer was non-empty → reward=0.0,
-                            # then the rej_penalty applied → all three at -0.45 → std=0 → skip).
-                            # Neutral 0.0 is the correct "reference" reward for unverified outputs.
+
+                            _extra_reward = 0.0  # default: neutral / unverified
+                            _extra_entropy_val = -1.0
+
+                            if _score_extras:
+                                # ── Score extra candidate with 2-sample solver spot-check ──
+                                # Parse questions from the extra proposer output.
+                                _extra_questions = _parse_all_questions(_extra_out)
+                                _extra_q = ""
+                                if _extra_questions:
+                                    _extra_q = _extra_questions[0].replace("\n", " ").strip()
+
+                                if _extra_q:
+                                    _extra_solver_prompt = build_solver_prompt(_extra_q)
+                                    _extra_answers_norm: List[str] = []
+                                    for _sc_idx in range(_extra_sc_samples):
+                                        _sc_temp = (
+                                            float(solver_temperatures[_sc_idx])
+                                            if _sc_idx < len(solver_temperatures)
+                                            else float(self.cfg.temp)
+                                        )
+                                        _sc_top_p = (
+                                            float(solver_top_ps[_sc_idx])
+                                            if _sc_idx < len(solver_top_ps)
+                                            else float(self.cfg.top_p)
+                                        )
+                                        try:
+                                            _sc_out = self._generate(
+                                                image=image,
+                                                prompt=_extra_solver_prompt,
+                                                adapter_name="default" if self.cfg.use_lora else None,
+                                                max_new_tokens=self.cfg.max_new_tokens_solver,
+                                                temperature=_sc_temp,
+                                                top_p=_sc_top_p,
+                                            )
+                                            _sc_ans = normalize_answer(_parse_answer(_sc_out))
+                                            _extra_answers_norm.append(_sc_ans)
+                                        except Exception:
+                                            pass
+
+                                    if _extra_answers_norm:
+                                        _extra_hist: Dict[str, int] = {}
+                                        for _ans in _extra_answers_norm:
+                                            _extra_hist[_ans] = _extra_hist.get(_ans, 0) + 1
+                                        _extra_probs = [
+                                            c / float(len(_extra_answers_norm))
+                                            for c in _extra_hist.values()
+                                        ]
+                                        _extra_entropy_val = shannon_entropy_nats(_extra_probs)
+
+                                        # Compute reward using same logic as chosen candidate.
+                                        _extra_reward_raw = gaussian_reward(
+                                            _extra_entropy_val,
+                                            proposer_entropy_mu_used,
+                                            self.cfg.prop_entropy_sigma,
+                                        )
+                                        _extra_reward = _extra_reward_raw
+                                        if _extra_entropy_val < 1e-6:
+                                            _extra_reward = -zero_entropy_cap
+                                        _extra_reward = max(-1.0, min(1.0, _extra_reward))
+
                             _grpo_completions.append(_extra_comp)
-                            _grpo_rewards.append(0.0)
+                            _grpo_rewards.append(_extra_reward)
                             _grpo_images.append(image)
+
+                            # Log extra candidate stats for diagnostics.
+                            if proposer_stats is None:
+                                proposer_stats = {}
+                            proposer_stats[f"grpo_extra_{_gi}_reward"] = _extra_reward
+                            proposer_stats[f"grpo_extra_{_gi}_entropy"] = _extra_entropy_val
                         except Exception:
                             pass
 
                     # Apply EMA absolute baseline shift to all group rewards.
-                    # self.proposer_baseline tracks the running mean reward; when
-                    # the whole group underperforms the baseline the advantage of
-                    # every candidate is negative → consistent push away.
+                    # self.proposer_baseline tracks the chosen candidate's reward;
+                    # when the whole group underperforms the baseline the advantage
+                    # of every candidate is negative → consistent push away.
                     _ema_baseline = float(self.proposer_baseline)
                     _grpo_rewards_shifted = [r - _ema_baseline for r in _grpo_rewards]
 
-                    proposer_stats = self.proposer_updater.step(
+                    proposer_stats_grpo = self.proposer_updater.step(
                         prompt=multi_proposer_prompt,
                         completions=_grpo_completions,
                         rewards=_grpo_rewards_shifted,
@@ -972,15 +1028,22 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         images=_grpo_images,
                         baseline_shifted=True,
                     )
+                    if proposer_stats_grpo is not None:
+                        if proposer_stats is None:
+                            proposer_stats = {}
+                        proposer_stats.update(proposer_stats_grpo)
 
-                    # Update EMA baseline from raw (un-shifted) mean reward so
-                    # the baseline tracks absolute performance, not shifted values.
-                    _raw_mean_reward = sum(_grpo_rewards) / max(1, len(_grpo_rewards))
-                    self._update_baseline("proposer", _raw_mean_reward)
+                    # Update EMA baseline from the CHOSEN candidate's reward only.
+                    # Previously this tracked the group mean (including unverified
+                    # extras at 0.0), which made shifted rewards sum to zero at
+                    # equilibrium → GRPO loss = 0 (mathematical deadlock).
+                    # Tracking chosen-only means baseline → effective_reward at
+                    # equilibrium; scored extras then get shifted ≠ 0 → non-zero loss.
+                    self._update_baseline("proposer", effective_reward)
                     # Log the baseline shift for visibility.
                     if proposer_stats is not None:
                         proposer_stats["grpo_ema_baseline"] = _ema_baseline
-                        proposer_stats["grpo_raw_mean_reward"] = _raw_mean_reward
+                        proposer_stats["grpo_baseline_input"] = effective_reward
                         # Debug: log valid completions to diagnose GRPO loss=0
                         proposer_stats["grpo_valid_completions"] = proposer_stats.get("valid_completions", -1)
                 else:
