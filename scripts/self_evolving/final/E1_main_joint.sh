@@ -312,7 +312,7 @@ fi
   --replay_buffer_size 1 \
   --replay_min_reward 1.10 \
   --replay_max_staleness 1 \
-  --gen_mix_source_mode buffer \
+  --gen_mix_source_mode folder \
   --gen_mix_ratio_start 0.0 \
   --gen_mix_ratio_max 0.0 \
   --gen_mix_ratio_warmup_steps 1 \
