@@ -104,7 +104,7 @@ class SelfEvolvingConfig:
     len_penalty_target_words: int = 6
     prop_entropy_mu: float = 0.90
     prop_entropy_sigma: float = 0.35
-    adaptive_prop_entropy_target: bool = False
+    adaptive_prop_entropy_target: bool = True
     prop_entropy_ema_momentum: float = 0.90
     prop_entropy_mu_min: float = 0.40
     prop_entropy_mu_max: float = 1.5
@@ -165,7 +165,7 @@ class SelfEvolvingConfig:
     kl_coef: float = 0.01
     kl_target: float = 0.02
     kl_adapt_rate: float = 0.10
-    kl_min: float = 1e-8
+    kl_min: float = 0.001       # FIXED: was 1e-8, causing KL coef to collapse to ~0
     kl_max: float = 1e2
 
     # ── Baselines ────────────────────────────────────────────────────────

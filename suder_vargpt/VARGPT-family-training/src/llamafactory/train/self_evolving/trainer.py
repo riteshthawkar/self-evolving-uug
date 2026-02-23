@@ -9,6 +9,7 @@ proposer-solver-generator loop:
 Ported from BLIP3o's unified_trainer.py with VARGPT-specific adaptations.
 """
 
+import collections
 import gc
 import json
 import logging
@@ -138,6 +139,17 @@ class SelfEvolvingTrainer(Trainer):
         self.reward_ema = 0.0
         self.global_step = 0
 
+        # ── Adaptive entropy target (EMA) ──────────────────────────────
+        self.proposer_entropy_mu_ema = float(se_config.prop_entropy_mu)
+
+        # ── Entropy & difficulty tracking windows ──────────────────────
+        self._entropy_window: collections.deque = collections.deque(
+            maxlen=se_config.entropy_iqr_window_size,
+        )
+        self._difficulty_window: collections.deque = collections.deque(
+            maxlen=se_config.difficulty_sampler_window_size,
+        )
+
         # ── DDP detection ────────────────────────────────────────────────
         self._is_ddp = dist.is_available() and dist.is_initialized()
 
@@ -240,9 +252,16 @@ class SelfEvolvingTrainer(Trainer):
     # ── Understanding Step ──────────────────────────────────────────────
 
     def _understanding_step(self, step: int) -> Dict:
-        """U-step: proposer proposes questions, solver answers, both update."""
+        """U-step: proposer proposes questions, solver answers, both update.
+
+        When ``acceptance_require_non_easy`` is enabled, the proposer is given
+        up to ``_max_easy_retries`` attempts to generate a non-trivial question.
+        If all attempts produce easy questions, the last attempt is used with
+        the easy-question penalty applied to the proposer reward.
+        """
         cfg = self.se_config
         stats = {}
+        max_retries = 3 if cfg.acceptance_require_non_easy else 1
 
         # ── 1. Sample image ─────────────────────────────────────────────
         image, source = self._sample_image(step)
@@ -250,21 +269,53 @@ class SelfEvolvingTrainer(Trainer):
             return {"u_skipped": True, "reason": "no_image"}
         stats["image_source"] = source
 
-        # ── 2. Proposer generates question(s) ───────────────────────────
-        with use_role(self.model, ROLE_PROPOSER):
-            question_text, proposer_completion = self._generate_proposer_question(
-                image, step
-            )
+        question_text = None
+        proposer_completion = None
+        answers = []
+        solver_completions = []
+        attempt = 0
+
+        for attempt in range(max_retries):
+            # ── 2. Proposer generates question(s) ───────────────────────
+            with use_role(self.model, ROLE_PROPOSER):
+                q, pc = self._generate_proposer_question(image, step)
+            if not q:
+                continue
+
+            # ── 3. Solver answers with K samples ────────────────────────
+            with use_role(self.model, ROLE_SOLVER):
+                ans, sc = self._generate_solver_answers(
+                    image, q, num_samples=cfg.num_solver_samples,
+                )
+            if not ans:
+                continue
+
+            question_text = q
+            proposer_completion = pc
+            answers = ans
+            solver_completions = sc
+
+            # Check if this question is non-trivial
+            norm = [normalize_answer(a) for a in answers]
+            _, mc = majority_vote(norm)
+            mf = mc / len(norm)
+            counts_check = {}
+            for a in norm:
+                counts_check[a] = counts_check.get(a, 0) + 1
+            probs_check = [c / len(norm) for c in counts_check.values()]
+            ent_check = shannon_entropy_nats(probs_check)
+
+            if ent_check >= cfg.sc_entropy_min or mf < cfg.easy_update_majority_frac_threshold:
+                # Non-trivial question found — use it
+                break
+            # Otherwise retry with a new question
+
         if not question_text:
             return {"u_skipped": True, "reason": "no_question"}
-        stats["question"] = question_text[:100]
 
-        # ── 3. Solver answers with K samples ────────────────────────────
-        with use_role(self.model, ROLE_SOLVER):
-            answers, solver_completions = self._generate_solver_answers(
-                image, question_text, num_samples=cfg.num_solver_samples,
-            )
+        stats["question"] = question_text[:100]
         stats["num_answers"] = len(answers)
+        stats["proposer_retries"] = attempt
 
         # ── 4. Compute rewards ──────────────────────────────────────────
         # Normalize answers for voting
@@ -283,18 +334,44 @@ class SelfEvolvingTrainer(Trainer):
         probs = [c / len(norm_answers) for c in counts.values()]
         entropy = shannon_entropy_nats(probs)
 
+        # ── Difficulty classification ────────────────────────────────
+        margin = majority_frac - self._second_highest_frac(norm_answers)
+        easy_question = (entropy < cfg.sc_entropy_min) and (margin > cfg.sc_margin_max)
+
+        # ── Track entropy & difficulty for adaptive thresholds ────
+        self._entropy_window.append(entropy)
+        diff_bucket = self._difficulty_bucket(entropy, margin, majority_frac)
+        self._difficulty_window.append(diff_bucket)
+
+        # ── Adaptive entropy target ──────────────────────────────
+        prop_entropy_mu_used = self._update_proposer_entropy_target(entropy)
+
         # Proposer reward: based on question difficulty (entropy)
         proposer_reward = gaussian_reward(
-            entropy, cfg.prop_entropy_mu, cfg.prop_entropy_sigma,
+            entropy, prop_entropy_mu_used, cfg.prop_entropy_sigma,
         )
-        # Penalty for zero-entropy (trivially easy question)
+        # Penalty for zero-entropy / trivially easy questions:
+        # Apply a HARD NEGATIVE — the proposer must be penalized for
+        # producing questions the solver unanimously agrees on.
         if entropy < 0.01:
-            proposer_reward = min(proposer_reward, cfg.zero_entropy_reward_cap)
+            proposer_reward = -cfg.zero_entropy_reward_cap
+        elif easy_question:
+            # Even non-zero but very low entropy gets penalized
+            proposer_reward = min(proposer_reward, -cfg.zero_entropy_reward_cap * 0.5)
 
-        # Solver reward: based on accuracy (high majority = good)
-        solver_reward = cfg.solver_soft_gamma * majority_frac + (
-            1.0 - cfg.solver_soft_gamma
-        ) * (1.0 - min(1.0, entropy / max(cfg.sc_entropy_max, 0.01)))
+        # Solver reward: penalize easy questions to avoid reinforcing
+        # overconfident unanimous answers on trivial questions.
+        if easy_question:
+            # Negative reward: punish solver for easy unanimous agreement
+            solver_reward = -(cfg.easy_solver_penalty_scale * (
+                cfg.solver_soft_gamma * majority_frac + (
+                    1.0 - cfg.solver_soft_gamma
+                ) * (1.0 - min(1.0, entropy / max(cfg.sc_entropy_max, 0.01)))
+            ))
+        else:
+            solver_reward = cfg.solver_soft_gamma * majority_frac + (
+                1.0 - cfg.solver_soft_gamma
+            ) * (1.0 - min(1.0, entropy / max(cfg.sc_entropy_max, 0.01)))
 
         stats.update({
             "entropy": entropy,
@@ -302,9 +379,15 @@ class SelfEvolvingTrainer(Trainer):
             "majority_answer": majority_answer[:50],
             "proposer_reward": proposer_reward,
             "solver_reward": solver_reward,
+            "easy_question": easy_question,
+            "margin": margin,
+            "prop_entropy_mu_used": prop_entropy_mu_used,
+            "difficulty_bucket": diff_bucket,
         })
 
         # ── 5. Update proposer ──────────────────────────────────────────
+        # Always update the proposer — it needs the negative signal
+        # from easy questions to learn to generate harder ones.
         proposer_prompt = build_proposer_prompt(
             target_difficulty=self._current_difficulty(step)
         )
@@ -324,23 +407,32 @@ class SelfEvolvingTrainer(Trainer):
         stats.update({f"prop_{k}": v for k, v in prop_stats.items()})
 
         # ── 6. Update solver ────────────────────────────────────────────
-        # Use the majority answer as the completion for solver update
-        solver_prompt = build_solver_prompt(question_text)
-        solver_completion = f"\n<answer>{majority_answer}</answer>"
-        sol_stats = self.solver_updater.step(
-            image=image,
-            prompt=solver_prompt,
-            completion=solver_completion,
-            reward=solver_reward,
-            baseline=self.solver_baseline,
-            device=self.device,
-            ddp_no_sync=self._is_ddp,
+        # Skip solver update on easy questions to avoid wasting gradient
+        # budget on trivial cases (the solver already knows the answer).
+        skip_solver = (
+            easy_question
+            and cfg.solver_skip_update_on_easy
+            and majority_frac >= cfg.easy_update_majority_frac_threshold
         )
-        self.solver_baseline = (
-            cfg.baseline_momentum * self.solver_baseline
-            + (1 - cfg.baseline_momentum) * solver_reward
-        )
-        stats.update({f"sol_{k}": v for k, v in sol_stats.items()})
+        stats["solver_update_skipped"] = skip_solver
+
+        if not skip_solver:
+            solver_prompt = build_solver_prompt(question_text)
+            solver_completion = f"\n<answer>{majority_answer}</answer>"
+            sol_stats = self.solver_updater.step(
+                image=image,
+                prompt=solver_prompt,
+                completion=solver_completion,
+                reward=solver_reward,
+                baseline=self.solver_baseline,
+                device=self.device,
+                ddp_no_sync=self._is_ddp,
+            )
+            self.solver_baseline = (
+                cfg.baseline_momentum * self.solver_baseline
+                + (1 - cfg.baseline_momentum) * solver_reward
+            )
+            stats.update({f"sol_{k}": v for k, v in sol_stats.items()})
 
         return stats
 
@@ -634,7 +726,13 @@ class SelfEvolvingTrainer(Trainer):
         question: str,
         num_samples: int = 5,
     ) -> Tuple[List[str], List[str]]:
-        """Generate solver answers for a given question."""
+        """Generate solver answers for a given question.
+
+        Uses a temperature schedule across samples to encourage answer
+        diversity. Lower temperatures produce more confident answers while
+        higher temperatures explore alternatives — this is critical for
+        producing non-zero entropy in the solver answer distribution.
+        """
         cfg = self.se_config
         prompt = build_solver_prompt(question)
         chat_text = _build_chat_text(self.processor, image, prompt)
@@ -646,15 +744,31 @@ class SelfEvolvingTrainer(Trainer):
         answers = []
         completions = []
 
+        # Build temperature and top_p schedules across samples
+        if cfg.solver_use_temperature_mix and num_samples > 1:
+            temp_schedule = [
+                cfg.solver_temp_min + (cfg.solver_temp_max - cfg.solver_temp_min)
+                * i / (num_samples - 1)
+                for i in range(num_samples)
+            ]
+            top_p_schedule = [
+                cfg.solver_top_p_min + (cfg.solver_top_p_max - cfg.solver_top_p_min)
+                * i / (num_samples - 1)
+                for i in range(num_samples)
+            ]
+        else:
+            temp_schedule = [cfg.temp] * num_samples
+            top_p_schedule = [cfg.top_p] * num_samples
+
         with torch.no_grad():
-            for _ in range(num_samples):
+            for i in range(num_samples):
                 try:
                     gen_ids = base_model.generate(
                         **mm_inputs,
                         max_new_tokens=cfg.max_new_tokens_solver,
                         do_sample=True,
-                        temperature=cfg.temp,
-                        top_p=cfg.top_p,
+                        temperature=temp_schedule[i],
+                        top_p=top_p_schedule[i],
                     )
                     input_len = mm_inputs["input_ids"].shape[1]
                     new_ids = gen_ids[0, input_len:]
@@ -874,17 +988,79 @@ class SelfEvolvingTrainer(Trainer):
 
         return None, None
 
+    def _update_proposer_entropy_target(self, entropy_nats: float) -> float:
+        """Adaptively shift the Gaussian reward center based on observed entropy.
+
+        Ported from BLIP3o understanding_trainer.py:220-234.
+
+        When ``adaptive_prop_entropy_target`` is False, returns the fixed
+        ``prop_entropy_mu`` from config. Otherwise, maintains an EMA of
+        observed entropy and shifts the Gaussian center toward it, clamped
+        to [prop_entropy_mu_min, prop_entropy_mu_max].
+        """
+        cfg = self.se_config
+        if not cfg.adaptive_prop_entropy_target:
+            return float(cfg.prop_entropy_mu)
+
+        momentum = max(0.0, min(0.9999, cfg.prop_entropy_ema_momentum))
+        prev = self.proposer_entropy_mu_ema
+        ema = momentum * prev + (1.0 - momentum) * float(entropy_nats)
+
+        mu_min = float(cfg.prop_entropy_mu_min)
+        mu_max = float(cfg.prop_entropy_mu_max)
+        if mu_min > mu_max:
+            mu_min, mu_max = mu_max, mu_min
+        ema = max(mu_min, min(mu_max, ema))
+
+        self.proposer_entropy_mu_ema = float(ema)
+        return float(ema)
+
+    def _difficulty_bucket(
+        self, entropy_nats: float, margin: float, majority_frac: float,
+    ) -> str:
+        """Classify observed difficulty into easy/medium/hard.
+
+        Ported from BLIP3o understanding_trainer.py:306-320.
+        """
+        cfg = self.se_config
+        easy_majority = cfg.easy_update_majority_frac_threshold
+        hard_min_entropy = cfg.difficulty_hard_min_entropy
+        hard_max_margin = cfg.difficulty_hard_max_margin
+
+        if entropy_nats <= cfg.sc_entropy_min or majority_frac >= easy_majority:
+            return "easy"
+        if entropy_nats >= hard_min_entropy and margin <= hard_max_margin:
+            return "hard"
+        return "medium"
+
+    @staticmethod
+    def _second_highest_frac(norm_answers: List[str]) -> float:
+        """Return the fraction of the second-most-common answer (0 if only one unique)."""
+        counts: Dict[str, int] = {}
+        for a in norm_answers:
+            counts[a] = counts.get(a, 0) + 1
+        if len(counts) < 2:
+            return 0.0
+        sorted_counts = sorted(counts.values(), reverse=True)
+        return sorted_counts[1] / len(norm_answers)
+
     def _current_difficulty(self, step: int) -> str:
-        """Determine current difficulty level based on curriculum."""
+        """Determine current difficulty level.
+
+        Always returns "hard" or "medium" — never "easy" — because the
+        proposer already has a strong tendency toward easy questions.
+        The difficulty label is embedded in the proposer prompt to
+        encourage harder question generation.
+        """
         cfg = self.se_config
         if not cfg.difficulty_sampler_enabled:
-            return "medium"
+            # Even when disabled, bias toward "hard" to counteract
+            # the proposer's natural easy-question tendency
+            return "hard"
 
-        # Simple linear curriculum: easy → medium → hard
+        # After step 0, always ask for medium or hard
         frac = step / max(cfg.total_steps, 1)
-        if frac < 0.3:
-            return "easy"
-        elif frac < 0.7:
+        if frac < 0.5:
             return "medium"
         else:
             return "hard"
@@ -983,6 +1159,16 @@ class SelfEvolvingTrainer(Trainer):
             msg_parts.append(f"entropy={stats.get('entropy', 0.0):.3f}")
             msg_parts.append(f"prop_r={stats.get('proposer_reward', 0.0):.3f}")
             msg_parts.append(f"sol_r={stats.get('solver_reward', 0.0):.3f}")
+            msg_parts.append(f"easy={stats.get('easy_question', '?')}")
+            msg_parts.append(f"margin={stats.get('margin', 0.0):.2f}")
+            retries = stats.get("proposer_retries", 0)
+            if retries > 0:
+                msg_parts.append(f"retries={retries}")
+            if stats.get("solver_update_skipped"):
+                msg_parts.append("sol_skip=True")
+            diff_bucket = stats.get("difficulty_bucket", "")
+            if diff_bucket:
+                msg_parts.append(f"diff={diff_bucket}")
         elif phase == "generation":
             msg_parts.append(f"reward_mean={stats.get('gen_reward_mean', 0.0):.3f}")
             msg_parts.append(f"reward_max={stats.get('gen_reward_max', 0.0):.3f}")
