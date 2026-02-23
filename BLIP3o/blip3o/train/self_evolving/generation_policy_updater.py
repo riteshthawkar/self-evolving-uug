@@ -1159,25 +1159,61 @@ class TextGRPOUpdater:
         images: Optional[List[Optional[Image.Image]]] = None,
         completion_token_ids: Optional[List[Optional[List[int]]]] = None,
         ddp_no_sync: bool = False,
+        baseline_shifted: bool = False,
     ) -> Dict[str, float]:
-        """Run one GRPO update using a group of (completion, reward) pairs."""
+        """Run one GRPO update using a group of (completion, reward) pairs.
+
+        Args:
+            baseline_shifted: If True, rewards have already been shifted by an
+                EMA baseline (e.g., the proposer path in unified_trainer.py).
+                In this case we use rewards directly as advantages (scaled by
+                max|r|) to avoid the loss-cancellation deadlock that occurs
+                with standard group normalization when importance ratios ≈ 1.0.
+                If False (default), use standard GRPO group normalization.
+        """
         self.step_id += 1
         n = len(completions)
         assert n == len(rewards), "completions and rewards must have same length"
 
-        # --- 1. Group-normalised advantages ---
+        # --- 1. Compute advantages ---
         r_tensor = torch.tensor(rewards, dtype=torch.float64)
         r_mean = float(r_tensor.mean().item())
         r_std = float(r_tensor.std(correction=0).item())
 
-        # When group std is too low, zero out advantages so the completion loop
-        # still runs (producing at least one forward for DDP AllReduce sync)
-        # but contributes zero policy-gradient signal.
-        skip_low_std = r_std < self.min_group_std
-        if skip_low_std:
-            advantages = [0.0] * n
+        if baseline_shifted:
+            # ── Baseline-shifted path (proposer) ─────────────────────────
+            #
+            # Rewards have ALREADY been shifted by the cross-step EMA
+            # baseline in the caller (e.g., unified_trainer.py):
+            #   rewards_shifted = [r - ema_baseline for r in raw_rewards]
+            #
+            # Standard GRPO re-centers on the group mean, producing
+            # advantages that sum to exactly zero.  When importance ratios
+            # ≈ 1.0 (early training), total loss = sum(-adv * 1.0) = 0.0
+            # — a deadlock where the proposer gets zero gradient.
+            #
+            # FIX: Use rewards directly as advantages.  They already encode
+            # the absolute signal via EMA baseline.  Scale by max(|r|) to
+            # keep them in [-1, 1] for gradient stability.
+            #
+            # Example with rewards [-0.067, 0.033, 0.033]:
+            #   advantages = [-1.0, 0.49, 0.49], sum = -0.02 ≠ 0
+            #   loss ≈ 0.02  (non-zero gradient!)
+            r_abs_max = max(abs(float(r)) for r in rewards) if rewards else 1.0
+            skip_low_std = r_abs_max < self.min_group_std
+            if skip_low_std:
+                advantages = [0.0] * n
+            else:
+                advantages = [float(r) / (r_abs_max + 1e-8) for r in rewards]
         else:
-            advantages = [(r - r_mean) / (r_std + 1e-8) for r in rewards]
+            # ── Standard GRPO group normalization (generator) ────────────
+            # Center on group mean and normalize by std.  This works well
+            # when rewards span a range (some good, some bad candidates).
+            skip_low_std = r_std < self.min_group_std
+            if skip_low_std:
+                advantages = [0.0] * n
+            else:
+                advantages = [(r - r_mean) / (r_std + 1e-8) for r in rewards]
 
         # --- 2. Build inputs for each completion ---
         self.model.train(True)

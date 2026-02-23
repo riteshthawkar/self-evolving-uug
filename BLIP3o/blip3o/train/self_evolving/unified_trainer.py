@@ -970,6 +970,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         rewards=_grpo_rewards_shifted,
                         device=self.device,
                         images=_grpo_images,
+                        baseline_shifted=True,
                     )
 
                     # Update EMA baseline from raw (un-shifted) mean reward so
@@ -980,6 +981,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     if proposer_stats is not None:
                         proposer_stats["grpo_ema_baseline"] = _ema_baseline
                         proposer_stats["grpo_raw_mean_reward"] = _raw_mean_reward
+                        # Debug: log valid completions to diagnose GRPO loss=0
+                        proposer_stats["grpo_valid_completions"] = proposer_stats.get("valid_completions", -1)
                 else:
                     # ── REINFORCE path (legacy / proposer_update_rule="reinforce") ──
                     # Use the raw baseline without clamping. The previous clamp
