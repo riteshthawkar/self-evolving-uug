@@ -65,11 +65,11 @@ if [[ "$TRAIN_STAGE" == "warmup" ]]; then
     --acceptance_require_non_easy
     --disable_proposer_require_objective
     --proposer_non_objective_penalty 0.0
-    --difficulty_target_easy   0.30
-    --difficulty_target_medium 0.50
-    --difficulty_target_hard   0.20
+    --difficulty_target_easy   0.0
+    --difficulty_target_medium 0.60
+    --difficulty_target_hard   0.40
     --rejected_question_penalty 0.25
-    --zero_entropy_reward_cap 0.20
+    --zero_entropy_reward_cap 0.45
     --difficulty_sampler_min_samples 8
     --fixed_prop_entropy_target
     --prop_entropy_mu 0.90
@@ -84,19 +84,19 @@ elif [[ "$TRAIN_STAGE" == "strict" ]]; then
     --acceptance_require_non_easy
     --disable_proposer_require_objective
     --proposer_non_objective_penalty 0.0
-    --difficulty_target_easy   0.10
+    --difficulty_target_easy   0.0
     --difficulty_target_medium 0.70
-    --difficulty_target_hard   0.20
+    --difficulty_target_hard   0.30
     --rejected_question_penalty 0.35
-    --zero_entropy_reward_cap 0.20
+    --zero_entropy_reward_cap 0.45
     --difficulty_sampler_min_samples 8
     --fixed_prop_entropy_target
     --prop_entropy_ema_momentum 0.90
     --prop_entropy_mu_min 0.65
     --prop_entropy_mu_max 1.50
-    --solver_temp_min  0.70
-    --solver_temp_max  1.30
-    --solver_top_p_min 0.50
+    --solver_temp_min  0.50
+    --solver_temp_max  1.80
+    --solver_top_p_min 0.30
     --solver_top_p_max 1.00
   )
 else
@@ -242,7 +242,7 @@ fi
   --generator_update_rule grpo \
   --generator_missing_trace_strategy skip \
   --grpo_clip_ratio 0.2 \
-  --grpo_min_group_std 1e-4 \
+  --grpo_min_group_std 1e-6 \
   \
   `# ── Sampling ────────────────────────────────────────────────────────────` \
   --temp 1.0 \
@@ -308,7 +308,7 @@ fi
   --kl_coef 0.01 \
   --kl_target 0.02 \
   --kl_adapt_rate 0.10 \
-  --kl_min 1e-8 \
+  --kl_min 0.001 \
   --kl_max 1e2 \
   \
   `# ── Proposer optimization ──────────────────────────────────────────────` \
