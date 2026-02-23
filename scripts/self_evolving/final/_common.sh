@@ -174,7 +174,7 @@ SHARED_ARGS=(
   --kl_coef 0.01
   --kl_target 0.02
   --kl_adapt_rate 0.10
-  --kl_min 1e-8
+  --kl_min 0.001
   --kl_max 1e2
 
   # Proposer optimization
@@ -213,11 +213,11 @@ WARMUP_STAGE_ARGS=(
   --acceptance_require_non_easy
   --disable_proposer_require_objective
   --proposer_non_objective_penalty 0.0
-  --difficulty_target_easy   0.30
-  --difficulty_target_medium 0.50
-  --difficulty_target_hard   0.20
+  --difficulty_target_easy   0.0
+  --difficulty_target_medium 0.60
+  --difficulty_target_hard   0.40
   --rejected_question_penalty 0.25
-  --zero_entropy_reward_cap 0.20
+  --zero_entropy_reward_cap 0.45
   --difficulty_sampler_min_samples 8
   --fixed_prop_entropy_target
   --prop_entropy_mu 0.90

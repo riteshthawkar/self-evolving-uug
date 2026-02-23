@@ -4446,6 +4446,7 @@ class GenerationSelfEvolvingTrainer:
                             device=self.device,
                             images=_grpo_images,
                             ddp_no_sync=_prop_no_sync,
+                            baseline_shifted=True,
                         )
                         _gen_advantage = float(proposer_stats.get("mean_advantage", 0.0))
 

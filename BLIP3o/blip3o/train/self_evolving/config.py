@@ -113,7 +113,7 @@ class UnderstandingSelfEvolvingConfig:
     kl_coef: float = 0.01
     kl_target: float = 0.02
     kl_adapt_rate: float = 0.10
-    kl_min: float = 1e-8
+    kl_min: float = 0.001
     kl_max: float = 1e2
 
     # Baselines
@@ -347,7 +347,7 @@ class GenerationSelfEvolvingConfig:
     kl_coef: float = 0.01
     kl_target: float = 0.02
     kl_adapt_rate: float = 0.10
-    kl_min: float = 1e-8
+    kl_min: float = 0.001
     kl_max: float = 1e2
 
     # Proposer update algorithm (mirrors UnderstandingSelfEvolvingConfig — must be kept in sync)
