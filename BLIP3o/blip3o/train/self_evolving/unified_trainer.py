@@ -92,6 +92,14 @@ _REASONING_DOMAIN_SPLIT_RE = re.compile(
     r"\s*(?:,|/|\||;|->|\+|\band\b)\s*",
     flags=re.IGNORECASE,
 )
+_VISUAL_TARGET_PLACEHOLDER_RE = re.compile(
+    r"^\s*(?:[hmcd]\d+(?:=[a-z0-9_\-]+)?|strategy|target)\s*$",
+    flags=re.IGNORECASE,
+)
+_TWO_ANSWER_TOKEN_PLACEHOLDER_RE = re.compile(
+    r"token[_\s-]?\d+",
+    flags=re.IGNORECASE,
+)
 _DOMAIN_ALIAS_TO_CANONICAL = {
     "d1": "relation",
     "relation": "relation",
@@ -411,15 +419,45 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         min_chain_words = max(1, int(getattr(self.cfg, "proposer_reasoning_min_chain_words", 8)))
         chain_words = len(str(meta.get("reasoning_chain", "") or "").split())
         two_ans = self._split_two_answer_test(meta.get("two_answer_test", ""))
+        two_answer_raw = str(meta.get("two_answer_test", "") or "")
         visual_target = str(meta.get("visual_target", "") or "").strip()
+        strategy_used = str(meta.get("strategy_used", "") or "").strip()
         objective = 1.0 if self._is_objective_question(q) else 0.0
         has_domains = 1.0 if len(domains) >= min_domains else 0.0
         has_non_rel = 1.0 if any(d != "relation" for d in domains) else 0.0
         if not require_non_rel:
             has_non_rel = 1.0
         has_chain = 1.0 if chain_words >= min_chain_words else 0.0
-        two_answer_valid = 1.0 if len(two_ans) >= 2 and two_ans[0] != two_ans[1] else 0.0
-        has_target = 1.0 if len(visual_target) >= 3 else 0.0
+        two_answer_placeholder = bool(_TWO_ANSWER_TOKEN_PLACEHOLDER_RE.search(two_answer_raw))
+        if not two_answer_placeholder:
+            for opt in two_ans[:2]:
+                opt_norm = normalize_answer(opt, max_words=6)
+                if opt_norm in {
+                    "a",
+                    "b",
+                    "option a",
+                    "option b",
+                    "answer a",
+                    "answer b",
+                    "token",
+                    "token 1",
+                    "token 2",
+                    "token1",
+                    "token2",
+                }:
+                    two_answer_placeholder = True
+                    break
+        two_answer_valid = (
+            1.0
+            if (len(two_ans) >= 2 and two_ans[0] != two_ans[1] and (not two_answer_placeholder))
+            else 0.0
+        )
+        target_compact = re.sub(r"\s+", "", visual_target.lower())
+        strategy_compact = re.sub(r"\s+", "", strategy_used.lower())
+        target_placeholder = bool(_VISUAL_TARGET_PLACEHOLDER_RE.match(target_compact))
+        if strategy_compact and target_compact == strategy_compact:
+            target_placeholder = True
+        has_target = 1.0 if (len(visual_target.split()) >= 2 and (not target_placeholder)) else 0.0
 
         score = (
             0.24 * objective
@@ -431,7 +469,19 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         score = float(max(0.0, min(1.0, score)))
         min_score = max(0.0, min(1.0, float(getattr(self.cfg, "proposer_certificate_min_score", 0.55))))
-        valid = 1.0 if score >= min_score else 0.0
+        strict_struct = bool(getattr(self.cfg, "proposer_certificate_strict_struct", True))
+        if strict_struct:
+            valid = 1.0 if (
+                score >= min_score
+                and objective > 0.5
+                and has_domains > 0.5
+                and has_non_rel > 0.5
+                and has_chain > 0.5
+                and two_answer_valid > 0.5
+                and has_target > 0.5
+            ) else 0.0
+        else:
+            valid = 1.0 if score >= min_score else 0.0
         return {
             "score": score,
             "valid": valid,
@@ -440,6 +490,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "chain": has_chain,
             "two_answer": two_answer_valid,
             "target": has_target,
+            "target_placeholder": 1.0 if target_placeholder else 0.0,
+            "two_answer_placeholder": 1.0 if two_answer_placeholder else 0.0,
         }
 
     def _question_template_key(self, question: str) -> str:
@@ -647,6 +699,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         temp_boost = 0.0
         top_p_boost = 0.0
         penalty_boost = 1.0
+        num_candidates_override = 0
         if bool(getattr(self.cfg, "adaptive_exploration_enabled", True)):
             thr = float(getattr(self.cfg, "exploration_easy_rate_threshold", 0.75))
             if easy_rate > thr:
@@ -662,6 +715,31 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             penalty_boost += max(
                 0.0, float(getattr(self.cfg, "collapse_cooldown_penalty_boost", 0.10))
             )
+        all_easy_trigger = max(1, int(getattr(self.cfg, "all_easy_explore_trigger", 3)))
+        all_easy_steps = max(1, int(getattr(self.cfg, "all_easy_explore_steps", 10)))
+        if self._all_easy_streak() >= all_easy_trigger:
+            self._forced_explore_steps_left = max(
+                int(getattr(self, "_forced_explore_steps_left", 0)),
+                all_easy_steps,
+            )
+        forced_explore_active = int(getattr(self, "_forced_explore_steps_left", 0)) > 0
+        if forced_explore_active:
+            temp_boost = max(
+                temp_boost, float(getattr(self.cfg, "all_easy_explore_temp_boost", 0.90))
+            )
+            top_p_boost = max(
+                top_p_boost, float(getattr(self.cfg, "all_easy_explore_top_p_boost", 0.15))
+            )
+            penalty_boost += max(
+                0.0, float(getattr(self.cfg, "all_easy_explore_penalty_boost", 0.50))
+            )
+            num_candidates_override = max(
+                int(getattr(self.cfg, "all_easy_explore_num_candidates", 6)),
+                int(getattr(self.cfg, "proposer_num_candidates", 3)),
+            )
+            self._forced_explore_steps_left = max(
+                0, int(getattr(self, "_forced_explore_steps_left", 0)) - 1
+            )
         dyn_temp = min(2.5, float(self.cfg.temp) * (1.0 + temp_boost))
         dyn_top_p = min(1.0, float(self.cfg.top_p) + top_p_boost)
         return {
@@ -670,9 +748,23 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "top_p_boost": top_p_boost,
             "penalty_boost": penalty_boost,
             "collapse_active": 1.0 if collapse_active else 0.0,
+            "forced_explore_active": 1.0 if forced_explore_active else 0.0,
+            "forced_explore_steps_left": float(
+                max(0, int(getattr(self, "_forced_explore_steps_left", 0)))
+            ),
+            "num_candidates_override": float(max(0, int(num_candidates_override))),
             "proposer_temp": dyn_temp,
             "proposer_top_p": dyn_top_p,
         }
+
+    def _all_easy_streak(self) -> int:
+        streak = 0
+        for v in reversed(self._all_easy_group_window):
+            if float(v) >= 0.5:
+                streak += 1
+            else:
+                break
+        return int(streak)
 
     def _update_collapse_state(self, difficulty_bucket_observed: str, proposer_stats: Optional[Dict[str, Any]]) -> Dict[str, float]:
         has_std = False
@@ -774,6 +866,36 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         adjusted = [max(-1.0, min(1.0, r + d)) for r, d in zip(adjusted, deltas)]
         return adjusted, deltas
 
+    def _apply_all_easy_relative_negatives(
+        self,
+        rewards: List[float],
+        buckets: List[str],
+    ) -> Tuple[List[float], List[float], bool]:
+        if len(rewards) <= 1:
+            return list(rewards), [0.0 for _ in rewards], False
+        labels = [str(b).strip().lower() for b in buckets]
+        if any(b != "easy" for b in labels):
+            return list(rewards), [0.0 for _ in rewards], False
+        easy_floor = min(
+            -1e-6, float(getattr(self.cfg, "proposer_easy_reward_floor", -0.35))
+        )
+        spread = max(
+            0.01, float(getattr(self.cfg, "proposer_all_easy_rank_spread", 0.08))
+        )
+        adjusted = list(float(r) for r in rewards)
+        deltas = [0.0 for _ in adjusted]
+        order = sorted(range(len(adjusted)), key=lambda i: adjusted[i], reverse=True)
+        denom = max(1, len(order) - 1)
+        for rank, idx in enumerate(order):
+            target = easy_floor - spread * (float(rank) / float(denom))
+            if adjusted[idx] > target:
+                deltas[idx] += (target - adjusted[idx])
+            else:
+                # Keep existing stronger-negative signal but enforce floor.
+                deltas[idx] += min(0.0, easy_floor - adjusted[idx])
+        adjusted = [max(-1.0, min(1.0, r + d)) for r, d in zip(adjusted, deltas)]
+        return adjusted, deltas, True
+
     def _init_adaptive_windows(self):
         ent_window_size = max(8, int(getattr(self.cfg, "entropy_iqr_window_size", 256)))
         diff_window_size = max(8, int(getattr(self.cfg, "difficulty_sampler_window_size", 256)))
@@ -802,6 +924,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._easy_rate_ema = 0.0
         self._easy_lagrange_lambda = 0.0
         self._collapse_streak = 0
+        self._forced_explore_steps_left = 0
 
     def _entropy_iqr_filter_state(self) -> Dict[str, float]:
         static_threshold = float(getattr(self.cfg, "sc_entropy_min", 0.15))
@@ -1065,10 +1188,16 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_temp_ctrl = float(controller_state.get("proposer_temp", self.cfg.temp))
         proposer_top_p_ctrl = float(controller_state.get("proposer_top_p", self.cfg.top_p))
         proposer_penalty_boost = max(1.0, float(controller_state.get("penalty_boost", 1.0)))
+        controller_num_candidates = max(
+            0, int(round(float(controller_state.get("num_candidates_override", 0.0))))
+        )
         easy_selection_scale = max(
             0.0, float(getattr(self.cfg, "easy_constraint_selection_scale", 0.20))
         )
         easy_constraint_enabled = bool(getattr(self.cfg, "easy_constraint_enabled", True))
+        easy_reward_floor = min(
+            -1e-6, float(getattr(self.cfg, "proposer_easy_reward_floor", -0.35))
+        )
 
         # ------------------------------------------------------------------
         # Single-shot multi-question generation (no retry loop).
@@ -1083,6 +1212,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         num_proposer_candidates = max(
             1, int(getattr(self.cfg, "proposer_num_candidates", 3))
         )
+        if controller_num_candidates > 0:
+            num_proposer_candidates = max(num_proposer_candidates, controller_num_candidates)
         # How many solver samples to use for the spot-check of each candidate.
         # Fewer samples = faster; default 3 gives ternary entropy outcomes.
         spot_check_samples = max(
@@ -1270,6 +1401,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             cand_bucket_bonus = 0.06 if sc_bucket == desired_difficulty_bucket else 0.0
             if sc_bucket == "easy":
                 cand_bucket_bonus -= 0.03
+            cand_bonus_enabled = sc_bucket in {"medium", "hard"}
+            cand_text_bonus_used = cand_text_bonus if cand_bonus_enabled else 0.0
+            cand_strategy_bonus_used = cand_strategy_bonus if cand_bonus_enabled else 0.0
+            cand_anchor_bonus_used = cand_anchor_bonus if cand_bonus_enabled else 0.0
+            cand_cert_weight_used = cert_weight if cand_bonus_enabled else 0.0
             cand_easy_constraint_penalty = 0.0
             if easy_constraint_enabled and sc_bucket == "easy":
                 cand_easy_constraint_penalty = (
@@ -1277,15 +1413,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 )
             cand_sc_core = (
                 max(cert_entropy_floor, sc_entropy)
-                + cand_text_bonus
-                + cand_strategy_bonus
-                + cand_anchor_bonus
+                + cand_text_bonus_used
+                + cand_strategy_bonus_used
+                + cand_anchor_bonus_used
                 + cand_bucket_bonus
                 + cand_contrastive_replay
                 - cand_cooldown_penalty
                 - cand_easy_constraint_penalty
             )
-            cand_pick_score = cand_sc_core * (1.0 + cert_weight * cand_cert_score)
+            cand_pick_score = cand_sc_core * (1.0 + cand_cert_weight_used * cand_cert_score)
             candidate_bucket_list.append(sc_bucket)
             candidate_valid_list.append(1.0 if cand_cert_valid else 0.0)
             candidate_cert_list.append(cand_cert_score)
@@ -1610,6 +1746,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_strategy_quota_bonus = self._strategy_quota_adjustment(chosen_strategy_used)
         proposer_anchor_bonus = self._anchor_replay_bonus(question, chosen_strategy_used)
         proposer_contrastive_replay_bonus = self._contrastive_replay_adjustment(question)
+        proposer_bonus_enabled = difficulty_bucket_observed in {"medium", "hard"}
+        if not proposer_bonus_enabled:
+            proposer_text_hardness_bonus = 0.0
+            proposer_strategy_quota_bonus = 0.0
+            proposer_anchor_bonus = 0.0
         proposer_repetition_penalty = (
             self._question_repetition_penalty(question) * proposer_penalty_boost
         )
@@ -1619,10 +1760,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_reward += proposer_text_hardness_bonus
         proposer_reward += proposer_strategy_quota_bonus
         proposer_reward += proposer_anchor_bonus
-        proposer_reward += (
-            max(0.0, float(getattr(self.cfg, "proposer_certificate_weight", 0.75)))
-            * selected_cert_score
-        )
+        if proposer_bonus_enabled:
+            proposer_reward += (
+                max(0.0, float(getattr(self.cfg, "proposer_certificate_weight", 0.75)))
+                * selected_cert_score
+            )
         if float(selected_cert.get("valid", 0.0)) < 0.5:
             proposer_reward -= 0.10
         proposer_reward += proposer_contrastive_replay_bonus
@@ -1666,6 +1808,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 * max(0.0, float(getattr(self.cfg, "easy_constraint_penalty_scale", 0.30)))
             )
             proposer_reward -= easy_constraint_penalty
+
+        if difficulty_bucket_observed == "easy":
+            proposer_reward = min(proposer_reward, easy_reward_floor)
 
         proposer_reward_pre_clip = float(proposer_reward)
         proposer_reward = max(-1.0, min(1.0, proposer_reward))
@@ -2140,6 +2285,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                 _extra_strategy_bonus = self._strategy_quota_adjustment(_extra_strategy_used)
                                 _extra_anchor_bonus = self._anchor_replay_bonus(_extra_q, _extra_strategy_used)
                                 _extra_contrastive_bonus = self._contrastive_replay_adjustment(_extra_q)
+                                _extra_bonus_enabled = _extra_bucket in {"medium", "hard"}
+                                if not _extra_bonus_enabled:
+                                    _extra_text_bonus = 0.0
+                                    _extra_strategy_bonus = 0.0
+                                    _extra_anchor_bonus = 0.0
                                 _extra_repeat_penalty = (
                                     self._question_repetition_penalty(_extra_q) * proposer_penalty_boost
                                 )
@@ -2157,17 +2307,21 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                 _extra_reward += _extra_strategy_bonus
                                 _extra_reward += _extra_anchor_bonus
                                 _extra_reward += _extra_contrastive_bonus
-                                _extra_reward += (
-                                    max(
-                                        0.0,
-                                        float(getattr(self.cfg, "proposer_certificate_weight", 0.75)),
+                                if _extra_bonus_enabled:
+                                    _extra_reward += (
+                                        max(
+                                            0.0,
+                                            float(getattr(self.cfg, "proposer_certificate_weight", 0.75)),
+                                        )
+                                        * _extra_cert_score
                                     )
-                                    * _extra_cert_score
-                                )
                                 if _extra_cert_valid < 0.5:
                                     _extra_reward -= 0.10
                                 _extra_reward -= _extra_repeat_penalty
                                 _extra_reward -= _extra_cooldown_penalty
+
+                            if _extra_bucket == "easy":
+                                _extra_reward = min(_extra_reward, easy_reward_floor)
 
                             _extra_reward = max(-1.0, min(1.0, _extra_reward))
 
@@ -2205,6 +2359,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     _grpo_rewards, _grpo_rank_deltas = self._apply_grpo_pairwise_ranking(
                         _grpo_rewards, _grpo_buckets
                     )
+                    _grpo_rewards, _grpo_all_easy_deltas, _grpo_all_easy_applied = (
+                        self._apply_all_easy_relative_negatives(_grpo_rewards, _grpo_buckets)
+                    )
                     if proposer_stats is None:
                         proposer_stats = {}
                     proposer_stats["grpo_pairwise_rank_delta_mean"] = (
@@ -2217,6 +2374,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     )
                     proposer_stats["grpo_pairwise_rank_delta_min"] = (
                         float(min(_grpo_rank_deltas)) if _grpo_rank_deltas else 0.0
+                    )
+                    proposer_stats["grpo_all_easy_rank_applied"] = bool(
+                        _grpo_all_easy_applied
+                    )
+                    proposer_stats["grpo_all_easy_rank_delta_mean"] = (
+                        float(sum(_grpo_all_easy_deltas) / max(1, len(_grpo_all_easy_deltas)))
+                        if _grpo_all_easy_deltas
+                        else 0.0
                     )
 
                     # ── Degenerate-group exploration noise ──────────────
@@ -2438,8 +2603,16 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_controller_temp": proposer_temp_ctrl,
             "proposer_controller_top_p": proposer_top_p_ctrl,
             "proposer_controller_penalty_boost": proposer_penalty_boost,
+            "proposer_controller_forced_explore_active": bool(
+                controller_state.get("forced_explore_active", 0.0) > 0.5
+            ),
+            "proposer_controller_forced_explore_steps_left": int(
+                round(float(controller_state.get("forced_explore_steps_left", 0.0)))
+            ),
+            "proposer_controller_num_candidates": int(num_proposer_candidates),
             "proposer_easy_rate_ema": easy_constraint_state.get("easy_rate_ema"),
             "proposer_easy_lagrange_lambda": easy_constraint_state.get("easy_lambda"),
+            "proposer_easy_reward_floor": easy_reward_floor,
             "proposer_collapse_streak": collapse_state.get("collapse_streak"),
             "proposer_collapse_mean_std": collapse_state.get("collapse_mean_std"),
             "proposer_collapse_hit": collapse_state.get("collapse_hit"),
@@ -2552,8 +2725,16 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "proposer_controller_temp": proposer_temp_ctrl,
                 "proposer_controller_top_p": proposer_top_p_ctrl,
                 "proposer_controller_penalty_boost": proposer_penalty_boost,
+                "proposer_controller_forced_explore_active": bool(
+                    controller_state.get("forced_explore_active", 0.0) > 0.5
+                ),
+                "proposer_controller_forced_explore_steps_left": int(
+                    round(float(controller_state.get("forced_explore_steps_left", 0.0)))
+                ),
+                "proposer_controller_num_candidates": int(num_proposer_candidates),
                 "proposer_easy_rate_ema": easy_constraint_state.get("easy_rate_ema"),
                 "proposer_easy_lagrange_lambda": easy_constraint_state.get("easy_lambda"),
+                "proposer_easy_reward_floor": easy_reward_floor,
                 "proposer_collapse_streak": collapse_state.get("collapse_streak"),
                 "proposer_collapse_mean_std": collapse_state.get("collapse_mean_std"),
                 "proposer_collapse_hit": collapse_state.get("collapse_hit"),
@@ -2699,6 +2880,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         state["unified_easy_rate_ema"] = float(getattr(self, "_easy_rate_ema", 0.0))
         state["unified_easy_lagrange_lambda"] = float(getattr(self, "_easy_lagrange_lambda", 0.0))
         state["unified_collapse_streak"] = int(getattr(self, "_collapse_streak", 0))
+        state["unified_forced_explore_steps_left"] = int(
+            getattr(self, "_forced_explore_steps_left", 0)
+        )
         state["unified_proposer_bucket_baselines"] = dict(self._proposer_bucket_baselines)
         # Replay buffer metadata (not the images — too large for checkpoint;
         # the buffer refills naturally after resume).
@@ -2850,6 +3034,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 state.get("unified_easy_lagrange_lambda", self._easy_lagrange_lambda)
             )
             self._collapse_streak = int(state.get("unified_collapse_streak", self._collapse_streak))
+            self._forced_explore_steps_left = int(
+                state.get("unified_forced_explore_steps_left", self._forced_explore_steps_left)
+            )
             bucket_baselines = state.get("unified_proposer_bucket_baselines")
             if isinstance(bucket_baselines, dict):
                 for b in ("easy", "medium", "hard"):
@@ -2883,6 +3070,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 self._easy_rate_ema = 0.0
                 self._easy_lagrange_lambda = 0.0
                 self._collapse_streak = 0
+                self._forced_explore_steps_left = 0
                 self._proposer_bucket_baselines = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
             if self.is_main_process:
                 print(

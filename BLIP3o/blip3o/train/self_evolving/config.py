@@ -85,6 +85,9 @@ class UnderstandingSelfEvolvingConfig:
     proposer_certificate_enabled: bool = True
     proposer_certificate_min_score: float = 0.55
     proposer_certificate_weight: float = 0.75
+    proposer_certificate_strict_struct: bool = True
+    proposer_easy_reward_floor: float = -0.35
+    proposer_all_easy_rank_spread: float = 0.08
     # Contrastive self-consistency replay (no extra model calls).
     proposer_contrastive_replay_enabled: bool = True
     proposer_contrastive_replay_size: int = 256
@@ -184,6 +187,12 @@ class UnderstandingSelfEvolvingConfig:
     collapse_lambda_boost: float = 0.25
     collapse_cooldown_penalty_boost: float = 0.30
     collapse_std_window_size: int = 32
+    all_easy_explore_trigger: int = 3
+    all_easy_explore_steps: int = 10
+    all_easy_explore_num_candidates: int = 6
+    all_easy_explore_temp_boost: float = 0.90
+    all_easy_explore_top_p_boost: float = 0.15
+    all_easy_explore_penalty_boost: float = 0.50
     # Optional exploration noise when GRPO rewards collapse to identical values.
     grpo_degenerate_noise_enabled: bool = True
     grpo_degenerate_noise_sigma: float = 0.03
@@ -410,6 +419,9 @@ class GenerationSelfEvolvingConfig:
     proposer_certificate_enabled: bool = True
     proposer_certificate_min_score: float = 0.55
     proposer_certificate_weight: float = 0.75
+    proposer_certificate_strict_struct: bool = True
+    proposer_easy_reward_floor: float = -0.35
+    proposer_all_easy_rank_spread: float = 0.08
     # Contrastive self-consistency replay (no extra model calls).
     proposer_contrastive_replay_enabled: bool = True
     proposer_contrastive_replay_size: int = 256
@@ -513,6 +525,12 @@ class GenerationSelfEvolvingConfig:
     collapse_lambda_boost: float = 0.25
     collapse_cooldown_penalty_boost: float = 0.30
     collapse_std_window_size: int = 32
+    all_easy_explore_trigger: int = 3
+    all_easy_explore_steps: int = 10
+    all_easy_explore_num_candidates: int = 6
+    all_easy_explore_temp_boost: float = 0.90
+    all_easy_explore_top_p_boost: float = 0.15
+    all_easy_explore_penalty_boost: float = 0.50
     # Optional exploration noise when GRPO rewards collapse to identical values.
     grpo_degenerate_noise_enabled: bool = True
     grpo_degenerate_noise_sigma: float = 0.03

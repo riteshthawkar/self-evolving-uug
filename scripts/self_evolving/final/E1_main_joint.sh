@@ -50,6 +50,27 @@ if [[ "$TRAIN_STAGE" == "warmup" ]]; then
     --acceptance_require_non_easy
     --proposer_require_objective
     --proposer_non_objective_penalty 0.20
+    --proposer_certificate_strict_struct
+    --proposer_certificate_min_score 0.60
+    --proposer_easy_reward_floor -0.65
+    --proposer_all_easy_rank_spread 0.20
+    --all_easy_explore_trigger 2
+    --all_easy_explore_steps 16
+    --all_easy_explore_num_candidates 6
+    --all_easy_explore_temp_boost 1.10
+    --all_easy_explore_top_p_boost 0.20
+    --all_easy_explore_penalty_boost 0.70
+    --easy_constraint_target_rate 0.10
+    --easy_constraint_lr 0.35
+    --easy_constraint_penalty_scale 0.90
+    --easy_constraint_selection_scale 0.75
+    --proposer_early_step1 6
+    --proposer_early_step2 12
+    --proposer_early_candidate_non_easy_min 0.20
+    --proposer_early_selected_non_easy_min 0.10
+    --proposer_early_all_easy_rate_max 0.85
+    --proposer_early_solver_updates_min 1
+    --proposer_early_collapse_streak_max 3
     --difficulty_target_easy   0.0
     --difficulty_target_medium 0.60
     --difficulty_target_hard   0.40
@@ -69,6 +90,27 @@ elif [[ "$TRAIN_STAGE" == "strict" ]]; then
     --acceptance_require_non_easy
     --proposer_require_objective
     --proposer_non_objective_penalty 0.20
+    --proposer_certificate_strict_struct
+    --proposer_certificate_min_score 0.60
+    --proposer_easy_reward_floor -0.65
+    --proposer_all_easy_rank_spread 0.20
+    --all_easy_explore_trigger 2
+    --all_easy_explore_steps 16
+    --all_easy_explore_num_candidates 6
+    --all_easy_explore_temp_boost 1.10
+    --all_easy_explore_top_p_boost 0.20
+    --all_easy_explore_penalty_boost 0.70
+    --easy_constraint_target_rate 0.10
+    --easy_constraint_lr 0.35
+    --easy_constraint_penalty_scale 0.90
+    --easy_constraint_selection_scale 0.75
+    --proposer_early_step1 6
+    --proposer_early_step2 12
+    --proposer_early_candidate_non_easy_min 0.20
+    --proposer_early_selected_non_easy_min 0.10
+    --proposer_early_all_easy_rate_max 0.85
+    --proposer_early_solver_updates_min 1
+    --proposer_early_collapse_streak_max 3
     --difficulty_target_easy   0.0
     --difficulty_target_medium 0.70
     --difficulty_target_hard   0.30
