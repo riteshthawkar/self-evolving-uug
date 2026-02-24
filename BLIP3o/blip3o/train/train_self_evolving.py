@@ -74,7 +74,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max_new_tokens_proposer", type=int, default=128)
     p.add_argument("--max_new_tokens_caption", type=int, default=96)
     p.add_argument("--max_new_tokens_generator", type=int, default=768)
-    p.add_argument("--num_solver_samples", type=int, default=5)
+    p.add_argument("--num_solver_samples", type=int, default=7)
     p.add_argument("--num_solver_samples_spec", type=int, default=3)
     p.add_argument("--num_generations", type=int, default=4)
 
@@ -88,9 +88,9 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="solver_use_forced_choice_from_proposer",
         action="store_false",
     )
-    p.add_argument("--solver_temp_min", type=float, default=0.6)
-    p.add_argument("--solver_temp_max", type=float, default=2.0)
-    p.add_argument("--solver_top_p_min", type=float, default=0.5)
+    p.add_argument("--solver_temp_min", type=float, default=0.4)
+    p.add_argument("--solver_temp_max", type=float, default=2.6)
+    p.add_argument("--solver_top_p_min", type=float, default=0.35)
     p.add_argument("--solver_top_p_max", type=float, default=1.0)
     p.add_argument("--sc_entropy_min", type=float, default=0.15)
     p.add_argument("--sc_entropy_max", type=float, default=1.2)
