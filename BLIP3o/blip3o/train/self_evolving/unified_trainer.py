@@ -14,7 +14,7 @@ import re
 import time
 import traceback
 from collections import deque
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -369,13 +369,275 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             return 0.0
         return float(score)
 
+    def _normalize_strategy_key(self, strategy_used: str) -> str:
+        s = str(strategy_used or "").strip().lower()
+        if not s:
+            return ""
+        s = s.split("=", 1)[0].strip()
+        s = re.sub(r"[^a-z0-9_]+", "", s)
+        return s
+
+    def _difficulty_rank(self, bucket: str) -> int:
+        b = str(bucket or "").strip().lower()
+        if b == "hard":
+            return 2
+        if b == "medium":
+            return 1
+        return 0
+
+    def _strategy_quota_adjustment(self, strategy_used: str) -> float:
+        key = self._normalize_strategy_key(strategy_used)
+        if not key:
+            return 0.0
+        values = [self._normalize_strategy_key(x) for x in self._strategy_window if str(x).strip()]
+        values = [x for x in values if x]
+        if not values:
+            return 0.0
+        count = sum(1 for x in values if x == key)
+        share = float(count) / float(len(values))
+        target = float(getattr(self.cfg, "proposer_strategy_target_share", 0.16))
+        target = max(0.01, min(1.0, target))
+        over_pen = max(0.0, float(getattr(self.cfg, "proposer_strategy_overuse_penalty", 0.12)))
+        under_bonus = max(0.0, float(getattr(self.cfg, "proposer_strategy_underuse_bonus", 0.04)))
+        if share > target:
+            return -over_pen * min(1.0, (share - target) / max(1e-6, 1.0 - target))
+        if share < 0.5 * target:
+            return under_bonus * min(1.0, ((0.5 * target) - share) / max(1e-6, 0.5 * target))
+        return 0.0
+
+    def _template_cooldown_penalty(self, question: str) -> float:
+        key = self._question_template_key(question)
+        if not key:
+            return 0.0
+        cooldown_steps = max(0, int(getattr(self.cfg, "proposer_template_cooldown_steps", 8)))
+        if cooldown_steps <= 0:
+            return 0.0
+        max_pen = max(0.0, float(getattr(self.cfg, "proposer_template_cooldown_penalty", 0.20)))
+        if max_pen <= 0.0:
+            return 0.0
+        recent = list(self._question_template_window)
+        for back_idx, prev_key in enumerate(reversed(recent)):
+            if prev_key != key:
+                continue
+            if back_idx >= cooldown_steps:
+                return 0.0
+            scale = 1.0 - (float(back_idx) / float(cooldown_steps))
+            return max_pen * max(0.0, scale)
+        return 0.0
+
+    def _anchor_replay_bonus(self, question: str, strategy_used: str) -> float:
+        if not self._proposer_anchor_replay:
+            return 0.0
+        qkey = self._question_template_key(question)
+        skey = self._normalize_strategy_key(strategy_used)
+        strategy_bonus = max(0.0, float(getattr(self.cfg, "proposer_anchor_strategy_bonus", 0.06)))
+        template_bonus = max(0.0, float(getattr(self.cfg, "proposer_anchor_template_bonus", 0.04)))
+        bonus = 0.0
+        if skey and any(item.get("strategy") == skey for item in self._proposer_anchor_replay):
+            bonus += strategy_bonus
+        if qkey and any(item.get("qkey") == qkey for item in self._proposer_anchor_replay):
+            bonus += template_bonus
+        return float(bonus)
+
+    def _proposer_base_reward(self, entropy_nats: float, local_info_score: float, entropy_mu: float) -> float:
+        gaussian_raw = gaussian_reward(
+            entropy_nats,
+            entropy_mu,
+            self.cfg.prop_entropy_sigma,
+        )
+        band_raw = max(-1.0, min(1.0, (2.0 * float(local_info_score)) - 1.0))
+        mode = str(getattr(self.cfg, "proposer_reward_mode", "hybrid") or "hybrid").strip().lower()
+        if mode == "gaussian":
+            return float(max(-1.0, min(1.0, gaussian_raw)))
+        if mode == "band":
+            return float(band_raw)
+        band_w = float(getattr(self.cfg, "proposer_band_reward_weight", 0.70))
+        band_w = max(0.0, min(1.0, band_w))
+        mixed = band_w * band_raw + (1.0 - band_w) * gaussian_raw
+        return float(max(-1.0, min(1.0, mixed)))
+
+    def _get_proposer_bucket_baseline(self, bucket: str) -> float:
+        b = str(bucket or "").strip().lower()
+        return float(self._proposer_bucket_baselines.get(b, self.proposer_baseline))
+
+    def _update_proposer_bucket_baseline(self, bucket: str, reward: float):
+        b = str(bucket or "").strip().lower()
+        if b not in {"easy", "medium", "hard"}:
+            return
+        m = float(getattr(self.cfg, "baseline_momentum", 0.6))
+        m = max(0.0, min(0.9999, m))
+        prev = float(self._proposer_bucket_baselines.get(b, self.proposer_baseline))
+        self._proposer_bucket_baselines[b] = m * prev + (1.0 - m) * float(reward)
+
+    def _update_easy_constraint(self, is_easy: bool) -> Dict[str, float]:
+        obs = self._dist_mean(1.0 if is_easy else 0.0)
+        mom = float(getattr(self.cfg, "easy_rate_ema_momentum", 0.97))
+        mom = max(0.0, min(0.9999, mom))
+        prev = float(getattr(self, "_easy_rate_ema", 0.0))
+        self._easy_rate_ema = mom * prev + (1.0 - mom) * obs
+        if bool(getattr(self.cfg, "easy_constraint_enabled", True)):
+            target = float(getattr(self.cfg, "easy_constraint_target_rate", 0.35))
+            lr = float(getattr(self.cfg, "easy_constraint_lr", 0.05))
+            lam_max = max(0.0, float(getattr(self.cfg, "easy_constraint_lambda_max", 1.5)))
+            lam = float(getattr(self, "_easy_lagrange_lambda", 0.0))
+            lam = lam + lr * (self._easy_rate_ema - target)
+            self._easy_lagrange_lambda = max(0.0, min(lam_max, lam))
+        else:
+            self._easy_lagrange_lambda = 0.0
+        return {
+            "easy_rate_ema": float(self._easy_rate_ema),
+            "easy_lambda": float(self._easy_lagrange_lambda),
+        }
+
+    def _proposer_controller_state(self) -> Dict[str, float]:
+        easy_rate = float(getattr(self, "_easy_rate_ema", 0.0))
+        temp_boost = 0.0
+        top_p_boost = 0.0
+        penalty_boost = 1.0
+        if bool(getattr(self.cfg, "adaptive_exploration_enabled", True)):
+            thr = float(getattr(self.cfg, "exploration_easy_rate_threshold", 0.75))
+            if easy_rate > thr:
+                ratio = min(1.0, (easy_rate - thr) / max(1e-6, 1.0 - thr))
+                temp_boost = float(getattr(self.cfg, "exploration_temp_boost_max", 0.60)) * ratio
+                top_p_boost = float(getattr(self.cfg, "exploration_top_p_boost_max", 0.10)) * ratio
+                penalty_boost += float(getattr(self.cfg, "exploration_penalty_boost_max", 1.0)) * ratio
+        trigger = max(1, int(getattr(self.cfg, "collapse_streak_trigger", 8)))
+        collapse_active = bool(getattr(self, "_collapse_streak", 0) >= trigger)
+        if collapse_active:
+            temp_boost = max(temp_boost, 0.50)
+            top_p_boost = max(top_p_boost, 0.10)
+            penalty_boost += max(
+                0.0, float(getattr(self.cfg, "collapse_cooldown_penalty_boost", 0.10))
+            )
+        dyn_temp = min(2.5, float(self.cfg.temp) * (1.0 + temp_boost))
+        dyn_top_p = min(1.0, float(self.cfg.top_p) + top_p_boost)
+        return {
+            "easy_rate_ema": easy_rate,
+            "temp_boost": temp_boost,
+            "top_p_boost": top_p_boost,
+            "penalty_boost": penalty_boost,
+            "collapse_active": 1.0 if collapse_active else 0.0,
+            "proposer_temp": dyn_temp,
+            "proposer_top_p": dyn_top_p,
+        }
+
+    def _update_collapse_state(self, difficulty_bucket_observed: str, proposer_stats: Optional[Dict[str, Any]]) -> Dict[str, float]:
+        has_std = False
+        std_reward = 0.0
+        if isinstance(proposer_stats, dict):
+            try:
+                std_reward = float(proposer_stats.get("std_reward", 0.0) or 0.0)
+                has_std = True
+            except Exception:
+                std_reward = 0.0
+        if has_std and math.isfinite(std_reward):
+            self._grpo_std_window.append(std_reward)
+        mean_std = (
+            float(sum(self._grpo_std_window) / max(1, len(self._grpo_std_window)))
+            if self._grpo_std_window
+            else 0.0
+        )
+        collapse_enabled = bool(getattr(self.cfg, "collapse_detector_enabled", True))
+        easy_thr = float(getattr(self.cfg, "collapse_easy_rate_threshold", 0.85))
+        std_thr = max(0.0, float(getattr(self.cfg, "collapse_std_threshold", 0.06)))
+        is_easy = str(difficulty_bucket_observed).strip().lower() == "easy"
+        collapse_hit = (
+            collapse_enabled
+            and has_std
+            and is_easy
+            and float(getattr(self, "_easy_rate_ema", 0.0)) >= easy_thr
+            and mean_std <= std_thr
+        )
+        if has_std:
+            if collapse_hit:
+                self._collapse_streak = int(getattr(self, "_collapse_streak", 0)) + 1
+            else:
+                self._collapse_streak = max(0, int(getattr(self, "_collapse_streak", 0)) - 1)
+
+        trigger = max(1, int(getattr(self.cfg, "collapse_streak_trigger", 8)))
+        if (
+            collapse_enabled
+            and self._collapse_streak >= trigger
+            and bool(getattr(self.cfg, "easy_constraint_enabled", True))
+        ):
+            lam = float(getattr(self, "_easy_lagrange_lambda", 0.0))
+            lam += max(0.0, float(getattr(self.cfg, "collapse_lambda_boost", 0.10)))
+            lam_max = max(0.0, float(getattr(self.cfg, "easy_constraint_lambda_max", 1.5)))
+            self._easy_lagrange_lambda = min(lam_max, lam)
+
+        return {
+            "collapse_streak": float(self._collapse_streak),
+            "collapse_mean_std": float(mean_std),
+            "collapse_hit": 1.0 if collapse_hit else 0.0,
+        }
+
+    def _sync_proposer_framework_state(self):
+        self._easy_rate_ema = self._dist_mean(float(getattr(self, "_easy_rate_ema", 0.0)))
+        self._easy_lagrange_lambda = self._dist_mean(
+            float(getattr(self, "_easy_lagrange_lambda", 0.0))
+        )
+        for b in ("easy", "medium", "hard"):
+            self._proposer_bucket_baselines[b] = self._dist_mean(
+                float(self._proposer_bucket_baselines.get(b, self.proposer_baseline))
+            )
+        self._collapse_streak = int(
+            round(self._dist_mean(float(getattr(self, "_collapse_streak", 0))))
+        )
+
+    def _apply_grpo_pairwise_ranking(
+        self,
+        rewards: List[float],
+        buckets: List[str],
+    ) -> Tuple[List[float], List[float]]:
+        if len(rewards) <= 1:
+            return list(rewards), [0.0 for _ in rewards]
+        if not bool(getattr(self.cfg, "grpo_pairwise_ranking_enabled", True)):
+            return list(rewards), [0.0 for _ in rewards]
+        rank_w = max(0.0, float(getattr(self.cfg, "grpo_pairwise_ranking_weight", 0.08)))
+        margin = max(0.0, float(getattr(self.cfg, "grpo_pairwise_margin", 0.05)))
+        easy_pen = max(0.0, float(getattr(self.cfg, "grpo_pairwise_easy_penalty", 0.05)))
+        if rank_w <= 0.0:
+            return list(rewards), [0.0 for _ in rewards]
+        adjusted = list(float(r) for r in rewards)
+        deltas = [0.0 for _ in adjusted]
+        n = len(adjusted)
+        for i in range(n):
+            for j in range(i + 1, n):
+                ri = self._difficulty_rank(buckets[i] if i < len(buckets) else "easy")
+                rj = self._difficulty_rank(buckets[j] if j < len(buckets) else "easy")
+                if ri == rj:
+                    continue
+                pref = i if ri > rj else j
+                other = j if pref == i else i
+                gap = adjusted[pref] - adjusted[other]
+                target = margin * float(abs(ri - rj))
+                if gap < target:
+                    boost = rank_w * (target - gap)
+                    deltas[pref] += boost
+                    deltas[other] -= boost
+        for i, b in enumerate(buckets):
+            if str(b).strip().lower() == "easy":
+                deltas[i] -= easy_pen
+        adjusted = [max(-1.0, min(1.0, r + d)) for r, d in zip(adjusted, deltas)]
+        return adjusted, deltas
+
     def _init_adaptive_windows(self):
         ent_window_size = max(8, int(getattr(self.cfg, "entropy_iqr_window_size", 256)))
         diff_window_size = max(8, int(getattr(self.cfg, "difficulty_sampler_window_size", 256)))
         qhist_window_size = max(32, int(getattr(self.cfg, "proposer_question_history_size", 256)))
+        strategy_window_size = max(32, int(getattr(self.cfg, "proposer_strategy_window_size", 256)))
+        anchor_replay_size = max(16, int(getattr(self.cfg, "proposer_anchor_replay_size", 256)))
+        std_window_size = max(8, int(getattr(self.cfg, "collapse_std_window_size", 32)))
         self._entropy_window = deque(maxlen=ent_window_size)
         self._difficulty_window = deque(maxlen=diff_window_size)
         self._question_template_window = deque(maxlen=qhist_window_size)
+        self._strategy_window = deque(maxlen=strategy_window_size)
+        self._proposer_anchor_replay = deque(maxlen=anchor_replay_size)
+        self._grpo_std_window = deque(maxlen=std_window_size)
+        self._proposer_bucket_baselines = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
+        self._easy_rate_ema = 0.0
+        self._easy_lagrange_lambda = 0.0
+        self._collapse_streak = 0
 
     def _entropy_iqr_filter_state(self) -> Dict[str, float]:
         static_threshold = float(getattr(self.cfg, "sc_entropy_min", 0.15))
@@ -524,6 +786,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         difficulty_sampler_mode = str(difficulty_target_state.get("mode", "target"))
         solver_temperatures = self._solver_temperature_schedule()
         solver_top_ps = self._solver_top_p_schedule()
+        controller_state = self._proposer_controller_state()
+        proposer_temp_ctrl = float(controller_state.get("proposer_temp", self.cfg.temp))
+        proposer_top_p_ctrl = float(controller_state.get("proposer_top_p", self.cfg.top_p))
+        proposer_penalty_boost = max(1.0, float(controller_state.get("penalty_boost", 1.0)))
+        easy_selection_scale = max(
+            0.0, float(getattr(self.cfg, "easy_constraint_selection_scale", 0.20))
+        )
+        easy_constraint_enabled = bool(getattr(self.cfg, "easy_constraint_enabled", True))
 
         # ------------------------------------------------------------------
         # Single-shot multi-question generation (no retry loop).
@@ -585,7 +855,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         chosen_strategy_used = ""
         chosen_two_answer_test = ""
         proposer_text_hardness_bonus = 0.0
+        proposer_strategy_quota_bonus = 0.0
+        proposer_anchor_bonus = 0.0
         proposer_repetition_penalty = 0.0
+        proposer_cooldown_penalty = 0.0
+        easy_constraint_penalty = 0.0
 
         solver_prompt = ""
         solver_outputs: List[str] = []
@@ -599,8 +873,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             prompt=multi_proposer_prompt,
             adapter_name="proposer" if self.cfg.use_lora else None,
             max_new_tokens=self.cfg.max_new_tokens_proposer,
-            temperature=self.cfg.temp,
-            top_p=self.cfg.top_p,
+            temperature=proposer_temp_ctrl,
+            top_p=proposer_top_p_ctrl,
         )
 
         candidate_infos = self._parse_proposer_question_candidates(proposer_out)
@@ -643,6 +917,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 cand_strategy,
                 cand_two_answer,
             )
+            cand_strategy_bonus = self._strategy_quota_adjustment(cand_strategy)
+            cand_anchor_bonus = self._anchor_replay_bonus(cand_q, cand_strategy)
+            cand_cooldown_penalty = self._template_cooldown_penalty(cand_q) * proposer_penalty_boost
 
             cand_non_objective = bool(
                 require_objective and (not self._is_objective_question(cand_q))
@@ -697,7 +974,23 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             sc_is_easy = bool(
                 (sc_entropy < entropy_easy_threshold) and (sc_margin > margin_max)
             )
-            cand_pick_score = sc_entropy + cand_text_bonus
+            cand_bucket_bonus = 0.06 if sc_bucket == desired_difficulty_bucket else 0.0
+            if sc_bucket == "easy":
+                cand_bucket_bonus -= 0.03
+            cand_easy_constraint_penalty = 0.0
+            if easy_constraint_enabled and sc_bucket == "easy":
+                cand_easy_constraint_penalty = (
+                    float(getattr(self, "_easy_lagrange_lambda", 0.0)) * easy_selection_scale
+                )
+            cand_pick_score = (
+                sc_entropy
+                + cand_text_bonus
+                + cand_strategy_bonus
+                + cand_anchor_bonus
+                + cand_bucket_bonus
+                - cand_cooldown_penalty
+                - cand_easy_constraint_penalty
+            )
 
             # Always remember the best candidate seen so far.
             if (
@@ -933,10 +1226,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         # unanimous on the reasoned track — the key to breaking the
         # same-model proposer-solver deadlock.
         proposer_entropy_mu_used = self._update_proposer_entropy_target(entropy_nats)
-        proposer_reward_raw = gaussian_reward(
+        proposer_reward_raw_gaussian = gaussian_reward(
             entropy_nats,
             proposer_entropy_mu_used,
             self.cfg.prop_entropy_sigma,
+        )
+        proposer_reward_raw = self._proposer_base_reward(
+            entropy_nats=entropy_nats,
+            local_info_score=local_info_score,
+            entropy_mu=proposer_entropy_mu_used,
         )
         proposer_reward = proposer_reward_raw
 
@@ -957,12 +1255,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 # Intuitive ≠ reasoned → "gotcha" question (V-Zero case 2)
                 # Reward = 0.5 * confidence (higher confidence → better gotcha)
                 proposer_reward = 0.5 * maj_frac
-            # else: keep proposer_reward = proposer_reward_raw (Gaussian).
-            # At sigma=0.25 and entropy≈0, gaussian ≈ 0.0015 — nearly zero
-            # but preserves micro-entropy variance as reward signal instead
-            # of discarding to a flat 0.0 that kills all differentiation.
+            # else: keep proposer_reward = proposer_reward_raw.
             zero_entropy_capped = True
-        # else: non-unanimous → gaussian reward (already set above)
+        # else: non-unanimous → band/hybrid reward (already set above)
 
         # Text-only hardness shaping (no extra model calls): pushes proposer
         # away from low-information easy templates even when solver entropy
@@ -972,9 +1267,19 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             chosen_strategy_used,
             chosen_two_answer_test,
         )
-        proposer_repetition_penalty = self._question_repetition_penalty(question)
+        proposer_strategy_quota_bonus = self._strategy_quota_adjustment(chosen_strategy_used)
+        proposer_anchor_bonus = self._anchor_replay_bonus(question, chosen_strategy_used)
+        proposer_repetition_penalty = (
+            self._question_repetition_penalty(question) * proposer_penalty_boost
+        )
+        proposer_cooldown_penalty = (
+            self._template_cooldown_penalty(question) * proposer_penalty_boost
+        )
         proposer_reward += proposer_text_hardness_bonus
+        proposer_reward += proposer_strategy_quota_bonus
+        proposer_reward += proposer_anchor_bonus
         proposer_reward -= proposer_repetition_penalty
+        proposer_reward -= proposer_cooldown_penalty
 
         # Non-objective penalty.
         proposer_non_objective_penalty = max(
@@ -1005,11 +1310,35 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     break
             _easy_scale = max(0.0, 1.0 - min(1.0, _rej_entropy / max(1e-6, proposer_entropy_mu_used)))
             proposer_reward -= rejected_question_penalty * _easy_scale
+
+        easy_constraint_penalty = 0.0
+        if easy_constraint_enabled and difficulty_bucket_observed == "easy":
+            easy_constraint_penalty = (
+                float(getattr(self, "_easy_lagrange_lambda", 0.0))
+                * max(0.0, float(getattr(self.cfg, "easy_constraint_penalty_scale", 0.30)))
+            )
+            proposer_reward -= easy_constraint_penalty
+
         proposer_reward = max(-1.0, min(1.0, proposer_reward))
         # Track selected question template to discourage repeated easy loops.
         _qkey = self._question_template_key(question)
         if _qkey:
             self._question_template_window.append(_qkey)
+        _strategy_key = self._normalize_strategy_key(chosen_strategy_used)
+        if _strategy_key:
+            self._strategy_window.append(_strategy_key)
+        if difficulty_bucket_observed in {"medium", "hard"} and proposer_reward >= float(
+            getattr(self.cfg, "proposer_anchor_min_reward", 0.20)
+        ):
+            self._proposer_anchor_replay.append(
+                {
+                    "qkey": _qkey,
+                    "strategy": _strategy_key,
+                    "bucket": difficulty_bucket_observed,
+                    "reward": float(proposer_reward),
+                    "step": int(step),
+                }
+            )
 
         solver_stats_list = []
         solver_update_due = (
@@ -1205,12 +1534,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     _grpo_completions = [completion_for_update]
                     _grpo_rewards = [effective_reward]
                     _grpo_images = [image]
+                    _grpo_buckets = [difficulty_bucket_observed]
                     _grpo_group_size = max(
                         2, int(getattr(self.cfg, "proposer_grpo_gen_group_size", 3))
                     )
                     _score_extras = bool(getattr(self.cfg, "score_grpo_extras", True))
                     _extra_temp_mult = float(getattr(self.cfg, "grpo_extra_temp_multiplier", 2.0))
-                    _extra_temp = min(3.0, self.cfg.temp * _extra_temp_mult)
+                    _extra_temp = min(3.0, proposer_temp_ctrl * _extra_temp_mult)
                     # Use a dedicated config for GRPO extras spot-check count,
                     # independent of the candidate-selection spot-check. Extras
                     # need ≥3 samples to produce ternary entropy outcomes
@@ -1233,7 +1563,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                 adapter_name="proposer" if self.cfg.use_lora else None,
                                 max_new_tokens=self.cfg.max_new_tokens_proposer,
                                 temperature=_extra_temp,
-                                top_p=self.cfg.top_p,
+                                top_p=proposer_top_p_ctrl,
                             )
                             _extra_comp = str(_extra_out or "").strip()
                             if not _extra_comp:
@@ -1251,7 +1581,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             _extra_strategy_used = ""
                             _extra_two_answer_test = ""
                             _extra_text_bonus = 0.0
+                            _extra_strategy_bonus = 0.0
+                            _extra_anchor_bonus = 0.0
                             _extra_repeat_penalty = 0.0
+                            _extra_cooldown_penalty = 0.0
 
                             # Pick the strongest text-level candidate from this extra output
                             # (zero inference cost), then optionally run solver spot-check.
@@ -1334,12 +1667,21 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                             _extra_maj_frac,
                                             entropy_easy_threshold,
                                         )
+                                        _extra_entropy_band = math.exp(
+                                            -(((_extra_entropy_val - entropy_mid) ** 2) / (2.0 * (entropy_sigma ** 2)))
+                                        )
+                                        _extra_margin_damp = max(
+                                            0.0, 1.0 - (_extra_margin_val / max(1e-6, margin_max))
+                                        )
+                                        _extra_local_info = max(
+                                            0.0, min(1.0, 0.5 * _extra_entropy_band + 0.5 * _extra_margin_damp)
+                                        )
 
                                         # Compute reward using same logic as chosen candidate.
-                                        _extra_reward_raw = gaussian_reward(
-                                            _extra_entropy_val,
-                                            proposer_entropy_mu_used,
-                                            self.cfg.prop_entropy_sigma,
+                                        _extra_reward_raw = self._proposer_base_reward(
+                                            entropy_nats=_extra_entropy_val,
+                                            local_info_score=_extra_local_info,
+                                            entropy_mu=proposer_entropy_mu_used,
                                         )
                                         _extra_reward = _extra_reward_raw
                                         # V-Zero dual-track for extras
@@ -1400,6 +1742,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                             ),
                                         )
                                         _extra_reward -= rejected_question_penalty * _extra_easy_scale
+                                    if easy_constraint_enabled and _extra_bucket == "easy":
+                                        _extra_reward -= (
+                                            float(getattr(self, "_easy_lagrange_lambda", 0.0))
+                                            * max(
+                                                0.0,
+                                                float(getattr(self.cfg, "easy_constraint_penalty_scale", 0.30)),
+                                            )
+                                        )
 
                             if _extra_q:
                                 # Deterministic text-level shaping for extras.
@@ -1408,7 +1758,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                     _extra_strategy_used,
                                     _extra_two_answer_test,
                                 )
-                                _extra_repeat_penalty = self._question_repetition_penalty(_extra_q)
+                                _extra_strategy_bonus = self._strategy_quota_adjustment(_extra_strategy_used)
+                                _extra_anchor_bonus = self._anchor_replay_bonus(_extra_q, _extra_strategy_used)
+                                _extra_repeat_penalty = (
+                                    self._question_repetition_penalty(_extra_q) * proposer_penalty_boost
+                                )
+                                _extra_cooldown_penalty = (
+                                    self._template_cooldown_penalty(_extra_q) * proposer_penalty_boost
+                                )
                                 _extra_qkey = self._question_template_key(_extra_q)
                                 if _extra_qkey:
                                     if _extra_qkey in _step_question_templates:
@@ -1417,13 +1774,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                         )
                                     _step_question_templates.add(_extra_qkey)
                                 _extra_reward += _extra_text_bonus
+                                _extra_reward += _extra_strategy_bonus
+                                _extra_reward += _extra_anchor_bonus
                                 _extra_reward -= _extra_repeat_penalty
+                                _extra_reward -= _extra_cooldown_penalty
 
                             _extra_reward = max(-1.0, min(1.0, _extra_reward))
 
                             _grpo_completions.append(_extra_comp)
                             _grpo_rewards.append(_extra_reward)
                             _grpo_images.append(image)
+                            _grpo_buckets.append(_extra_bucket if _extra_bucket in {"easy", "medium", "hard"} else difficulty_bucket_observed)
 
                             # Log extra candidate stats for diagnostics.
                             if proposer_stats is None:
@@ -1439,9 +1800,31 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             proposer_stats[f"grpo_extra_{_gi}_strategy"] = _extra_strategy_used
                             proposer_stats[f"grpo_extra_{_gi}_two_answer_test"] = _extra_two_answer_test
                             proposer_stats[f"grpo_extra_{_gi}_text_bonus"] = _extra_text_bonus
+                            proposer_stats[f"grpo_extra_{_gi}_strategy_bonus"] = _extra_strategy_bonus
+                            proposer_stats[f"grpo_extra_{_gi}_anchor_bonus"] = _extra_anchor_bonus
                             proposer_stats[f"grpo_extra_{_gi}_repeat_penalty"] = _extra_repeat_penalty
+                            proposer_stats[f"grpo_extra_{_gi}_cooldown_penalty"] = _extra_cooldown_penalty
                         except Exception:
                             pass
+
+                    # Pairwise ranking signal: enforce medium/hard > easy
+                    # ordering inside each GRPO group without extra inference.
+                    _grpo_rewards, _grpo_rank_deltas = self._apply_grpo_pairwise_ranking(
+                        _grpo_rewards, _grpo_buckets
+                    )
+                    if proposer_stats is None:
+                        proposer_stats = {}
+                    proposer_stats["grpo_pairwise_rank_delta_mean"] = (
+                        float(sum(_grpo_rank_deltas) / max(1, len(_grpo_rank_deltas)))
+                        if _grpo_rank_deltas
+                        else 0.0
+                    )
+                    proposer_stats["grpo_pairwise_rank_delta_max"] = (
+                        float(max(_grpo_rank_deltas)) if _grpo_rank_deltas else 0.0
+                    )
+                    proposer_stats["grpo_pairwise_rank_delta_min"] = (
+                        float(min(_grpo_rank_deltas)) if _grpo_rank_deltas else 0.0
+                    )
 
                     # ── Degenerate-group exploration noise ──────────────
                     # When ALL GRPO candidates receive identical pre-shift
@@ -1480,12 +1863,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         if proposer_stats is not None:
                             proposer_stats["grpo_degenerate_noise"] = False
 
-                    # Apply EMA absolute baseline shift to all group rewards.
-                    # self.proposer_baseline tracks the chosen candidate's reward;
-                    # when the whole group underperforms the baseline the advantage
-                    # of every candidate is negative → consistent push away.
-                    _ema_baseline = float(self.proposer_baseline)
-                    _grpo_rewards_shifted = [r - _ema_baseline for r in _grpo_rewards]
+                    # Apply bucket-stratified EMA baselines to all group rewards.
+                    _grpo_rewards_shifted = [
+                        r - self._get_proposer_bucket_baseline(b)
+                        for r, b in zip(_grpo_rewards, _grpo_buckets)
+                    ]
 
                     proposer_stats_grpo = self.proposer_updater.step(
                         prompt=multi_proposer_prompt,
@@ -1507,12 +1889,20 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     # Tracking chosen-only means baseline → effective_reward at
                     # equilibrium; scored extras then get shifted ≠ 0 → non-zero loss.
                     self._update_baseline("proposer", effective_reward)
+                    self._update_proposer_bucket_baseline(
+                        difficulty_bucket_observed,
+                        effective_reward,
+                    )
                     # Log the baseline shift for visibility.
                     if proposer_stats is not None:
-                        proposer_stats["grpo_ema_baseline"] = _ema_baseline
+                        proposer_stats["grpo_ema_baseline"] = float(self.proposer_baseline)
+                        proposer_stats["grpo_bucket_baseline_easy"] = self._get_proposer_bucket_baseline("easy")
+                        proposer_stats["grpo_bucket_baseline_medium"] = self._get_proposer_bucket_baseline("medium")
+                        proposer_stats["grpo_bucket_baseline_hard"] = self._get_proposer_bucket_baseline("hard")
                         proposer_stats["grpo_baseline_input"] = effective_reward
                         # Debug: log valid completions to diagnose GRPO loss=0
                         proposer_stats["grpo_valid_completions"] = proposer_stats.get("valid_completions", -1)
+                        proposer_stats["grpo_bucket_labels"] = list(_grpo_buckets)
                 else:
                     # ── REINFORCE path (legacy / proposer_update_rule="reinforce") ──
                     # Use the raw baseline without clamping. The previous clamp
@@ -1521,7 +1911,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     # reward) — eliminating the learning signal entirely. Standard
                     # REINFORCE advantage = reward - baseline handles negative rewards
                     # correctly without any clamping.
-                    effective_baseline = baseline_before if local_can_proposer_update else 0.0
+                    effective_baseline = (
+                        self._get_proposer_bucket_baseline(difficulty_bucket_observed)
+                        if local_can_proposer_update
+                        else 0.0
+                    )
                     proposer_stats = self.proposer_updater.step(
                         image=image,
                         prompt=multi_proposer_prompt,
@@ -1532,6 +1926,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     )
                     if local_can_proposer_update:
                         self._update_baseline("proposer", proposer_reward)
+                        self._update_proposer_bucket_baseline(
+                            difficulty_bucket_observed,
+                            proposer_reward,
+                        )
 
                 if proposer_stats and proposer_stats.get("did_step", True):
                     self._policy_update_counts["proposer"] += 1
@@ -1550,6 +1948,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             self._sync_state_scalars()
         else:
             proposer_skip_reason = "update_not_due"
+
+        easy_constraint_state = self._update_easy_constraint(
+            difficulty_bucket_observed == "easy"
+        )
+        collapse_state = self._update_collapse_state(
+            difficulty_bucket_observed=difficulty_bucket_observed,
+            proposer_stats=proposer_stats,
+        )
+        self._sync_proposer_framework_state()
 
         step_dt = time.perf_counter() - step_t0
         record = {
@@ -1604,12 +2011,28 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_spot_check_offset": spot_check_offset,
             "entropy_nats": entropy_nats,
             "proposer_entropy_mu_used": proposer_entropy_mu_used,
+            "proposer_reward_raw_gaussian": proposer_reward_raw_gaussian,
             "proposer_reward_raw": proposer_reward_raw,
             "proposer_reward": proposer_reward,
             "proposer_text_hardness_bonus": proposer_text_hardness_bonus,
+            "proposer_strategy_quota_bonus": proposer_strategy_quota_bonus,
+            "proposer_anchor_bonus": proposer_anchor_bonus,
             "proposer_repetition_penalty": proposer_repetition_penalty,
+            "proposer_cooldown_penalty": proposer_cooldown_penalty,
+            "proposer_easy_constraint_penalty": easy_constraint_penalty,
             "proposer_strategy_used": chosen_strategy_used,
             "proposer_two_answer_test": chosen_two_answer_test,
+            "proposer_controller_temp": proposer_temp_ctrl,
+            "proposer_controller_top_p": proposer_top_p_ctrl,
+            "proposer_controller_penalty_boost": proposer_penalty_boost,
+            "proposer_easy_rate_ema": easy_constraint_state.get("easy_rate_ema"),
+            "proposer_easy_lagrange_lambda": easy_constraint_state.get("easy_lambda"),
+            "proposer_collapse_streak": collapse_state.get("collapse_streak"),
+            "proposer_collapse_mean_std": collapse_state.get("collapse_mean_std"),
+            "proposer_collapse_hit": collapse_state.get("collapse_hit"),
+            "proposer_bucket_baseline_easy": self._get_proposer_bucket_baseline("easy"),
+            "proposer_bucket_baseline_medium": self._get_proposer_bucket_baseline("medium"),
+            "proposer_bucket_baseline_hard": self._get_proposer_bucket_baseline("hard"),
             "zero_entropy_capped": zero_entropy_capped,
             "zero_entropy_reward_cap": zero_entropy_cap,
             "intuitive_answer": _intuitive_answer,
@@ -1679,12 +2102,28 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "entropy_nats": entropy_nats,
                 "solver_reward_soft_mean": sum(solver_rewards_soft) / max(1, len(solver_rewards_soft)),
                 "proposer_entropy_mu_used": proposer_entropy_mu_used,
+                "proposer_reward_raw_gaussian": proposer_reward_raw_gaussian,
                 "proposer_reward_raw": proposer_reward_raw,
                 "proposer_reward": proposer_reward,
                 "proposer_text_hardness_bonus": proposer_text_hardness_bonus,
+                "proposer_strategy_quota_bonus": proposer_strategy_quota_bonus,
+                "proposer_anchor_bonus": proposer_anchor_bonus,
                 "proposer_repetition_penalty": proposer_repetition_penalty,
+                "proposer_cooldown_penalty": proposer_cooldown_penalty,
+                "proposer_easy_constraint_penalty": easy_constraint_penalty,
                 "proposer_strategy_used": chosen_strategy_used,
                 "proposer_two_answer_test": chosen_two_answer_test,
+                "proposer_controller_temp": proposer_temp_ctrl,
+                "proposer_controller_top_p": proposer_top_p_ctrl,
+                "proposer_controller_penalty_boost": proposer_penalty_boost,
+                "proposer_easy_rate_ema": easy_constraint_state.get("easy_rate_ema"),
+                "proposer_easy_lagrange_lambda": easy_constraint_state.get("easy_lambda"),
+                "proposer_collapse_streak": collapse_state.get("collapse_streak"),
+                "proposer_collapse_mean_std": collapse_state.get("collapse_mean_std"),
+                "proposer_collapse_hit": collapse_state.get("collapse_hit"),
+                "proposer_bucket_baseline_easy": self._get_proposer_bucket_baseline("easy"),
+                "proposer_bucket_baseline_medium": self._get_proposer_bucket_baseline("medium"),
+                "proposer_bucket_baseline_hard": self._get_proposer_bucket_baseline("hard"),
                 "proposer_non_objective_question": proposer_non_objective_question,
                 "proposer_non_objective_penalty": proposer_non_objective_penalty,
                 "question_rejected": question_rejected,
@@ -1723,6 +2162,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"info_ratio={informative_ratio:.2f} info_gate={int(solver_informative_gate)} "
                 f"up_scale={solver_update_scale:.2f} P_R={proposer_reward:.3f} "
                 f"T_B={proposer_text_hardness_bonus:.3f} R_P={proposer_repetition_penalty:.3f} "
+                f"E_L={easy_constraint_state.get('easy_lambda', 0.0):.3f} "
+                f"E_R={easy_constraint_state.get('easy_rate_ema', 0.0):.2f} "
+                f"C_ST={int(collapse_state.get('collapse_streak', 0.0))} "
                 f"dt={step_dt:.1f}s"
             )
             print(f"  Q: {question}")
@@ -1751,7 +2193,27 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._update_metric("u_proposer_entropy_mu_used", self._dist_mean(proposer_entropy_mu_used))
         self._update_metric("u_proposer_reward", self._dist_mean(proposer_reward))
         self._update_metric("u_proposer_text_bonus", self._dist_mean(proposer_text_hardness_bonus))
+        self._update_metric("u_proposer_strategy_bonus", self._dist_mean(proposer_strategy_quota_bonus))
+        self._update_metric("u_proposer_anchor_bonus", self._dist_mean(proposer_anchor_bonus))
         self._update_metric("u_proposer_repeat_penalty", self._dist_mean(proposer_repetition_penalty))
+        self._update_metric("u_proposer_cooldown_penalty", self._dist_mean(proposer_cooldown_penalty))
+        self._update_metric("u_proposer_easy_penalty", self._dist_mean(easy_constraint_penalty))
+        self._update_metric(
+            "u_proposer_easy_rate_ema",
+            self._dist_mean(float(easy_constraint_state.get("easy_rate_ema", 0.0))),
+        )
+        self._update_metric(
+            "u_proposer_easy_lambda",
+            self._dist_mean(float(easy_constraint_state.get("easy_lambda", 0.0))),
+        )
+        self._update_metric(
+            "u_proposer_collapse_streak",
+            self._dist_mean(float(collapse_state.get("collapse_streak", 0.0))),
+        )
+        self._update_metric(
+            "u_proposer_collapse_mean_std",
+            self._dist_mean(float(collapse_state.get("collapse_mean_std", 0.0))),
+        )
 
         return record
 
@@ -1765,6 +2227,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         state["unified_entropy_window"] = list(self._entropy_window)
         state["unified_difficulty_window"] = list(self._difficulty_window)
         state["unified_question_template_window"] = list(self._question_template_window)
+        state["unified_strategy_window"] = list(self._strategy_window)
+        state["unified_proposer_anchor_replay"] = list(self._proposer_anchor_replay)
+        state["unified_grpo_std_window"] = list(self._grpo_std_window)
+        state["unified_easy_rate_ema"] = float(getattr(self, "_easy_rate_ema", 0.0))
+        state["unified_easy_lagrange_lambda"] = float(getattr(self, "_easy_lagrange_lambda", 0.0))
+        state["unified_collapse_streak"] = int(getattr(self, "_collapse_streak", 0))
+        state["unified_proposer_bucket_baselines"] = dict(self._proposer_bucket_baselines)
         # Replay buffer metadata (not the images — too large for checkpoint;
         # the buffer refills naturally after resume).
         state["unified_replay_buffer_len"] = len(self.replay_buffer) if self.replay_buffer is not None else 0
@@ -1823,6 +2292,43 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     k = str(key).strip()
                     if k:
                         self._question_template_window.append(k)
+            strategy_window = state.get("unified_strategy_window")
+            if isinstance(strategy_window, list):
+                self._strategy_window.clear()
+                max_keep = int(self._strategy_window.maxlen or len(strategy_window))
+                for key in strategy_window[-max_keep:]:
+                    k = self._normalize_strategy_key(str(key))
+                    if k:
+                        self._strategy_window.append(k)
+            anchor_replay = state.get("unified_proposer_anchor_replay")
+            if isinstance(anchor_replay, list):
+                self._proposer_anchor_replay.clear()
+                max_keep = int(self._proposer_anchor_replay.maxlen or len(anchor_replay))
+                for item in anchor_replay[-max_keep:]:
+                    if isinstance(item, dict):
+                        self._proposer_anchor_replay.append(dict(item))
+            std_window = state.get("unified_grpo_std_window")
+            if isinstance(std_window, list):
+                self._grpo_std_window.clear()
+                max_keep = int(self._grpo_std_window.maxlen or len(std_window))
+                for v in std_window[-max_keep:]:
+                    try:
+                        self._grpo_std_window.append(float(v))
+                    except Exception:
+                        continue
+            self._easy_rate_ema = float(state.get("unified_easy_rate_ema", self._easy_rate_ema))
+            self._easy_lagrange_lambda = float(
+                state.get("unified_easy_lagrange_lambda", self._easy_lagrange_lambda)
+            )
+            self._collapse_streak = int(state.get("unified_collapse_streak", self._collapse_streak))
+            bucket_baselines = state.get("unified_proposer_bucket_baselines")
+            if isinstance(bucket_baselines, dict):
+                for b in ("easy", "medium", "hard"):
+                    if b in bucket_baselines:
+                        try:
+                            self._proposer_bucket_baselines[b] = float(bucket_baselines[b])
+                        except Exception:
+                            continue
             # When reset_proposer_baseline=True (set in parent _load_state),
             # also wipe the entropy/difficulty history so the IQR filter
             # re-warms from scratch instead of staying locked at IQR=0.
@@ -1835,6 +2341,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 self._entropy_window.clear()
                 self._difficulty_window.clear()
                 self._question_template_window.clear()
+                self._strategy_window.clear()
+                self._proposer_anchor_replay.clear()
+                self._grpo_std_window.clear()
+                self._easy_rate_ema = 0.0
+                self._easy_lagrange_lambda = 0.0
+                self._collapse_streak = 0
+                self._proposer_bucket_baselines = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
             if self.is_main_process:
                 print(
                     f"[Unified] Restored self-evolving state: "
