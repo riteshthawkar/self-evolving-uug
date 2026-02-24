@@ -62,6 +62,21 @@ def build_solver_prompt(question_text: str) -> str:
     )
 
 
+def build_solver_choice_prompt(question_text: str, option_a: str, option_b: str) -> str:
+    return (
+        "You are a precise vision-language solver.\n"
+        "Answer by selecting exactly one option using only image evidence.\n"
+        "Rules:\n"
+        "- Choose only one: A or B.\n"
+        "- Do not output any explanation.\n"
+        "- Return only XML:\n"
+        "<answer>A</answer> or <answer>B</answer>\n"
+        f"Question: {question_text}\n"
+        f"Option A: {option_a}\n"
+        f"Option B: {option_b}"
+    )
+
+
 def build_caption_prompt() -> str:
     return "Describe this image in detail."
 
@@ -424,17 +439,17 @@ def build_proposer_multi_prompt(
     )
     hard_task_cards = (
         "HARD TASK CARDS (few-shot templates; do NOT copy literally, instantiate on this image):\n"
-        "  C1 physics+causal: target=support relation under occlusion; discriminate=A hanging/attached vs B resting/stacked;\n"
+        "  C1 physics+causal: target=support relation under occlusion; discriminate=two concrete support states of the same object;\n"
         "     chain=contact cues -> gravity plausibility -> support conclusion.\n"
-        "  C2 action+temporal: target=action phase; discriminate=A initiating-action vs B completing-action;\n"
+        "  C2 action+temporal: target=action phase; discriminate=two concrete event phases tied to visible pose;\n"
         "     chain=limb pose -> object trajectory -> temporal phase.\n"
-        "  C3 behavior+commonsense: target=agent intent; discriminate=A approaching/interacting vs B leaving/idle;\n"
+        "  C3 behavior+commonsense: target=agent intent; discriminate=two concrete intents grounded in body orientation;\n"
         "     chain=body orientation -> affordance -> context prior.\n"
-        "  C4 scientific+material: target=material identity; discriminate=A metallic/glossy vs B matte/polymer;\n"
+        "  C4 scientific+material: target=material identity; discriminate=two concrete materials with visible optical differences;\n"
         "     chain=highlight behavior -> edge softness -> texture consistency.\n"
-        "  C5 OCR+context: target=partial text token; discriminate=A plausible token A vs B plausible token B;\n"
+        "  C5 OCR+context: target=partial text token; discriminate=two concrete candidate words from visible glyph fragments;\n"
         "     chain=glyph fragments -> lexical plausibility -> scene compatibility.\n"
-        "  C6 causal+count: target=occluded count source; discriminate=A lower count vs B higher count;\n"
+        "  C6 causal+count: target=occluded count source; discriminate=two concrete count outcomes (e.g., 4 vs 5);\n"
         "     chain=occlusion map -> boundary ownership -> count consistency.\n"
     )
 

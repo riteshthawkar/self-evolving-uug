@@ -25,6 +25,7 @@ from .generation_helpers import GenerationSpec
 from .generation_trainer import GenerationSelfEvolvingTrainer
 from .prompts import (
     build_proposer_multi_prompt,
+    build_solver_choice_prompt,
     build_solver_prompt,
 )
 from .replay_buffer import ReplayBuffer
@@ -120,6 +121,38 @@ _OBJECTIVE_BINARY_HINT_RE = re.compile(
     r"inside|outside|walking|standing|sitting|running|open|closed|attached|hanging|resting|"
     r"supported|unsupported|before|after"
     r")\b",
+    flags=re.IGNORECASE,
+)
+_QUESTION_TEMPLATE_LITERAL_RE = re.compile(
+    r"\b(?:"
+    r"stable-by-contact|pre-?event|post-?event|preparing-for-x|recovering-from-x|"
+    r"token[_\s-]?\d+|lower count|higher count|plausible token [ab]|"
+    r"support-state|event-phase|agent-intent"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_TWO_ANSWER_META_ALT_RE = re.compile(
+    r"\b(?:"
+    r"lower count|higher count|pre-?event|post-?event|token[_\s-]?\d+|"
+    r"plausible token [ab]|option [ab]|answer [ab]|stable-by-contact|unsupported"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_LOW_INFO_ANSWER_RE = re.compile(
+    r"^(?:"
+    r"(?:yes|no)(?:\b.*)?|"
+    r"supported|unsupported|present|absent|"
+    r"unknown|unclear|not visible|cannot tell|can't tell|n/?a|none|"
+    r"something|anything|object|item|thing"
+    r")$",
+    flags=re.IGNORECASE,
+)
+_VAGUE_COUNT_ANSWER_RE = re.compile(
+    r"\b(?:many|too many|a lot|lots|several|some|few|numerous|multiple)\b",
+    flags=re.IGNORECASE,
+)
+_NUMERIC_ANSWER_RE = re.compile(
+    r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
     flags=re.IGNORECASE,
 )
 _DOMAIN_ALIAS_TO_CANONICAL = {
@@ -298,11 +331,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             return False
         q = " ".join(q.split())
         q_lower = q.lower()
+        subjective_hit = bool(_SUBJECTIVE_QUESTION_RE.search(q))
         if _MALFORMED_QUESTION_RE.search(q):
             return False
         if _META_PLACEHOLDER_RE.search(q):
-            return False
-        if _SUBJECTIVE_QUESTION_RE.search(q):
             return False
         if len(q.split()) < 4:
             return False
@@ -333,6 +365,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     )
                     if has_hint or structured_binary:
                         return True
+        if subjective_hit:
+            return False
         return False
 
     def _parse_proposer_question_candidates(self, proposer_out: str) -> List[Dict[str, str]]:
@@ -377,6 +411,75 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             if v and v not in out:
                 out.append(v)
         return out[:4]
+
+    def _extract_forced_choice_options(self, two_answer_test: str) -> Tuple[str, str]:
+        """Extract concrete A/B alternatives from two_answer_test.
+
+        Returns ("", "") when alternatives are missing, placeholders, or low-signal.
+        """
+        opts = self._split_two_answer_test(two_answer_test)
+        cleaned: List[str] = []
+        for opt in opts:
+            v = normalize_answer(opt, max_words=8)
+            if not v:
+                continue
+            v = re.sub(r"^(?:option|answer)\s*[ab]\s*[:.)-]?\s*", "", v).strip()
+            v = re.sub(r"^[ab]\s*[:.)-]\s*", "", v).strip()
+            if not v:
+                continue
+            if v in {"a", "b", "option a", "option b", "answer a", "answer b"}:
+                continue
+            if _TWO_ANSWER_TOKEN_PLACEHOLDER_RE.search(v):
+                continue
+            if _TWO_ANSWER_META_ALT_RE.search(v):
+                continue
+            if _BINARY_LOW_INFO_ALT_RE.match(v):
+                continue
+            if v not in cleaned:
+                cleaned.append(v)
+        if len(cleaned) >= 2 and cleaned[0] != cleaned[1]:
+            return cleaned[0], cleaned[1]
+        return "", ""
+
+    def _parse_forced_choice_answer(
+        self,
+        answer_raw: str,
+        option_a: str,
+        option_b: str,
+    ) -> str:
+        """Map free-form solver output to canonical 'a'/'b' for choice prompts."""
+        raw = str(answer_raw or "").strip()
+        if not raw:
+            return ""
+        v = normalize_answer(raw, max_words=12)
+        if not v:
+            return ""
+        if re.search(r"\b(?:option|answer)?\s*a\b", v) and not re.search(
+            r"\b(?:option|answer)?\s*b\b", v
+        ):
+            return "a"
+        if re.search(r"\b(?:option|answer)?\s*b\b", v) and not re.search(
+            r"\b(?:option|answer)?\s*a\b", v
+        ):
+            return "b"
+
+        a = normalize_answer(option_a, max_words=8)
+        b = normalize_answer(option_b, max_words=8)
+        if a and (a in v) and (b not in v):
+            return "a"
+        if b and (b in v) and (a not in v):
+            return "b"
+
+        vtoks = set(re.findall(r"[a-z0-9]+", v))
+        atoks = set(re.findall(r"[a-z0-9]+", a))
+        btoks = set(re.findall(r"[a-z0-9]+", b))
+        sa = (len(vtoks & atoks) / float(max(1, len(vtoks | atoks)))) if atoks else 0.0
+        sb = (len(vtoks & btoks) / float(max(1, len(vtoks | btoks)))) if btoks else 0.0
+        if sa > sb and sa > 0.05:
+            return "a"
+        if sb > sa and sb > 0.05:
+            return "b"
+        return ""
 
     def _parse_reasoning_domains(self, raw: str) -> List[str]:
         text = str(raw or "").strip().lower()
@@ -468,6 +571,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         two_answer_raw = str(meta.get("two_answer_test", "") or "")
         visual_target = str(meta.get("visual_target", "") or "").strip()
         strategy_used = str(meta.get("strategy_used", "") or "").strip()
+        question_template_literal = bool(_QUESTION_TEMPLATE_LITERAL_RE.search(q))
         objective = 1.0 if self._is_objective_question(q) else 0.0
         has_domains = 1.0 if len(domains) >= min_domains else 0.0
         has_non_rel = 1.0 if any(d != "relation" for d in domains) else 0.0
@@ -493,9 +597,20 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 }:
                     two_answer_placeholder = True
                     break
+        two_answer_meta_placeholder = bool(_TWO_ANSWER_META_ALT_RE.search(two_answer_raw))
+        if not two_answer_meta_placeholder:
+            for opt in two_ans:
+                if _TWO_ANSWER_META_ALT_RE.search(opt):
+                    two_answer_meta_placeholder = True
+                    break
         two_answer_valid = (
             1.0
-            if (len(two_ans) >= 2 and two_ans[0] != two_ans[1] and (not two_answer_placeholder))
+            if (
+                len(two_ans) >= 2
+                and two_ans[0] != two_ans[1]
+                and (not two_answer_placeholder)
+                and (not two_answer_meta_placeholder)
+            )
             else 0.0
         )
         target_compact = re.sub(r"\s+", "", visual_target.lower())
@@ -513,6 +628,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             + 0.14 * two_answer_valid
             + 0.08 * has_target
         )
+        if question_template_literal:
+            score -= 0.20
         score = float(max(0.0, min(1.0, score)))
         min_score = max(0.0, min(1.0, float(getattr(self.cfg, "proposer_certificate_min_score", 0.55))))
         strict_struct = bool(getattr(self.cfg, "proposer_certificate_strict_struct", True))
@@ -525,6 +642,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 and has_chain > 0.5
                 and two_answer_valid > 0.5
                 and has_target > 0.5
+                and (not question_template_literal)
+                and (not two_answer_meta_placeholder)
             ) else 0.0
         else:
             valid = 1.0 if score >= min_score else 0.0
@@ -538,7 +657,29 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "target": has_target,
             "target_placeholder": 1.0 if target_placeholder else 0.0,
             "two_answer_placeholder": 1.0 if two_answer_placeholder else 0.0,
+            "two_answer_meta_placeholder": 1.0 if two_answer_meta_placeholder else 0.0,
+            "question_template_literal": 1.0 if question_template_literal else 0.0,
         }
+
+    def _is_low_info_majority_answer(self, question: str, majority_answer: str) -> bool:
+        q = normalize_answer(str(question or ""), max_words=24)
+        a = normalize_answer(str(majority_answer or ""), max_words=12)
+        if not a:
+            return True
+        if a in {"yes", "no"} or a.startswith("yes ") or a.startswith("no "):
+            return True
+        if _LOW_INFO_ANSWER_RE.match(a):
+            return True
+        if _QUESTION_TEMPLATE_LITERAL_RE.search(q):
+            return True
+        if (
+            q.startswith("how many")
+            or ("number of" in q)
+            or ("count" in q)
+        ):
+            if _VAGUE_COUNT_ANSWER_RE.search(a) and (not _NUMERIC_ANSWER_RE.search(a)):
+                return True
+        return False
 
     def _question_template_key(self, question: str) -> str:
         q = normalize_answer(str(question or ""), max_words=16)
@@ -1124,6 +1265,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "reward_clipped_rate": 0.0,
             "selected_non_easy_rate": 0.0,
             "solver_update_applied_count": 0.0,
+            "recovery_armed": 0.0,
             "triggered": 0.0,
         }
         if not enabled:
@@ -1193,17 +1335,31 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             if not stage2_pass:
                 state["triggered"] = 1.0
 
-        if state["triggered"] > 0.5 and bool(getattr(self.cfg, "proposer_early_failfast_stop", True)):
-            msg = (
-                "[EarlyFailFast] unhealthy run detected: "
-                f"u_step={u_step} cand_non_easy_rate={state['candidate_non_easy_rate']:.3f} "
-                f"all_easy_rate={state['all_easy_group_rate']:.3f} "
-                f"reward_clipped_rate={state['reward_clipped_rate']:.3f} "
-                f"selected_non_easy_rate={state['selected_non_easy_rate']:.3f} "
-                f"solver_updates={state['solver_update_applied_count']:.1f} "
-                f"collapse_streak={collapse_streak}"
+        if state["triggered"] > 0.5:
+            recover_enabled = bool(
+                getattr(self.cfg, "proposer_early_failfast_recover", True)
             )
-            raise RuntimeError(msg)
+            if recover_enabled:
+                recover_steps = max(
+                    1,
+                    int(getattr(self.cfg, "proposer_early_failfast_recover_steps", 20)),
+                )
+                self._forced_explore_steps_left = max(
+                    int(getattr(self, "_forced_explore_steps_left", 0)),
+                    recover_steps,
+                )
+                state["recovery_armed"] = 1.0
+            if bool(getattr(self.cfg, "proposer_early_failfast_stop", True)) and (not recover_enabled):
+                msg = (
+                    "[EarlyFailFast] unhealthy run detected: "
+                    f"u_step={u_step} cand_non_easy_rate={state['candidate_non_easy_rate']:.3f} "
+                    f"all_easy_rate={state['all_easy_group_rate']:.3f} "
+                    f"reward_clipped_rate={state['reward_clipped_rate']:.3f} "
+                    f"selected_non_easy_rate={state['selected_non_easy_rate']:.3f} "
+                    f"solver_updates={state['solver_update_applied_count']:.1f} "
+                    f"collapse_streak={collapse_streak}"
+                )
+                raise RuntimeError(msg)
 
         return state
 
@@ -1276,6 +1432,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 len(solver_temperatures) - spot_check_samples,
                 len(solver_temperatures) // 3,
             ),
+        )
+        solver_use_forced_choice_from_proposer = bool(
+            getattr(self.cfg, "solver_use_forced_choice_from_proposer", True)
         )
 
         # Derive image source hint from path so the proposer can apply
@@ -1354,6 +1513,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         best_bucket = "easy"
         best_meta: Dict[str, str] = {}
         best_pick_score = -1e9
+        best_choice_mode = False
+        best_choice_option_a = ""
+        best_choice_option_b = ""
         best_accept_question = ""
         best_accept_outputs: List[str] = []
         best_accept_answers_raw: List[str] = []
@@ -1363,6 +1525,21 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         best_accept_margin = 1.0
         best_accept_meta: Dict[str, str] = {}
         best_accept_pick_score = -1e9
+        best_accept_choice_mode = False
+        best_accept_choice_option_a = ""
+        best_accept_choice_option_b = ""
+        best_valid_question = ""
+        best_valid_outputs: List[str] = []
+        best_valid_answers_raw: List[str] = []
+        best_valid_answers_norm: List[str] = []
+        best_valid_pre_words: List[int] = []
+        best_valid_entropy = -1.0
+        best_valid_margin = 1.0
+        best_valid_meta: Dict[str, str] = {}
+        best_valid_pick_score = -1e9
+        best_valid_choice_mode = False
+        best_valid_choice_option_a = ""
+        best_valid_choice_option_b = ""
         candidate_bucket_list: List[str] = []
         candidate_valid_list: List[float] = []
         candidate_cert_list: List[float] = []
@@ -1398,8 +1575,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 0.0, min(1.0, float(getattr(self.cfg, "proposer_certificate_entropy_floor", 0.10)))
             )
             cand_contrastive_replay = self._contrastive_replay_adjustment(cand_q)
-
-            cand_solver_prompt = build_solver_prompt(cand_q)
+            cand_option_a, cand_option_b = self._extract_forced_choice_options(cand_two_answer)
+            cand_choice_mode = bool(
+                solver_use_forced_choice_from_proposer and cand_option_a and cand_option_b
+            )
+            cand_solver_prompt = (
+                build_solver_choice_prompt(cand_q, cand_option_a, cand_option_b)
+                if cand_choice_mode
+                else build_solver_prompt(cand_q)
+            )
             cand_outputs: List[str] = []
             cand_answers_raw: List[str] = []
             cand_answers_norm: List[str] = []
@@ -1427,9 +1611,16 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     top_p=sc_top_p,
                 )
                 sc_ans_raw = _parse_answer(sc_out)
+                sc_ans_norm = (
+                    self._parse_forced_choice_answer(sc_ans_raw, cand_option_a, cand_option_b)
+                    if cand_choice_mode
+                    else normalize_answer(sc_ans_raw)
+                )
+                if not sc_ans_norm:
+                    sc_ans_norm = normalize_answer(sc_ans_raw)
                 cand_outputs.append(sc_out)
                 cand_answers_raw.append(sc_ans_raw)
-                cand_answers_norm.append(normalize_answer(sc_ans_raw))
+                cand_answers_norm.append(sc_ans_norm)
                 cand_pre_words.append(pre_answer_word_count(sc_out))
 
             sc_hist: Dict[str, int] = {}
@@ -1497,6 +1688,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 best_answers_norm = cand_answers_norm
                 best_pre_words = cand_pre_words
                 best_meta = dict(cand_meta)
+                best_choice_mode = cand_choice_mode
+                best_choice_option_a = cand_option_a
+                best_choice_option_b = cand_option_b
 
             # Keep the best acceptable (non-easy, objective) candidate instead
             # of taking the first. This removes proposer ordering bias.
@@ -1523,6 +1717,37 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     best_accept_answers_norm = cand_answers_norm
                     best_accept_pre_words = cand_pre_words
                     best_accept_meta = dict(cand_meta)
+                    best_accept_choice_mode = cand_choice_mode
+                    best_accept_choice_option_a = cand_option_a
+                    best_accept_choice_option_b = cand_option_b
+
+            # Keep the best structurally valid candidate even when all are easy.
+            if (not cand_non_objective) and cand_cert_valid:
+                if (
+                    (cand_pick_score > best_valid_pick_score)
+                    or (
+                        abs(cand_pick_score - best_valid_pick_score) <= 1e-8
+                        and (
+                            sc_entropy > best_valid_entropy
+                            or (
+                                abs(sc_entropy - best_valid_entropy) <= 1e-8
+                                and sc_margin < best_valid_margin
+                            )
+                        )
+                    )
+                ):
+                    best_valid_pick_score = cand_pick_score
+                    best_valid_entropy = sc_entropy
+                    best_valid_margin = sc_margin
+                    best_valid_question = cand_q
+                    best_valid_outputs = cand_outputs
+                    best_valid_answers_raw = cand_answers_raw
+                    best_valid_answers_norm = cand_answers_norm
+                    best_valid_pre_words = cand_pre_words
+                    best_valid_meta = dict(cand_meta)
+                    best_valid_choice_mode = cand_choice_mode
+                    best_valid_choice_option_a = cand_option_a
+                    best_valid_choice_option_b = cand_option_b
 
         if candidate_bucket_list:
             candidate_non_easy_rate = float(
@@ -1551,6 +1776,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 max(1, int(getattr(self.cfg, "all_easy_explore_steps", 10))),
             )
 
+        selected_choice_mode = False
+        selected_choice_option_a = ""
+        selected_choice_option_b = ""
+        selected_visual_target = ""
         if best_accept_question:
             question = best_accept_question
             solver_outputs = best_accept_outputs
@@ -1562,6 +1791,25 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             chosen_reasoning_domains = str(best_accept_meta.get("reasoning_domains", "") or "")
             chosen_reasoning_chain = str(best_accept_meta.get("reasoning_chain", "") or "")
             chosen_task_card = str(best_accept_meta.get("task_card", "") or "")
+            selected_visual_target = str(best_accept_meta.get("visual_target", "") or "")
+            selected_choice_mode = best_accept_choice_mode
+            selected_choice_option_a = best_accept_choice_option_a
+            selected_choice_option_b = best_accept_choice_option_b
+        elif best_valid_question:
+            question = best_valid_question
+            solver_outputs = best_valid_outputs
+            solver_answers_raw = best_valid_answers_raw
+            solver_answers_norm = best_valid_answers_norm
+            pre_words = best_valid_pre_words
+            chosen_strategy_used = str(best_valid_meta.get("strategy_used", "") or "")
+            chosen_two_answer_test = str(best_valid_meta.get("two_answer_test", "") or "")
+            chosen_reasoning_domains = str(best_valid_meta.get("reasoning_domains", "") or "")
+            chosen_reasoning_chain = str(best_valid_meta.get("reasoning_chain", "") or "")
+            chosen_task_card = str(best_valid_meta.get("task_card", "") or "")
+            selected_visual_target = str(best_valid_meta.get("visual_target", "") or "")
+            selected_choice_mode = best_valid_choice_mode
+            selected_choice_option_a = best_valid_choice_option_a
+            selected_choice_option_b = best_valid_choice_option_b
         else:
             # No candidate cleared the gate — use the best-entropy one found.
             question = best_question or candidate_questions[0].replace("\n", " ").strip()
@@ -1577,35 +1825,34 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             chosen_reasoning_domains = str(best_meta.get("reasoning_domains", "") or "")
             chosen_reasoning_chain = str(best_meta.get("reasoning_chain", "") or "")
             chosen_task_card = str(best_meta.get("task_card", "") or "")
+            selected_visual_target = str(best_meta.get("visual_target", "") or "")
+            selected_choice_mode = best_choice_mode
+            selected_choice_option_a = best_choice_option_a
+            selected_choice_option_b = best_choice_option_b
 
         selected_cert = self._proposer_certificate_score(
             question,
             {
                 "strategy_used": chosen_strategy_used,
                 "two_answer_test": chosen_two_answer_test,
-                "visual_target": (
-                    best_accept_meta.get("visual_target", "")
-                    if best_accept_question
-                    else best_meta.get("visual_target", "")
-                ),
-                "reasoning_domains": (
-                    best_accept_meta.get("reasoning_domains", "")
-                    if best_accept_question
-                    else best_meta.get("reasoning_domains", "")
-                ),
-                "reasoning_chain": (
-                    best_accept_meta.get("reasoning_chain", "")
-                    if best_accept_question
-                    else best_meta.get("reasoning_chain", "")
-                ),
+                "visual_target": selected_visual_target,
+                "reasoning_domains": chosen_reasoning_domains,
+                "reasoning_chain": chosen_reasoning_chain,
             },
         )
         selected_cert_score = float(selected_cert.get("score", 0.0))
 
         # If the chosen candidate came from a spot-check (< num_solver_samples),
         # run the remaining solver samples to reach the full count needed for RL.
-        if len(solver_answers_norm) < self.cfg.num_solver_samples:
+        if selected_choice_mode and selected_choice_option_a and selected_choice_option_b:
+            solver_prompt = build_solver_choice_prompt(
+                question,
+                selected_choice_option_a,
+                selected_choice_option_b,
+            )
+        else:
             solver_prompt = build_solver_prompt(question)
+        if len(solver_answers_norm) < self.cfg.num_solver_samples:
             for sample_idx in range(len(solver_answers_norm), self.cfg.num_solver_samples):
                 solver_temp = (
                     float(solver_temperatures[sample_idx])
@@ -1626,15 +1873,33 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     top_p=solver_top_p,
                 )
                 answer_raw = _parse_answer(solver_out)
+                answer_norm = (
+                    self._parse_forced_choice_answer(
+                        answer_raw,
+                        selected_choice_option_a,
+                        selected_choice_option_b,
+                    )
+                    if selected_choice_mode
+                    else normalize_answer(answer_raw)
+                )
+                if not answer_norm:
+                    answer_norm = normalize_answer(answer_raw)
                 solver_outputs.append(solver_out)
                 solver_answers_raw.append(answer_raw)
-                solver_answers_norm.append(normalize_answer(answer_raw))
+                solver_answers_norm.append(answer_norm)
                 pre_words.append(pre_answer_word_count(solver_out))
 
         # Ensure solver_prompt is always set (may have been skipped if all
         # solver samples were collected during spot-checking).
         if not solver_prompt and question:
-            solver_prompt = build_solver_prompt(question)
+            if selected_choice_mode and selected_choice_option_a and selected_choice_option_b:
+                solver_prompt = build_solver_choice_prompt(
+                    question,
+                    selected_choice_option_a,
+                    selected_choice_option_b,
+                )
+            else:
+                solver_prompt = build_solver_prompt(question)
 
         # Derive final question metadata from the accepted question.
         parsed_question = question
@@ -1702,6 +1967,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             maj_frac,
             entropy_easy_threshold,
         )
+        solver_low_info_majority = self._is_low_info_majority_answer(
+            question,
+            maj_answer,
+        )
         self._entropy_window.append(float(entropy_nats))
         self._difficulty_window.append(difficulty_bucket_observed)
         easy_solver_penalty_scale = max(
@@ -1710,8 +1979,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
 
         # --- Solver rewards ---
         if easy_solver_case:
+            easy_majority_penalty = easy_solver_penalty_scale * sc_signal
+            if solver_low_info_majority:
+                easy_majority_penalty *= max(
+                    1.0,
+                    float(getattr(self.cfg, "solver_low_info_easy_penalty_scale", 2.0)),
+                )
             solver_rewards_raw = [
-                (-easy_solver_penalty_scale * sc_signal)
+                (-easy_majority_penalty)
                 if ans == maj_answer
                 else (neg_weight * sc_signal)
                 for ans in solver_answers_norm
@@ -1842,6 +2117,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         if proposer_non_objective_question and proposer_non_objective_penalty > 0.0:
             proposer_reward -= proposer_non_objective_penalty
+        if solver_low_info_majority:
+            proposer_reward -= max(
+                0.0,
+                float(getattr(self.cfg, "proposer_low_info_majority_penalty", 0.30)),
+            )
 
         # Rejection: non-objective or too-easy bucket.
         easy_question_detected = easy_solver_case
@@ -1852,6 +2132,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             reject_reasons.append("easy_bucket")
         if acceptance_require_non_easy and spot_all_easy_low_entropy:
             reject_reasons.append("all_candidates_easy")
+        if solver_low_info_majority:
+            reject_reasons.append("low_info_majority")
         question_rejected = len(reject_reasons) > 0
         question_reject_reason = "|".join(reject_reasons)
         if question_rejected and rejected_question_penalty > 0.0:
@@ -1958,6 +2240,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             and (
                 easy_solver_case
                 or (maj_frac >= easy_update_majority_frac_threshold)
+            )
+            and not (
+                bool(getattr(self.cfg, "solver_update_on_low_info_easy", True))
+                and solver_low_info_majority
             )
         )
         # NOTE: We intentionally do NOT block the solver update when question_rejected.
@@ -2628,6 +2914,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "solver_informative_ratio_min": ratio_min,
             "solver_informative_gate": solver_informative_gate,
             "solver_informative_gate_global": solver_informative_gate_global,
+            "solver_low_info_majority": solver_low_info_majority,
             "solver_margin_score": margin_damp_score,
             "solver_entropy_band_score": entropy_band_score,
             "solver_local_info_score": local_info_score,
@@ -2698,6 +2985,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "unsolvable_capped": unsolvable_capped,
             "easy_question_detected": easy_question_detected,
             "solver_skip_update_on_easy": solver_skip_update_on_easy,
+            "solver_update_on_low_info_easy": bool(
+                getattr(self.cfg, "solver_update_on_low_info_easy", True)
+            ),
             "solver_entropy_iqr_blocked": solver_entropy_iqr_blocked,
             "entropy_iqr_filter_min_majority_frac": entropy_iqr_filter_min_majority_frac,
             "solver_easy_update_blocked": solver_easy_update_blocked,
@@ -2724,6 +3014,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_early_stage1_pass": bool(early_failfast_state.get("stage1_pass", 1.0)),
             "proposer_early_stage2_active": bool(early_failfast_state.get("stage2_active", 0.0)),
             "proposer_early_stage2_pass": bool(early_failfast_state.get("stage2_pass", 1.0)),
+            "proposer_early_recovery_armed": bool(
+                early_failfast_state.get("recovery_armed", 0.0)
+            ),
             "proposer_early_triggered": bool(early_failfast_state.get("triggered", 0.0)),
         }
         self._append_jsonl(self.iter_log_path, record)
@@ -2753,6 +3046,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "solver_informative_ratio_min": ratio_min,
                 "solver_informative_gate": solver_informative_gate,
                 "solver_informative_gate_global": solver_informative_gate_global,
+                "solver_low_info_majority": solver_low_info_majority,
                 "solver_margin_score": margin_damp_score,
                 "solver_entropy_band_score": entropy_band_score,
                 "solver_local_info_score": local_info_score,
@@ -2828,6 +3122,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "unsolvable_capped": unsolvable_capped,
                 "easy_question_detected": easy_question_detected,
                 "solver_skip_update_on_easy": solver_skip_update_on_easy,
+                "solver_update_on_low_info_easy": bool(
+                    getattr(self.cfg, "solver_update_on_low_info_easy", True)
+                ),
                 "solver_entropy_iqr_blocked": solver_entropy_iqr_blocked,
                 "entropy_iqr_filter_min_majority_frac": entropy_iqr_filter_min_majority_frac,
                 "solver_easy_update_blocked": solver_easy_update_blocked,
@@ -2844,6 +3141,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "proposer_early_stage1_pass": bool(early_failfast_state.get("stage1_pass", 1.0)),
                 "proposer_early_stage2_active": bool(early_failfast_state.get("stage2_active", 0.0)),
                 "proposer_early_stage2_pass": bool(early_failfast_state.get("stage2_pass", 1.0)),
+                "proposer_early_recovery_armed": bool(
+                    early_failfast_state.get("recovery_armed", 0.0)
+                ),
                 "proposer_early_triggered": bool(early_failfast_state.get("triggered", 0.0)),
             },
         )
@@ -2854,6 +3154,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"maj_frac={maj_frac:.2f} H={entropy_nats:.3f} M={margin:.3f} "
                 f"info_local={int(solver_informative_local)} "
                 f"info_ratio={informative_ratio:.2f} info_gate={int(solver_informative_gate)} "
+                f"li_maj={int(solver_low_info_majority)} "
                 f"up_scale={solver_update_scale:.2f} P_R={proposer_reward:.3f} "
                 f"T_B={proposer_text_hardness_bonus:.3f} R_P={proposer_repetition_penalty:.3f} "
                 f"C_NE={candidate_non_easy_rate:.2f} C_V={candidate_struct_valid_rate:.2f} "
@@ -2862,6 +3163,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"C_ST={int(collapse_state.get('collapse_streak', 0.0))} "
                 f"EF1={int(bool(early_failfast_state.get('stage1_pass', 1.0)))} "
                 f"EF2={int(bool(early_failfast_state.get('stage2_pass', 1.0)))} "
+                f"EFR={int(bool(early_failfast_state.get('recovery_armed', 0.0)))} "
                 f"dt={step_dt:.1f}s"
             )
             print(f"  Q: {question}")
@@ -2908,6 +3210,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._update_metric(
             "u_early_stage2_pass",
             self._dist_mean(float(early_failfast_state.get("stage2_pass", 1.0))),
+        )
+        self._update_metric(
+            "u_early_recovery_armed",
+            self._dist_mean(float(early_failfast_state.get("recovery_armed", 0.0))),
         )
         self._update_metric(
             "u_proposer_easy_rate_ema",

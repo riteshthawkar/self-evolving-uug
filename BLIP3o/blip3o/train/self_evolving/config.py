@@ -49,6 +49,7 @@ class UnderstandingSelfEvolvingConfig:
     # Reward shaping
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
+    solver_use_forced_choice_from_proposer: bool = True
     solver_temp_min: float = 0.6
     solver_temp_max: float = 2.0
     solver_top_p_min: float = 0.5
@@ -59,6 +60,8 @@ class UnderstandingSelfEvolvingConfig:
     sc_informative_ratio_min: float = 0.25
     sc_negative_weight: float = 0.25
     easy_solver_penalty_scale: float = 1.0
+    solver_update_on_low_info_easy: bool = True
+    solver_low_info_easy_penalty_scale: float = 2.5
     skip_solver_update_when_uninformative: bool = True
     solver_always_update_with_informative_scaling: bool = True
     solver_update_min_scale: float = 0.20
@@ -74,6 +77,7 @@ class UnderstandingSelfEvolvingConfig:
     proposer_unsolvable_reward_cap: float = 0.10  # hard negative magnitude when question is unsolvable
     solver_unsolvable_maj_threshold: float = 0.20  # majority fraction at or below this → question treated as unsolvable
     proposer_non_objective_penalty: float = 0.20  # subtract from proposer reward when question is subjective/open-ended
+    proposer_low_info_majority_penalty: float = 0.50
     proposer_require_objective: bool = True
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
@@ -97,6 +101,8 @@ class UnderstandingSelfEvolvingConfig:
     # Early fail-fast health checks to stop collapsed runs quickly.
     proposer_early_failfast_enabled: bool = True
     proposer_early_failfast_stop: bool = True
+    proposer_early_failfast_recover: bool = True
+    proposer_early_failfast_recover_steps: int = 20
     proposer_early_step1: int = 12
     proposer_early_step2: int = 24
     proposer_early_candidate_non_easy_min: float = 0.08
@@ -384,6 +390,7 @@ class GenerationSelfEvolvingConfig:
     # Reward shaping
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
+    solver_use_forced_choice_from_proposer: bool = True
     solver_temp_min: float = 0.6
     solver_temp_max: float = 2.0
     solver_top_p_min: float = 0.5
@@ -394,6 +401,8 @@ class GenerationSelfEvolvingConfig:
     sc_informative_ratio_min: float = 0.25
     sc_negative_weight: float = 0.25
     easy_solver_penalty_scale: float = 1.0
+    solver_update_on_low_info_easy: bool = True
+    solver_low_info_easy_penalty_scale: float = 2.5
     skip_solver_update_when_uninformative: bool = True
     solver_always_update_with_informative_scaling: bool = True
     solver_update_min_scale: float = 0.20
@@ -409,6 +418,7 @@ class GenerationSelfEvolvingConfig:
     proposer_unsolvable_reward_cap: float = 0.10
     solver_unsolvable_maj_threshold: float = 0.20
     proposer_non_objective_penalty: float = 0.20
+    proposer_low_info_majority_penalty: float = 0.50
     proposer_require_objective: bool = True
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
@@ -432,6 +442,8 @@ class GenerationSelfEvolvingConfig:
     # Early fail-fast health checks to stop collapsed runs quickly.
     proposer_early_failfast_enabled: bool = True
     proposer_early_failfast_stop: bool = True
+    proposer_early_failfast_recover: bool = True
+    proposer_early_failfast_recover_steps: int = 20
     proposer_early_step1: int = 12
     proposer_early_step2: int = 24
     proposer_early_candidate_non_easy_min: float = 0.08
