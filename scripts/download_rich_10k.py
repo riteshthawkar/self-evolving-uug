@@ -71,10 +71,8 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import os
-import random
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 from urllib.request import urlopen
@@ -82,7 +80,7 @@ from urllib.request import urlopen
 from PIL import Image
 
 try:
-    from datasets import Dataset, IterableDataset, get_dataset_split_names, load_dataset
+    from datasets import IterableDataset, load_dataset
 except Exception as exc:
     raise RuntimeError(
         "This script requires `datasets`. Install with: pip install datasets pillow"
@@ -410,31 +408,38 @@ def allocate_alias_targets(aliases: Sequence[str], total: int) -> Dict[str, int]
     return alias_targets
 
 
-def load_with_fallback(spec: DatasetSpec, *, streaming_only: bool):
+def load_with_fallback(spec: DatasetSpec) -> Tuple[IterableDataset, str, str]:
+    """Always loads as a streaming IterableDataset — never downloads the full dataset."""
     errors: List[str] = []
+    # Use only the splits declared in the spec — no get_dataset_split_names() call,
+    # which can trigger a full metadata/parquet fetch on some HF repos.
+    split_candidates = [spec.split] + list(spec.fallback_splits)
     for dataset_id in spec.dataset_ids:
-        split_candidates = [spec.split] + list(spec.fallback_splits)
-        try:
-            discovered = get_dataset_split_names(dataset_id, config_name=spec.config_name)
-            for s in discovered:
-                if s not in split_candidates:
-                    split_candidates.append(s)
-        except Exception:
-            pass
         for split_name in split_candidates:
-            for streaming in ([True] if streaming_only else [True, False]):
-                try:
-                    kwargs = {"path": dataset_id, "split": split_name, "streaming": streaming}
-                    if spec.config_name:
-                        kwargs["name"] = spec.config_name
-                    ds = load_dataset(**kwargs)
-                    if streaming_only and not isinstance(ds, IterableDataset):
-                        continue
-                    return ds, dataset_id, streaming, split_name
-                except Exception as exc:
-                    errors.append(f"id={dataset_id} split={split_name}: {repr(exc)[:120]}")
+            try:
+                kwargs: Dict = {
+                    "path": dataset_id,
+                    "split": split_name,
+                    "streaming": True,   # ALWAYS streaming — never materialise on disk
+                    "trust_remote_code": False,
+                }
+                if spec.config_name:
+                    kwargs["name"] = spec.config_name
+                ds = load_dataset(**kwargs)
+                if not isinstance(ds, IterableDataset):
+                    # Some HF repos ignore streaming=True and return a Dataset;
+                    # refuse to use it to avoid an accidental full download.
+                    errors.append(
+                        f"id={dataset_id} split={split_name}: "
+                        "load_dataset returned non-streaming Dataset despite streaming=True; skipping."
+                    )
+                    continue
+                return ds, dataset_id, split_name
+            except Exception as exc:
+                errors.append(f"id={dataset_id} split={split_name}: {repr(exc)[:160]}")
     raise RuntimeError(
-        f"Failed to load '{spec.alias}'. Attempts:\n  " + "\n  ".join(errors)
+        f"Could not stream '{spec.alias}' from any source.\n"
+        + "\n".join(f"  • {e}" for e in errors)
     )
 
 
@@ -505,21 +510,16 @@ def extract_image(record: Dict) -> Tuple[Optional[Image.Image], Optional[str]]:
     return None, None
 
 
-def iter_records(ds, *, seed: int, max_records: int, shuffle_buffer: int) -> Iterator[Dict]:
-    if isinstance(ds, IterableDataset):
-        buf = max(1_000, min(max_records, shuffle_buffer))
-        for idx, row in enumerate(ds.shuffle(seed=seed, buffer_size=buf)):
-            if idx >= max_records:
-                break
-            yield row
-        return
-    if isinstance(ds, Dataset):
-        indices = list(range(len(ds)))
-        random.Random(seed).shuffle(indices)
-        for idx in indices[:max_records]:
-            yield ds[int(idx)]
-        return
-    for idx, row in enumerate(ds):
+def iter_records(ds: IterableDataset, *, seed: int, max_records: int,
+                 shuffle_buffer: int) -> Iterator[Dict]:
+    """Iterate over a streaming IterableDataset with a bounded shuffle buffer.
+
+    The buffer holds at most `shuffle_buffer` rows in memory at once — it is
+    NOT a full materialisation of the dataset.  Records stream in one at a time
+    from HF Hub and are evicted from the buffer as they are yielded.
+    """
+    buf = max(1_000, min(max_records, shuffle_buffer))
+    for idx, row in enumerate(ds.shuffle(seed=seed, buffer_size=buf)):
         if idx >= max_records:
             break
         yield row
@@ -534,12 +534,9 @@ def save_subset(
     strict: bool,
     max_scan_multiplier: int,
     shuffle_buffer: int,
-    streaming_only: bool,
     min_side: int,
 ) -> Dict:
-    ds, dataset_id, streaming, used_split = load_with_fallback(
-        spec, streaming_only=streaming_only
-    )
+    ds, dataset_id, used_split = load_with_fallback(spec)
     images_dir = output_root / "images" / spec.alias
     manifests_dir = output_root / "manifests"
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -595,6 +592,7 @@ def save_subset(
         "domain": spec.domain,
         "dataset_id": dataset_id,
         "split": used_split,
+        "streaming": True,
         "saved": saved,
         "target": target,
         "scanned": scanned,
@@ -626,14 +624,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--samples_per_dataset", type=int, default=None,
                    help="Override per-dataset (ignores --total_samples).")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--shuffle_buffer", type=int, default=20_000)
+    p.add_argument(
+        "--shuffle_buffer", type=int, default=20_000,
+        help="Streaming shuffle buffer size (rows held in RAM at once). "
+             "Does NOT materialise the full dataset. Default: 20000.",
+    )
     p.add_argument("--max_scan_multiplier", type=int, default=15)
-    p.add_argument("--streaming_only", action="store_true", default=True)
-    p.add_argument("--allow_non_streaming", dest="streaming_only", action="store_false")
     p.add_argument(
         "--min_side", type=int, default=224,
-        help="Inline resolution pre-filter during download (default 224). "
-             "Run filter_dataset_images.py after for full filtering.",
+        help="Inline resolution pre-filter during streaming (default 224). "
+             "Images below this threshold are discarded without saving. "
+             "Run filter_dataset_images.py after for full content-based filtering.",
     )
     p.add_argument("--strict", action="store_true", default=False)
     return p.parse_args()
@@ -688,7 +689,6 @@ def main() -> int:
                 strict=args.strict,
                 max_scan_multiplier=args.max_scan_multiplier,
                 shuffle_buffer=args.shuffle_buffer,
-                streaming_only=args.streaming_only,
                 min_side=args.min_side,
             )
             summary.append(result)
