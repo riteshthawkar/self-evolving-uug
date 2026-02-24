@@ -82,6 +82,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--solver_soft_gamma", type=float, default=0.7)
     p.add_argument("--solver_use_temperature_mix", action="store_true", default=True)
     p.add_argument("--disable_solver_temperature_mix", dest="solver_use_temperature_mix", action="store_false")
+    p.add_argument("--solver_use_forced_choice_from_proposer", action="store_true", default=True)
+    p.add_argument(
+        "--disable_solver_use_forced_choice_from_proposer",
+        dest="solver_use_forced_choice_from_proposer",
+        action="store_false",
+    )
     p.add_argument("--solver_temp_min", type=float, default=0.6)
     p.add_argument("--solver_temp_max", type=float, default=2.0)
     p.add_argument("--solver_top_p_min", type=float, default=0.5)
@@ -92,6 +98,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sc_informative_ratio_min", type=float, default=0.25)
     p.add_argument("--sc_negative_weight", type=float, default=0.25)
     p.add_argument("--easy_solver_penalty_scale", type=float, default=1.0)
+    p.add_argument("--solver_low_info_easy_penalty_scale", type=float, default=2.5)
+    p.add_argument("--solver_update_on_low_info_easy", action="store_true", default=True)
+    p.add_argument(
+        "--disable_solver_update_on_low_info_easy",
+        dest="solver_update_on_low_info_easy",
+        action="store_false",
+    )
     p.add_argument("--skip_solver_update_when_uninformative", action="store_true", default=True)
     p.add_argument(
         "--allow_solver_update_when_uninformative",
@@ -116,6 +129,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prop_entropy_mu_max", type=float, default=1.5)
     p.add_argument("--zero_entropy_reward_cap", type=float, default=0.10)
     p.add_argument("--proposer_non_objective_penalty", type=float, default=0.20)
+    p.add_argument("--proposer_low_info_majority_penalty", type=float, default=0.50)
     p.add_argument("--proposer_require_objective", action="store_true", default=True)
     p.add_argument(
         "--disable_proposer_require_objective",
@@ -209,6 +223,13 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="proposer_early_failfast_stop",
         action="store_false",
     )
+    p.add_argument("--proposer_early_failfast_recover", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_early_failfast_recover",
+        dest="proposer_early_failfast_recover",
+        action="store_false",
+    )
+    p.add_argument("--proposer_early_failfast_recover_steps", type=int, default=20)
     p.add_argument("--reward_spec_weight", type=float, default=0.65)
     p.add_argument("--reward_cycle_weight", type=float, default=0.20)
     p.add_argument("--reward_diversity_weight", type=float, default=0.10)
@@ -465,6 +486,7 @@ def _build_understanding_config(args):
         num_solver_samples=args.num_solver_samples,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
+        solver_use_forced_choice_from_proposer=args.solver_use_forced_choice_from_proposer,
         solver_temp_min=args.solver_temp_min,
         solver_temp_max=args.solver_temp_max,
         solver_top_p_min=args.solver_top_p_min,
@@ -475,6 +497,8 @@ def _build_understanding_config(args):
         sc_informative_ratio_min=args.sc_informative_ratio_min,
         sc_negative_weight=args.sc_negative_weight,
         easy_solver_penalty_scale=args.easy_solver_penalty_scale,
+        solver_update_on_low_info_easy=args.solver_update_on_low_info_easy,
+        solver_low_info_easy_penalty_scale=args.solver_low_info_easy_penalty_scale,
         skip_solver_update_when_uninformative=args.skip_solver_update_when_uninformative,
         solver_always_update_with_informative_scaling=args.solver_always_update_with_informative_scaling,
         solver_update_min_scale=args.solver_update_min_scale,
@@ -488,6 +512,7 @@ def _build_understanding_config(args):
         prop_entropy_mu_max=args.prop_entropy_mu_max,
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
         proposer_non_objective_penalty=args.proposer_non_objective_penalty,
+        proposer_low_info_majority_penalty=args.proposer_low_info_majority_penalty,
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
@@ -537,6 +562,8 @@ def _build_understanding_config(args):
         proposer_early_collapse_streak_max=args.proposer_early_collapse_streak_max,
         proposer_early_failfast_enabled=args.proposer_early_failfast_enabled,
         proposer_early_failfast_stop=args.proposer_early_failfast_stop,
+        proposer_early_failfast_recover=args.proposer_early_failfast_recover,
+        proposer_early_failfast_recover_steps=args.proposer_early_failfast_recover_steps,
         kl_coef=args.kl_coef,
         kl_target=args.kl_target,
         kl_adapt_rate=args.kl_adapt_rate,
@@ -655,6 +682,7 @@ def _build_generation_config(args):
         proposer_grpo_unverified_extra_margin=args.proposer_grpo_unverified_extra_margin,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
+        solver_use_forced_choice_from_proposer=args.solver_use_forced_choice_from_proposer,
         solver_temp_min=args.solver_temp_min,
         solver_temp_max=args.solver_temp_max,
         solver_top_p_min=args.solver_top_p_min,
@@ -665,6 +693,8 @@ def _build_generation_config(args):
         sc_informative_ratio_min=args.sc_informative_ratio_min,
         sc_negative_weight=args.sc_negative_weight,
         easy_solver_penalty_scale=args.easy_solver_penalty_scale,
+        solver_update_on_low_info_easy=args.solver_update_on_low_info_easy,
+        solver_low_info_easy_penalty_scale=args.solver_low_info_easy_penalty_scale,
         skip_solver_update_when_uninformative=args.skip_solver_update_when_uninformative,
         solver_always_update_with_informative_scaling=args.solver_always_update_with_informative_scaling,
         solver_update_min_scale=args.solver_update_min_scale,
@@ -678,6 +708,7 @@ def _build_generation_config(args):
         prop_entropy_mu_max=args.prop_entropy_mu_max,
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
         proposer_non_objective_penalty=args.proposer_non_objective_penalty,
+        proposer_low_info_majority_penalty=args.proposer_low_info_majority_penalty,
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
@@ -726,6 +757,8 @@ def _build_generation_config(args):
         proposer_early_collapse_streak_max=args.proposer_early_collapse_streak_max,
         proposer_early_failfast_enabled=args.proposer_early_failfast_enabled,
         proposer_early_failfast_stop=args.proposer_early_failfast_stop,
+        proposer_early_failfast_recover=args.proposer_early_failfast_recover,
+        proposer_early_failfast_recover_steps=args.proposer_early_failfast_recover_steps,
         reward_spec_weight=args.reward_spec_weight,
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
@@ -862,6 +895,7 @@ def _build_unified_config(args):
         proposer_grpo_unverified_extra_margin=args.proposer_grpo_unverified_extra_margin,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
+        solver_use_forced_choice_from_proposer=args.solver_use_forced_choice_from_proposer,
         solver_temp_min=args.solver_temp_min,
         solver_temp_max=args.solver_temp_max,
         solver_top_p_min=args.solver_top_p_min,
@@ -872,6 +906,8 @@ def _build_unified_config(args):
         sc_informative_ratio_min=args.sc_informative_ratio_min,
         sc_negative_weight=args.sc_negative_weight,
         easy_solver_penalty_scale=args.easy_solver_penalty_scale,
+        solver_update_on_low_info_easy=args.solver_update_on_low_info_easy,
+        solver_low_info_easy_penalty_scale=args.solver_low_info_easy_penalty_scale,
         skip_solver_update_when_uninformative=args.skip_solver_update_when_uninformative,
         solver_always_update_with_informative_scaling=args.solver_always_update_with_informative_scaling,
         solver_update_min_scale=args.solver_update_min_scale,
@@ -885,6 +921,7 @@ def _build_unified_config(args):
         prop_entropy_mu_max=args.prop_entropy_mu_max,
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
         proposer_non_objective_penalty=args.proposer_non_objective_penalty,
+        proposer_low_info_majority_penalty=args.proposer_low_info_majority_penalty,
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
@@ -933,6 +970,8 @@ def _build_unified_config(args):
         proposer_early_collapse_streak_max=args.proposer_early_collapse_streak_max,
         proposer_early_failfast_enabled=args.proposer_early_failfast_enabled,
         proposer_early_failfast_stop=args.proposer_early_failfast_stop,
+        proposer_early_failfast_recover=args.proposer_early_failfast_recover,
+        proposer_early_failfast_recover_steps=args.proposer_early_failfast_recover_steps,
         reward_spec_weight=args.reward_spec_weight,
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
