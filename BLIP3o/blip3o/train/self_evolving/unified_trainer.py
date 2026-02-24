@@ -740,9 +740,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 # Intuitive ≠ reasoned → "gotcha" question (V-Zero case 2)
                 # Reward = 0.5 * confidence (higher confidence → better gotcha)
                 proposer_reward = 0.5 * maj_frac
-            else:
-                # Both tracks agree unanimously → truly trivial → zero reward
-                proposer_reward = 0.0
+            # else: keep proposer_reward = proposer_reward_raw (Gaussian).
+            # At sigma=0.25 and entropy≈0, gaussian ≈ 0.0015 — nearly zero
+            # but preserves micro-entropy variance as reward signal instead
+            # of discarding to a flat 0.0 that kills all differentiation.
             zero_entropy_capped = True
         # else: non-unanimous → gaussian reward (already set above)
 
@@ -763,7 +764,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         question_rejected = len(reject_reasons) > 0
         question_reject_reason = "|".join(reject_reasons)
         if question_rejected and rejected_question_penalty > 0.0:
-            proposer_reward -= rejected_question_penalty
+            # Scale penalty by how far entropy is from target: fully-easy
+            # (entropy=0) gets full penalty, near-target gets none. Creates
+            # continuous gradient within the "easy" bucket instead of a flat
+            # penalty that makes all easy questions identically bad.
+            _rej_entropy = entropy_nats
+            for _rr in reject_reasons:
+                if _rr == "non_objective":
+                    # Non-objective rejection: full penalty regardless of entropy
+                    _rej_entropy = 0.0
+                    break
+            _easy_scale = max(0.0, 1.0 - min(1.0, _rej_entropy / max(1e-6, proposer_entropy_mu_used)))
+            proposer_reward -= rejected_question_penalty * _easy_scale
         proposer_reward = max(-1.0, min(1.0, proposer_reward))
 
         solver_stats_list = []
@@ -966,7 +978,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     _score_extras = bool(getattr(self.cfg, "score_grpo_extras", True))
                     _extra_temp_mult = float(getattr(self.cfg, "grpo_extra_temp_multiplier", 1.5))
                     _extra_temp = min(2.0, self.cfg.temp * _extra_temp_mult)
-                    _extra_sc_samples = min(2, spot_check_samples)  # 2-sample spot-check
+                    # Use a dedicated config for GRPO extras spot-check count,
+                    # independent of the candidate-selection spot-check. Extras
+                    # need ≥3 samples to produce ternary entropy outcomes
+                    # (0, 0.637, 1.099) instead of binary (0 or 0.693), enabling
+                    # differential reward signal across the GRPO group.
+                    _extra_sc_samples = max(
+                        2,
+                        int(getattr(self.cfg, "grpo_extra_sc_samples", 3)),
+                    )
 
                     for _gi in range(_grpo_group_size - 1):
                         try:
@@ -1068,8 +1088,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                                 # Dual-track disagree → gotcha reward (consistent with chosen: 0.5 * maj_frac)
                                                 _extra_maj_frac = _extra_answers_norm.count(_extra_maj) / max(1, len(_extra_answers_norm))
                                                 _extra_reward = 0.5 * _extra_maj_frac
-                                            else:
-                                                _extra_reward = 0.0
+                                            # else: keep _extra_reward = _extra_reward_raw (set at L1042).
+                                            # Preserves Gaussian micro-signal instead of discarding to flat 0.0.
 
                                     # ── Penalties for extras (mirror chosen at L745-762) ──
                                     # Applied regardless of whether spot-check answers are
