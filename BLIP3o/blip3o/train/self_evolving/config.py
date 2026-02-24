@@ -44,15 +44,15 @@ class UnderstandingSelfEvolvingConfig:
     top_p: float = 1.0
     max_new_tokens_solver: int = 128
     max_new_tokens_proposer: int = 128
-    num_solver_samples: int = 5
+    num_solver_samples: int = 7
 
     # Reward shaping
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
     solver_use_forced_choice_from_proposer: bool = True
-    solver_temp_min: float = 0.6
-    solver_temp_max: float = 2.0
-    solver_top_p_min: float = 0.5
+    solver_temp_min: float = 0.4
+    solver_temp_max: float = 2.6
+    solver_top_p_min: float = 0.35
     solver_top_p_max: float = 1.0
     sc_entropy_min: float = 0.15
     sc_entropy_max: float = 1.2
@@ -290,7 +290,7 @@ class GenerationSelfEvolvingConfig:
     max_new_tokens_proposer: int = 256
     max_new_tokens_caption: int = 96
     max_new_tokens_generator: int = 768
-    num_solver_samples: int = 5
+    num_solver_samples: int = 7
     num_solver_samples_spec: int = 3
     num_generations: int = 4
 
@@ -391,9 +391,9 @@ class GenerationSelfEvolvingConfig:
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
     solver_use_forced_choice_from_proposer: bool = True
-    solver_temp_min: float = 0.6
-    solver_temp_max: float = 2.0
-    solver_top_p_min: float = 0.5
+    solver_temp_min: float = 0.4
+    solver_temp_max: float = 2.6
+    solver_top_p_min: float = 0.35
     solver_top_p_max: float = 1.0
     sc_entropy_min: float = 0.15
     sc_entropy_max: float = 1.2

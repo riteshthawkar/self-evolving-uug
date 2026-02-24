@@ -25,7 +25,6 @@ from .generation_helpers import GenerationSpec
 from .generation_trainer import GenerationSelfEvolvingTrainer
 from .prompts import (
     build_proposer_multi_prompt,
-    build_solver_choice_prompt,
     build_solver_prompt,
 )
 from .replay_buffer import ReplayBuffer
@@ -80,7 +79,8 @@ _LOW_INFO_BINARY_TOKEN_RE = re.compile(
 )
 _LATENT_NONVISUAL_RE = re.compile(
     r"\b(?:crispy|soft|texture|tasty|taste|flavor|smell|odor|fresh|stale|"
-    r"hot|cold|ripe|unripe)\b",
+    r"hot|cold|ripe|unripe|about to|just|recently|trying to|intent|stable|unstable|"
+    r"supported|unsupported)\b",
     flags=re.IGNORECASE,
 )
 _LOW_SIGNAL_TEMPLATE_RE = re.compile(
@@ -281,11 +281,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         return (local_idx % freq) == 0
 
     def _solver_top_p_schedule(self) -> List[float]:
-        """Vary top_p across solver samples to inject diversity.
+        """Vary top_p across solver samples with a stratified ladder.
 
-        Ranges from solver_top_p_min (default 0.5) to solver_top_p_max (default 1.0).
-        Lower top_p forces the model to commit to fewer tokens, producing more
-        varied short answers that break unanimous voting on trivially easy questions.
+        Uses widely separated quantiles first (0.0, 1.0, 0.2, 0.8, ...),
+        then fills with low-discrepancy points. This avoids near-duplicate
+        decode regimes across samples.
         """
         n = max(1, int(self.cfg.num_solver_samples))
         top_p_min = float(getattr(self.cfg, "solver_top_p_min", 0.5))
@@ -294,7 +294,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             return [top_p_max]
         if abs(top_p_max - top_p_min) < 1e-8:
             return [top_p_min] * n
-        return [top_p_min + (top_p_max - top_p_min) * (float(i) / float(n - 1)) for i in range(n)]
+        q = self._solver_mix_quantiles(n)
+        # Anti-correlate with temperature quantiles to increase decode diversity.
+        return [top_p_min + (top_p_max - top_p_min) * (1.0 - qi) for qi in q]
 
     def _solver_temperature_schedule(self) -> List[float]:
         n = max(1, int(self.cfg.num_solver_samples))
@@ -307,7 +309,32 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             tmin, tmax = tmax, tmin
         if abs(tmax - tmin) < 1e-8:
             return [tmin] * n
-        return [tmin + (tmax - tmin) * (float(i) / float(n - 1)) for i in range(n)]
+        q = self._solver_mix_quantiles(n)
+        return [tmin + (tmax - tmin) * qi for qi in q]
+
+    def _solver_mix_quantiles(self, n: int) -> List[float]:
+        n = max(1, int(n))
+        if n <= 1:
+            return [1.0]
+        anchors = [0.0, 1.0, 0.2, 0.8, 0.4, 0.6, 0.1, 0.9, 0.3, 0.7, 0.5]
+        if n <= len(anchors):
+            return anchors[:n]
+
+        out = list(anchors)
+        k = 1
+        while len(out) < n:
+            # Van der Corput sequence (base-2) for stable low-discrepancy fill.
+            x = 0.0
+            denom = 1.0
+            kk = k
+            while kk > 0:
+                kk, rem = divmod(kk, 2)
+                denom *= 2.0
+                x += rem / denom
+            k += 1
+            if all(abs(x - y) > 1e-9 for y in out):
+                out.append(x)
+        return out[:n]
 
     def _update_proposer_entropy_target(self, entropy_nats: float) -> float:
         if not bool(getattr(self.cfg, "adaptive_prop_entropy_target", True)):
@@ -341,6 +368,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if not _QUESTION_START_RE.search(q):
             return False
         if not q.endswith("?"):
+            return False
+        # Reject latent-state binary forms that are weakly grounded in a single frame.
+        if _EASY_BINARY_START_RE.search(q) and _LATENT_NONVISUAL_RE.search(q_lower):
             return False
         if _OBJECTIVE_QUESTION_RE.search(q):
             return True
@@ -1579,14 +1609,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             cand_choice_mode = bool(
                 solver_use_forced_choice_from_proposer and cand_option_a and cand_option_b
             )
-            cand_solver_prompt = (
-                build_solver_choice_prompt(cand_q, cand_option_a, cand_option_b)
-                if cand_choice_mode
-                else build_solver_prompt(cand_q)
-            )
+            cand_solver_prompt = build_solver_prompt(cand_q)
             cand_outputs: List[str] = []
             cand_answers_raw: List[str] = []
             cand_answers_norm: List[str] = []
+            cand_vote_labels: List[str] = []
             cand_pre_words: List[int] = []
 
             # Spot-check with a subset of solver samples for speed.
@@ -1611,20 +1638,22 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     top_p=sc_top_p,
                 )
                 sc_ans_raw = _parse_answer(sc_out)
-                sc_ans_norm = (
+                sc_ans_text = normalize_answer(sc_ans_raw)
+                sc_vote = (
                     self._parse_forced_choice_answer(sc_ans_raw, cand_option_a, cand_option_b)
                     if cand_choice_mode
-                    else normalize_answer(sc_ans_raw)
+                    else sc_ans_text
                 )
-                if not sc_ans_norm:
-                    sc_ans_norm = normalize_answer(sc_ans_raw)
+                if not sc_vote:
+                    sc_vote = "ood" if cand_choice_mode else sc_ans_text
                 cand_outputs.append(sc_out)
                 cand_answers_raw.append(sc_ans_raw)
-                cand_answers_norm.append(sc_ans_norm)
+                cand_answers_norm.append(sc_ans_text)
+                cand_vote_labels.append(sc_vote)
                 cand_pre_words.append(pre_answer_word_count(sc_out))
 
             sc_hist: Dict[str, int] = {}
-            for ans in cand_answers_norm:
+            for ans in cand_vote_labels:
                 sc_hist[ans] = sc_hist.get(ans, 0) + 1
             sc_probs = [c / float(spot_check_samples) for c in sc_hist.values()]
             sc_entropy = shannon_entropy_nats(sc_probs)
@@ -1842,16 +1871,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         selected_cert_score = float(selected_cert.get("score", 0.0))
 
-        # If the chosen candidate came from a spot-check (< num_solver_samples),
-        # run the remaining solver samples to reach the full count needed for RL.
-        if selected_choice_mode and selected_choice_option_a and selected_choice_option_b:
-            solver_prompt = build_solver_choice_prompt(
-                question,
-                selected_choice_option_a,
-                selected_choice_option_b,
-            )
-        else:
-            solver_prompt = build_solver_prompt(question)
+        # Solver is always prompted in free-form mode.
+        # Proposer two-answer alternatives are used only as a hidden scorer.
+        solver_prompt = build_solver_prompt(question)
         if len(solver_answers_norm) < self.cfg.num_solver_samples:
             for sample_idx in range(len(solver_answers_norm), self.cfg.num_solver_samples):
                 solver_temp = (
@@ -1873,17 +1895,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     top_p=solver_top_p,
                 )
                 answer_raw = _parse_answer(solver_out)
-                answer_norm = (
-                    self._parse_forced_choice_answer(
-                        answer_raw,
-                        selected_choice_option_a,
-                        selected_choice_option_b,
-                    )
-                    if selected_choice_mode
-                    else normalize_answer(answer_raw)
-                )
-                if not answer_norm:
-                    answer_norm = normalize_answer(answer_raw)
+                answer_norm = normalize_answer(answer_raw)
                 solver_outputs.append(solver_out)
                 solver_answers_raw.append(answer_raw)
                 solver_answers_norm.append(answer_norm)
@@ -1892,14 +1904,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         # Ensure solver_prompt is always set (may have been skipped if all
         # solver samples were collected during spot-checking).
         if not solver_prompt and question:
-            if selected_choice_mode and selected_choice_option_a and selected_choice_option_b:
-                solver_prompt = build_solver_choice_prompt(
-                    question,
-                    selected_choice_option_a,
-                    selected_choice_option_b,
-                )
-            else:
-                solver_prompt = build_solver_prompt(question)
+            solver_prompt = build_solver_prompt(question)
 
         # Derive final question metadata from the accepted question.
         parsed_question = question
@@ -1910,13 +1915,40 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         template_fallback_used = False
 
-        maj_answer, maj_count = majority_vote(solver_answers_norm)
+        solver_choice_mode = bool(
+            selected_choice_mode and selected_choice_option_a and selected_choice_option_b
+        )
+        solver_vote_labels: List[str] = []
+        if solver_choice_mode:
+            for _raw in solver_answers_raw:
+                _lab = self._parse_forced_choice_answer(
+                    _raw,
+                    selected_choice_option_a,
+                    selected_choice_option_b,
+                )
+                solver_vote_labels.append(_lab if _lab else "ood")
+        else:
+            solver_vote_labels = list(solver_answers_norm)
+
+        raw_majority_answer, _ = majority_vote(solver_answers_norm)
+
+        maj_answer_vote, maj_count = majority_vote(solver_vote_labels)
         maj_frac = maj_count / float(self.cfg.num_solver_samples)
         hist: Dict[str, int] = {}
-        for ans in solver_answers_norm:
+        for ans in solver_vote_labels:
             hist[ans] = hist.get(ans, 0) + 1
         probs = [count / float(self.cfg.num_solver_samples) for count in hist.values()]
         entropy_nats = shannon_entropy_nats(probs)
+
+        if solver_choice_mode:
+            if maj_answer_vote == "a":
+                maj_answer = selected_choice_option_a
+            elif maj_answer_vote == "b":
+                maj_answer = selected_choice_option_b
+            else:
+                maj_answer = "ood"
+        else:
+            maj_answer = maj_answer_vote
 
         sorted_probs = sorted(probs, reverse=True)
         p1 = float(sorted_probs[0]) if sorted_probs else 0.0
@@ -1969,7 +2001,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         solver_low_info_majority = self._is_low_info_majority_answer(
             question,
-            maj_answer,
+            raw_majority_answer,
         )
         self._entropy_window.append(float(entropy_nats))
         self._difficulty_window.append(difficulty_bucket_observed)
@@ -1987,25 +2019,25 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 )
             solver_rewards_raw = [
                 (-easy_majority_penalty)
-                if ans == maj_answer
+                if ans == maj_answer_vote
                 else (neg_weight * sc_signal)
-                for ans in solver_answers_norm
+                for ans in solver_vote_labels
             ]
         elif unsolvable_solver_case:
             solver_rewards_raw = [
                 -neg_weight * sc_signal
-                for _ in solver_answers_norm
+                for _ in solver_vote_labels
             ]
         else:
             solver_rewards_raw = [
-                sc_signal if ans == maj_answer else (-neg_weight * sc_signal)
-                for ans in solver_answers_norm
+                sc_signal if ans == maj_answer_vote else (-neg_weight * sc_signal)
+                for ans in solver_vote_labels
             ]
 
         target_w = max(1, self.cfg.len_penalty_target_words)
         penalties = [min(1.0, max(0.0, (w - target_w) / float(target_w))) for w in pre_words]
         prob_map = {ans: count / float(self.cfg.num_solver_samples) for ans, count in hist.items()}
-        solver_probs = [prob_map[ans] for ans in solver_answers_norm]
+        solver_probs = [prob_map[ans] for ans in solver_vote_labels]
         solver_rewards_soft = [
             (prob ** self.cfg.solver_soft_gamma) * (1.0 - self.cfg.len_penalty_weight * pen)
             * reward_raw
@@ -2015,7 +2047,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         # --- Intuitive answer: one greedy solver call (V-Zero fast track) ---
         # Reference: "V-Zero: Self-Improving Multimodal Reasoning with Zero
         # Annotation" (arXiv:2601.10094)
+        _intuitive_answer_raw = ""
         _intuitive_answer = ""
+        _intuitive_answer_vote = ""
         _intuitive_generation_failed = False
         _intuitive_attempted = False
         if question and solver_prompt:
@@ -2030,9 +2064,22 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     top_p=1.0,
                     do_sample=False,    # truly greedy (V-Zero intuitive track)
                 )
-                _intuitive_answer = normalize_answer(_parse_answer(_intuitive_out))
+                _intuitive_answer_raw = normalize_answer(_parse_answer(_intuitive_out))
+                _intuitive_answer = _intuitive_answer_raw
+                if solver_choice_mode:
+                    _intuitive_answer_vote = self._parse_forced_choice_answer(
+                        _parse_answer(_intuitive_out),
+                        selected_choice_option_a,
+                        selected_choice_option_b,
+                    )
+                    if not _intuitive_answer_vote:
+                        _intuitive_answer_vote = "ood"
+                else:
+                    _intuitive_answer_vote = _intuitive_answer_raw
             except Exception:
+                _intuitive_answer_raw = ""
                 _intuitive_answer = ""
+                _intuitive_answer_vote = ""
                 _intuitive_generation_failed = True
 
         # --- Proposer reward: V-Zero dual-track learnability ---
@@ -2059,7 +2106,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         _confidence_logprob = None  # kept for log-record compatibility
         unsolvable_capped = False
 
-        _tracks_agree = bool(_intuitive_answer == maj_answer) if _intuitive_answer else True
+        _tracks_agree = (
+            bool(_intuitive_answer_vote == maj_answer_vote)
+            if _intuitive_answer_vote
+            else True
+        )
 
         if unsolvable_solver_case:
             # Unsolvable → zero reward (AZ: r_propose = 0 when mean_solve = 0)
@@ -2067,7 +2118,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             unsolvable_capped = True
         elif entropy_nats < 1e-6 or maj_frac >= 1.0:
             # Solver unanimous on reasoned track → check dual-track gap
-            if not _tracks_agree and _intuitive_answer:
+            if not _tracks_agree and _intuitive_answer_vote:
                 # Intuitive ≠ reasoned → "gotcha" question (V-Zero case 2)
                 # Reward = 0.5 * confidence (higher confidence → better gotcha)
                 proposer_reward = 0.5 * maj_frac
@@ -2482,8 +2533,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             if _score_extras and _extra_q:
                                 # ── Score extra candidate with configured solver spot-check ──
                                 if _extra_q:
+                                    _extra_opt_a, _extra_opt_b = self._extract_forced_choice_options(
+                                        _extra_two_answer_test
+                                    )
+                                    _extra_choice_mode = bool(
+                                        solver_use_forced_choice_from_proposer
+                                        and _extra_opt_a
+                                        and _extra_opt_b
+                                    )
                                     _extra_solver_prompt = build_solver_prompt(_extra_q)
                                     _extra_answers_norm: List[str] = []
+                                    _extra_vote_labels: List[str] = []
                                     # Offset extras spot-check to use hotter solver
                                     # temperatures. With schedule [0.5..2.5] and 3
                                     # spot-check samples, indices [0,1,2] give temps
@@ -2519,14 +2579,25 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                                 temperature=_sc_temp,
                                                 top_p=_sc_top_p,
                                             )
-                                            _sc_ans = normalize_answer(_parse_answer(_sc_out))
-                                            _extra_answers_norm.append(_sc_ans)
+                                            _sc_ans_raw = _parse_answer(_sc_out)
+                                            _sc_ans_text = normalize_answer(_sc_ans_raw)
+                                            _sc_vote = (
+                                                self._parse_forced_choice_answer(
+                                                    _sc_ans_raw, _extra_opt_a, _extra_opt_b
+                                                )
+                                                if _extra_choice_mode
+                                                else _sc_ans_text
+                                            )
+                                            if not _sc_vote:
+                                                _sc_vote = "ood" if _extra_choice_mode else _sc_ans_text
+                                            _extra_answers_norm.append(_sc_ans_text)
+                                            _extra_vote_labels.append(_sc_vote)
                                         except Exception:
                                             pass
 
                                     if _extra_answers_norm:
                                         _extra_hist: Dict[str, int] = {}
-                                        for _ans in _extra_answers_norm:
+                                        for _ans in _extra_vote_labels:
                                             _extra_hist[_ans] = _extra_hist.get(_ans, 0) + 1
                                         _extra_probs = [
                                             c / float(len(_extra_answers_norm))
@@ -2576,15 +2647,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                                     top_p=1.0,
                                                     do_sample=False,  # truly greedy (V-Zero intuitive track)
                                                 )
-                                                _extra_intuitive = normalize_answer(
-                                                    _parse_answer(_ei_out)
+                                                _extra_intuitive_raw = _parse_answer(_ei_out)
+                                                _extra_intuitive = (
+                                                    self._parse_forced_choice_answer(
+                                                        _extra_intuitive_raw, _extra_opt_a, _extra_opt_b
+                                                    )
+                                                    if _extra_choice_mode
+                                                    else normalize_answer(_extra_intuitive_raw)
                                                 )
+                                                if not _extra_intuitive:
+                                                    _extra_intuitive = (
+                                                        "ood" if _extra_choice_mode else normalize_answer(_extra_intuitive_raw)
+                                                    )
                                             except Exception:
                                                 _extra_intuitive_failed = True
                                             _extra_maj = max(
-                                                set(_extra_answers_norm),
-                                                key=_extra_answers_norm.count,
-                                            ) if _extra_answers_norm else ""
+                                                set(_extra_vote_labels),
+                                                key=_extra_vote_labels.count,
+                                            ) if _extra_vote_labels else ""
                                             if _extra_intuitive and _extra_maj and _extra_intuitive != _extra_maj:
                                                 # Dual-track disagree → gotcha reward (consistent with chosen: 0.5 * maj_frac)
                                                 _extra_reward = 0.5 * _extra_maj_frac
@@ -2892,9 +2972,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "acceptance_require_non_easy": acceptance_require_non_easy,
             "solver_answers_raw": solver_answers_raw,
             "solver_answers_norm": solver_answers_norm,
+            "solver_vote_labels": solver_vote_labels,
             "solver_rewards_raw": solver_rewards_raw,
             "solver_rewards_soft": solver_rewards_soft,
             "majority_answer": maj_answer,
+            "majority_answer_vote": maj_answer_vote,
+            "majority_answer_raw": raw_majority_answer,
             "majority_count": maj_count,
             "majority_fraction": maj_frac,
             "solver_top1_prob": p1,
@@ -2943,7 +3026,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_easy_constraint_penalty": easy_constraint_penalty,
             "proposer_strategy_used": chosen_strategy_used,
             "proposer_two_answer_test": chosen_two_answer_test,
-            "solver_choice_mode": selected_choice_mode,
+            "solver_choice_mode": solver_choice_mode,
             "solver_choice_option_a": selected_choice_option_a,
             "solver_choice_option_b": selected_choice_option_b,
             "proposer_reasoning_domains": chosen_reasoning_domains,
@@ -2981,6 +3064,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "zero_entropy_capped": zero_entropy_capped,
             "zero_entropy_reward_cap": zero_entropy_cap,
             "intuitive_answer": _intuitive_answer,
+            "intuitive_answer_raw": _intuitive_answer_raw,
+            "intuitive_answer_vote": _intuitive_answer_vote,
             "dual_track_agree": _tracks_agree,
             "intuitive_attempted": _intuitive_attempted,
             "intuitive_generation_failed": _intuitive_generation_failed,
@@ -3031,6 +3116,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "phase": "understanding",
                 "image_path": meta.get("path"),
                 "majority_answer": maj_answer,
+                "majority_answer_vote": maj_answer_vote,
+                "majority_answer_raw": raw_majority_answer,
                 "majority_fraction": maj_frac,
                 "solver_top1_prob": p1,
                 "solver_top2_prob": p2,
@@ -3077,7 +3164,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "proposer_easy_constraint_penalty": easy_constraint_penalty,
                 "proposer_strategy_used": chosen_strategy_used,
                 "proposer_two_answer_test": chosen_two_answer_test,
-                "solver_choice_mode": selected_choice_mode,
+                "solver_choice_mode": solver_choice_mode,
                 "solver_choice_option_a": selected_choice_option_a,
                 "solver_choice_option_b": selected_choice_option_b,
                 "proposer_reasoning_domains": chosen_reasoning_domains,
@@ -3121,6 +3208,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "zero_entropy_capped": zero_entropy_capped,
                 "zero_entropy_reward_cap": zero_entropy_cap,
                 "intuitive_answer": _intuitive_answer,
+                "intuitive_answer_raw": _intuitive_answer_raw,
+                "intuitive_answer_vote": _intuitive_answer_vote,
                 "dual_track_agree": _tracks_agree,
                 "intuitive_attempted": _intuitive_attempted,
                 "intuitive_generation_failed": _intuitive_generation_failed,
@@ -3161,7 +3250,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"info_local={int(solver_informative_local)} "
                 f"info_ratio={informative_ratio:.2f} info_gate={int(solver_informative_gate)} "
                 f"li_maj={int(solver_low_info_majority)} "
-                f"ch={int(selected_choice_mode)} "
+                f"ch={int(solver_choice_mode)} "
                 f"up_scale={solver_update_scale:.2f} P_R={proposer_reward:.3f} "
                 f"T_B={proposer_text_hardness_bonus:.3f} R_P={proposer_repetition_penalty:.3f} "
                 f"C_NE={candidate_non_easy_rate:.2f} C_V={candidate_struct_valid_rate:.2f} "

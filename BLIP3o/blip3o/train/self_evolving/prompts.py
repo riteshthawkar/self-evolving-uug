@@ -10,8 +10,8 @@ def build_proposer_prompt(target_difficulty: str = "medium") -> str:
         level = "medium"
     if level == "hard":
         diff_hint = (
-            "Target HARD: question should require multi-step reasoning with at least two visual constraints "
-            "(for example: comparison + attribute, relation + count)."
+            "Target HARD: question should require multi-step reasoning with at least two visible constraints "
+            "(for example: comparison + attribute, relation + count), while keeping a single exact answer."
         )
     elif level == "easy":
         diff_hint = (
@@ -19,8 +19,9 @@ def build_proposer_prompt(target_difficulty: str = "medium") -> str:
         )
     else:
         diff_hint = (
-            "Target MEDIUM: question should require at least two visual constraints "
-            "(for example: count + attribute, relation + attribute, or comparison between entities)."
+            "Target MEDIUM: question should require at least two visible constraints "
+            "(for example: count + attribute, relation + attribute, or comparison between entities), "
+            "with one exact answer."
         )
     return (
         "You are a Question Proposer.\n"
@@ -37,9 +38,10 @@ def build_proposer_prompt(target_difficulty: str = "medium") -> str:
         "- The answer should be short (a few words) and directly checkable from image evidence.\n"
         "- Do not require external knowledge beyond what is visible.\n"
         "- Avoid easy binary forms and low-information outputs. Do NOT ask questions where likely answers are "
-        "'yes/no', 'not visible', 'unclear', or the main obvious object/action.\n"
+        "'yes/no', 'not visible', 'unclear', 'too many', or the main obvious object/action.\n"
         "- Avoid latent/physical-state questions that are weakly inferable from a still image "
         "(e.g., 'crispy or soft', 'fresh or stale', 'hot or cold').\n"
+        "- Do not ask hidden-state intent questions (e.g., 'about to', 'just', 'trying to').\n"
         "- Prefer precise alternatives grounded in visible evidence (small text tokens, subtle color variants, "
         "tight spatial relations, partial counts under occlusion).\n"
         "- Output XML only:\n"
@@ -55,25 +57,15 @@ def build_solver_prompt(question_text: str) -> str:
         "Rules:\n"
         "- Your answer MUST be 1-5 words only. No full sentences.\n"
         "- Give only the core answer, not an explanation.\n"
+        "- The answer must be concrete and exact, not vague.\n"
+        "- If the question asks 'how many' or 'number of', answer with a single integer (e.g., 0, 1, 2, 3).\n"
+        "- Never output vague count words: 'too many', 'several', 'many', 'a lot', 'multiple', 'few'.\n"
+        "- Never output uncertainty phrases: 'unclear', 'unknown', 'cannot tell', 'not visible'.\n"
+        "- If unsure, still choose the single most likely concrete answer from visible evidence.\n"
         "- Examples of good answers: 'primary producer', '42%', 'increases then decreases', 'red circle'\n"
         "- Return only the final answer inside XML:\n"
         "<answer>...</answer>\n"
         f"Question: {question_text}"
-    )
-
-
-def build_solver_choice_prompt(question_text: str, option_a: str, option_b: str) -> str:
-    return (
-        "You are a precise vision-language solver.\n"
-        "Answer by selecting exactly one option using only image evidence.\n"
-        "Rules:\n"
-        "- Choose only one: A or B.\n"
-        "- Do not output any explanation.\n"
-        "- Return only XML:\n"
-        "<answer>A</answer> or <answer>B</answer>\n"
-        f"Question: {question_text}\n"
-        f"Option A: {option_a}\n"
-        f"Option B: {option_b}"
     )
 
 
@@ -371,9 +363,9 @@ def build_proposer_multi_prompt(
 
     if level == "hard":
         diff_hint = (
-            "TARGET: HARD — the solver should be genuinely uncertain.\n"
+            "TARGET: HARD — the question should be difficult due to fine-grained visual grounding.\n"
             "Required: reasoning must include at least 2 domains and at least one non-relational domain.\n"
-            "The final question must be derived from a declared uncertain target and not from the dominant object."
+            "The final question must have one exact image-verifiable answer and not target the dominant object."
         )
     elif level == "easy":
         diff_hint = (
@@ -382,10 +374,10 @@ def build_proposer_multi_prompt(
         )
     else:
         diff_hint = (
-            "TARGET: MEDIUM — the solver should frequently disagree on the precise answer.\n"
+            "TARGET: MEDIUM — the question should require careful multi-hop visual reasoning.\n"
             "Required: reasoning must include at least 2 domains and at least one of action/physics/behavior/"
             "commonsense/scientific.\n"
-            "Question must target non-salient ambiguity grounded in visible evidence."
+            "Question must target non-salient details grounded in visible evidence and yield one exact answer."
         )
 
     strategy_block = (
@@ -439,12 +431,12 @@ def build_proposer_multi_prompt(
     )
     hard_task_cards = (
         "HARD TASK CARDS (few-shot templates; do NOT copy literally, instantiate on this image):\n"
-        "  C1 physics+causal: target=support relation under occlusion; discriminate=two concrete support states of the same object;\n"
+        "  C1 physics+causal: target=visible support/contact relation under occlusion; discriminate=two concrete contact configurations;\n"
         "     chain=contact cues -> gravity plausibility -> support conclusion.\n"
-        "  C2 action+temporal: target=action phase; discriminate=two concrete event phases tied to visible pose;\n"
+        "  C2 action+temporal: target=observable action proxy; discriminate=two concrete pose-grounded states;\n"
         "     chain=limb pose -> object trajectory -> temporal phase.\n"
-        "  C3 behavior+commonsense: target=agent intent; discriminate=two concrete intents grounded in body orientation;\n"
-        "     chain=body orientation -> affordance -> context prior.\n"
+        "  C3 behavior+commonsense: target=observable behavior cue; discriminate=two concrete visible behavior states;\n"
+        "     chain=body orientation -> affordance cue -> context consistency.\n"
         "  C4 scientific+material: target=material identity; discriminate=two concrete materials with visible optical differences;\n"
         "     chain=highlight behavior -> edge softness -> texture consistency.\n"
         "  C5 OCR+context: target=partial text token; discriminate=two concrete candidate words from visible glyph fragments;\n"
@@ -485,25 +477,27 @@ def build_proposer_multi_prompt(
         f'    <reasoning_chain>...2-4 short steps with visible evidence...</reasoning_chain>\n'
         f'    <strategy_used>...which strategy from the library above (e.g. H2, M3)...</strategy_used>\n'
         f'    <visual_target>...specific small/secondary/background element (must NOT be main subject)...</visual_target>\n'
-        f'    <two_answer_test>...two genuinely DIFFERENT answers the solver might give. '
-        f'If both answers are the same, this is TOO EASY...</two_answer_test>\n'
+        f'    <two_answer_test>...two genuinely DIFFERENT, concrete, image-grounded candidate answers '
+        f'(never placeholders; never vague words like many/several/unclear)...</two_answer_test>\n'
         f'    <text>...final question text ending with "?" derived from reasoning_chain...</text>\n'
-        f'    <rationale>...why this is ambiguous but still visually verifiable...</rationale>\n'
+        f'    <rationale>...why this is hard but still objectively and exactly verifiable from visible evidence...</rationale>\n'
         f'  </question>'
         for i in range(1, n + 1)
     )
 
     return (
         "You are an Adversarial Fine-Grained Question Proposer.\n"
-        "GOAL: make solver disagreement using reasoning-first construction, not question-first guesses.\n"
+        "GOAL: produce hard, visually grounded, objective questions using reasoning-first construction.\n"
         "\n"
         "CRITICAL RULES:\n"
         "- NEVER ask about the main/dominant subject, object, or largest text.\n"
         "- Question must be derived AFTER reasoning_chain is defined.\n"
         "- Each question must use >=2 reasoning domains and include >=1 non-relational domain.\n"
-        "- Each question must include a valid two-answer ambiguity test with distinct alternatives.\n"
+        "- Each question must include a valid two-answer precision test with distinct concrete alternatives.\n"
+        "- Final question must have one exact answer grounded in visible evidence.\n"
         "- NEVER copy literal card placeholders into final text (forbidden literals: token_1, token_2, stable-by-contact, unsupported, pre-event, post-event, preparing-for-X, recovering-from-X).\n"
         "- Avoid low-information yes/no forms and latent non-visual states.\n"
+        "- Do not ask hidden-state intent or speculative timeline questions (e.g., about to/just/recently/trying to).\n"
         "- Use DISTINCT strategy codes across questions.\n"
         "\n"
         f"{diff_hint}\n"
@@ -520,6 +514,7 @@ def build_proposer_multi_prompt(
         "- If reasoning_domains has fewer than 2 domains, rewrite.\n"
         "- If no non-relational domain is present, rewrite.\n"
         "- If two_answer_test alternatives are not distinct, rewrite.\n"
+        "- If two_answer_test contains vague alternatives (many/several/unclear/unknown), rewrite.\n"
         "- If question is not grounded in visual_target/reasoning_chain, rewrite.\n"
         "Output XML only:\n"
         "<questions>\n"
