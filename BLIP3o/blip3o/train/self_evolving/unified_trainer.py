@@ -66,6 +66,28 @@ _QUESTION_START_RE = re.compile(
     r"^(?:what|which|how|where|when|who|is|are|was|were|does|do|did|can|could|should|would|has|have|had)\b",
     flags=re.IGNORECASE,
 )
+_EASY_BINARY_START_RE = re.compile(
+    r"^(?:is|are|was|were|do|does|did|can|could|should|would|has|have|had)\b",
+    flags=re.IGNORECASE,
+)
+_LOW_INFO_BINARY_TOKEN_RE = re.compile(
+    r"\b(?:yes|no|visible|invisible|open|closed|present|absent|clear|murky|"
+    r"not visible|unknown|unclear|cannot tell|can't tell)\b",
+    flags=re.IGNORECASE,
+)
+_LATENT_NONVISUAL_RE = re.compile(
+    r"\b(?:crispy|soft|texture|tasty|taste|flavor|smell|odor|fresh|stale|"
+    r"hot|cold|ripe|unripe)\b",
+    flags=re.IGNORECASE,
+)
+_LOW_SIGNAL_TEMPLATE_RE = re.compile(
+    r"\b(?:what type of|what kind of|is there|are there)\b",
+    flags=re.IGNORECASE,
+)
+_TWO_ANSWER_SPLIT_RE = re.compile(
+    r"\s*(?:/|\||;|,|\bvs\.?\b|\bor\b)\s*",
+    flags=re.IGNORECASE,
+)
 
 
 def _quantile(values: List[float], q: float) -> float:
@@ -227,11 +249,133 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             return False
         return bool(_OBJECTIVE_QUESTION_RE.search(q))
 
+    def _parse_proposer_question_candidates(self, proposer_out: str) -> List[Dict[str, str]]:
+        """Parse multi-question proposer XML into structured candidates."""
+        text = str(proposer_out or "")
+        blocks = re.findall(
+            r"<question[^>]*>(.*?)</question>",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        candidates: List[Dict[str, str]] = []
+        for block in blocks:
+            q_text = (strip_tags(block, "text") or _parse_first_question(block) or "").strip()
+            q_text = q_text.replace("\n", " ")
+            if not q_text:
+                continue
+            candidates.append(
+                {
+                    "text": q_text,
+                    "strategy_used": (strip_tags(block, "strategy_used") or "").strip(),
+                    "two_answer_test": (strip_tags(block, "two_answer_test") or "").strip(),
+                    "visual_target": (strip_tags(block, "visual_target") or "").strip(),
+                    "rationale": (strip_tags(block, "rationale") or "").strip(),
+                }
+            )
+        if candidates:
+            return candidates
+        # Fallback to legacy parser to ensure at least one candidate.
+        return [{"text": q.replace("\n", " ").strip()} for q in _parse_all_questions(text) if q.strip()]
+
+    def _split_two_answer_test(self, two_answer_test: str) -> List[str]:
+        raw = str(two_answer_test or "").strip()
+        if not raw:
+            return []
+        parts = _TWO_ANSWER_SPLIT_RE.split(raw)
+        out: List[str] = []
+        for p in parts:
+            v = normalize_answer(p, max_words=8)
+            if v and v not in out:
+                out.append(v)
+        return out[:4]
+
+    def _question_template_key(self, question: str) -> str:
+        q = normalize_answer(str(question or ""), max_words=16)
+        if not q:
+            return ""
+        q = re.sub(r"\b\d+\b", "<num>", q)
+        q = re.sub(r"'[^']*'|\"[^\"]*\"", "<quoted>", q)
+        q = " ".join(q.split())
+        return q
+
+    def _question_repetition_penalty(self, question: str) -> float:
+        key = self._question_template_key(question)
+        if not key:
+            return 0.0
+        count = sum(1 for x in self._question_template_window if x == key)
+        unit = float(getattr(self.cfg, "proposer_repeat_penalty_unit", 0.04))
+        max_pen = float(getattr(self.cfg, "proposer_repeat_penalty_max", 0.25))
+        if unit <= 0.0 or max_pen <= 0.0:
+            return 0.0
+        return max(0.0, min(max_pen, unit * float(count)))
+
+    def _proposer_text_hardness_bonus(
+        self,
+        question: str,
+        strategy_used: str,
+        two_answer_test: str,
+    ) -> float:
+        """Cheap text-only hardness prior (no extra model calls)."""
+        q = str(question or "").strip()
+        if not q:
+            return -0.20
+        qn = normalize_answer(q, max_words=20)
+        score = 0.0
+
+        strat = normalize_answer(str(strategy_used or ""), max_words=4)
+        if strat.startswith("h"):
+            score += 0.06
+        elif strat.startswith("m"):
+            score += 0.02
+        elif strat:
+            score -= 0.02
+        else:
+            score -= 0.03
+
+        if _EASY_BINARY_START_RE.search(qn):
+            score -= 0.07
+        if _LOW_INFO_BINARY_TOKEN_RE.search(qn):
+            score -= 0.10
+        if _LATENT_NONVISUAL_RE.search(qn):
+            score -= 0.12
+        if _LOW_SIGNAL_TEMPLATE_RE.search(qn):
+            score -= 0.06
+        if qn.startswith(("what ", "which ", "how many ")):
+            score += 0.03
+
+        alts = self._split_two_answer_test(two_answer_test)
+        if len(alts) >= 2:
+            score += 0.05
+            if len(alts) == 2 and alts[0] == alts[1]:
+                score -= 0.18
+            if any(_LOW_INFO_BINARY_TOKEN_RE.search(a) for a in alts):
+                score -= 0.10
+        else:
+            score -= 0.12
+
+        if self._is_objective_question(q):
+            score += 0.02
+        else:
+            score -= 0.06
+
+        pos_cap = float(getattr(self.cfg, "proposer_text_bonus_max", 0.20))
+        neg_cap = float(getattr(self.cfg, "proposer_text_penalty_max", 0.35))
+        if pos_cap < 0.0:
+            pos_cap = 0.0
+        if neg_cap < 0.0:
+            neg_cap = 0.0
+        score = max(-neg_cap, min(pos_cap, score))
+        if not math.isfinite(score):
+            return 0.0
+        return float(score)
+
     def _init_adaptive_windows(self):
         ent_window_size = max(8, int(getattr(self.cfg, "entropy_iqr_window_size", 256)))
         diff_window_size = max(8, int(getattr(self.cfg, "difficulty_sampler_window_size", 256)))
+        qhist_window_size = max(32, int(getattr(self.cfg, "proposer_question_history_size", 256)))
         self._entropy_window = deque(maxlen=ent_window_size)
         self._difficulty_window = deque(maxlen=diff_window_size)
+        self._question_template_window = deque(maxlen=qhist_window_size)
 
     def _entropy_iqr_filter_state(self) -> Dict[str, float]:
         static_threshold = float(getattr(self.cfg, "sc_entropy_min", 0.15))
@@ -438,6 +582,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         difficulty_bucket_observed = "unknown"
         question_rejected = False
         question_reject_reason = ""
+        chosen_strategy_used = ""
+        chosen_two_answer_test = ""
+        proposer_text_hardness_bonus = 0.0
+        proposer_repetition_penalty = 0.0
 
         solver_prompt = ""
         solver_outputs: List[str] = []
@@ -455,12 +603,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             top_p=self.cfg.top_p,
         )
 
-        candidate_questions = _parse_all_questions(proposer_out)
+        candidate_infos = self._parse_proposer_question_candidates(proposer_out)
+        candidate_questions = [c.get("text", "").strip() for c in candidate_infos if c.get("text", "").strip()]
         if not candidate_questions:
             candidate_questions = ["What is the most salient object in the image?"]
             fallback_used = True
+            candidate_infos = [{"text": candidate_questions[0]}]
 
-        # --- Spot-check each candidate; accept first non-easy one ---
+        # --- Spot-check each candidate; select best acceptable by score ---
         best_question = ""
         best_outputs: List[str] = []
         best_answers_raw: List[str] = []
@@ -469,6 +619,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         best_entropy = -1.0
         best_margin = 1.0
         best_bucket = "easy"
+        best_meta: Dict[str, str] = {}
+        best_pick_score = -1e9
         best_accept_question = ""
         best_accept_outputs: List[str] = []
         best_accept_answers_raw: List[str] = []
@@ -476,11 +628,21 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         best_accept_pre_words: List[int] = []
         best_accept_entropy = -1.0
         best_accept_margin = 1.0
+        best_accept_meta: Dict[str, str] = {}
+        best_accept_pick_score = -1e9
 
         for cand_idx, cand_q in enumerate(candidate_questions):
             cand_q = cand_q.replace("\n", " ").strip()
             if not cand_q:
                 continue
+            cand_meta = candidate_infos[cand_idx] if cand_idx < len(candidate_infos) else {"text": cand_q}
+            cand_strategy = str(cand_meta.get("strategy_used", "") or "")
+            cand_two_answer = str(cand_meta.get("two_answer_test", "") or "")
+            cand_text_bonus = self._proposer_text_hardness_bonus(
+                cand_q,
+                cand_strategy,
+                cand_two_answer,
+            )
 
             cand_non_objective = bool(
                 require_objective and (not self._is_objective_question(cand_q))
@@ -535,12 +697,20 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             sc_is_easy = bool(
                 (sc_entropy < entropy_easy_threshold) and (sc_margin > margin_max)
             )
+            cand_pick_score = sc_entropy + cand_text_bonus
 
-            # Always remember the best candidate seen so far (highest entropy wins).
+            # Always remember the best candidate seen so far.
             if (
-                (sc_entropy > best_entropy)
-                or (abs(sc_entropy - best_entropy) <= 1e-8 and sc_margin < best_margin)
+                (cand_pick_score > best_pick_score)
+                or (
+                    abs(cand_pick_score - best_pick_score) <= 1e-8
+                    and (
+                        sc_entropy > best_entropy
+                        or (abs(sc_entropy - best_entropy) <= 1e-8 and sc_margin < best_margin)
+                    )
+                )
             ):
+                best_pick_score = cand_pick_score
                 best_entropy = sc_entropy
                 best_margin = sc_margin
                 best_bucket = sc_bucket
@@ -549,17 +719,25 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 best_answers_raw = cand_answers_raw
                 best_answers_norm = cand_answers_norm
                 best_pre_words = cand_pre_words
+                best_meta = dict(cand_meta)
 
             # Keep the best acceptable (non-easy, objective) candidate instead
             # of taking the first. This removes proposer ordering bias.
             if (not sc_is_easy) and (not cand_non_objective):
                 if (
-                    (sc_entropy > best_accept_entropy)
+                    (cand_pick_score > best_accept_pick_score)
                     or (
-                        abs(sc_entropy - best_accept_entropy) <= 1e-8
-                        and sc_margin < best_accept_margin
+                        abs(cand_pick_score - best_accept_pick_score) <= 1e-8
+                        and (
+                            sc_entropy > best_accept_entropy
+                            or (
+                                abs(sc_entropy - best_accept_entropy) <= 1e-8
+                                and sc_margin < best_accept_margin
+                            )
+                        )
                     )
                 ):
+                    best_accept_pick_score = cand_pick_score
                     best_accept_entropy = sc_entropy
                     best_accept_margin = sc_margin
                     best_accept_question = cand_q
@@ -567,6 +745,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     best_accept_answers_raw = cand_answers_raw
                     best_accept_answers_norm = cand_answers_norm
                     best_accept_pre_words = cand_pre_words
+                    best_accept_meta = dict(cand_meta)
 
         if best_accept_question:
             question = best_accept_question
@@ -574,6 +753,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             solver_answers_raw = best_accept_answers_raw
             solver_answers_norm = best_accept_answers_norm
             pre_words = best_accept_pre_words
+            chosen_strategy_used = str(best_accept_meta.get("strategy_used", "") or "")
+            chosen_two_answer_test = str(best_accept_meta.get("two_answer_test", "") or "")
         else:
             # No candidate cleared the gate — use the best-entropy one found.
             question = best_question or candidate_questions[0].replace("\n", " ").strip()
@@ -584,6 +765,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             solver_answers_raw = best_answers_raw
             solver_answers_norm = best_answers_norm
             pre_words = best_pre_words
+            chosen_strategy_used = str(best_meta.get("strategy_used", "") or "")
+            chosen_two_answer_test = str(best_meta.get("two_answer_test", "") or "")
 
         # If the chosen candidate came from a spot-check (< num_solver_samples),
         # run the remaining solver samples to reach the full count needed for RL.
@@ -781,6 +964,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             zero_entropy_capped = True
         # else: non-unanimous → gaussian reward (already set above)
 
+        # Text-only hardness shaping (no extra model calls): pushes proposer
+        # away from low-information easy templates even when solver entropy
+        # rewards are degenerate.
+        proposer_text_hardness_bonus = self._proposer_text_hardness_bonus(
+            question,
+            chosen_strategy_used,
+            chosen_two_answer_test,
+        )
+        proposer_repetition_penalty = self._question_repetition_penalty(question)
+        proposer_reward += proposer_text_hardness_bonus
+        proposer_reward -= proposer_repetition_penalty
+
         # Non-objective penalty.
         proposer_non_objective_penalty = max(
             0.0, float(getattr(self.cfg, "proposer_non_objective_penalty", 0.0))
@@ -811,6 +1006,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             _easy_scale = max(0.0, 1.0 - min(1.0, _rej_entropy / max(1e-6, proposer_entropy_mu_used)))
             proposer_reward -= rejected_question_penalty * _easy_scale
         proposer_reward = max(-1.0, min(1.0, proposer_reward))
+        # Track selected question template to discourage repeated easy loops.
+        _qkey = self._question_template_key(question)
+        if _qkey:
+            self._question_template_window.append(_qkey)
 
         solver_stats_list = []
         solver_update_due = (
@@ -1010,8 +1209,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         2, int(getattr(self.cfg, "proposer_grpo_gen_group_size", 3))
                     )
                     _score_extras = bool(getattr(self.cfg, "score_grpo_extras", True))
-                    _extra_temp_mult = float(getattr(self.cfg, "grpo_extra_temp_multiplier", 1.5))
-                    _extra_temp = min(2.0, self.cfg.temp * _extra_temp_mult)
+                    _extra_temp_mult = float(getattr(self.cfg, "grpo_extra_temp_multiplier", 2.0))
+                    _extra_temp = min(3.0, self.cfg.temp * _extra_temp_mult)
                     # Use a dedicated config for GRPO extras spot-check count,
                     # independent of the candidate-selection spot-check. Extras
                     # need ≥3 samples to produce ternary entropy outcomes
@@ -1021,6 +1220,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         2,
                         int(getattr(self.cfg, "grpo_extra_sc_samples", 3)),
                     )
+                    _step_question_templates: set = set()
+                    _chosen_qkey = self._question_template_key(question)
+                    if _chosen_qkey:
+                        _step_question_templates.add(_chosen_qkey)
 
                     for _gi in range(_grpo_group_size - 1):
                         try:
@@ -1044,15 +1247,30 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             _extra_intuitive_failed = False
                             _extra_intuitive_attempted = False
                             _sc_offset = 0  # temp-offset for extras spot-check
+                            _extra_q = ""
+                            _extra_strategy_used = ""
+                            _extra_two_answer_test = ""
+                            _extra_text_bonus = 0.0
+                            _extra_repeat_penalty = 0.0
 
-                            if _score_extras:
+                            # Pick the strongest text-level candidate from this extra output
+                            # (zero inference cost), then optionally run solver spot-check.
+                            _extra_candidates = self._parse_proposer_question_candidates(_extra_out)
+                            if _extra_candidates:
+                                _extra_best = max(
+                                    _extra_candidates,
+                                    key=lambda c: self._proposer_text_hardness_bonus(
+                                        c.get("text", ""),
+                                        c.get("strategy_used", ""),
+                                        c.get("two_answer_test", ""),
+                                    ),
+                                )
+                                _extra_q = str(_extra_best.get("text", "")).replace("\n", " ").strip()
+                                _extra_strategy_used = str(_extra_best.get("strategy_used", "") or "")
+                                _extra_two_answer_test = str(_extra_best.get("two_answer_test", "") or "")
+
+                            if _score_extras and _extra_q:
                                 # ── Score extra candidate with configured solver spot-check ──
-                                # Parse questions from the extra proposer output.
-                                _extra_questions = _parse_all_questions(_extra_out)
-                                _extra_q = ""
-                                if _extra_questions:
-                                    _extra_q = _extra_questions[0].replace("\n", " ").strip()
-
                                 if _extra_q:
                                     _extra_solver_prompt = build_solver_prompt(_extra_q)
                                     _extra_answers_norm: List[str] = []
@@ -1183,7 +1401,25 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                         )
                                         _extra_reward -= rejected_question_penalty * _extra_easy_scale
 
-                                    _extra_reward = max(-1.0, min(1.0, _extra_reward))
+                            if _extra_q:
+                                # Deterministic text-level shaping for extras.
+                                _extra_text_bonus = self._proposer_text_hardness_bonus(
+                                    _extra_q,
+                                    _extra_strategy_used,
+                                    _extra_two_answer_test,
+                                )
+                                _extra_repeat_penalty = self._question_repetition_penalty(_extra_q)
+                                _extra_qkey = self._question_template_key(_extra_q)
+                                if _extra_qkey:
+                                    if _extra_qkey in _step_question_templates:
+                                        _extra_repeat_penalty += float(
+                                            getattr(self.cfg, "proposer_text_step_dup_penalty", 0.08)
+                                        )
+                                    _step_question_templates.add(_extra_qkey)
+                                _extra_reward += _extra_text_bonus
+                                _extra_reward -= _extra_repeat_penalty
+
+                            _extra_reward = max(-1.0, min(1.0, _extra_reward))
 
                             _grpo_completions.append(_extra_comp)
                             _grpo_rewards.append(_extra_reward)
@@ -1200,8 +1436,49 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             proposer_stats[f"grpo_extra_{_gi}_sc_offset"] = _sc_offset
                             proposer_stats[f"grpo_extra_{_gi}_margin"] = _extra_margin_val
                             proposer_stats[f"grpo_extra_{_gi}_bucket"] = _extra_bucket
+                            proposer_stats[f"grpo_extra_{_gi}_strategy"] = _extra_strategy_used
+                            proposer_stats[f"grpo_extra_{_gi}_two_answer_test"] = _extra_two_answer_test
+                            proposer_stats[f"grpo_extra_{_gi}_text_bonus"] = _extra_text_bonus
+                            proposer_stats[f"grpo_extra_{_gi}_repeat_penalty"] = _extra_repeat_penalty
                         except Exception:
                             pass
+
+                    # ── Degenerate-group exploration noise ──────────────
+                    # When ALL GRPO candidates receive identical pre-shift
+                    # rewards (std ≈ 0), the baseline-shifted advantage path
+                    # produces uniform advantages (e.g. [-1, -1, -1]).  This
+                    # provides zero directional signal and accelerates mode
+                    # collapse by uniformly reducing policy entropy.
+                    #
+                    # Fix: inject micro-noise to break the tie, creating a
+                    # random exploration gradient.  Over many steps the random
+                    # directions average out *except* when one direction
+                    # accidentally produces a harder question — that step gets
+                    # a real (non-noisy) reward signal and reinforces the move.
+                    _pre_shift_std = (
+                        torch.tensor(_grpo_rewards, dtype=torch.float64)
+                        .std(correction=0)
+                        .item()
+                    )
+                    _noise_enabled = bool(getattr(self.cfg, "grpo_degenerate_noise_enabled", True))
+                    _noise_std_threshold = max(
+                        0.0, float(getattr(self.cfg, "grpo_degenerate_noise_std_threshold", 1e-6))
+                    )
+                    _noise_sigma = max(0.0, float(getattr(self.cfg, "grpo_degenerate_noise_sigma", 0.03)))
+                    if (
+                        _noise_enabled
+                        and _noise_sigma > 0.0
+                        and _pre_shift_std < _noise_std_threshold
+                        and len(_grpo_rewards) > 1
+                    ):
+                        _grpo_rewards = [r + random.gauss(0.0, _noise_sigma) for r in _grpo_rewards]
+                        if proposer_stats is None:
+                            proposer_stats = {}
+                        proposer_stats["grpo_degenerate_noise"] = True
+                        proposer_stats["grpo_degenerate_noise_sigma"] = _noise_sigma
+                    else:
+                        if proposer_stats is not None:
+                            proposer_stats["grpo_degenerate_noise"] = False
 
                     # Apply EMA absolute baseline shift to all group rewards.
                     # self.proposer_baseline tracks the chosen candidate's reward;
@@ -1329,6 +1606,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_entropy_mu_used": proposer_entropy_mu_used,
             "proposer_reward_raw": proposer_reward_raw,
             "proposer_reward": proposer_reward,
+            "proposer_text_hardness_bonus": proposer_text_hardness_bonus,
+            "proposer_repetition_penalty": proposer_repetition_penalty,
+            "proposer_strategy_used": chosen_strategy_used,
+            "proposer_two_answer_test": chosen_two_answer_test,
             "zero_entropy_capped": zero_entropy_capped,
             "zero_entropy_reward_cap": zero_entropy_cap,
             "intuitive_answer": _intuitive_answer,
@@ -1400,6 +1681,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "proposer_entropy_mu_used": proposer_entropy_mu_used,
                 "proposer_reward_raw": proposer_reward_raw,
                 "proposer_reward": proposer_reward,
+                "proposer_text_hardness_bonus": proposer_text_hardness_bonus,
+                "proposer_repetition_penalty": proposer_repetition_penalty,
+                "proposer_strategy_used": chosen_strategy_used,
+                "proposer_two_answer_test": chosen_two_answer_test,
                 "proposer_non_objective_question": proposer_non_objective_question,
                 "proposer_non_objective_penalty": proposer_non_objective_penalty,
                 "question_rejected": question_rejected,
@@ -1437,6 +1722,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"info_local={int(solver_informative_local)} "
                 f"info_ratio={informative_ratio:.2f} info_gate={int(solver_informative_gate)} "
                 f"up_scale={solver_update_scale:.2f} P_R={proposer_reward:.3f} "
+                f"T_B={proposer_text_hardness_bonus:.3f} R_P={proposer_repetition_penalty:.3f} "
                 f"dt={step_dt:.1f}s"
             )
             print(f"  Q: {question}")
@@ -1464,6 +1750,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         self._update_metric("u_proposer_entropy_mu_used", self._dist_mean(proposer_entropy_mu_used))
         self._update_metric("u_proposer_reward", self._dist_mean(proposer_reward))
+        self._update_metric("u_proposer_text_bonus", self._dist_mean(proposer_text_hardness_bonus))
+        self._update_metric("u_proposer_repeat_penalty", self._dist_mean(proposer_repetition_penalty))
 
         return record
 
@@ -1476,6 +1764,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         state["unified_gen_reward_ema_initialized"] = self._gen_reward_ema_initialized
         state["unified_entropy_window"] = list(self._entropy_window)
         state["unified_difficulty_window"] = list(self._difficulty_window)
+        state["unified_question_template_window"] = list(self._question_template_window)
         # Replay buffer metadata (not the images — too large for checkpoint;
         # the buffer refills naturally after resume).
         state["unified_replay_buffer_len"] = len(self.replay_buffer) if self.replay_buffer is not None else 0
@@ -1526,6 +1815,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     b = str(bucket).strip().lower()
                     if b in {"easy", "medium", "hard"}:
                         self._difficulty_window.append(b)
+            q_template_window = state.get("unified_question_template_window")
+            if isinstance(q_template_window, list):
+                self._question_template_window.clear()
+                max_keep = int(self._question_template_window.maxlen or len(q_template_window))
+                for key in q_template_window[-max_keep:]:
+                    k = str(key).strip()
+                    if k:
+                        self._question_template_window.append(k)
             # When reset_proposer_baseline=True (set in parent _load_state),
             # also wipe the entropy/difficulty history so the IQR filter
             # re-warms from scratch instead of staying locked at IQR=0.
@@ -1537,6 +1834,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     )
                 self._entropy_window.clear()
                 self._difficulty_window.clear()
+                self._question_template_window.clear()
             if self.is_main_process:
                 print(
                     f"[Unified] Restored self-evolving state: "

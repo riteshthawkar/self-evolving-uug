@@ -116,11 +116,23 @@ class UnderstandingSelfEvolvingConfig:
     # Temperature multiplier for extra GRPO candidate generation.  Higher values
     # increase diversity, making it more likely that at least one extra produces
     # a non-easy question with a different reward → real gradient signal.
-    grpo_extra_temp_multiplier: float = 1.5
+    grpo_extra_temp_multiplier: float = 2.0
     # Number of solver spot-check samples for extra GRPO candidates.
     # 3 samples give ternary entropy outcomes (0, 0.637, 1.099) vs binary
     # with 2 samples (0 or 0.693), enabling differential reward signal.
     grpo_extra_sc_samples: int = 3
+    # Text-only proposer shaping (no extra model calls):
+    # rewards harder-looking templates and penalizes repeated templates.
+    proposer_question_history_size: int = 256
+    proposer_text_bonus_max: float = 0.20
+    proposer_text_penalty_max: float = 0.35
+    proposer_repeat_penalty_unit: float = 0.04
+    proposer_repeat_penalty_max: float = 0.25
+    proposer_text_step_dup_penalty: float = 0.08
+    # Optional exploration noise when GRPO rewards collapse to identical values.
+    grpo_degenerate_noise_enabled: bool = True
+    grpo_degenerate_noise_sigma: float = 0.03
+    grpo_degenerate_noise_std_threshold: float = 1e-6
     # Generation-phase proposer GRPO: unverified extras are assigned
     # (chosen_reward - margin), clamped to [-1, 1], so they cannot outrank
     # the verified chosen candidate.
@@ -376,9 +388,21 @@ class GenerationSelfEvolvingConfig:
     # Score extra GRPO candidates with a configurable solver spot-check.
     score_grpo_extras: bool = True
     # Temperature multiplier for extra GRPO candidate generation.
-    grpo_extra_temp_multiplier: float = 1.5
+    grpo_extra_temp_multiplier: float = 2.0
     # Number of solver spot-check samples for extra GRPO candidates.
     grpo_extra_sc_samples: int = 3
+    # Text-only proposer shaping (no extra model calls):
+    # rewards harder-looking templates and penalizes repeated templates.
+    proposer_question_history_size: int = 256
+    proposer_text_bonus_max: float = 0.20
+    proposer_text_penalty_max: float = 0.35
+    proposer_repeat_penalty_unit: float = 0.04
+    proposer_repeat_penalty_max: float = 0.25
+    proposer_text_step_dup_penalty: float = 0.08
+    # Optional exploration noise when GRPO rewards collapse to identical values.
+    grpo_degenerate_noise_enabled: bool = True
+    grpo_degenerate_noise_sigma: float = 0.03
+    grpo_degenerate_noise_std_threshold: float = 1e-6
     # Generation-phase proposer GRPO: unverified extras are assigned
     # (chosen_reward - margin), clamped to [-1, 1], so they cannot outrank
     # the verified chosen candidate.
