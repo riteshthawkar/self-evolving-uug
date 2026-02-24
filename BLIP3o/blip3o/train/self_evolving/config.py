@@ -77,7 +77,7 @@ class UnderstandingSelfEvolvingConfig:
     proposer_require_objective: bool = True
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
-    proposer_spot_check_samples: int = 2  # solver samples used to spot-check each candidate
+    proposer_spot_check_samples: int = 3  # 3 samples give ternary entropy for candidate selection
     solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
@@ -108,7 +108,7 @@ class UnderstandingSelfEvolvingConfig:
     # Gen-phase proposer: how many specs to sample for the GRPO group.
     # Understanding phase always uses proposer_num_candidates (already K=3).
     proposer_grpo_gen_group_size: int = 3
-    # Score extra GRPO candidates with a 2-sample solver spot-check instead of
+    # Score extra GRPO candidates with a configurable solver spot-check instead of
     # assigning them a neutral reward of 0.0.  This gives real differential
     # signal between candidates, preventing the GRPO loss from collapsing to
     # zero at EMA equilibrium.  Costs ~4 extra solver forward passes per step.
@@ -331,7 +331,7 @@ class GenerationSelfEvolvingConfig:
     proposer_require_objective: bool = True
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
-    proposer_spot_check_samples: int = 2  # solver samples used to spot-check each candidate
+    proposer_spot_check_samples: int = 3  # 3 samples give ternary entropy for candidate selection
     solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
@@ -373,7 +373,7 @@ class GenerationSelfEvolvingConfig:
     # "grpo"      → group-relative policy optimization on K proposer candidates.
     proposer_update_rule: str = "grpo"
     proposer_grpo_gen_group_size: int = 3
-    # Score extra GRPO candidates with a 2-sample solver spot-check.
+    # Score extra GRPO candidates with a configurable solver spot-check.
     score_grpo_extras: bool = True
     # Temperature multiplier for extra GRPO candidate generation.
     grpo_extra_temp_multiplier: float = 1.5

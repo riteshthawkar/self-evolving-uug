@@ -124,7 +124,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # Single-shot multi-question generation (replaces retry loop)
     p.add_argument("--proposer_num_candidates", type=int, default=3)
-    p.add_argument("--proposer_spot_check_samples", type=int, default=2)
+    p.add_argument("--proposer_spot_check_samples", type=int, default=3)
     p.add_argument("--solver_skip_update_on_easy", action="store_true", default=True)
     p.add_argument(
         "--allow_solver_update_on_easy",
@@ -312,6 +312,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Number of specs to sample for the GRPO group in generation-phase "
                         "proposer updates. Understanding phase always uses proposer_num_candidates.")
     p.add_argument(
+        "--grpo_extra_sc_samples",
+        type=int,
+        default=3,
+        help="Number of solver spot-check samples for extra proposer GRPO candidates.",
+    )
+    p.add_argument(
         "--proposer_grpo_unverified_extra_margin",
         type=float,
         default=0.02,
@@ -441,6 +447,7 @@ def _build_understanding_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
+        grpo_extra_sc_samples=args.grpo_extra_sc_samples,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
@@ -575,6 +582,7 @@ def _build_generation_config(args):
         reset_proposer_baseline=args.reset_proposer_baseline,
         proposer_update_rule=args.proposer_update_rule,
         proposer_grpo_gen_group_size=args.proposer_grpo_gen_group_size,
+        grpo_extra_sc_samples=args.grpo_extra_sc_samples,
         proposer_grpo_unverified_extra_margin=args.proposer_grpo_unverified_extra_margin,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,
@@ -756,6 +764,7 @@ def _build_unified_config(args):
         reset_proposer_baseline=args.reset_proposer_baseline,
         proposer_update_rule=args.proposer_update_rule,
         proposer_grpo_gen_group_size=args.proposer_grpo_gen_group_size,
+        grpo_extra_sc_samples=args.grpo_extra_sc_samples,
         proposer_grpo_unverified_extra_margin=args.proposer_grpo_unverified_extra_margin,
         solver_soft_gamma=args.solver_soft_gamma,
         solver_use_temperature_mix=args.solver_use_temperature_mix,

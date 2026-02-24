@@ -395,9 +395,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             1, int(getattr(self.cfg, "proposer_num_candidates", 3))
         )
         # How many solver samples to use for the spot-check of each candidate.
-        # Fewer samples = faster; 2 is usually sufficient to catch trivially easy.
+        # Fewer samples = faster; default 3 gives ternary entropy outcomes.
         spot_check_samples = max(
-            1, int(getattr(self.cfg, "proposer_spot_check_samples", 2))
+            1, int(getattr(self.cfg, "proposer_spot_check_samples", 3))
+        )
+        # Avoid cold-only spot-checking (e.g. [0.5, 0.83, 1.17]) which tends to
+        # classify borderline questions as easy. Start near the 33rd percentile.
+        spot_check_offset = max(
+            0,
+            min(
+                len(solver_temperatures) - spot_check_samples,
+                len(solver_temperatures) // 3,
+            ),
         )
 
         # Derive image source hint from path so the proposer can apply
@@ -460,6 +469,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         best_entropy = -1.0
         best_margin = 1.0
         best_bucket = "easy"
+        best_accept_question = ""
+        best_accept_outputs: List[str] = []
+        best_accept_answers_raw: List[str] = []
+        best_accept_answers_norm: List[str] = []
+        best_accept_pre_words: List[int] = []
+        best_accept_entropy = -1.0
+        best_accept_margin = 1.0
 
         for cand_idx, cand_q in enumerate(candidate_questions):
             cand_q = cand_q.replace("\n", " ").strip()
@@ -478,14 +494,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
 
             # Spot-check with a subset of solver samples for speed.
             for sc_idx in range(spot_check_samples):
+                real_idx = spot_check_offset + sc_idx
                 sc_temp = (
-                    float(solver_temperatures[sc_idx])
-                    if sc_idx < len(solver_temperatures)
+                    float(solver_temperatures[real_idx])
+                    if real_idx < len(solver_temperatures)
                     else float(self.cfg.temp)
                 )
                 sc_top_p = (
-                    float(solver_top_ps[sc_idx])
-                    if sc_idx < len(solver_top_ps)
+                    float(solver_top_ps[real_idx])
+                    if real_idx < len(solver_top_ps)
                     else float(self.cfg.top_p)
                 )
                 sc_out = self._generate(
@@ -520,7 +537,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             )
 
             # Always remember the best candidate seen so far (highest entropy wins).
-            if sc_entropy > best_entropy:
+            if (
+                (sc_entropy > best_entropy)
+                or (abs(sc_entropy - best_entropy) <= 1e-8 and sc_margin < best_margin)
+            ):
                 best_entropy = sc_entropy
                 best_margin = sc_margin
                 best_bucket = sc_bucket
@@ -530,16 +550,30 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 best_answers_norm = cand_answers_norm
                 best_pre_words = cand_pre_words
 
-            # Accept this candidate immediately if it passes the easy gate
-            # and is objective.  Candidates are ordered hardest-first, so
-            # the first acceptable one is typically the best.
+            # Keep the best acceptable (non-easy, objective) candidate instead
+            # of taking the first. This removes proposer ordering bias.
             if (not sc_is_easy) and (not cand_non_objective):
-                question = cand_q
-                solver_outputs = cand_outputs
-                solver_answers_raw = cand_answers_raw
-                solver_answers_norm = cand_answers_norm
-                pre_words = cand_pre_words
-                break
+                if (
+                    (sc_entropy > best_accept_entropy)
+                    or (
+                        abs(sc_entropy - best_accept_entropy) <= 1e-8
+                        and sc_margin < best_accept_margin
+                    )
+                ):
+                    best_accept_entropy = sc_entropy
+                    best_accept_margin = sc_margin
+                    best_accept_question = cand_q
+                    best_accept_outputs = cand_outputs
+                    best_accept_answers_raw = cand_answers_raw
+                    best_accept_answers_norm = cand_answers_norm
+                    best_accept_pre_words = cand_pre_words
+
+        if best_accept_question:
+            question = best_accept_question
+            solver_outputs = best_accept_outputs
+            solver_answers_raw = best_accept_answers_raw
+            solver_answers_norm = best_accept_answers_norm
+            pre_words = best_accept_pre_words
         else:
             # No candidate cleared the gate — use the best-entropy one found.
             question = best_question or candidate_questions[0].replace("\n", " ").strip()
@@ -1004,11 +1038,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
 
                             _extra_reward = 0.0  # default: neutral / unverified
                             _extra_entropy_val = -1.0
+                            _extra_margin_val = 1.0
+                            _extra_maj_frac = 0.0
+                            _extra_bucket = "unknown"
                             _extra_intuitive_failed = False
                             _extra_intuitive_attempted = False
+                            _sc_offset = 0  # temp-offset for extras spot-check
 
                             if _score_extras:
-                                # ── Score extra candidate with 2-sample solver spot-check ──
+                                # ── Score extra candidate with configured solver spot-check ──
                                 # Parse questions from the extra proposer output.
                                 _extra_questions = _parse_all_questions(_extra_out)
                                 _extra_q = ""
@@ -1018,15 +1056,30 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                 if _extra_q:
                                     _extra_solver_prompt = build_solver_prompt(_extra_q)
                                     _extra_answers_norm: List[str] = []
+                                    # Offset extras spot-check to use hotter solver
+                                    # temperatures. With schedule [0.5..2.5] and 3
+                                    # spot-check samples, indices [0,1,2] give temps
+                                    # [0.5, 0.83, 1.17] — too cold to break unanimity
+                                    # on easy questions. Offset to ~33rd percentile so
+                                    # samples use temps like [1.17, 1.5, 1.83] where
+                                    # borderline questions are more likely to split.
+                                    _sc_offset = max(
+                                        0,
+                                        min(
+                                            len(solver_temperatures) - _extra_sc_samples,
+                                            len(solver_temperatures) // 3,
+                                        ),
+                                    )
                                     for _sc_idx in range(_extra_sc_samples):
+                                        _real_idx = _sc_offset + _sc_idx
                                         _sc_temp = (
-                                            float(solver_temperatures[_sc_idx])
-                                            if _sc_idx < len(solver_temperatures)
+                                            float(solver_temperatures[_real_idx])
+                                            if _real_idx < len(solver_temperatures)
                                             else float(self.cfg.temp)
                                         )
                                         _sc_top_p = (
-                                            float(solver_top_ps[_sc_idx])
-                                            if _sc_idx < len(solver_top_ps)
+                                            float(solver_top_ps[_real_idx])
+                                            if _real_idx < len(solver_top_ps)
                                             else float(self.cfg.top_p)
                                         )
                                         try:
@@ -1052,6 +1105,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                             for c in _extra_hist.values()
                                         ]
                                         _extra_entropy_val = shannon_entropy_nats(_extra_probs)
+                                        _extra_sorted_probs = sorted(_extra_probs, reverse=True)
+                                        _extra_p1 = float(_extra_sorted_probs[0]) if _extra_sorted_probs else 0.0
+                                        _extra_p2 = float(_extra_sorted_probs[1]) if len(_extra_sorted_probs) > 1 else 0.0
+                                        _extra_margin_val = max(0.0, _extra_p1 - _extra_p2)
+                                        _extra_maj_frac = _extra_p1
+                                        _extra_bucket = self._difficulty_bucket(
+                                            _extra_entropy_val,
+                                            _extra_margin_val,
+                                            _extra_maj_frac,
+                                            entropy_easy_threshold,
+                                        )
 
                                         # Compute reward using same logic as chosen candidate.
                                         _extra_reward_raw = gaussian_reward(
@@ -1086,24 +1150,38 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                             ) if _extra_answers_norm else ""
                                             if _extra_intuitive and _extra_maj and _extra_intuitive != _extra_maj:
                                                 # Dual-track disagree → gotcha reward (consistent with chosen: 0.5 * maj_frac)
-                                                _extra_maj_frac = _extra_answers_norm.count(_extra_maj) / max(1, len(_extra_answers_norm))
                                                 _extra_reward = 0.5 * _extra_maj_frac
                                             # else: keep _extra_reward = _extra_reward_raw (set at L1042).
                                             # Preserves Gaussian micro-signal instead of discarding to flat 0.0.
 
-                                    # ── Penalties for extras (mirror chosen at L745-762) ──
-                                    # Applied regardless of whether spot-check answers are
-                                    # available — chosen candidate always gets penalties too.
-                                    # Non-objective penalty.
-                                    if require_objective:
-                                        if not self._is_objective_question(_extra_q) and proposer_non_objective_penalty > 0.0:
-                                            _extra_reward -= proposer_non_objective_penalty
-                                    # Easy-bucket rejection penalty.
-                                    # Only when valid entropy was computed (_extra_entropy_val >= 0);
-                                    # default is -1.0, so skip when solver spot-check failed entirely.
-                                    if acceptance_require_non_easy and _extra_entropy_val >= 0 and _extra_entropy_val < 1e-6:
-                                        if rejected_question_penalty > 0.0:
-                                            _extra_reward -= rejected_question_penalty
+                                    # ── Penalties for extras (mirror chosen-candidate objective) ──
+                                    _extra_non_objective = bool(
+                                        require_objective and (not self._is_objective_question(_extra_q))
+                                    )
+                                    _extra_reject_reasons: List[str] = []
+                                    if _extra_non_objective:
+                                        _extra_reject_reasons.append("non_objective")
+                                    if (
+                                        acceptance_require_non_easy
+                                        and _extra_entropy_val >= 0.0
+                                        and _extra_bucket == "easy"
+                                    ):
+                                        _extra_reject_reasons.append("easy_bucket")
+
+                                    if _extra_non_objective and proposer_non_objective_penalty > 0.0:
+                                        _extra_reward -= proposer_non_objective_penalty
+                                    if _extra_reject_reasons and rejected_question_penalty > 0.0:
+                                        _extra_rej_entropy = max(0.0, _extra_entropy_val)
+                                        if "non_objective" in _extra_reject_reasons:
+                                            _extra_rej_entropy = 0.0
+                                        _extra_easy_scale = max(
+                                            0.0,
+                                            1.0 - min(
+                                                1.0,
+                                                _extra_rej_entropy / max(1e-6, proposer_entropy_mu_used),
+                                            ),
+                                        )
+                                        _extra_reward -= rejected_question_penalty * _extra_easy_scale
 
                                     _extra_reward = max(-1.0, min(1.0, _extra_reward))
 
@@ -1118,6 +1196,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             proposer_stats[f"grpo_extra_{_gi}_entropy"] = _extra_entropy_val
                             proposer_stats[f"grpo_extra_{_gi}_intuitive_attempted"] = _extra_intuitive_attempted
                             proposer_stats[f"grpo_extra_{_gi}_intuitive_failed"] = _extra_intuitive_failed
+                            proposer_stats[f"grpo_extra_{_gi}_sc_samples"] = _extra_sc_samples
+                            proposer_stats[f"grpo_extra_{_gi}_sc_offset"] = _sc_offset
+                            proposer_stats[f"grpo_extra_{_gi}_margin"] = _extra_margin_val
+                            proposer_stats[f"grpo_extra_{_gi}_bucket"] = _extra_bucket
                         except Exception:
                             pass
 
@@ -1241,6 +1323,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "solver_update_scale": solver_update_scale,
             "solver_temperature_schedule": solver_temperatures,
             "solver_top_p_schedule": solver_top_ps,
+            "proposer_spot_check_samples": spot_check_samples,
+            "proposer_spot_check_offset": spot_check_offset,
             "entropy_nats": entropy_nats,
             "proposer_entropy_mu_used": proposer_entropy_mu_used,
             "proposer_reward_raw": proposer_reward_raw,
@@ -1309,6 +1393,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "easy_solver_case": easy_solver_case,
                 "easy_solver_penalty_scale": easy_solver_penalty_scale,
                 "solver_update_scale": solver_update_scale,
+                "proposer_spot_check_samples": spot_check_samples,
+                "proposer_spot_check_offset": spot_check_offset,
                 "entropy_nats": entropy_nats,
                 "solver_reward_soft_mean": sum(solver_rewards_soft) / max(1, len(solver_rewards_soft)),
                 "proposer_entropy_mu_used": proposer_entropy_mu_used,

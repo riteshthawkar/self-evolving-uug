@@ -240,6 +240,7 @@ fi
   --num_generations 3 \
   --proposer_num_candidates 3 \
   --proposer_spot_check_samples 3 \
+  --grpo_extra_sc_samples 3 \
   \
   `# ── Image generation (BLIP3o diffusion) ─────────────────────────────────` \
   --generation_num_inference_steps 50 \
