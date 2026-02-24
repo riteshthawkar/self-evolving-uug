@@ -129,10 +129,45 @@ class UnderstandingSelfEvolvingConfig:
     proposer_repeat_penalty_unit: float = 0.04
     proposer_repeat_penalty_max: float = 0.25
     proposer_text_step_dup_penalty: float = 0.08
+    proposer_template_cooldown_steps: int = 8
+    proposer_template_cooldown_penalty: float = 0.20
+    proposer_strategy_window_size: int = 256
+    proposer_strategy_target_share: float = 0.16
+    proposer_strategy_overuse_penalty: float = 0.12
+    proposer_strategy_underuse_bonus: float = 0.04
+    proposer_anchor_replay_size: int = 256
+    proposer_anchor_strategy_bonus: float = 0.06
+    proposer_anchor_template_bonus: float = 0.04
+    proposer_anchor_min_reward: float = 0.20
+    proposer_reward_mode: str = "hybrid"  # gaussian|band|hybrid
+    proposer_band_reward_weight: float = 0.70  # used when proposer_reward_mode=hybrid
+    easy_constraint_enabled: bool = True
+    easy_constraint_target_rate: float = 0.35
+    easy_constraint_lr: float = 0.05
+    easy_constraint_lambda_max: float = 1.5
+    easy_constraint_penalty_scale: float = 0.30
+    easy_constraint_selection_scale: float = 0.20
+    easy_rate_ema_momentum: float = 0.97
+    adaptive_exploration_enabled: bool = True
+    exploration_easy_rate_threshold: float = 0.75
+    exploration_temp_boost_max: float = 0.60
+    exploration_top_p_boost_max: float = 0.10
+    exploration_penalty_boost_max: float = 1.00
+    collapse_detector_enabled: bool = True
+    collapse_easy_rate_threshold: float = 0.85
+    collapse_std_threshold: float = 0.06
+    collapse_streak_trigger: int = 8
+    collapse_lambda_boost: float = 0.10
+    collapse_cooldown_penalty_boost: float = 0.10
+    collapse_std_window_size: int = 32
     # Optional exploration noise when GRPO rewards collapse to identical values.
     grpo_degenerate_noise_enabled: bool = True
     grpo_degenerate_noise_sigma: float = 0.03
     grpo_degenerate_noise_std_threshold: float = 1e-6
+    grpo_pairwise_ranking_enabled: bool = True
+    grpo_pairwise_ranking_weight: float = 0.08
+    grpo_pairwise_margin: float = 0.05
+    grpo_pairwise_easy_penalty: float = 0.05
     # Generation-phase proposer GRPO: unverified extras are assigned
     # (chosen_reward - margin), clamped to [-1, 1], so they cannot outrank
     # the verified chosen candidate.
@@ -399,10 +434,45 @@ class GenerationSelfEvolvingConfig:
     proposer_repeat_penalty_unit: float = 0.04
     proposer_repeat_penalty_max: float = 0.25
     proposer_text_step_dup_penalty: float = 0.08
+    proposer_template_cooldown_steps: int = 8
+    proposer_template_cooldown_penalty: float = 0.20
+    proposer_strategy_window_size: int = 256
+    proposer_strategy_target_share: float = 0.16
+    proposer_strategy_overuse_penalty: float = 0.12
+    proposer_strategy_underuse_bonus: float = 0.04
+    proposer_anchor_replay_size: int = 256
+    proposer_anchor_strategy_bonus: float = 0.06
+    proposer_anchor_template_bonus: float = 0.04
+    proposer_anchor_min_reward: float = 0.20
+    proposer_reward_mode: str = "hybrid"  # gaussian|band|hybrid
+    proposer_band_reward_weight: float = 0.70  # used when proposer_reward_mode=hybrid
+    easy_constraint_enabled: bool = True
+    easy_constraint_target_rate: float = 0.35
+    easy_constraint_lr: float = 0.05
+    easy_constraint_lambda_max: float = 1.5
+    easy_constraint_penalty_scale: float = 0.30
+    easy_constraint_selection_scale: float = 0.20
+    easy_rate_ema_momentum: float = 0.97
+    adaptive_exploration_enabled: bool = True
+    exploration_easy_rate_threshold: float = 0.75
+    exploration_temp_boost_max: float = 0.60
+    exploration_top_p_boost_max: float = 0.10
+    exploration_penalty_boost_max: float = 1.00
+    collapse_detector_enabled: bool = True
+    collapse_easy_rate_threshold: float = 0.85
+    collapse_std_threshold: float = 0.06
+    collapse_streak_trigger: int = 8
+    collapse_lambda_boost: float = 0.10
+    collapse_cooldown_penalty_boost: float = 0.10
+    collapse_std_window_size: int = 32
     # Optional exploration noise when GRPO rewards collapse to identical values.
     grpo_degenerate_noise_enabled: bool = True
     grpo_degenerate_noise_sigma: float = 0.03
     grpo_degenerate_noise_std_threshold: float = 1e-6
+    grpo_pairwise_ranking_enabled: bool = True
+    grpo_pairwise_ranking_weight: float = 0.08
+    grpo_pairwise_margin: float = 0.05
+    grpo_pairwise_easy_penalty: float = 0.05
     # Generation-phase proposer GRPO: unverified extras are assigned
     # (chosen_reward - margin), clamped to [-1, 1], so they cannot outrank
     # the verified chosen candidate.
