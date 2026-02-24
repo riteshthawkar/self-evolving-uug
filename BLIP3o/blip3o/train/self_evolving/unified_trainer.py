@@ -49,7 +49,9 @@ _SUBJECTIVE_QUESTION_RE = re.compile(
 _OBJECTIVE_QUESTION_RE = re.compile(
     r"\b("
     r"how many|count|number of|what (?:is|are|was|were)|which|compare|difference|ratio|"
-    r"total|sum|percent|percentage|value|label|name|color|shape|position|left|right|top|bottom|"
+    r"total|sum|percent|percentage|value|label|name|color|shape|position|pattern|material|made of|"
+    r"left|right|top|bottom|above|below|inside|outside|"
+    r"walking|standing|sitting|running|open|closed|attached|hanging|resting|supported|unsupported|"
     r"highest|lowest|maximum|minimum"
     r")\b",
     flags=re.IGNORECASE,
@@ -98,6 +100,26 @@ _VISUAL_TARGET_PLACEHOLDER_RE = re.compile(
 )
 _TWO_ANSWER_TOKEN_PLACEHOLDER_RE = re.compile(
     r"token[_\s-]?\d+",
+    flags=re.IGNORECASE,
+)
+_BINARY_FORCED_CHOICE_RE = re.compile(
+    r"\b(?:or|vs\.?)\b",
+    flags=re.IGNORECASE,
+)
+_BINARY_ALT_TAIL_RE = re.compile(
+    r"\b([a-z0-9][a-z0-9\-\s]{1,40})\s+(?:or|vs\.?)\s+([a-z0-9][a-z0-9\-\s]{1,40})\s*\??$",
+    flags=re.IGNORECASE,
+)
+_BINARY_LOW_INFO_ALT_RE = re.compile(
+    r"^(?:yes|no|true|false|unknown|unclear|not visible|cannot tell|can't tell)$",
+    flags=re.IGNORECASE,
+)
+_OBJECTIVE_BINARY_HINT_RE = re.compile(
+    r"\b("
+    r"material|made of|color|shape|pattern|text|word|token|count|number|left|right|above|below|"
+    r"inside|outside|walking|standing|sitting|running|open|closed|attached|hanging|resting|"
+    r"supported|unsupported|before|after"
+    r")\b",
     flags=re.IGNORECASE,
 )
 _DOMAIN_ALIAS_TO_CANONICAL = {
@@ -275,6 +297,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if not q:
             return False
         q = " ".join(q.split())
+        q_lower = q.lower()
         if _MALFORMED_QUESTION_RE.search(q):
             return False
         if _META_PLACEHOLDER_RE.search(q):
@@ -287,7 +310,30 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             return False
         if not q.endswith("?"):
             return False
-        return bool(_OBJECTIVE_QUESTION_RE.search(q))
+        if _OBJECTIVE_QUESTION_RE.search(q):
+            return True
+        # Accept concrete forced-choice binaries as objective even when they do
+        # not contain the explicit lexicon above.
+        if _EASY_BINARY_START_RE.search(q) and _BINARY_FORCED_CHOICE_RE.search(q):
+            m = _BINARY_ALT_TAIL_RE.search(q)
+            if m is not None:
+                left = normalize_answer(m.group(1), max_words=8)
+                right = normalize_answer(m.group(2), max_words=8)
+                if (
+                    left
+                    and right
+                    and left != right
+                    and (not _BINARY_LOW_INFO_ALT_RE.match(left))
+                    and (not _BINARY_LOW_INFO_ALT_RE.match(right))
+                ):
+                    has_hint = bool(_OBJECTIVE_BINARY_HINT_RE.search(q))
+                    structured_binary = (
+                        len(q_lower.split()) >= 6
+                        and (" is " in f" {q_lower} " or " are " in f" {q_lower} ")
+                    )
+                    if has_hint or structured_binary:
+                        return True
+        return False
 
     def _parse_proposer_question_candidates(self, proposer_out: str) -> List[Dict[str, str]]:
         """Parse multi-question proposer XML into structured candidates."""
