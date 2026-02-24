@@ -2943,6 +2943,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_easy_constraint_penalty": easy_constraint_penalty,
             "proposer_strategy_used": chosen_strategy_used,
             "proposer_two_answer_test": chosen_two_answer_test,
+            "solver_choice_mode": selected_choice_mode,
+            "solver_choice_option_a": selected_choice_option_a,
+            "solver_choice_option_b": selected_choice_option_b,
             "proposer_reasoning_domains": chosen_reasoning_domains,
             "proposer_reasoning_chain": chosen_reasoning_chain,
             "proposer_task_card": chosen_task_card,
@@ -3074,6 +3077,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "proposer_easy_constraint_penalty": easy_constraint_penalty,
                 "proposer_strategy_used": chosen_strategy_used,
                 "proposer_two_answer_test": chosen_two_answer_test,
+                "solver_choice_mode": selected_choice_mode,
+                "solver_choice_option_a": selected_choice_option_a,
+                "solver_choice_option_b": selected_choice_option_b,
                 "proposer_reasoning_domains": chosen_reasoning_domains,
                 "proposer_reasoning_chain": chosen_reasoning_chain,
                 "proposer_task_card": chosen_task_card,
@@ -3155,6 +3161,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"info_local={int(solver_informative_local)} "
                 f"info_ratio={informative_ratio:.2f} info_gate={int(solver_informative_gate)} "
                 f"li_maj={int(solver_low_info_majority)} "
+                f"ch={int(selected_choice_mode)} "
                 f"up_scale={solver_update_scale:.2f} P_R={proposer_reward:.3f} "
                 f"T_B={proposer_text_hardness_bonus:.3f} R_P={proposer_repetition_penalty:.3f} "
                 f"C_NE={candidate_non_easy_rate:.2f} C_V={candidate_struct_valid_rate:.2f} "
