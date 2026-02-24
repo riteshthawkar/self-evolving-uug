@@ -49,8 +49,8 @@ class UnderstandingSelfEvolvingConfig:
     # Reward shaping
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
-    solver_temp_min: float = 0.7
-    solver_temp_max: float = 1.3
+    solver_temp_min: float = 0.6
+    solver_temp_max: float = 2.0
     solver_top_p_min: float = 0.5
     solver_top_p_max: float = 1.0
     sc_entropy_min: float = 0.15
@@ -78,6 +78,7 @@ class UnderstandingSelfEvolvingConfig:
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
     proposer_spot_check_samples: int = 3  # 3 samples give ternary entropy for candidate selection
+    proposer_spot_entropy_min_gate: float = 0.05
     # Reasoning-first proposer schema validation.
     proposer_reasoning_min_domains: int = 2
     proposer_reasoning_require_non_relation: bool = True
@@ -117,12 +118,12 @@ class UnderstandingSelfEvolvingConfig:
     entropy_iqr_min_threshold: float = 0.02
     entropy_iqr_max_threshold: float = 1.2
     entropy_iqr_filter_min_majority_frac: float = 0.80
-    difficulty_sampler_enabled: bool = False
+    difficulty_sampler_enabled: bool = True
     difficulty_sampler_window_size: int = 256
     difficulty_sampler_min_samples: int = 32
-    difficulty_target_easy: float = 0.20
-    difficulty_target_medium: float = 0.60
-    difficulty_target_hard: float = 0.20
+    difficulty_target_easy: float = 0.10
+    difficulty_target_medium: float = 0.50
+    difficulty_target_hard: float = 0.40
     difficulty_hard_min_entropy: float = 0.90
     difficulty_hard_max_margin: float = 0.35
 
@@ -187,10 +188,10 @@ class UnderstandingSelfEvolvingConfig:
     collapse_lambda_boost: float = 0.25
     collapse_cooldown_penalty_boost: float = 0.30
     collapse_std_window_size: int = 32
-    all_easy_explore_trigger: int = 3
+    all_easy_explore_trigger: int = 2
     all_easy_explore_steps: int = 10
     all_easy_explore_num_candidates: int = 6
-    all_easy_explore_temp_boost: float = 0.90
+    all_easy_explore_temp_boost: float = 1.20
     all_easy_explore_top_p_boost: float = 0.15
     all_easy_explore_penalty_boost: float = 0.50
     # Optional exploration noise when GRPO rewards collapse to identical values.
@@ -383,8 +384,8 @@ class GenerationSelfEvolvingConfig:
     # Reward shaping
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
-    solver_temp_min: float = 0.7
-    solver_temp_max: float = 1.3
+    solver_temp_min: float = 0.6
+    solver_temp_max: float = 2.0
     solver_top_p_min: float = 0.5
     solver_top_p_max: float = 1.0
     sc_entropy_min: float = 0.15
@@ -412,6 +413,7 @@ class GenerationSelfEvolvingConfig:
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
     proposer_spot_check_samples: int = 3  # 3 samples give ternary entropy for candidate selection
+    proposer_spot_entropy_min_gate: float = 0.05
     # Reasoning-first proposer schema validation.
     proposer_reasoning_min_domains: int = 2
     proposer_reasoning_require_non_relation: bool = True
@@ -451,12 +453,12 @@ class GenerationSelfEvolvingConfig:
     entropy_iqr_min_threshold: float = 0.02
     entropy_iqr_max_threshold: float = 1.2
     entropy_iqr_filter_min_majority_frac: float = 0.80
-    difficulty_sampler_enabled: bool = False
+    difficulty_sampler_enabled: bool = True
     difficulty_sampler_window_size: int = 256
     difficulty_sampler_min_samples: int = 32
-    difficulty_target_easy: float = 0.20
-    difficulty_target_medium: float = 0.60
-    difficulty_target_hard: float = 0.20
+    difficulty_target_easy: float = 0.10
+    difficulty_target_medium: float = 0.50
+    difficulty_target_hard: float = 0.40
     difficulty_hard_min_entropy: float = 0.90
     difficulty_hard_max_margin: float = 0.35
     reward_spec_weight: float = 0.65
@@ -525,10 +527,10 @@ class GenerationSelfEvolvingConfig:
     collapse_lambda_boost: float = 0.25
     collapse_cooldown_penalty_boost: float = 0.30
     collapse_std_window_size: int = 32
-    all_easy_explore_trigger: int = 3
+    all_easy_explore_trigger: int = 2
     all_easy_explore_steps: int = 10
     all_easy_explore_num_candidates: int = 6
-    all_easy_explore_temp_boost: float = 0.90
+    all_easy_explore_temp_boost: float = 1.20
     all_easy_explore_top_p_boost: float = 0.15
     all_easy_explore_penalty_boost: float = 0.50
     # Optional exploration noise when GRPO rewards collapse to identical values.

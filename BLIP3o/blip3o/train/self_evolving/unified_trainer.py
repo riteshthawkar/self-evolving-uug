@@ -1219,6 +1219,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         spot_check_samples = max(
             1, int(getattr(self.cfg, "proposer_spot_check_samples", 3))
         )
+        spot_entropy_min_gate = max(
+            0.0, float(getattr(self.cfg, "proposer_spot_entropy_min_gate", 0.05))
+        )
         # Avoid cold-only spot-checking (e.g. [0.5, 0.83, 1.17]) which tends to
         # classify borderline questions as easy. Start near the 33rd percentile.
         spot_check_offset = max(
@@ -1320,6 +1323,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         candidate_non_easy_rate = 0.0
         candidate_struct_valid_rate = 0.0
         all_easy_candidate_group = True
+        spot_all_easy_low_entropy = False
 
         for cand_idx, cand_q in enumerate(candidate_questions):
             cand_q = cand_q.replace("\n", " ").strip()
@@ -1485,6 +1489,21 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             all_easy_candidate_group = bool(all(b == "easy" for b in candidate_bucket_list))
         else:
             all_easy_candidate_group = True
+
+        # Minimum spot-check entropy gate: if all candidates are easy and even
+        # the best spot-check entropy is near zero, force exploration for
+        # upcoming steps to avoid repeatedly selecting "best-of-easy".
+        if (
+            all_easy_candidate_group
+            and best_entropy >= 0.0
+            and best_entropy < spot_entropy_min_gate
+        ):
+            spot_all_easy_low_entropy = True
+            candidate_non_easy_rate = 0.0
+            self._forced_explore_steps_left = max(
+                int(getattr(self, "_forced_explore_steps_left", 0)),
+                max(1, int(getattr(self.cfg, "all_easy_explore_steps", 10))),
+            )
 
         if best_accept_question:
             question = best_accept_question
@@ -1785,6 +1804,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             reject_reasons.append("non_objective")
         if acceptance_require_non_easy and (difficulty_bucket_observed == "easy"):
             reject_reasons.append("easy_bucket")
+        if acceptance_require_non_easy and spot_all_easy_low_entropy:
+            reject_reasons.append("all_candidates_easy")
         question_rejected = len(reject_reasons) > 0
         question_reject_reason = "|".join(reject_reasons)
         if question_rejected and rejected_question_penalty > 0.0:
@@ -2571,6 +2592,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "solver_top_p_schedule": solver_top_ps,
             "proposer_spot_check_samples": spot_check_samples,
             "proposer_spot_check_offset": spot_check_offset,
+            "proposer_spot_entropy_min_gate": spot_entropy_min_gate,
+            "proposer_spot_all_easy_low_entropy": spot_all_easy_low_entropy,
             "entropy_nats": entropy_nats,
             "proposer_entropy_mu_used": proposer_entropy_mu_used,
             "proposer_reward_raw_gaussian": proposer_reward_raw_gaussian,
@@ -2692,6 +2715,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "solver_update_scale": solver_update_scale,
                 "proposer_spot_check_samples": spot_check_samples,
                 "proposer_spot_check_offset": spot_check_offset,
+                "proposer_spot_entropy_min_gate": spot_entropy_min_gate,
+                "proposer_spot_all_easy_low_entropy": spot_all_easy_low_entropy,
                 "entropy_nats": entropy_nats,
                 "solver_reward_soft_mean": sum(solver_rewards_soft) / max(1, len(solver_rewards_soft)),
                 "proposer_entropy_mu_used": proposer_entropy_mu_used,

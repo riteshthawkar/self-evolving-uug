@@ -55,18 +55,19 @@ if [[ "$TRAIN_STAGE" == "warmup" ]]; then
     --all_easy_explore_trigger 2
     --all_easy_explore_steps 16
     --all_easy_explore_num_candidates 6
-    --all_easy_explore_temp_boost 1.10
+    --all_easy_explore_temp_boost 1.20
     --all_easy_explore_top_p_boost 0.20
     --all_easy_explore_penalty_boost 0.70
     --easy_constraint_target_rate 0.10
     --easy_constraint_lr 0.35
     --easy_constraint_penalty_scale 0.90
     --easy_constraint_selection_scale 0.75
-    --proposer_early_step1 6
-    --proposer_early_step2 12
-    --proposer_early_candidate_non_easy_min 0.20
+    --proposer_early_step1 12
+    --proposer_early_step2 24
+    --proposer_early_candidate_non_easy_min 0.08
     --proposer_early_selected_non_easy_min 0.10
-    --proposer_early_all_easy_rate_max 0.85
+    --proposer_early_all_easy_rate_max 0.93
+    --proposer_early_reward_clipped_rate_max 0.85
     --proposer_early_solver_updates_min 1
     --proposer_early_collapse_streak_max 3
     --difficulty_target_easy   0.0
@@ -94,18 +95,19 @@ elif [[ "$TRAIN_STAGE" == "strict" ]]; then
     --all_easy_explore_trigger 2
     --all_easy_explore_steps 16
     --all_easy_explore_num_candidates 6
-    --all_easy_explore_temp_boost 1.10
+    --all_easy_explore_temp_boost 1.20
     --all_easy_explore_top_p_boost 0.20
     --all_easy_explore_penalty_boost 0.70
     --easy_constraint_target_rate 0.10
     --easy_constraint_lr 0.35
     --easy_constraint_penalty_scale 0.90
     --easy_constraint_selection_scale 0.75
-    --proposer_early_step1 6
-    --proposer_early_step2 12
-    --proposer_early_candidate_non_easy_min 0.20
+    --proposer_early_step1 12
+    --proposer_early_step2 24
+    --proposer_early_candidate_non_easy_min 0.08
     --proposer_early_selected_non_easy_min 0.10
-    --proposer_early_all_easy_rate_max 0.85
+    --proposer_early_all_easy_rate_max 0.93
+    --proposer_early_reward_clipped_rate_max 0.85
     --proposer_early_solver_updates_min 1
     --proposer_early_collapse_streak_max 3
     --difficulty_target_easy   0.0

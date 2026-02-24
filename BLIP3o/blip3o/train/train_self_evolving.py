@@ -82,8 +82,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--solver_soft_gamma", type=float, default=0.7)
     p.add_argument("--solver_use_temperature_mix", action="store_true", default=True)
     p.add_argument("--disable_solver_temperature_mix", dest="solver_use_temperature_mix", action="store_false")
-    p.add_argument("--solver_temp_min", type=float, default=0.7)
-    p.add_argument("--solver_temp_max", type=float, default=1.3)
+    p.add_argument("--solver_temp_min", type=float, default=0.6)
+    p.add_argument("--solver_temp_max", type=float, default=2.0)
     p.add_argument("--solver_top_p_min", type=float, default=0.5)
     p.add_argument("--solver_top_p_max", type=float, default=1.0)
     p.add_argument("--sc_entropy_min", type=float, default=0.15)
@@ -125,6 +125,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Single-shot multi-question generation (replaces retry loop)
     p.add_argument("--proposer_num_candidates", type=int, default=3)
     p.add_argument("--proposer_spot_check_samples", type=int, default=3)
+    p.add_argument("--proposer_spot_entropy_min_gate", type=float, default=0.05)
     p.add_argument("--proposer_certificate_min_score", type=float, default=0.55)
     p.add_argument(
         "--proposer_certificate_strict_struct",
@@ -165,7 +166,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--entropy_iqr_min_threshold", type=float, default=0.02)
     p.add_argument("--entropy_iqr_max_threshold", type=float, default=1.2)
     p.add_argument("--entropy_iqr_filter_min_majority_frac", type=float, default=0.80)
-    p.add_argument("--difficulty_sampler_enabled", action="store_true", default=False)
+    p.add_argument("--difficulty_sampler_enabled", action="store_true", default=True)
     p.add_argument(
         "--disable_difficulty_sampler",
         dest="difficulty_sampler_enabled",
@@ -173,28 +174,41 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--difficulty_sampler_window_size", type=int, default=256)
     p.add_argument("--difficulty_sampler_min_samples", type=int, default=32)
-    p.add_argument("--difficulty_target_easy", type=float, default=0.20)
-    p.add_argument("--difficulty_target_medium", type=float, default=0.60)
-    p.add_argument("--difficulty_target_hard", type=float, default=0.20)
+    p.add_argument("--difficulty_target_easy", type=float, default=0.10)
+    p.add_argument("--difficulty_target_medium", type=float, default=0.50)
+    p.add_argument("--difficulty_target_hard", type=float, default=0.40)
     p.add_argument("--difficulty_hard_min_entropy", type=float, default=0.90)
     p.add_argument("--difficulty_hard_max_margin", type=float, default=0.35)
     p.add_argument("--easy_constraint_target_rate", type=float, default=0.18)
     p.add_argument("--easy_constraint_lr", type=float, default=0.20)
     p.add_argument("--easy_constraint_penalty_scale", type=float, default=0.60)
     p.add_argument("--easy_constraint_selection_scale", type=float, default=0.50)
-    p.add_argument("--all_easy_explore_trigger", type=int, default=3)
+    p.add_argument("--all_easy_explore_trigger", type=int, default=2)
     p.add_argument("--all_easy_explore_steps", type=int, default=10)
     p.add_argument("--all_easy_explore_num_candidates", type=int, default=6)
-    p.add_argument("--all_easy_explore_temp_boost", type=float, default=0.90)
+    p.add_argument("--all_easy_explore_temp_boost", type=float, default=1.20)
     p.add_argument("--all_easy_explore_top_p_boost", type=float, default=0.15)
     p.add_argument("--all_easy_explore_penalty_boost", type=float, default=0.50)
     p.add_argument("--proposer_early_step1", type=int, default=12)
     p.add_argument("--proposer_early_step2", type=int, default=20)
     p.add_argument("--proposer_early_candidate_non_easy_min", type=float, default=0.25)
     p.add_argument("--proposer_early_all_easy_rate_max", type=float, default=0.70)
+    p.add_argument("--proposer_early_reward_clipped_rate_max", type=float, default=0.60)
     p.add_argument("--proposer_early_selected_non_easy_min", type=float, default=0.15)
     p.add_argument("--proposer_early_solver_updates_min", type=int, default=2)
     p.add_argument("--proposer_early_collapse_streak_max", type=int, default=5)
+    p.add_argument("--proposer_early_failfast_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_early_failfast",
+        dest="proposer_early_failfast_enabled",
+        action="store_false",
+    )
+    p.add_argument("--proposer_early_failfast_stop", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_early_failfast_stop",
+        dest="proposer_early_failfast_stop",
+        action="store_false",
+    )
     p.add_argument("--reward_spec_weight", type=float, default=0.65)
     p.add_argument("--reward_cycle_weight", type=float, default=0.20)
     p.add_argument("--reward_diversity_weight", type=float, default=0.10)
@@ -206,7 +220,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--kl_adapt_rate", type=float, default=0.10)
     p.add_argument("--kl_min", type=float, default=1e-8)
     p.add_argument("--kl_max", type=float, default=1e2)
-    p.add_argument("--baseline_momentum", type=float, default=0.9)
+    p.add_argument("--baseline_momentum", type=float, default=0.6)
 
     # LoRA
     p.add_argument("--use_lora", action="store_true", default=True)
@@ -477,6 +491,7 @@ def _build_understanding_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
+        proposer_spot_entropy_min_gate=args.proposer_spot_entropy_min_gate,
         proposer_certificate_min_score=args.proposer_certificate_min_score,
         proposer_certificate_strict_struct=args.proposer_certificate_strict_struct,
         proposer_easy_reward_floor=args.proposer_easy_reward_floor,
@@ -516,9 +531,12 @@ def _build_understanding_config(args):
         proposer_early_step2=args.proposer_early_step2,
         proposer_early_candidate_non_easy_min=args.proposer_early_candidate_non_easy_min,
         proposer_early_all_easy_rate_max=args.proposer_early_all_easy_rate_max,
+        proposer_early_reward_clipped_rate_max=args.proposer_early_reward_clipped_rate_max,
         proposer_early_selected_non_easy_min=args.proposer_early_selected_non_easy_min,
         proposer_early_solver_updates_min=args.proposer_early_solver_updates_min,
         proposer_early_collapse_streak_max=args.proposer_early_collapse_streak_max,
+        proposer_early_failfast_enabled=args.proposer_early_failfast_enabled,
+        proposer_early_failfast_stop=args.proposer_early_failfast_stop,
         kl_coef=args.kl_coef,
         kl_target=args.kl_target,
         kl_adapt_rate=args.kl_adapt_rate,
@@ -663,6 +681,7 @@ def _build_generation_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
+        proposer_spot_entropy_min_gate=args.proposer_spot_entropy_min_gate,
         proposer_certificate_min_score=args.proposer_certificate_min_score,
         proposer_certificate_strict_struct=args.proposer_certificate_strict_struct,
         proposer_easy_reward_floor=args.proposer_easy_reward_floor,
@@ -701,9 +720,12 @@ def _build_generation_config(args):
         proposer_early_step2=args.proposer_early_step2,
         proposer_early_candidate_non_easy_min=args.proposer_early_candidate_non_easy_min,
         proposer_early_all_easy_rate_max=args.proposer_early_all_easy_rate_max,
+        proposer_early_reward_clipped_rate_max=args.proposer_early_reward_clipped_rate_max,
         proposer_early_selected_non_easy_min=args.proposer_early_selected_non_easy_min,
         proposer_early_solver_updates_min=args.proposer_early_solver_updates_min,
         proposer_early_collapse_streak_max=args.proposer_early_collapse_streak_max,
+        proposer_early_failfast_enabled=args.proposer_early_failfast_enabled,
+        proposer_early_failfast_stop=args.proposer_early_failfast_stop,
         reward_spec_weight=args.reward_spec_weight,
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
@@ -866,6 +888,7 @@ def _build_unified_config(args):
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
+        proposer_spot_entropy_min_gate=args.proposer_spot_entropy_min_gate,
         proposer_certificate_min_score=args.proposer_certificate_min_score,
         proposer_certificate_strict_struct=args.proposer_certificate_strict_struct,
         proposer_easy_reward_floor=args.proposer_easy_reward_floor,
@@ -904,9 +927,12 @@ def _build_unified_config(args):
         proposer_early_step2=args.proposer_early_step2,
         proposer_early_candidate_non_easy_min=args.proposer_early_candidate_non_easy_min,
         proposer_early_all_easy_rate_max=args.proposer_early_all_easy_rate_max,
+        proposer_early_reward_clipped_rate_max=args.proposer_early_reward_clipped_rate_max,
         proposer_early_selected_non_easy_min=args.proposer_early_selected_non_easy_min,
         proposer_early_solver_updates_min=args.proposer_early_solver_updates_min,
         proposer_early_collapse_streak_max=args.proposer_early_collapse_streak_max,
+        proposer_early_failfast_enabled=args.proposer_early_failfast_enabled,
+        proposer_early_failfast_stop=args.proposer_early_failfast_stop,
         reward_spec_weight=args.reward_spec_weight,
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
