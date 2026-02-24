@@ -117,6 +117,10 @@ class UnderstandingSelfEvolvingConfig:
     # increase diversity, making it more likely that at least one extra produces
     # a non-easy question with a different reward → real gradient signal.
     grpo_extra_temp_multiplier: float = 1.5
+    # Number of solver spot-check samples for extra GRPO candidates.
+    # 3 samples give ternary entropy outcomes (0, 0.637, 1.099) vs binary
+    # with 2 samples (0 or 0.693), enabling differential reward signal.
+    grpo_extra_sc_samples: int = 3
     # Generation-phase proposer GRPO: unverified extras are assigned
     # (chosen_reward - margin), clamped to [-1, 1], so they cannot outrank
     # the verified chosen candidate.
@@ -373,6 +377,8 @@ class GenerationSelfEvolvingConfig:
     score_grpo_extras: bool = True
     # Temperature multiplier for extra GRPO candidate generation.
     grpo_extra_temp_multiplier: float = 1.5
+    # Number of solver spot-check samples for extra GRPO candidates.
+    grpo_extra_sc_samples: int = 3
     # Generation-phase proposer GRPO: unverified extras are assigned
     # (chosen_reward - margin), clamped to [-1, 1], so they cannot outrank
     # the verified chosen candidate.
