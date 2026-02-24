@@ -50,7 +50,13 @@ def build_proposer_prompt(target_difficulty: str = "medium") -> str:
     )
 
 
-def build_solver_prompt(question_text: str) -> str:
+def build_solver_prompt(question_text: str, focus_hint: str = "") -> str:
+    hint = (focus_hint or "").strip()
+    focus_line = (
+        f"- Focus mode for this sample: {hint}. Prefer evidence consistent with this focus.\n"
+        if hint
+        else ""
+    )
     return (
         "You are a precise vision-language solver.\n"
         "Answer the question using only the provided image.\n"
@@ -58,6 +64,7 @@ def build_solver_prompt(question_text: str) -> str:
         "- Your answer MUST be 1-5 words only. No full sentences.\n"
         "- Give only the core answer, not an explanation.\n"
         "- The answer must be concrete and exact, not vague.\n"
+        f"{focus_line}"
         "- If the question asks 'how many' or 'number of', answer with a single integer (e.g., 0, 1, 2, 3).\n"
         "- Never output vague count words: 'too many', 'several', 'many', 'a lot', 'multiple', 'few'.\n"
         "- Never output uncertainty phrases: 'unclear', 'unknown', 'cannot tell', 'not visible'.\n"

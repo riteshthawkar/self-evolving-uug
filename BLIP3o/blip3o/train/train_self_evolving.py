@@ -82,7 +82,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--solver_soft_gamma", type=float, default=0.7)
     p.add_argument("--solver_use_temperature_mix", action="store_true", default=True)
     p.add_argument("--disable_solver_temperature_mix", dest="solver_use_temperature_mix", action="store_false")
-    p.add_argument("--solver_use_forced_choice_from_proposer", action="store_true", default=True)
+    p.add_argument("--solver_use_forced_choice_from_proposer", action="store_true", default=False)
     p.add_argument(
         "--disable_solver_use_forced_choice_from_proposer",
         dest="solver_use_forced_choice_from_proposer",
@@ -130,6 +130,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--zero_entropy_reward_cap", type=float, default=0.10)
     p.add_argument("--proposer_non_objective_penalty", type=float, default=0.20)
     p.add_argument("--proposer_low_info_majority_penalty", type=float, default=0.50)
+    p.add_argument("--proposer_slot_compiler_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_slot_compiler",
+        dest="proposer_slot_compiler_enabled",
+        action="store_false",
+    )
+    p.add_argument("--proposer_slot_compiler_strict", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_slot_compiler_strict",
+        dest="proposer_slot_compiler_strict",
+        action="store_false",
+    )
+    p.add_argument("--proposer_trivial_archetype_penalty", type=float, default=0.25)
+    p.add_argument("--proposer_answer_family_repeat_penalty", type=float, default=0.25)
+    p.add_argument("--proposer_answer_family_repeat_target", type=float, default=0.25)
     p.add_argument("--proposer_require_objective", action="store_true", default=True)
     p.add_argument(
         "--disable_proposer_require_objective",
@@ -513,6 +528,11 @@ def _build_understanding_config(args):
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
         proposer_non_objective_penalty=args.proposer_non_objective_penalty,
         proposer_low_info_majority_penalty=args.proposer_low_info_majority_penalty,
+        proposer_slot_compiler_enabled=args.proposer_slot_compiler_enabled,
+        proposer_slot_compiler_strict=args.proposer_slot_compiler_strict,
+        proposer_trivial_archetype_penalty=args.proposer_trivial_archetype_penalty,
+        proposer_answer_family_repeat_penalty=args.proposer_answer_family_repeat_penalty,
+        proposer_answer_family_repeat_target=args.proposer_answer_family_repeat_target,
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
@@ -709,6 +729,11 @@ def _build_generation_config(args):
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
         proposer_non_objective_penalty=args.proposer_non_objective_penalty,
         proposer_low_info_majority_penalty=args.proposer_low_info_majority_penalty,
+        proposer_slot_compiler_enabled=args.proposer_slot_compiler_enabled,
+        proposer_slot_compiler_strict=args.proposer_slot_compiler_strict,
+        proposer_trivial_archetype_penalty=args.proposer_trivial_archetype_penalty,
+        proposer_answer_family_repeat_penalty=args.proposer_answer_family_repeat_penalty,
+        proposer_answer_family_repeat_target=args.proposer_answer_family_repeat_target,
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
@@ -922,6 +947,11 @@ def _build_unified_config(args):
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
         proposer_non_objective_penalty=args.proposer_non_objective_penalty,
         proposer_low_info_majority_penalty=args.proposer_low_info_majority_penalty,
+        proposer_slot_compiler_enabled=args.proposer_slot_compiler_enabled,
+        proposer_slot_compiler_strict=args.proposer_slot_compiler_strict,
+        proposer_trivial_archetype_penalty=args.proposer_trivial_archetype_penalty,
+        proposer_answer_family_repeat_penalty=args.proposer_answer_family_repeat_penalty,
+        proposer_answer_family_repeat_target=args.proposer_answer_family_repeat_target,
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,

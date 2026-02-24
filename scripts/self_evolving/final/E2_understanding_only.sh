@@ -294,7 +294,6 @@ fi
   \
   `# ── Difficulty curriculum (easy-bucket rejection ENABLED) ──────────` \
   --difficulty_sampler_enabled \
-  --solver_skip_update_on_easy \
   \
   `# ── Reward weights ──────────────────────────────────────────────────────` \
   --reward_spec_weight 0.65 \

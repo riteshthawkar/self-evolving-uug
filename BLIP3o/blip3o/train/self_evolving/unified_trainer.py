@@ -155,6 +155,32 @@ _NUMERIC_ANSWER_RE = re.compile(
     r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
     flags=re.IGNORECASE,
 )
+_GENERIC_TARGET_TOKEN_RE = re.compile(
+    r"^(?:"
+    r"person|people|man|woman|child|player|car|vehicle|bike|bicycle|shoe|wheel|"
+    r"road|street|tree|building|house|dog|cat|animal|object|item|thing"
+    r")$",
+    flags=re.IGNORECASE,
+)
+_EASY_ARCHETYPE_RE = re.compile(
+    r"^(?:"
+    r"what material is (?:the )?.+"
+    r"|what color is (?:the )?.+"
+    r"|where is (?:the )?.+ located"
+    r"|is (?:the )?.+ to the (?:left|right|above|below|top|bottom) or "
+    r"(?:left|right|above|below|top|bottom)(?: of .+)?"
+    r"|is (?:the )?.+ (?:tied|untied|smooth|rough)"
+    r")\??$",
+    flags=re.IGNORECASE,
+)
+_LATENT_NON_OBSERVABLE_RE = re.compile(
+    r"\b(?:"
+    r"about to|just|recently|likely|probably|appears to|seems to|"
+    r"pre-?event|post-?event|preparing-for-x|recovering-from-x|"
+    r"stable-by-contact|unsupported|support-state|agent-intent|event-phase"
+    r")\b",
+    flags=re.IGNORECASE,
+)
 _DOMAIN_ALIAS_TO_CANONICAL = {
     "d1": "relation",
     "relation": "relation",
@@ -430,6 +456,168 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         # Fallback to legacy parser to ensure at least one candidate.
         return [{"text": q.replace("\n", " ").strip()} for q in _parse_all_questions(text) if q.strip()]
 
+    def _is_easy_archetype_question(self, question: str) -> bool:
+        qn = normalize_answer(str(question or ""), max_words=32)
+        if not qn:
+            return True
+        if _EASY_ARCHETYPE_RE.match(qn):
+            return True
+        if _QUESTION_TEMPLATE_LITERAL_RE.search(qn):
+            return True
+        if _LATENT_NON_OBSERVABLE_RE.search(qn):
+            return True
+        return False
+
+    def _normalize_visual_target(self, visual_target: str) -> str:
+        t = normalize_answer(str(visual_target or ""), max_words=10)
+        if not t:
+            return ""
+        t_compact = re.sub(r"\s+", "", t)
+        if _VISUAL_TARGET_PLACEHOLDER_RE.match(t_compact):
+            return ""
+        t = re.sub(r"^(?:the|a|an)\s+", "", t).strip()
+        if not t:
+            return ""
+        if len(t.split()) == 1 and _GENERIC_TARGET_TOKEN_RE.match(t):
+            return ""
+        return t
+
+    def _extract_target_from_question(self, question_text: str) -> str:
+        qn = normalize_answer(str(question_text or ""), max_words=32)
+        if not qn:
+            return ""
+        patterns = [
+            r"^how many ([a-z0-9' -]{2,48}) (?:are|is)\b",
+            r"^what (?:material|color|pattern|word|text|token) is (?:the )?([a-z0-9' -]{2,48})\b",
+            r"^is (?:the )?([a-z0-9' -]{2,48}) (?:to|in|on|at|near|behind|above|below|left|right)\b",
+            r"^what is (?:the )?([a-z0-9' -]{2,48}) (?:made of|doing|holding)\b",
+        ]
+        for pat in patterns:
+            m = re.search(pat, qn)
+            if not m:
+                continue
+            target = self._normalize_visual_target(m.group(1))
+            if target:
+                return target
+        return ""
+
+    def _synthesize_grounded_question(
+        self,
+        question_text: str,
+        meta: Dict[str, str],
+        target: str,
+        alts: List[str],
+    ) -> str:
+        qn = normalize_answer(str(question_text or ""), max_words=28)
+        t = target or self._normalize_visual_target(meta.get("visual_target", ""))
+        if not t:
+            t = self._extract_target_from_question(question_text)
+        task_card = normalize_answer(str(meta.get("task_card", "") or ""), max_words=2)
+        domains = self._parse_reasoning_domains(str(meta.get("reasoning_domains", "") or ""))
+
+        if t:
+            if (task_card == "c6") or qn.startswith("how many") or ("count" in qn):
+                return f"How many {t} are partially visible?"
+            if (task_card == "c5") or ("text" in qn) or ("word" in qn) or ("token" in qn):
+                return f"What exact text is visible on the {t}?"
+            if len(alts) >= 2:
+                a, b = alts[0], alts[1]
+                return f"For the {t}, which is more consistent with visible evidence: {a} or {b}?"
+            if "relation" in domains:
+                return f"What is immediately beside the {t}?"
+            return f"What detail on the {t} is most clearly visible?"
+
+        # Last-resort synthesized question when target extraction fails.
+        return "How many partially visible objects are near the center?"
+
+    def _solver_focus_hint(self, sample_idx: int) -> str:
+        hints = [
+            "global scene layout",
+            "fine text and symbols",
+            "occlusion boundaries",
+            "left-right spatial relations",
+            "counting visible instances",
+            "color and texture evidence",
+            "object interaction cues",
+        ]
+        idx = int(sample_idx) if sample_idx >= 0 else 0
+        return hints[idx % len(hints)]
+
+    def _compile_question_from_slots(
+        self,
+        question_text: str,
+        meta: Dict[str, str],
+    ) -> Tuple[str, bool, str]:
+        q = str(question_text or "").replace("\n", " ").strip()
+        if not bool(getattr(self.cfg, "proposer_slot_compiler_enabled", True)):
+            return q, True, "disabled"
+        strict = bool(getattr(self.cfg, "proposer_slot_compiler_strict", True))
+        target = self._normalize_visual_target(meta.get("visual_target", ""))
+        if not target:
+            target = self._extract_target_from_question(q)
+        qn = normalize_answer(q, max_words=28)
+        alts = []
+        for opt in self._split_two_answer_test(meta.get("two_answer_test", "")):
+            v = normalize_answer(opt, max_words=8)
+            if not v:
+                continue
+            if _BINARY_LOW_INFO_ALT_RE.match(v):
+                continue
+            if _TWO_ANSWER_META_ALT_RE.search(v):
+                continue
+            if _VAGUE_COUNT_ANSWER_RE.search(v):
+                continue
+            alts.append(v)
+        if len(alts) >= 2 and alts[0] == alts[1]:
+            alts = []
+
+        compiled = q
+        is_count = bool(
+            qn.startswith("how many")
+            or ("number of" in qn)
+            or ("count" in qn)
+        )
+        if target and is_count:
+            compiled = f"How many {target} are visible?"
+        elif target and len(alts) >= 2:
+            a, b = alts[0], alts[1]
+            if qn.startswith(("is ", "are ", "was ", "were ")):
+                compiled = f"Is the {target} {a} or {b}?"
+            else:
+                compiled = f"What is the {target}: {a} or {b}?"
+        elif target and qn.startswith("what color"):
+            compiled = f"What color is the {target}?"
+        elif target and qn.startswith("what pattern"):
+            compiled = f"What pattern is on the {target}?"
+        elif target and qn.startswith("which"):
+            compiled = f"Which {target} is correct?"
+
+        if strict and (not target):
+            repaired = self._synthesize_grounded_question(q, meta, target, alts).strip()
+            if repaired:
+                compiled = repaired
+            else:
+                return "", False, "target_missing_or_generic"
+
+        compiled = compiled.strip()
+        if compiled and not compiled.endswith("?"):
+            compiled = compiled + "?"
+
+        if strict and (self._is_easy_archetype_question(compiled) or (not self._is_objective_question(compiled))):
+            repaired = self._synthesize_grounded_question(q, meta, target, alts).strip()
+            if repaired:
+                compiled = repaired
+                if compiled and not compiled.endswith("?"):
+                    compiled = compiled + "?"
+
+        if not compiled:
+            return "", False, "empty_compiled"
+        if strict and self._is_easy_archetype_question(compiled):
+            return "", False, "easy_archetype"
+        if strict and (not self._is_objective_question(compiled)):
+            return "", False, "non_objective"
+        return compiled, True, "ok"
+
     def _split_two_answer_test(self, two_answer_test: str) -> List[str]:
         raw = str(two_answer_test or "").strip()
         if not raw:
@@ -601,7 +789,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         two_answer_raw = str(meta.get("two_answer_test", "") or "")
         visual_target = str(meta.get("visual_target", "") or "").strip()
         strategy_used = str(meta.get("strategy_used", "") or "").strip()
+        compiler_valid = str(meta.get("_compiler_valid", "1")).strip() != "0"
         question_template_literal = bool(_QUESTION_TEMPLATE_LITERAL_RE.search(q))
+        easy_archetype = self._is_easy_archetype_question(q)
+        generic_target = (self._normalize_visual_target(visual_target) == "")
         objective = 1.0 if self._is_objective_question(q) else 0.0
         has_domains = 1.0 if len(domains) >= min_domains else 0.0
         has_non_rel = 1.0 if any(d != "relation" for d in domains) else 0.0
@@ -658,8 +849,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             + 0.14 * two_answer_valid
             + 0.08 * has_target
         )
+        if not compiler_valid:
+            score -= 0.20
         if question_template_literal:
             score -= 0.20
+        if easy_archetype:
+            score -= 0.20
+        if generic_target:
+            score -= 0.12
         score = float(max(0.0, min(1.0, score)))
         min_score = max(0.0, min(1.0, float(getattr(self.cfg, "proposer_certificate_min_score", 0.55))))
         strict_struct = bool(getattr(self.cfg, "proposer_certificate_strict_struct", True))
@@ -674,6 +871,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 and has_target > 0.5
                 and (not question_template_literal)
                 and (not two_answer_meta_placeholder)
+                and (not easy_archetype)
+                and compiler_valid
+                and (not generic_target)
             ) else 0.0
         else:
             valid = 1.0 if score >= min_score else 0.0
@@ -689,6 +889,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "two_answer_placeholder": 1.0 if two_answer_placeholder else 0.0,
             "two_answer_meta_placeholder": 1.0 if two_answer_meta_placeholder else 0.0,
             "question_template_literal": 1.0 if question_template_literal else 0.0,
+            "easy_archetype": 1.0 if easy_archetype else 0.0,
+            "generic_target": 1.0 if generic_target else 0.0,
+            "compiler_valid": 1.0 if compiler_valid else 0.0,
         }
 
     def _is_low_info_majority_answer(self, question: str, majority_answer: str) -> bool:
@@ -710,6 +913,57 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             if _VAGUE_COUNT_ANSWER_RE.search(a) and (not _NUMERIC_ANSWER_RE.search(a)):
                 return True
         return False
+
+    def _classify_answer_family(self, question: str, majority_answer: str) -> str:
+        q = normalize_answer(str(question or ""), max_words=24)
+        a = normalize_answer(str(majority_answer or ""), max_words=12)
+        if not a:
+            return "empty"
+        if a == "ood":
+            return "ood"
+        if a in {"yes", "no"} or a.startswith("yes ") or a.startswith("no "):
+            return "yesno"
+        if _LOW_INFO_ANSWER_RE.match(a):
+            return "low_info"
+        if q.startswith("how many") or ("number of" in q) or ("count" in q):
+            if _VAGUE_COUNT_ANSWER_RE.search(a) and (not _NUMERIC_ANSWER_RE.search(a)):
+                return "count_vague"
+            if _NUMERIC_ANSWER_RE.search(a):
+                return "count_numeric"
+            return "count_other"
+        if "made of" in q or "material" in q:
+            return "material"
+        if "color" in q:
+            return "color"
+        if re.search(r"\b(left|right|above|below|top|bottom|inside|outside)\b", q):
+            return "direction"
+        return "other"
+
+    def _answer_family_penalty(self, family: str) -> float:
+        fam = str(family or "").strip().lower()
+        if not fam:
+            return 0.0
+        hist = list(getattr(self, "_answer_family_window", []))
+        rep_target = max(
+            0.0,
+            min(1.0, float(getattr(self.cfg, "proposer_answer_family_repeat_target", 0.25))),
+        )
+        rep_pen_weight = max(
+            0.0, float(getattr(self.cfg, "proposer_answer_family_repeat_penalty", 0.25))
+        )
+        repeat_pen = 0.0
+        if hist and rep_pen_weight > 0.0:
+            share = float(sum(1 for x in hist if x == fam)) / float(len(hist))
+            if share > rep_target:
+                repeat_pen = rep_pen_weight * min(
+                    1.0, (share - rep_target) / max(1e-6, 1.0 - rep_target)
+                )
+        trivial_pen = 0.0
+        if fam in {"yesno", "low_info", "ood", "count_vague", "material", "direction"}:
+            trivial_pen = max(
+                0.0, float(getattr(self.cfg, "proposer_trivial_archetype_penalty", 0.25))
+            )
+        return float(repeat_pen + trivial_pen)
 
     def _question_template_key(self, question: str) -> str:
         q = normalize_answer(str(question or ""), max_words=16)
@@ -1127,6 +1381,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._entropy_window = deque(maxlen=ent_window_size)
         self._difficulty_window = deque(maxlen=diff_window_size)
         self._question_template_window = deque(maxlen=qhist_window_size)
+        self._answer_family_window = deque(maxlen=qhist_window_size)
         self._strategy_window = deque(maxlen=strategy_window_size)
         self._proposer_anchor_replay = deque(maxlen=anchor_replay_size)
         self._contrastive_pos_replay = deque(maxlen=contrastive_replay_size)
@@ -1577,12 +1832,22 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         candidate_struct_valid_rate = 0.0
         all_easy_candidate_group = True
         spot_all_easy_low_entropy = False
+        strict_slot_compiler = bool(getattr(self.cfg, "proposer_slot_compiler_strict", True))
 
         for cand_idx, cand_q in enumerate(candidate_questions):
             cand_q = cand_q.replace("\n", " ").strip()
             if not cand_q:
                 continue
             cand_meta = candidate_infos[cand_idx] if cand_idx < len(candidate_infos) else {"text": cand_q}
+            cand_q_compiled, cand_compile_ok, cand_compile_reason = self._compile_question_from_slots(
+                cand_q,
+                cand_meta,
+            )
+            cand_meta = dict(cand_meta)
+            cand_meta["_compiler_valid"] = "1" if cand_compile_ok else "0"
+            cand_meta["_compiler_reason"] = cand_compile_reason
+            if cand_compile_ok and cand_q_compiled:
+                cand_q = cand_q_compiled
             cand_strategy = str(cand_meta.get("strategy_used", "") or "")
             cand_two_answer = str(cand_meta.get("two_answer_test", "") or "")
             cand_text_bonus = self._proposer_text_hardness_bonus(
@@ -1600,6 +1865,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             cand_cert = self._proposer_certificate_score(cand_q, cand_meta)
             cand_cert_score = float(cand_cert.get("score", 0.0))
             cand_cert_valid = bool(cand_cert.get("valid", 0.0) > 0.5)
+            if (not cand_compile_ok) and bool(getattr(self.cfg, "proposer_slot_compiler_strict", True)):
+                cand_cert_valid = False
+                cand_cert_score = min(cand_cert_score, 0.0)
             cert_weight = max(0.0, float(getattr(self.cfg, "proposer_certificate_weight", 0.75)))
             cert_entropy_floor = max(
                 0.0, min(1.0, float(getattr(self.cfg, "proposer_certificate_entropy_floor", 0.10)))
@@ -1609,7 +1877,6 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             cand_choice_mode = bool(
                 solver_use_forced_choice_from_proposer and cand_option_a and cand_option_b
             )
-            cand_solver_prompt = build_solver_prompt(cand_q)
             cand_outputs: List[str] = []
             cand_answers_raw: List[str] = []
             cand_answers_norm: List[str] = []
@@ -1629,9 +1896,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     if real_idx < len(solver_top_ps)
                     else float(self.cfg.top_p)
                 )
+                sc_prompt = build_solver_prompt(cand_q, focus_hint=self._solver_focus_hint(real_idx))
                 sc_out = self._generate(
                     image=image,
-                    prompt=cand_solver_prompt,
+                    prompt=sc_prompt,
                     adapter_name="default" if self.cfg.use_lora else None,
                     max_new_tokens=self.cfg.max_new_tokens_solver,
                     temperature=sc_temp,
@@ -1697,29 +1965,30 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             candidate_cert_list.append(cand_cert_score)
 
             # Always remember the best candidate seen so far.
-            if (
-                (cand_pick_score > best_pick_score)
-                or (
-                    abs(cand_pick_score - best_pick_score) <= 1e-8
-                    and (
-                        sc_entropy > best_entropy
-                        or (abs(sc_entropy - best_entropy) <= 1e-8 and sc_margin < best_margin)
+            if (not strict_slot_compiler) or cand_cert_valid:
+                if (
+                    (cand_pick_score > best_pick_score)
+                    or (
+                        abs(cand_pick_score - best_pick_score) <= 1e-8
+                        and (
+                            sc_entropy > best_entropy
+                            or (abs(sc_entropy - best_entropy) <= 1e-8 and sc_margin < best_margin)
+                        )
                     )
-                )
-            ):
-                best_pick_score = cand_pick_score
-                best_entropy = sc_entropy
-                best_margin = sc_margin
-                best_bucket = sc_bucket
-                best_question = cand_q
-                best_outputs = cand_outputs
-                best_answers_raw = cand_answers_raw
-                best_answers_norm = cand_answers_norm
-                best_pre_words = cand_pre_words
-                best_meta = dict(cand_meta)
-                best_choice_mode = cand_choice_mode
-                best_choice_option_a = cand_option_a
-                best_choice_option_b = cand_option_b
+                ):
+                    best_pick_score = cand_pick_score
+                    best_entropy = sc_entropy
+                    best_margin = sc_margin
+                    best_bucket = sc_bucket
+                    best_question = cand_q
+                    best_outputs = cand_outputs
+                    best_answers_raw = cand_answers_raw
+                    best_answers_norm = cand_answers_norm
+                    best_pre_words = cand_pre_words
+                    best_meta = dict(cand_meta)
+                    best_choice_mode = cand_choice_mode
+                    best_choice_option_a = cand_option_a
+                    best_choice_option_b = cand_option_b
 
             # Keep the best acceptable (non-easy, objective) candidate instead
             # of taking the first. This removes proposer ordering bias.
@@ -1841,9 +2110,20 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             selected_choice_option_b = best_valid_choice_option_b
         else:
             # No candidate cleared the gate — use the best-entropy one found.
-            question = best_question or candidate_questions[0].replace("\n", " ").strip()
+            fallback_used = True
+            if best_question:
+                question = best_question
+            else:
+                seed_q = candidate_questions[0].replace("\n", " ").strip() if candidate_questions else ""
+                seed_meta = candidate_infos[0] if candidate_infos else {}
+                seed_alts = self._split_two_answer_test(str(seed_meta.get("two_answer_test", "") or ""))
+                question = self._synthesize_grounded_question(seed_q, seed_meta, "", seed_alts)
+                if (not question) and seed_q:
+                    question = seed_q
+            if question and (not question.endswith("?")):
+                question = question + "?"
             if not question:
-                question = "What is the most salient object in the image?"
+                question = "How many partially visible objects are near the center?"
                 fallback_used = True
             solver_outputs = best_outputs
             solver_answers_raw = best_answers_raw
@@ -1886,9 +2166,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     if sample_idx < len(solver_top_ps)
                     else float(self.cfg.top_p)
                 )
+                sample_solver_prompt = build_solver_prompt(
+                    question,
+                    focus_hint=self._solver_focus_hint(sample_idx),
+                )
                 solver_out = self._generate(
                     image=image,
-                    prompt=solver_prompt,
+                    prompt=sample_solver_prompt,
                     adapter_name="default" if self.cfg.use_lora else None,
                     max_new_tokens=self.cfg.max_new_tokens_solver,
                     temperature=solver_temp,
@@ -1915,23 +2199,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         template_fallback_used = False
 
-        solver_choice_mode = bool(
-            selected_choice_mode and selected_choice_option_a and selected_choice_option_b
-        )
-        solver_vote_labels: List[str] = []
-        if solver_choice_mode:
-            for _raw in solver_answers_raw:
-                _lab = self._parse_forced_choice_answer(
-                    _raw,
-                    selected_choice_option_a,
-                    selected_choice_option_b,
-                )
-                solver_vote_labels.append(_lab if _lab else "ood")
-        else:
-            solver_vote_labels = list(solver_answers_norm)
-
+        solver_choice_mode = False
+        solver_vote_labels: List[str] = list(solver_answers_norm)
         raw_majority_answer, _ = majority_vote(solver_answers_norm)
-
         maj_answer_vote, maj_count = majority_vote(solver_vote_labels)
         maj_frac = maj_count / float(self.cfg.num_solver_samples)
         hist: Dict[str, int] = {}
@@ -1940,15 +2210,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         probs = [count / float(self.cfg.num_solver_samples) for count in hist.values()]
         entropy_nats = shannon_entropy_nats(probs)
 
-        if solver_choice_mode:
-            if maj_answer_vote == "a":
-                maj_answer = selected_choice_option_a
-            elif maj_answer_vote == "b":
-                maj_answer = selected_choice_option_b
-            else:
-                maj_answer = "ood"
-        else:
-            maj_answer = maj_answer_vote
+        maj_answer = maj_answer_vote
 
         sorted_probs = sorted(probs, reverse=True)
         p1 = float(sorted_probs[0]) if sorted_probs else 0.0
@@ -2173,6 +2435,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 0.0,
                 float(getattr(self.cfg, "proposer_low_info_majority_penalty", 0.30)),
             )
+        proposer_answer_family = self._classify_answer_family(
+            question,
+            raw_majority_answer,
+        )
+        proposer_answer_family_penalty = self._answer_family_penalty(
+            proposer_answer_family
+        )
+        proposer_reward -= proposer_answer_family_penalty
 
         # Rejection: non-objective or too-easy bucket.
         easy_question_detected = easy_solver_case
@@ -2226,6 +2496,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             elif difficulty_bucket_observed == "easy":
                 if _qtoken_set:
                     self._contrastive_neg_replay.append(_qtoken_set)
+        if proposer_answer_family:
+            self._answer_family_window.append(proposer_answer_family)
         _strategy_key = self._normalize_strategy_key(chosen_strategy_used)
         if _strategy_key:
             self._strategy_window.append(_strategy_key)
@@ -2524,11 +2796,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                     ),
                                 )
                                 _extra_q = str(_extra_best.get("text", "")).replace("\n", " ").strip()
+                                _extra_q_compiled, _extra_compile_ok, _extra_compile_reason = (
+                                    self._compile_question_from_slots(_extra_q, _extra_best)
+                                )
+                                _extra_best = dict(_extra_best)
+                                _extra_best["_compiler_valid"] = "1" if _extra_compile_ok else "0"
+                                _extra_best["_compiler_reason"] = _extra_compile_reason
+                                if _extra_compile_ok and _extra_q_compiled:
+                                    _extra_q = _extra_q_compiled
                                 _extra_strategy_used = str(_extra_best.get("strategy_used", "") or "")
                                 _extra_two_answer_test = str(_extra_best.get("two_answer_test", "") or "")
                                 _extra_cert = self._proposer_certificate_score(_extra_q, _extra_best)
                                 _extra_cert_score = float(_extra_cert.get("score", 0.0))
                                 _extra_cert_valid = float(_extra_cert.get("valid", 0.0))
+                                if (not _extra_compile_ok) and bool(
+                                    getattr(self.cfg, "proposer_slot_compiler_strict", True)
+                                ):
+                                    _extra_cert_valid = 0.0
+                                    _extra_cert_score = min(_extra_cert_score, 0.0)
 
                             if _score_extras and _extra_q:
                                 # ── Score extra candidate with configured solver spot-check ──
@@ -2541,9 +2826,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                         and _extra_opt_a
                                         and _extra_opt_b
                                     )
-                                    _extra_solver_prompt = build_solver_prompt(_extra_q)
                                     _extra_answers_norm: List[str] = []
                                     _extra_vote_labels: List[str] = []
+                                    _extra_raw_majority = ""
                                     # Offset extras spot-check to use hotter solver
                                     # temperatures. With schedule [0.5..2.5] and 3
                                     # spot-check samples, indices [0,1,2] give temps
@@ -2569,6 +2854,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                             float(solver_top_ps[_real_idx])
                                             if _real_idx < len(solver_top_ps)
                                             else float(self.cfg.top_p)
+                                        )
+                                        _extra_solver_prompt = build_solver_prompt(
+                                            _extra_q,
+                                            focus_hint=self._solver_focus_hint(_real_idx),
                                         )
                                         try:
                                             _sc_out = self._generate(
@@ -2596,6 +2885,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                             pass
 
                                     if _extra_answers_norm:
+                                        _extra_raw_majority, _ = majority_vote(_extra_answers_norm)
                                         _extra_hist: Dict[str, int] = {}
                                         for _ans in _extra_vote_labels:
                                             _extra_hist[_ans] = _extra_hist.get(_ans, 0) + 1
@@ -2750,6 +3040,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                     )
                                 if _extra_cert_valid < 0.5:
                                     _extra_reward -= 0.10
+                                _extra_answer_family = self._classify_answer_family(
+                                    _extra_q,
+                                    _extra_raw_majority,
+                                )
+                                _extra_reward -= self._answer_family_penalty(_extra_answer_family)
                                 _extra_reward -= _extra_repeat_penalty
                                 _extra_reward -= _extra_cooldown_penalty
 
@@ -3021,6 +3316,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_strategy_quota_bonus": proposer_strategy_quota_bonus,
             "proposer_anchor_bonus": proposer_anchor_bonus,
             "proposer_contrastive_replay_bonus": proposer_contrastive_replay_bonus,
+            "proposer_answer_family": proposer_answer_family,
+            "proposer_answer_family_penalty": proposer_answer_family_penalty,
             "proposer_repetition_penalty": proposer_repetition_penalty,
             "proposer_cooldown_penalty": proposer_cooldown_penalty,
             "proposer_easy_constraint_penalty": easy_constraint_penalty,
@@ -3159,6 +3456,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "proposer_strategy_quota_bonus": proposer_strategy_quota_bonus,
                 "proposer_anchor_bonus": proposer_anchor_bonus,
                 "proposer_contrastive_replay_bonus": proposer_contrastive_replay_bonus,
+                "proposer_answer_family": proposer_answer_family,
+                "proposer_answer_family_penalty": proposer_answer_family_penalty,
                 "proposer_repetition_penalty": proposer_repetition_penalty,
                 "proposer_cooldown_penalty": proposer_cooldown_penalty,
                 "proposer_easy_constraint_penalty": easy_constraint_penalty,
@@ -3291,6 +3590,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._update_metric("u_proposer_strategy_bonus", self._dist_mean(proposer_strategy_quota_bonus))
         self._update_metric("u_proposer_anchor_bonus", self._dist_mean(proposer_anchor_bonus))
         self._update_metric("u_proposer_contrastive_bonus", self._dist_mean(proposer_contrastive_replay_bonus))
+        self._update_metric(
+            "u_proposer_answer_family_penalty",
+            self._dist_mean(proposer_answer_family_penalty),
+        )
         self._update_metric("u_proposer_repeat_penalty", self._dist_mean(proposer_repetition_penalty))
         self._update_metric("u_proposer_cooldown_penalty", self._dist_mean(proposer_cooldown_penalty))
         self._update_metric("u_proposer_easy_penalty", self._dist_mean(easy_constraint_penalty))
@@ -3340,6 +3643,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         state["unified_entropy_window"] = list(self._entropy_window)
         state["unified_difficulty_window"] = list(self._difficulty_window)
         state["unified_question_template_window"] = list(self._question_template_window)
+        state["unified_answer_family_window"] = list(self._answer_family_window)
         state["unified_strategy_window"] = list(self._strategy_window)
         state["unified_proposer_anchor_replay"] = list(self._proposer_anchor_replay)
         state["unified_contrastive_pos_replay"] = [sorted(list(x)) for x in self._contrastive_pos_replay]
@@ -3415,6 +3719,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     k = str(key).strip()
                     if k:
                         self._question_template_window.append(k)
+            answer_family_window = state.get("unified_answer_family_window")
+            if isinstance(answer_family_window, list):
+                self._answer_family_window.clear()
+                max_keep = int(self._answer_family_window.maxlen or len(answer_family_window))
+                for key in answer_family_window[-max_keep:]:
+                    k = str(key).strip().lower()
+                    if k:
+                        self._answer_family_window.append(k)
             strategy_window = state.get("unified_strategy_window")
             if isinstance(strategy_window, list):
                 self._strategy_window.clear()
@@ -3530,6 +3842,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 self._entropy_window.clear()
                 self._difficulty_window.clear()
                 self._question_template_window.clear()
+                self._answer_family_window.clear()
                 self._strategy_window.clear()
                 self._proposer_anchor_replay.clear()
                 self._contrastive_pos_replay.clear()
