@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,7 +51,6 @@ class DatasetSpec:
     split: str = "train"
     fallback_splits: Tuple[str, ...] = ()
     config_name: Optional[str] = None
-    prefer_streaming: bool = True
 
 
 PRESET_SPECS: Dict[str, DatasetSpec] = {
@@ -62,7 +60,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         dataset_ids=("ahmed-masry/ChartQA",),
         domain="chart_math",
         split="train",
-        prefer_streaming=True,
+
     ),
     "docvqa": DatasetSpec(
         alias="docvqa",
@@ -71,7 +69,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         config_name="DocVQA",
         split="validation",
         fallback_splits=("test",),
-        prefer_streaming=True,
+
     ),
     "sa1b": DatasetSpec(
         alias="sa1b",
@@ -84,14 +82,14 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         ),
         domain="natural",
         split="train",
-        prefer_streaming=True,
+
     ),
     "laion_coco": DatasetSpec(
         alias="laion_coco",
         dataset_ids=("laion/laion-coco",),
         domain="natural",
         split="train",
-        prefer_streaming=True,
+
     ),
     # Optional OCR-heavy domain. Some mirrors vary; tries IDs in order.
     "textvqa": DatasetSpec(
@@ -103,7 +101,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         ),
         domain="ocr",
         split="train",
-        prefer_streaming=True,
+
     ),
     # Optional chart/math domain expansion.
     "mathvista": DatasetSpec(
@@ -114,7 +112,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         ),
         domain="chart_math",
         split="train",
-        prefer_streaming=True,
+
     ),
     # Optional compositional reasoning visuals.
     "gqa": DatasetSpec(
@@ -126,14 +124,14 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         ),
         domain="compositional",
         split="train",
-        prefer_streaming=True,
+
     ),
     "coco10k": DatasetSpec(
         alias="coco10k",
         dataset_ids=("astro21/coco-caption-train-split-10k",),
         domain="natural",
         split="train",
-        prefer_streaming=True,
+
     ),
 }
 
@@ -191,21 +189,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=42,
         help="Random seed for deterministic subset selection.",
-    )
-    parser.add_argument(
-        "--streaming_only",
-        action="store_true",
-        default=True,
-        help=(
-            "Use HuggingFace streaming only (default). "
-            "Prevents full-dataset materialization on local disk."
-        ),
-    )
-    parser.add_argument(
-        "--allow_non_streaming",
-        dest="streaming_only",
-        action="store_false",
-        help="Allow non-streaming fallback (may download full dataset).",
     )
     parser.add_argument(
         "--shuffle_buffer",
@@ -464,36 +447,20 @@ def extract_image(record: Dict) -> Tuple[Optional[Image.Image], Optional[str]]:
 
 
 def iter_records(
-    ds,
+    ds: IterableDataset,
     *,
     seed: int,
     max_records: int,
     shuffle_buffer: int,
-    streaming_only: bool,
 ) -> Iterator[Dict]:
-    if isinstance(ds, IterableDataset):
-        buffer_size = max(1_000, min(max_records, int(shuffle_buffer)))
-        shuffled = ds.shuffle(seed=seed, buffer_size=buffer_size)
-        for idx, row in enumerate(shuffled):
-            if idx >= max_records:
-                break
-            yield row
-        return
-    if isinstance(ds, Dataset):
-        if streaming_only:
-            raise RuntimeError(
-                "Received non-streaming Dataset while --streaming_only is enabled. "
-                "This would risk full local download."
-            )
-        total = len(ds)
-        indices = list(range(total))
-        rng = random.Random(seed)
-        rng.shuffle(indices)
-        for idx in indices[: max_records]:
-            yield ds[int(idx)]
-        return
-    # Unknown dataset type; best effort sequential iteration.
-    for idx, row in enumerate(ds):
+    """Iterate over a streaming IterableDataset with a bounded shuffle buffer.
+
+    The buffer holds at most `shuffle_buffer` rows in RAM at once — it is
+    NOT a full materialisation of the dataset.  Records stream in one shard
+    at a time from HF Hub and are evicted from the buffer as they are yielded.
+    """
+    buffer_size = max(1_000, min(max_records, int(shuffle_buffer)))
+    for idx, row in enumerate(ds.shuffle(seed=seed, buffer_size=buffer_size)):
         if idx >= max_records:
             break
         yield row
@@ -508,11 +475,8 @@ def save_subset_for_spec(
     strict: bool,
     max_scan_multiplier: int,
     shuffle_buffer: int,
-    streaming_only: bool,
 ) -> Dict[str, object]:
-    ds, dataset_id, streaming, used_split = load_with_fallback(
-        spec, streaming_only=streaming_only
-    )
+    ds, dataset_id, used_split = load_with_fallback(spec)
     images_dir = output_root / "images" / spec.alias
     manifests_dir = output_root / "manifests"
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -530,7 +494,6 @@ def save_subset_for_spec(
             seed=seed,
             max_records=max_scan,
             shuffle_buffer=shuffle_buffer,
-            streaming_only=streaming_only,
         ):
             scanned += 1
             img, key = extract_image(record)
@@ -549,7 +512,7 @@ def save_subset_for_spec(
                         "alias": spec.alias,
                         "dataset_id": dataset_id,
                         "split": used_split,
-                        "streaming": streaming,
+                        "streaming": True,
                         "image_key": key,
                         "saved_index": saved,
                         "image_relpath": str(Path("images") / spec.alias / out_name),
@@ -573,7 +536,7 @@ def save_subset_for_spec(
         "domain": spec.domain,
         "dataset_id": dataset_id,
         "split": used_split,
-        "streaming": streaming,
+        "streaming": True,
         "image_key_detected": image_key,
         "saved": saved,
         "target": samples_target,
@@ -621,8 +584,7 @@ def main() -> int:
         print(f"[download] Target per dataset: {args.samples_per_dataset}")
     print(f"[download] Datasets: {', '.join(aliases)}")
     print(
-        "[download] Mode: "
-        f"streaming_only={args.streaming_only} "
+        "[download] Mode: streaming=True (always) "
         f"shuffle_buffer={args.shuffle_buffer} "
         f"max_scan_multiplier={args.max_scan_multiplier}"
     )
@@ -646,7 +608,6 @@ def main() -> int:
                 strict=args.strict,
                 max_scan_multiplier=args.max_scan_multiplier,
                 shuffle_buffer=args.shuffle_buffer,
-                streaming_only=args.streaming_only,
             )
             summary.append(result)
             print(
@@ -670,7 +631,7 @@ def main() -> int:
                 "alias_targets": alias_targets,
                 "domain_distribution": args.domain_distribution,
                 "strict": args.strict,
-                "streaming_only": args.streaming_only,
+                "streaming": True,
                 "shuffle_buffer": args.shuffle_buffer,
                 "max_scan_multiplier": args.max_scan_multiplier,
                 "results": summary,

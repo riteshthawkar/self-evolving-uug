@@ -109,7 +109,6 @@ class DatasetSpec:
     split: str = "train"
     fallback_splits: Tuple[str, ...] = ()
     config_name: Optional[str] = None
-    prefer_streaming: bool = True
     # Human-readable rationale (for --list flag)
     rationale: str = ""
 
@@ -126,7 +125,6 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         ),
         domain="relational",
         split="train",
-        prefer_streaming=True,
         rationale=(
             "108k images, avg 35 objects + 21 pairwise relations + dense attributes. "
             "Best single dataset for H1 (counting), H3 (attribute), H7 (composition). "
@@ -144,7 +142,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         domain="multi_object",
         split="train",
         fallback_splits=("validation",),
-        prefer_streaming=True,
+
         rationale=(
             "Open Images V7 — crowded real-world scenes with multi-label annotations. "
             "Rich occlusion, stacking, and interaction → H2 (spatial), H4 (occlusion). "
@@ -161,7 +159,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         domain="commonsense",
         split="train",
         fallback_splits=("val",),
-        prefer_streaming=True,
+
         rationale=(
             "A-OKVQA: commonsense + knowledge-grounded QA over complex real-world images. "
             "Questions require causal (H6) and compositional (H7) reasoning. "
@@ -179,7 +177,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         domain="relational",
         split="train",
         fallback_splits=("test",),
-        prefer_streaming=True,
+
         rationale=(
             "Flickr30k Entities: rich multi-person outdoor scenes with grounded NPs. "
             "5 reference captions per image → spatial + relational language. "
@@ -196,7 +194,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         domain="natural",
         split="val",
         fallback_splits=("train",),
-        prefer_streaming=True,
+
         rationale=(
             "NoCaps out-of-domain COCO captioning benchmark — contains rare objects "
             "and uncommon configurations (in-domain, near-domain, out-of-domain). "
@@ -213,7 +211,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         domain="relational",
         split="train",
         fallback_splits=("test",),
-        prefer_streaming=True,
+
         rationale=(
             "DOCCI (Descriptions of Connected and Contrasting Images) — "
             "purposely designed for fine-grained spatial, attribute, and "
@@ -233,7 +231,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         domain="spatial",
         split="test",
         fallback_splits=("train", "val"),
-        prefer_streaming=True,
+
         rationale=(
             "RealWorldQA: spatial reasoning in real-world photos (driving, indoor, outdoor). "
             "DIRECT alignment with the RealWorldQA eval benchmark. "
@@ -250,7 +248,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         domain="spatial",
         split="train",
         fallback_splits=("test",),
-        prefer_streaming=True,
+
         rationale=(
             "Visual Spatial Reasoning (VSR): 65 spatial relation types "
             "(left-of, behind, above, …) over real-world images. "
@@ -267,7 +265,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         ),
         domain="multi_object",
         split="train",
-        prefer_streaming=True,
+
         rationale=(
             "SA-1B (SAM) images from complex crowded scenes — markets, streets, "
             "kitchens, workshops. We use same IDs as download_benchmark_10k but "
@@ -284,7 +282,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         ),
         domain="multi_object",
         split="train",
-        prefer_streaming=True,
+
         rationale=(
             "MSCOCO train split filtered to images with ≥5 annotations "
             "(already in use but we apply tighter filtering here). "
@@ -300,7 +298,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         ),
         domain="spatial_document",
         split="train",
-        prefer_streaming=True,
+
         rationale=(
             "InfographicVQA: infographics with spatial layout reasoning "
             "(arrows, tables, timelines). Distinct from chart-math domain. "
@@ -321,7 +319,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         split="train_balanced",
         fallback_splits=("train", "testdev"),
         config_name=None,
-        prefer_streaming=True,
+
         rationale=(
             "GQA balanced split: compositional scene-graph questions. "
             "You already use GQA but the BALANCED split has harder questions "
@@ -337,7 +335,7 @@ PRESET_SPECS: Dict[str, DatasetSpec] = {
         ),
         domain="spatial",
         split="train",
-        prefer_streaming=True,
+
         rationale=(
             "RefCOCO/RefCOCO+: grounded referring expression images. "
             "The underlying COCO images contain complex multi-object scenes. "

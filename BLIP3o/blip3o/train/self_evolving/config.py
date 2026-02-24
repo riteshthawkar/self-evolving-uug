@@ -49,7 +49,7 @@ class UnderstandingSelfEvolvingConfig:
     # Reward shaping
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
-    solver_use_forced_choice_from_proposer: bool = True
+    solver_use_forced_choice_from_proposer: bool = False
     solver_temp_min: float = 0.4
     solver_temp_max: float = 2.6
     solver_top_p_min: float = 0.35
@@ -78,6 +78,11 @@ class UnderstandingSelfEvolvingConfig:
     solver_unsolvable_maj_threshold: float = 0.20  # majority fraction at or below this → question treated as unsolvable
     proposer_non_objective_penalty: float = 0.20  # subtract from proposer reward when question is subjective/open-ended
     proposer_low_info_majority_penalty: float = 0.50
+    proposer_slot_compiler_enabled: bool = True
+    proposer_slot_compiler_strict: bool = True
+    proposer_trivial_archetype_penalty: float = 0.25
+    proposer_answer_family_repeat_penalty: float = 0.25
+    proposer_answer_family_repeat_target: float = 0.25
     proposer_require_objective: bool = True
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
@@ -390,7 +395,7 @@ class GenerationSelfEvolvingConfig:
     # Reward shaping
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
-    solver_use_forced_choice_from_proposer: bool = True
+    solver_use_forced_choice_from_proposer: bool = False
     solver_temp_min: float = 0.4
     solver_temp_max: float = 2.6
     solver_top_p_min: float = 0.35
@@ -419,6 +424,11 @@ class GenerationSelfEvolvingConfig:
     solver_unsolvable_maj_threshold: float = 0.20
     proposer_non_objective_penalty: float = 0.20
     proposer_low_info_majority_penalty: float = 0.50
+    proposer_slot_compiler_enabled: bool = True
+    proposer_slot_compiler_strict: bool = True
+    proposer_trivial_archetype_penalty: float = 0.25
+    proposer_answer_family_repeat_penalty: float = 0.25
+    proposer_answer_family_repeat_target: float = 0.25
     proposer_require_objective: bool = True
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
