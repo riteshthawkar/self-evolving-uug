@@ -78,6 +78,30 @@ class UnderstandingSelfEvolvingConfig:
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
     proposer_spot_check_samples: int = 3  # 3 samples give ternary entropy for candidate selection
+    # Reasoning-first proposer schema validation.
+    proposer_reasoning_min_domains: int = 2
+    proposer_reasoning_require_non_relation: bool = True
+    proposer_reasoning_min_chain_words: int = 8
+    proposer_certificate_enabled: bool = True
+    proposer_certificate_min_score: float = 0.55
+    proposer_certificate_weight: float = 0.75
+    # Contrastive self-consistency replay (no extra model calls).
+    proposer_contrastive_replay_enabled: bool = True
+    proposer_contrastive_replay_size: int = 256
+    proposer_contrastive_pos_bonus: float = 0.08
+    proposer_contrastive_neg_penalty: float = 0.08
+    # Early fail-fast health checks to stop collapsed runs quickly.
+    proposer_early_failfast_enabled: bool = True
+    proposer_early_failfast_stop: bool = True
+    proposer_early_step1: int = 12
+    proposer_early_step2: int = 20
+    proposer_early_candidate_non_easy_min: float = 0.25
+    proposer_early_all_easy_rate_max: float = 0.70
+    proposer_early_reward_clipped_rate_max: float = 0.60
+    proposer_early_selected_non_easy_min: float = 0.15
+    proposer_early_solver_updates_min: int = 2
+    proposer_early_collapse_streak_max: int = 5
+    proposer_health_window_size: int = 256
     solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
@@ -379,6 +403,30 @@ class GenerationSelfEvolvingConfig:
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
     proposer_spot_check_samples: int = 3  # 3 samples give ternary entropy for candidate selection
+    # Reasoning-first proposer schema validation.
+    proposer_reasoning_min_domains: int = 2
+    proposer_reasoning_require_non_relation: bool = True
+    proposer_reasoning_min_chain_words: int = 8
+    proposer_certificate_enabled: bool = True
+    proposer_certificate_min_score: float = 0.55
+    proposer_certificate_weight: float = 0.75
+    # Contrastive self-consistency replay (no extra model calls).
+    proposer_contrastive_replay_enabled: bool = True
+    proposer_contrastive_replay_size: int = 256
+    proposer_contrastive_pos_bonus: float = 0.08
+    proposer_contrastive_neg_penalty: float = 0.08
+    # Early fail-fast health checks to stop collapsed runs quickly.
+    proposer_early_failfast_enabled: bool = True
+    proposer_early_failfast_stop: bool = True
+    proposer_early_step1: int = 12
+    proposer_early_step2: int = 20
+    proposer_early_candidate_non_easy_min: float = 0.25
+    proposer_early_all_easy_rate_max: float = 0.70
+    proposer_early_reward_clipped_rate_max: float = 0.60
+    proposer_early_selected_non_easy_min: float = 0.15
+    proposer_early_solver_updates_min: int = 2
+    proposer_early_collapse_streak_max: int = 5
+    proposer_health_window_size: int = 256
     solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
