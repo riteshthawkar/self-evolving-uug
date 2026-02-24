@@ -40,9 +40,9 @@ MAX_LATENT_SIZE="${MAX_LATENT_SIZE:-64}"
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
   STAGE_ARGS=(
-    --disable_proposer_require_objective
+    --proposer_require_objective
     --disable_acceptance_require_non_easy
-    --proposer_non_objective_penalty 0.0
+    --proposer_non_objective_penalty 0.20
     --rejected_question_penalty 0.25
     --proposer_entropy_mu 0.90
     --proposer_entropy_sigma 0.30
