@@ -88,6 +88,38 @@ _TWO_ANSWER_SPLIT_RE = re.compile(
     r"\s*(?:/|\||;|,|\bvs\.?\b|\bor\b)\s*",
     flags=re.IGNORECASE,
 )
+_REASONING_DOMAIN_SPLIT_RE = re.compile(
+    r"\s*(?:,|/|\||;|->|\+|\band\b)\s*",
+    flags=re.IGNORECASE,
+)
+_DOMAIN_ALIAS_TO_CANONICAL = {
+    "d1": "relation",
+    "relation": "relation",
+    "spatial": "relation",
+    "multi-hop-relation": "relation",
+    "d2": "action",
+    "action": "action",
+    "temporal": "action",
+    "event-phase": "action",
+    "d3": "physics",
+    "physics": "physics",
+    "mechanics": "physics",
+    "support": "physics",
+    "d4": "behavior",
+    "behavior": "behavior",
+    "intent": "behavior",
+    "agent-intent": "behavior",
+    "d5": "commonsense",
+    "commonsense": "commonsense",
+    "world-knowledge": "commonsense",
+    "realworld": "commonsense",
+    "d6": "scientific",
+    "scientific": "scientific",
+    "material": "scientific",
+    "d7": "causal",
+    "causal": "causal",
+    "counterfactual": "causal",
+}
 
 
 def _quantile(values: List[float], q: float) -> float:
@@ -266,6 +298,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             candidates.append(
                 {
                     "text": q_text,
+                    "task_card": (strip_tags(block, "task_card") or "").strip(),
+                    "reasoning_domains": (strip_tags(block, "reasoning_domains") or "").strip(),
+                    "reasoning_chain": (strip_tags(block, "reasoning_chain") or "").strip(),
                     "strategy_used": (strip_tags(block, "strategy_used") or "").strip(),
                     "two_answer_test": (strip_tags(block, "two_answer_test") or "").strip(),
                     "visual_target": (strip_tags(block, "visual_target") or "").strip(),
@@ -288,6 +323,124 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             if v and v not in out:
                 out.append(v)
         return out[:4]
+
+    def _parse_reasoning_domains(self, raw: str) -> List[str]:
+        text = str(raw or "").strip().lower()
+        if not text:
+            return []
+        parts = _REASONING_DOMAIN_SPLIT_RE.split(text)
+        out: List[str] = []
+        for p in parts:
+            key = normalize_answer(p, max_words=4).replace(" ", "")
+            if not key:
+                continue
+            canonical = _DOMAIN_ALIAS_TO_CANONICAL.get(key, "")
+            if canonical and canonical not in out:
+                out.append(canonical)
+        return out
+
+    def _question_token_set(self, question: str) -> set:
+        q = normalize_answer(str(question or ""), max_words=32)
+        if not q:
+            return set()
+        toks = [t for t in re.findall(r"[a-z0-9]+", q) if len(t) > 2]
+        stop = {
+            "what",
+            "which",
+            "where",
+            "when",
+            "who",
+            "many",
+            "much",
+            "color",
+            "type",
+            "kind",
+            "this",
+            "that",
+            "there",
+            "with",
+            "from",
+            "about",
+            "into",
+            "than",
+            "then",
+        }
+        return {t for t in toks if t not in stop}
+
+    def _jaccard_similarity(self, a: set, b: set) -> float:
+        if not a or not b:
+            return 0.0
+        inter = float(len(a.intersection(b)))
+        union = float(len(a.union(b)))
+        if union <= 0.0:
+            return 0.0
+        return inter / union
+
+    def _contrastive_replay_adjustment(self, question: str) -> float:
+        if not bool(getattr(self.cfg, "proposer_contrastive_replay_enabled", True)):
+            return 0.0
+        qset = self._question_token_set(question)
+        if not qset:
+            return 0.0
+        pos_bonus = max(0.0, float(getattr(self.cfg, "proposer_contrastive_pos_bonus", 0.08)))
+        neg_pen = max(0.0, float(getattr(self.cfg, "proposer_contrastive_neg_penalty", 0.08)))
+        max_pos = 0.0
+        max_neg = 0.0
+        for item in self._contrastive_pos_replay:
+            max_pos = max(max_pos, self._jaccard_similarity(qset, item))
+        for item in self._contrastive_neg_replay:
+            max_neg = max(max_neg, self._jaccard_similarity(qset, item))
+        return (pos_bonus * max_pos) - (neg_pen * max_neg)
+
+    def _proposer_certificate_score(self, question: str, meta: Dict[str, str]) -> Dict[str, float]:
+        if not bool(getattr(self.cfg, "proposer_certificate_enabled", True)):
+            return {
+                "score": 1.0,
+                "valid": 1.0,
+                "domains": 1.0,
+                "non_relation": 1.0,
+                "chain": 1.0,
+                "two_answer": 1.0,
+                "target": 1.0,
+            }
+
+        q = str(question or "").strip()
+        domains = self._parse_reasoning_domains(meta.get("reasoning_domains", ""))
+        min_domains = max(1, int(getattr(self.cfg, "proposer_reasoning_min_domains", 2)))
+        require_non_rel = bool(getattr(self.cfg, "proposer_reasoning_require_non_relation", True))
+        min_chain_words = max(1, int(getattr(self.cfg, "proposer_reasoning_min_chain_words", 8)))
+        chain_words = len(str(meta.get("reasoning_chain", "") or "").split())
+        two_ans = self._split_two_answer_test(meta.get("two_answer_test", ""))
+        visual_target = str(meta.get("visual_target", "") or "").strip()
+        objective = 1.0 if self._is_objective_question(q) else 0.0
+        has_domains = 1.0 if len(domains) >= min_domains else 0.0
+        has_non_rel = 1.0 if any(d != "relation" for d in domains) else 0.0
+        if not require_non_rel:
+            has_non_rel = 1.0
+        has_chain = 1.0 if chain_words >= min_chain_words else 0.0
+        two_answer_valid = 1.0 if len(two_ans) >= 2 and two_ans[0] != two_ans[1] else 0.0
+        has_target = 1.0 if len(visual_target) >= 3 else 0.0
+
+        score = (
+            0.24 * objective
+            + 0.20 * has_domains
+            + 0.18 * has_non_rel
+            + 0.16 * has_chain
+            + 0.14 * two_answer_valid
+            + 0.08 * has_target
+        )
+        score = float(max(0.0, min(1.0, score)))
+        min_score = max(0.0, min(1.0, float(getattr(self.cfg, "proposer_certificate_min_score", 0.55))))
+        valid = 1.0 if score >= min_score else 0.0
+        return {
+            "score": score,
+            "valid": valid,
+            "domains": has_domains,
+            "non_relation": has_non_rel,
+            "chain": has_chain,
+            "two_answer": two_answer_valid,
+            "target": has_target,
+        }
 
     def _question_template_key(self, question: str) -> str:
         q = normalize_answer(str(question or ""), max_words=16)
@@ -627,13 +780,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         qhist_window_size = max(32, int(getattr(self.cfg, "proposer_question_history_size", 256)))
         strategy_window_size = max(32, int(getattr(self.cfg, "proposer_strategy_window_size", 256)))
         anchor_replay_size = max(16, int(getattr(self.cfg, "proposer_anchor_replay_size", 256)))
+        contrastive_replay_size = max(
+            32, int(getattr(self.cfg, "proposer_contrastive_replay_size", 256))
+        )
         std_window_size = max(8, int(getattr(self.cfg, "collapse_std_window_size", 32)))
+        health_window_size = max(32, int(getattr(self.cfg, "proposer_health_window_size", 256)))
         self._entropy_window = deque(maxlen=ent_window_size)
         self._difficulty_window = deque(maxlen=diff_window_size)
         self._question_template_window = deque(maxlen=qhist_window_size)
         self._strategy_window = deque(maxlen=strategy_window_size)
         self._proposer_anchor_replay = deque(maxlen=anchor_replay_size)
+        self._contrastive_pos_replay = deque(maxlen=contrastive_replay_size)
+        self._contrastive_neg_replay = deque(maxlen=contrastive_replay_size)
         self._grpo_std_window = deque(maxlen=std_window_size)
+        self._candidate_non_easy_window = deque(maxlen=health_window_size)
+        self._all_easy_group_window = deque(maxlen=health_window_size)
+        self._proposer_reward_clipped_window = deque(maxlen=health_window_size)
+        self._selected_non_easy_window = deque(maxlen=health_window_size)
+        self._solver_update_applied_window = deque(maxlen=health_window_size)
         self._proposer_bucket_baselines = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
         self._easy_rate_ema = 0.0
         self._easy_lagrange_lambda = 0.0
@@ -763,6 +927,117 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "sampling_weights": weights_for_sampling,
         }
 
+    def _mean_recent(self, values: deque, count: int) -> float:
+        if not values:
+            return 0.0
+        n = max(1, min(int(count), len(values)))
+        tail = list(values)[-n:]
+        return float(sum(float(v) for v in tail) / float(n))
+
+    def _sum_recent(self, values: deque, count: int) -> float:
+        if not values:
+            return 0.0
+        n = max(1, min(int(count), len(values)))
+        tail = list(values)[-n:]
+        return float(sum(float(v) for v in tail))
+
+    def _early_failfast_state(self, step: int, collapse_state: Dict[str, float]) -> Dict[str, float]:
+        enabled = bool(getattr(self.cfg, "proposer_early_failfast_enabled", True))
+        state: Dict[str, float] = {
+            "enabled": 1.0 if enabled else 0.0,
+            "u_step": 0.0,
+            "stage1_pass": 1.0,
+            "stage2_pass": 1.0,
+            "stage1_active": 0.0,
+            "stage2_active": 0.0,
+            "candidate_non_easy_rate": 0.0,
+            "all_easy_group_rate": 0.0,
+            "reward_clipped_rate": 0.0,
+            "selected_non_easy_rate": 0.0,
+            "solver_update_applied_count": 0.0,
+            "triggered": 0.0,
+        }
+        if not enabled:
+            return state
+
+        u_step = self._phase_local_step_index(step, "understanding")
+        state["u_step"] = float(max(0, u_step))
+        if u_step <= 0:
+            return state
+
+        step1 = max(1, int(getattr(self.cfg, "proposer_early_step1", 12)))
+        step2 = max(step1, int(getattr(self.cfg, "proposer_early_step2", 20)))
+        cand_non_easy_min = max(
+            0.0, min(1.0, float(getattr(self.cfg, "proposer_early_candidate_non_easy_min", 0.25)))
+        )
+        all_easy_max = max(
+            0.0, min(1.0, float(getattr(self.cfg, "proposer_early_all_easy_rate_max", 0.70)))
+        )
+        clipped_max = max(
+            0.0, min(1.0, float(getattr(self.cfg, "proposer_early_reward_clipped_rate_max", 0.60)))
+        )
+        selected_non_easy_min = max(
+            0.0, min(1.0, float(getattr(self.cfg, "proposer_early_selected_non_easy_min", 0.15)))
+        )
+        solver_updates_min = max(0, int(getattr(self.cfg, "proposer_early_solver_updates_min", 2)))
+        collapse_max = max(0, int(getattr(self.cfg, "proposer_early_collapse_streak_max", 5)))
+
+        state["candidate_non_easy_rate"] = self._dist_mean(
+            self._mean_recent(self._candidate_non_easy_window, u_step)
+        )
+        state["all_easy_group_rate"] = self._dist_mean(
+            self._mean_recent(self._all_easy_group_window, u_step)
+        )
+        state["reward_clipped_rate"] = self._dist_mean(
+            self._mean_recent(self._proposer_reward_clipped_window, u_step)
+        )
+        state["selected_non_easy_rate"] = self._dist_mean(
+            self._mean_recent(self._selected_non_easy_window, u_step)
+        )
+        state["solver_update_applied_count"] = self._dist_mean(
+            self._sum_recent(self._solver_update_applied_window, u_step)
+        )
+
+        collapse_streak = int(
+            round(self._dist_mean(float(collapse_state.get("collapse_streak", 0.0))))
+        )
+
+        if u_step >= step1:
+            state["stage1_active"] = 1.0
+            stage1_pass = (
+                state["candidate_non_easy_rate"] >= cand_non_easy_min
+                and state["all_easy_group_rate"] <= all_easy_max
+                and state["reward_clipped_rate"] <= clipped_max
+            )
+            state["stage1_pass"] = 1.0 if stage1_pass else 0.0
+            if not stage1_pass:
+                state["triggered"] = 1.0
+
+        if u_step >= step2:
+            state["stage2_active"] = 1.0
+            stage2_pass = (
+                state["selected_non_easy_rate"] >= selected_non_easy_min
+                and state["solver_update_applied_count"] >= float(solver_updates_min)
+                and collapse_streak <= collapse_max
+            )
+            state["stage2_pass"] = 1.0 if stage2_pass else 0.0
+            if not stage2_pass:
+                state["triggered"] = 1.0
+
+        if state["triggered"] > 0.5 and bool(getattr(self.cfg, "proposer_early_failfast_stop", True)):
+            msg = (
+                "[EarlyFailFast] unhealthy run detected: "
+                f"u_step={u_step} cand_non_easy_rate={state['candidate_non_easy_rate']:.3f} "
+                f"all_easy_rate={state['all_easy_group_rate']:.3f} "
+                f"reward_clipped_rate={state['reward_clipped_rate']:.3f} "
+                f"selected_non_easy_rate={state['selected_non_easy_rate']:.3f} "
+                f"solver_updates={state['solver_update_applied_count']:.1f} "
+                f"collapse_streak={collapse_streak}"
+            )
+            raise RuntimeError(msg)
+
+        return state
+
     def _understanding_step(self, step: int, image: Image.Image, meta: Dict) -> Dict[str, object]:
         step_t0 = time.perf_counter()
         entropy_min = float(getattr(self.cfg, "sc_entropy_min", 0.15))
@@ -854,9 +1129,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         question_reject_reason = ""
         chosen_strategy_used = ""
         chosen_two_answer_test = ""
+        chosen_reasoning_domains = ""
+        chosen_reasoning_chain = ""
+        chosen_task_card = ""
         proposer_text_hardness_bonus = 0.0
         proposer_strategy_quota_bonus = 0.0
         proposer_anchor_bonus = 0.0
+        proposer_contrastive_replay_bonus = 0.0
         proposer_repetition_penalty = 0.0
         proposer_cooldown_penalty = 0.0
         easy_constraint_penalty = 0.0
@@ -904,6 +1183,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         best_accept_margin = 1.0
         best_accept_meta: Dict[str, str] = {}
         best_accept_pick_score = -1e9
+        candidate_bucket_list: List[str] = []
+        candidate_valid_list: List[float] = []
+        candidate_cert_list: List[float] = []
+        candidate_non_easy_rate = 0.0
+        candidate_struct_valid_rate = 0.0
+        all_easy_candidate_group = True
 
         for cand_idx, cand_q in enumerate(candidate_questions):
             cand_q = cand_q.replace("\n", " ").strip()
@@ -924,6 +1209,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             cand_non_objective = bool(
                 require_objective and (not self._is_objective_question(cand_q))
             )
+            cand_cert = self._proposer_certificate_score(cand_q, cand_meta)
+            cand_cert_score = float(cand_cert.get("score", 0.0))
+            cand_cert_valid = bool(cand_cert.get("valid", 0.0) > 0.5)
+            cert_weight = max(0.0, float(getattr(self.cfg, "proposer_certificate_weight", 0.75)))
+            cert_entropy_floor = max(
+                0.0, min(1.0, float(getattr(self.cfg, "proposer_certificate_entropy_floor", 0.10)))
+            )
+            cand_contrastive_replay = self._contrastive_replay_adjustment(cand_q)
 
             cand_solver_prompt = build_solver_prompt(cand_q)
             cand_outputs: List[str] = []
@@ -982,15 +1275,20 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 cand_easy_constraint_penalty = (
                     float(getattr(self, "_easy_lagrange_lambda", 0.0)) * easy_selection_scale
                 )
-            cand_pick_score = (
-                sc_entropy
+            cand_sc_core = (
+                max(cert_entropy_floor, sc_entropy)
                 + cand_text_bonus
                 + cand_strategy_bonus
                 + cand_anchor_bonus
                 + cand_bucket_bonus
+                + cand_contrastive_replay
                 - cand_cooldown_penalty
                 - cand_easy_constraint_penalty
             )
+            cand_pick_score = cand_sc_core * (1.0 + cert_weight * cand_cert_score)
+            candidate_bucket_list.append(sc_bucket)
+            candidate_valid_list.append(1.0 if cand_cert_valid else 0.0)
+            candidate_cert_list.append(cand_cert_score)
 
             # Always remember the best candidate seen so far.
             if (
@@ -1016,7 +1314,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
 
             # Keep the best acceptable (non-easy, objective) candidate instead
             # of taking the first. This removes proposer ordering bias.
-            if (not sc_is_easy) and (not cand_non_objective):
+            if (not sc_is_easy) and (not cand_non_objective) and cand_cert_valid:
                 if (
                     (cand_pick_score > best_accept_pick_score)
                     or (
@@ -1040,6 +1338,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     best_accept_pre_words = cand_pre_words
                     best_accept_meta = dict(cand_meta)
 
+        if candidate_bucket_list:
+            candidate_non_easy_rate = float(
+                sum(1.0 for b in candidate_bucket_list if b != "easy")
+                / float(len(candidate_bucket_list))
+            )
+            candidate_struct_valid_rate = float(
+                sum(candidate_valid_list) / float(len(candidate_valid_list))
+            )
+            all_easy_candidate_group = bool(all(b == "easy" for b in candidate_bucket_list))
+        else:
+            all_easy_candidate_group = True
+
         if best_accept_question:
             question = best_accept_question
             solver_outputs = best_accept_outputs
@@ -1048,6 +1358,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             pre_words = best_accept_pre_words
             chosen_strategy_used = str(best_accept_meta.get("strategy_used", "") or "")
             chosen_two_answer_test = str(best_accept_meta.get("two_answer_test", "") or "")
+            chosen_reasoning_domains = str(best_accept_meta.get("reasoning_domains", "") or "")
+            chosen_reasoning_chain = str(best_accept_meta.get("reasoning_chain", "") or "")
+            chosen_task_card = str(best_accept_meta.get("task_card", "") or "")
         else:
             # No candidate cleared the gate — use the best-entropy one found.
             question = best_question or candidate_questions[0].replace("\n", " ").strip()
@@ -1060,6 +1373,33 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             pre_words = best_pre_words
             chosen_strategy_used = str(best_meta.get("strategy_used", "") or "")
             chosen_two_answer_test = str(best_meta.get("two_answer_test", "") or "")
+            chosen_reasoning_domains = str(best_meta.get("reasoning_domains", "") or "")
+            chosen_reasoning_chain = str(best_meta.get("reasoning_chain", "") or "")
+            chosen_task_card = str(best_meta.get("task_card", "") or "")
+
+        selected_cert = self._proposer_certificate_score(
+            question,
+            {
+                "strategy_used": chosen_strategy_used,
+                "two_answer_test": chosen_two_answer_test,
+                "visual_target": (
+                    best_accept_meta.get("visual_target", "")
+                    if best_accept_question
+                    else best_meta.get("visual_target", "")
+                ),
+                "reasoning_domains": (
+                    best_accept_meta.get("reasoning_domains", "")
+                    if best_accept_question
+                    else best_meta.get("reasoning_domains", "")
+                ),
+                "reasoning_chain": (
+                    best_accept_meta.get("reasoning_chain", "")
+                    if best_accept_question
+                    else best_meta.get("reasoning_chain", "")
+                ),
+            },
+        )
+        selected_cert_score = float(selected_cert.get("score", 0.0))
 
         # If the chosen candidate came from a spot-check (< num_solver_samples),
         # run the remaining solver samples to reach the full count needed for RL.
@@ -1269,6 +1609,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         proposer_strategy_quota_bonus = self._strategy_quota_adjustment(chosen_strategy_used)
         proposer_anchor_bonus = self._anchor_replay_bonus(question, chosen_strategy_used)
+        proposer_contrastive_replay_bonus = self._contrastive_replay_adjustment(question)
         proposer_repetition_penalty = (
             self._question_repetition_penalty(question) * proposer_penalty_boost
         )
@@ -1278,6 +1619,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_reward += proposer_text_hardness_bonus
         proposer_reward += proposer_strategy_quota_bonus
         proposer_reward += proposer_anchor_bonus
+        proposer_reward += (
+            max(0.0, float(getattr(self.cfg, "proposer_certificate_weight", 0.75)))
+            * selected_cert_score
+        )
+        if float(selected_cert.get("valid", 0.0)) < 0.5:
+            proposer_reward -= 0.10
+        proposer_reward += proposer_contrastive_replay_bonus
         proposer_reward -= proposer_repetition_penalty
         proposer_reward -= proposer_cooldown_penalty
 
@@ -1319,11 +1667,20 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             )
             proposer_reward -= easy_constraint_penalty
 
+        proposer_reward_pre_clip = float(proposer_reward)
         proposer_reward = max(-1.0, min(1.0, proposer_reward))
+        proposer_reward_clipped = bool(abs(proposer_reward - proposer_reward_pre_clip) > 1e-8)
         # Track selected question template to discourage repeated easy loops.
         _qkey = self._question_template_key(question)
         if _qkey:
             self._question_template_window.append(_qkey)
+            _qtoken_set = self._question_token_set(question)
+            if difficulty_bucket_observed in {"medium", "hard"}:
+                if _qtoken_set:
+                    self._contrastive_pos_replay.append(_qtoken_set)
+            elif difficulty_bucket_observed == "easy":
+                if _qtoken_set:
+                    self._contrastive_neg_replay.append(_qtoken_set)
         _strategy_key = self._normalize_strategy_key(chosen_strategy_used)
         if _strategy_key:
             self._strategy_window.append(_strategy_key)
@@ -1496,6 +1853,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 if solver_update_skip_reason_local is not None
                 else "all_ranks_solver_update_blocked"
             )
+        selected_non_easy = 1.0 if difficulty_bucket_observed in {"medium", "hard"} else 0.0
+        self._candidate_non_easy_window.append(float(candidate_non_easy_rate))
+        self._all_easy_group_window.append(1.0 if all_easy_candidate_group else 0.0)
+        self._proposer_reward_clipped_window.append(1.0 if proposer_reward_clipped else 0.0)
+        self._selected_non_easy_window.append(float(selected_non_easy))
+        self._solver_update_applied_window.append(1.0 if solver_update_applied else 0.0)
 
         proposer_stats = None
         proposer_skip_reason: Optional[str] = None
@@ -1583,6 +1946,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             _extra_text_bonus = 0.0
                             _extra_strategy_bonus = 0.0
                             _extra_anchor_bonus = 0.0
+                            _extra_contrastive_bonus = 0.0
+                            _extra_cert_score = 0.0
+                            _extra_cert_valid = 0.0
                             _extra_repeat_penalty = 0.0
                             _extra_cooldown_penalty = 0.0
 
@@ -1596,11 +1962,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                         c.get("text", ""),
                                         c.get("strategy_used", ""),
                                         c.get("two_answer_test", ""),
+                                    )
+                                    + max(
+                                        0.0,
+                                        float(getattr(self.cfg, "proposer_certificate_weight", 0.75)),
+                                    )
+                                    * float(
+                                        self._proposer_certificate_score(
+                                            str(c.get("text", "") or ""),
+                                            c,
+                                        ).get("score", 0.0)
                                     ),
                                 )
                                 _extra_q = str(_extra_best.get("text", "")).replace("\n", " ").strip()
                                 _extra_strategy_used = str(_extra_best.get("strategy_used", "") or "")
                                 _extra_two_answer_test = str(_extra_best.get("two_answer_test", "") or "")
+                                _extra_cert = self._proposer_certificate_score(_extra_q, _extra_best)
+                                _extra_cert_score = float(_extra_cert.get("score", 0.0))
+                                _extra_cert_valid = float(_extra_cert.get("valid", 0.0))
 
                             if _score_extras and _extra_q:
                                 # ── Score extra candidate with configured solver spot-check ──
@@ -1760,6 +2139,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                 )
                                 _extra_strategy_bonus = self._strategy_quota_adjustment(_extra_strategy_used)
                                 _extra_anchor_bonus = self._anchor_replay_bonus(_extra_q, _extra_strategy_used)
+                                _extra_contrastive_bonus = self._contrastive_replay_adjustment(_extra_q)
                                 _extra_repeat_penalty = (
                                     self._question_repetition_penalty(_extra_q) * proposer_penalty_boost
                                 )
@@ -1776,6 +2156,16 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                 _extra_reward += _extra_text_bonus
                                 _extra_reward += _extra_strategy_bonus
                                 _extra_reward += _extra_anchor_bonus
+                                _extra_reward += _extra_contrastive_bonus
+                                _extra_reward += (
+                                    max(
+                                        0.0,
+                                        float(getattr(self.cfg, "proposer_certificate_weight", 0.75)),
+                                    )
+                                    * _extra_cert_score
+                                )
+                                if _extra_cert_valid < 0.5:
+                                    _extra_reward -= 0.10
                                 _extra_reward -= _extra_repeat_penalty
                                 _extra_reward -= _extra_cooldown_penalty
 
@@ -1802,6 +2192,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             proposer_stats[f"grpo_extra_{_gi}_text_bonus"] = _extra_text_bonus
                             proposer_stats[f"grpo_extra_{_gi}_strategy_bonus"] = _extra_strategy_bonus
                             proposer_stats[f"grpo_extra_{_gi}_anchor_bonus"] = _extra_anchor_bonus
+                            proposer_stats[f"grpo_extra_{_gi}_contrastive_bonus"] = _extra_contrastive_bonus
+                            proposer_stats[f"grpo_extra_{_gi}_cert_score"] = _extra_cert_score
+                            proposer_stats[f"grpo_extra_{_gi}_cert_valid"] = _extra_cert_valid
                             proposer_stats[f"grpo_extra_{_gi}_repeat_penalty"] = _extra_repeat_penalty
                             proposer_stats[f"grpo_extra_{_gi}_cooldown_penalty"] = _extra_cooldown_penalty
                         except Exception:
@@ -1956,6 +2349,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             difficulty_bucket_observed=difficulty_bucket_observed,
             proposer_stats=proposer_stats,
         )
+        early_failfast_state = self._early_failfast_state(
+            step=step,
+            collapse_state=collapse_state,
+        )
         self._sync_proposer_framework_state()
 
         step_dt = time.perf_counter() - step_t0
@@ -2014,14 +2411,30 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_reward_raw_gaussian": proposer_reward_raw_gaussian,
             "proposer_reward_raw": proposer_reward_raw,
             "proposer_reward": proposer_reward,
+            "proposer_reward_pre_clip": proposer_reward_pre_clip,
+            "proposer_reward_clipped": proposer_reward_clipped,
             "proposer_text_hardness_bonus": proposer_text_hardness_bonus,
             "proposer_strategy_quota_bonus": proposer_strategy_quota_bonus,
             "proposer_anchor_bonus": proposer_anchor_bonus,
+            "proposer_contrastive_replay_bonus": proposer_contrastive_replay_bonus,
             "proposer_repetition_penalty": proposer_repetition_penalty,
             "proposer_cooldown_penalty": proposer_cooldown_penalty,
             "proposer_easy_constraint_penalty": easy_constraint_penalty,
             "proposer_strategy_used": chosen_strategy_used,
             "proposer_two_answer_test": chosen_two_answer_test,
+            "proposer_reasoning_domains": chosen_reasoning_domains,
+            "proposer_reasoning_chain": chosen_reasoning_chain,
+            "proposer_task_card": chosen_task_card,
+            "proposer_certificate_selected": selected_cert_score,
+            "proposer_candidate_certificate_best": max(candidate_cert_list) if candidate_cert_list else 0.0,
+            "proposer_candidate_certificate_mean": (
+                float(sum(candidate_cert_list) / max(1, len(candidate_cert_list)))
+                if candidate_cert_list
+                else 0.0
+            ),
+            "proposer_candidate_non_easy_rate": candidate_non_easy_rate,
+            "proposer_candidate_struct_valid_rate": candidate_struct_valid_rate,
+            "proposer_all_easy_candidate_group": all_easy_candidate_group,
             "proposer_controller_temp": proposer_temp_ctrl,
             "proposer_controller_top_p": proposer_top_p_ctrl,
             "proposer_controller_penalty_boost": proposer_penalty_boost,
@@ -2063,6 +2476,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_update_due": proposer_update_due,
             "proposer_skip_reason": proposer_skip_reason,
             "proposer_stats": proposer_stats,
+            "proposer_early_failfast_enabled": bool(early_failfast_state.get("enabled", 0.0)),
+            "proposer_early_u_step": int(early_failfast_state.get("u_step", 0.0)),
+            "proposer_early_stage1_active": bool(early_failfast_state.get("stage1_active", 0.0)),
+            "proposer_early_stage1_pass": bool(early_failfast_state.get("stage1_pass", 1.0)),
+            "proposer_early_stage2_active": bool(early_failfast_state.get("stage2_active", 0.0)),
+            "proposer_early_stage2_pass": bool(early_failfast_state.get("stage2_pass", 1.0)),
+            "proposer_early_triggered": bool(early_failfast_state.get("triggered", 0.0)),
         }
         self._append_jsonl(self.iter_log_path, record)
 
@@ -2105,14 +2525,30 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "proposer_reward_raw_gaussian": proposer_reward_raw_gaussian,
                 "proposer_reward_raw": proposer_reward_raw,
                 "proposer_reward": proposer_reward,
+                "proposer_reward_pre_clip": proposer_reward_pre_clip,
+                "proposer_reward_clipped": proposer_reward_clipped,
                 "proposer_text_hardness_bonus": proposer_text_hardness_bonus,
                 "proposer_strategy_quota_bonus": proposer_strategy_quota_bonus,
                 "proposer_anchor_bonus": proposer_anchor_bonus,
+                "proposer_contrastive_replay_bonus": proposer_contrastive_replay_bonus,
                 "proposer_repetition_penalty": proposer_repetition_penalty,
                 "proposer_cooldown_penalty": proposer_cooldown_penalty,
                 "proposer_easy_constraint_penalty": easy_constraint_penalty,
                 "proposer_strategy_used": chosen_strategy_used,
                 "proposer_two_answer_test": chosen_two_answer_test,
+                "proposer_reasoning_domains": chosen_reasoning_domains,
+                "proposer_reasoning_chain": chosen_reasoning_chain,
+                "proposer_task_card": chosen_task_card,
+                "proposer_certificate_selected": selected_cert_score,
+                "proposer_candidate_certificate_best": max(candidate_cert_list) if candidate_cert_list else 0.0,
+                "proposer_candidate_certificate_mean": (
+                    float(sum(candidate_cert_list) / max(1, len(candidate_cert_list)))
+                    if candidate_cert_list
+                    else 0.0
+                ),
+                "proposer_candidate_non_easy_rate": candidate_non_easy_rate,
+                "proposer_candidate_struct_valid_rate": candidate_struct_valid_rate,
+                "proposer_all_easy_candidate_group": all_easy_candidate_group,
                 "proposer_controller_temp": proposer_temp_ctrl,
                 "proposer_controller_top_p": proposer_top_p_ctrl,
                 "proposer_controller_penalty_boost": proposer_penalty_boost,
@@ -2151,6 +2587,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "difficulty_target_weights": difficulty_target_state.get("target_weights", {}),
                 "difficulty_observed_weights": difficulty_target_state.get("observed_weights", {}),
                 "difficulty_sampling_weights": difficulty_target_state.get("sampling_weights", {}),
+                "proposer_early_u_step": int(early_failfast_state.get("u_step", 0.0)),
+                "proposer_early_stage1_active": bool(early_failfast_state.get("stage1_active", 0.0)),
+                "proposer_early_stage1_pass": bool(early_failfast_state.get("stage1_pass", 1.0)),
+                "proposer_early_stage2_active": bool(early_failfast_state.get("stage2_active", 0.0)),
+                "proposer_early_stage2_pass": bool(early_failfast_state.get("stage2_pass", 1.0)),
+                "proposer_early_triggered": bool(early_failfast_state.get("triggered", 0.0)),
             },
         )
 
@@ -2162,9 +2604,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"info_ratio={informative_ratio:.2f} info_gate={int(solver_informative_gate)} "
                 f"up_scale={solver_update_scale:.2f} P_R={proposer_reward:.3f} "
                 f"T_B={proposer_text_hardness_bonus:.3f} R_P={proposer_repetition_penalty:.3f} "
+                f"C_NE={candidate_non_easy_rate:.2f} C_V={candidate_struct_valid_rate:.2f} "
                 f"E_L={easy_constraint_state.get('easy_lambda', 0.0):.3f} "
                 f"E_R={easy_constraint_state.get('easy_rate_ema', 0.0):.2f} "
                 f"C_ST={int(collapse_state.get('collapse_streak', 0.0))} "
+                f"EF1={int(bool(early_failfast_state.get('stage1_pass', 1.0)))} "
+                f"EF2={int(bool(early_failfast_state.get('stage2_pass', 1.0)))} "
                 f"dt={step_dt:.1f}s"
             )
             print(f"  Q: {question}")
@@ -2195,9 +2640,23 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._update_metric("u_proposer_text_bonus", self._dist_mean(proposer_text_hardness_bonus))
         self._update_metric("u_proposer_strategy_bonus", self._dist_mean(proposer_strategy_quota_bonus))
         self._update_metric("u_proposer_anchor_bonus", self._dist_mean(proposer_anchor_bonus))
+        self._update_metric("u_proposer_contrastive_bonus", self._dist_mean(proposer_contrastive_replay_bonus))
         self._update_metric("u_proposer_repeat_penalty", self._dist_mean(proposer_repetition_penalty))
         self._update_metric("u_proposer_cooldown_penalty", self._dist_mean(proposer_cooldown_penalty))
         self._update_metric("u_proposer_easy_penalty", self._dist_mean(easy_constraint_penalty))
+        self._update_metric("u_proposer_reward_clipped", self._dist_mean(1.0 if proposer_reward_clipped else 0.0))
+        self._update_metric("u_candidate_non_easy_rate", self._dist_mean(candidate_non_easy_rate))
+        self._update_metric("u_candidate_struct_valid_rate", self._dist_mean(candidate_struct_valid_rate))
+        self._update_metric("u_candidate_all_easy_group", self._dist_mean(1.0 if all_easy_candidate_group else 0.0))
+        self._update_metric("u_selected_cert_score", self._dist_mean(selected_cert_score))
+        self._update_metric(
+            "u_early_stage1_pass",
+            self._dist_mean(float(early_failfast_state.get("stage1_pass", 1.0))),
+        )
+        self._update_metric(
+            "u_early_stage2_pass",
+            self._dist_mean(float(early_failfast_state.get("stage2_pass", 1.0))),
+        )
         self._update_metric(
             "u_proposer_easy_rate_ema",
             self._dist_mean(float(easy_constraint_state.get("easy_rate_ema", 0.0))),
@@ -2229,7 +2688,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         state["unified_question_template_window"] = list(self._question_template_window)
         state["unified_strategy_window"] = list(self._strategy_window)
         state["unified_proposer_anchor_replay"] = list(self._proposer_anchor_replay)
+        state["unified_contrastive_pos_replay"] = [sorted(list(x)) for x in self._contrastive_pos_replay]
+        state["unified_contrastive_neg_replay"] = [sorted(list(x)) for x in self._contrastive_neg_replay]
         state["unified_grpo_std_window"] = list(self._grpo_std_window)
+        state["unified_candidate_non_easy_window"] = list(self._candidate_non_easy_window)
+        state["unified_all_easy_group_window"] = list(self._all_easy_group_window)
+        state["unified_proposer_reward_clipped_window"] = list(self._proposer_reward_clipped_window)
+        state["unified_selected_non_easy_window"] = list(self._selected_non_easy_window)
+        state["unified_solver_update_applied_window"] = list(self._solver_update_applied_window)
         state["unified_easy_rate_ema"] = float(getattr(self, "_easy_rate_ema", 0.0))
         state["unified_easy_lagrange_lambda"] = float(getattr(self, "_easy_lagrange_lambda", 0.0))
         state["unified_collapse_streak"] = int(getattr(self, "_collapse_streak", 0))
@@ -2307,6 +2773,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 for item in anchor_replay[-max_keep:]:
                     if isinstance(item, dict):
                         self._proposer_anchor_replay.append(dict(item))
+            contrastive_pos = state.get("unified_contrastive_pos_replay")
+            if isinstance(contrastive_pos, list):
+                self._contrastive_pos_replay.clear()
+                max_keep = int(self._contrastive_pos_replay.maxlen or len(contrastive_pos))
+                for item in contrastive_pos[-max_keep:]:
+                    if isinstance(item, (list, tuple, set)):
+                        s = {str(x).strip() for x in item if str(x).strip()}
+                        if s:
+                            self._contrastive_pos_replay.append(s)
+            contrastive_neg = state.get("unified_contrastive_neg_replay")
+            if isinstance(contrastive_neg, list):
+                self._contrastive_neg_replay.clear()
+                max_keep = int(self._contrastive_neg_replay.maxlen or len(contrastive_neg))
+                for item in contrastive_neg[-max_keep:]:
+                    if isinstance(item, (list, tuple, set)):
+                        s = {str(x).strip() for x in item if str(x).strip()}
+                        if s:
+                            self._contrastive_neg_replay.append(s)
             std_window = state.get("unified_grpo_std_window")
             if isinstance(std_window, list):
                 self._grpo_std_window.clear()
@@ -2314,6 +2798,51 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 for v in std_window[-max_keep:]:
                     try:
                         self._grpo_std_window.append(float(v))
+                    except Exception:
+                        continue
+            cand_non_easy_window = state.get("unified_candidate_non_easy_window")
+            if isinstance(cand_non_easy_window, list):
+                self._candidate_non_easy_window.clear()
+                max_keep = int(self._candidate_non_easy_window.maxlen or len(cand_non_easy_window))
+                for v in cand_non_easy_window[-max_keep:]:
+                    try:
+                        self._candidate_non_easy_window.append(float(v))
+                    except Exception:
+                        continue
+            all_easy_window = state.get("unified_all_easy_group_window")
+            if isinstance(all_easy_window, list):
+                self._all_easy_group_window.clear()
+                max_keep = int(self._all_easy_group_window.maxlen or len(all_easy_window))
+                for v in all_easy_window[-max_keep:]:
+                    try:
+                        self._all_easy_group_window.append(float(v))
+                    except Exception:
+                        continue
+            clipped_window = state.get("unified_proposer_reward_clipped_window")
+            if isinstance(clipped_window, list):
+                self._proposer_reward_clipped_window.clear()
+                max_keep = int(self._proposer_reward_clipped_window.maxlen or len(clipped_window))
+                for v in clipped_window[-max_keep:]:
+                    try:
+                        self._proposer_reward_clipped_window.append(float(v))
+                    except Exception:
+                        continue
+            selected_non_easy_window = state.get("unified_selected_non_easy_window")
+            if isinstance(selected_non_easy_window, list):
+                self._selected_non_easy_window.clear()
+                max_keep = int(self._selected_non_easy_window.maxlen or len(selected_non_easy_window))
+                for v in selected_non_easy_window[-max_keep:]:
+                    try:
+                        self._selected_non_easy_window.append(float(v))
+                    except Exception:
+                        continue
+            solver_applied_window = state.get("unified_solver_update_applied_window")
+            if isinstance(solver_applied_window, list):
+                self._solver_update_applied_window.clear()
+                max_keep = int(self._solver_update_applied_window.maxlen or len(solver_applied_window))
+                for v in solver_applied_window[-max_keep:]:
+                    try:
+                        self._solver_update_applied_window.append(float(v))
                     except Exception:
                         continue
             self._easy_rate_ema = float(state.get("unified_easy_rate_ema", self._easy_rate_ema))
@@ -2343,7 +2872,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 self._question_template_window.clear()
                 self._strategy_window.clear()
                 self._proposer_anchor_replay.clear()
+                self._contrastive_pos_replay.clear()
+                self._contrastive_neg_replay.clear()
                 self._grpo_std_window.clear()
+                self._candidate_non_easy_window.clear()
+                self._all_easy_group_window.clear()
+                self._proposer_reward_clipped_window.clear()
+                self._selected_non_easy_window.clear()
+                self._solver_update_applied_window.clear()
                 self._easy_rate_ema = 0.0
                 self._easy_lagrange_lambda = 0.0
                 self._collapse_streak = 0

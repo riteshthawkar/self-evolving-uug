@@ -349,30 +349,7 @@ def build_proposer_multi_prompt(
     num_questions: int = 3,
     image_source_hint: str = "",
 ) -> str:
-    """Single-shot multi-question proposer prompt with adversarial solver-failure framing.
-
-    The proposer's explicit goal is to craft questions that a vision-language
-    solver (a peer model looking at the same image) would FAIL to answer
-    unanimously — i.e. questions where solvers would disagree or make errors.
-
-    Key design principles (researcher notes):
-    1. STRATEGY LIBRARY: Give the proposer concrete question-writing strategies
-       that empirically cause solver disagreement, not just abstract difficulty levels.
-    2. ANTI-PATTERN BLOCKING: Explicitly name the easy-question patterns the model
-       defaults to (single salient object, dominant scene action, obvious text) and
-       forbid them.
-    3. AMBIGUITY IS THE TARGET: The proposer must identify a visual element where
-       the *answer is genuinely uncertain* due to occlusion, similarity, scale, or
-       boundary conditions — not just "complex to describe".
-    4. TWO-ANSWER TEST: Each question must pass the internal test "could a reasonable
-       person looking at this image give TWO different answers?" If not, it is easy.
-    5. FINE-GRAINED FOCUS: Questions must target small, peripheral, or partially
-       visible details — never the dominant/salient subject.
-
-    Returns K=num_questions candidate questions ordered hardest-first.
-    Each candidate includes a chain-of-thought block reasoning about WHY each
-    question will cause the solver to fail/disagree.
-    """
+    """Single-shot multi-question proposer prompt with reasoning-first structure."""
     level = (target_difficulty or "medium").strip().lower()
     if level not in {"easy", "medium", "hard"}:
         level = "medium"
@@ -380,29 +357,22 @@ def build_proposer_multi_prompt(
     if level == "hard":
         diff_hint = (
             "TARGET: HARD — the solver should be genuinely uncertain.\n"
-            "Required: pick a question strategy from the HARD tier below and apply it to a specific "
-            "visual element in this image where the answer is genuinely ambiguous.\n"
-            "The correct answer should NOT be immediately obvious from the most salient part of the image.\n"
-            "FOCUS ON: tiny background text, partially hidden objects, objects at image edges, "
-            "ambiguous boundaries between similar objects, fine texture details, or reflections."
+            "Required: reasoning must include at least 2 domains and at least one non-relational domain.\n"
+            "The final question must be derived from a declared uncertain target and not from the dominant object."
         )
     elif level == "easy":
         diff_hint = (
             "TARGET: EASY-MEDIUM — avoid single-lookup questions but keep the answer verifiable.\n"
-            "Pick a strategy from the MEDIUM tier below that requires noticing at least two objects or "
-            "one non-obvious attribute. Solvers should sometimes give different precise answers."
+            "Reasoning must still include at least 2 domains and a concrete two-answer ambiguity test."
         )
     else:
         diff_hint = (
             "TARGET: MEDIUM — the solver should frequently disagree on the precise answer.\n"
-            "Required: pick a question strategy from the MEDIUM or HARD tier below and apply it to "
-            "a non-salient or ambiguous visual element in this image.\n"
-            "Do NOT ask about the most obvious/dominant element in the scene.\n"
-            "FOCUS ON: secondary objects, background details, partially visible items, "
-            "small text, ambiguous counts, or subtle color differences."
+            "Required: reasoning must include at least 2 domains and at least one of action/physics/behavior/"
+            "commonsense/scientific.\n"
+            "Question must target non-salient ambiguity grounded in visible evidence."
         )
 
-    # Strategy library with expanded descriptions to guide fine-grained question writing.
     strategy_block = (
         "STRATEGIES (pick one per question; apply to a SPECIFIC fine-grained element in THIS image):\n"
         "HARD:\n"
@@ -442,6 +412,31 @@ def build_proposer_multi_prompt(
         "  X obvious-yes-no: 'Is there a person in the image?' 'Is the sky blue?'\n"
         "  X main-action: 'What is the person doing?' 'What sport is being played?'\n"
     )
+    reasoning_domains_block = (
+        "REASONING DOMAINS (must include >=2 domains per question; include >=1 non-relational domain):\n"
+        "  D1=relation/spatial\n"
+        "  D2=action/temporal\n"
+        "  D3=physics/mechanics\n"
+        "  D4=behavior/intent\n"
+        "  D5=commonsense/world-knowledge\n"
+        "  D6=scientific/material inference\n"
+        "  D7=causal/counterfactual\n"
+    )
+    hard_task_cards = (
+        "HARD TASK CARDS (few-shot templates; do NOT copy literally, instantiate on this image):\n"
+        "  C1 physics+causal: target=support-state; discriminate=A stable-by-contact vs B unsupported;\n"
+        "     chain=contact points -> shadow continuity -> load-path plausibility.\n"
+        "  C2 action+temporal: target=event-phase; discriminate=A pre-event vs B post-event;\n"
+        "     chain=motion cue -> state change -> downstream consequence.\n"
+        "  C3 behavior+commonsense: target=agent-intent; discriminate=A preparing-for-X vs B recovering-from-X;\n"
+        "     chain=pose -> affordance -> context prior.\n"
+        "  C4 scientific+material: target=material identity; discriminate=A metal/ceramic vs B plastic/composite;\n"
+        "     chain=specular behavior -> edge softness -> color bleed.\n"
+        "  C5 OCR+context: target=partial token; discriminate=A token_1 vs B token_2;\n"
+        "     chain=glyph fragments -> lexical plausibility -> scene compatibility.\n"
+        "  C6 causal+count: target=occluded count source; discriminate=A lower count vs B higher count;\n"
+        "     chain=occlusion map -> boundary ownership -> count consistency.\n"
+    )
 
     # Dataset-specific one-liner hint (kept short to save tokens).
     src = (image_source_hint or "").strip().lower()
@@ -470,52 +465,46 @@ def build_proposer_multi_prompt(
     n = max(1, int(num_questions))
     qa_template = "\n".join(
         f'  <question id="{i}">\n'
+        f'    <task_card>...C1/C2/C3/C4/C5/C6...</task_card>\n'
+        f'    <reasoning_domains>...comma-separated D-codes, minimum 2...</reasoning_domains>\n'
+        f'    <reasoning_chain>...2-4 short steps with visible evidence...</reasoning_chain>\n'
         f'    <strategy_used>...which strategy from the library above (e.g. H2, M3)...</strategy_used>\n'
-        f'    <visual_target>...which SPECIFIC small/secondary/background element in the image you are targeting (must NOT be the main subject)...</visual_target>\n'
+        f'    <visual_target>...specific small/secondary/background element (must NOT be main subject)...</visual_target>\n'
         f'    <two_answer_test>...two genuinely DIFFERENT answers the solver might give. '
-        f'If both answers are the same or one is obviously wrong, this question is TOO EASY — pick a harder target...</two_answer_test>\n'
-        f'    <text>...the question text ending with "?"...</text>\n'
-        f'    <rationale>...why this targets a fine-grained detail that is hard to answer with certainty...</rationale>\n'
+        f'If both answers are the same, this is TOO EASY...</two_answer_test>\n'
+        f'    <text>...final question text ending with "?" derived from reasoning_chain...</text>\n'
+        f'    <rationale>...why this is ambiguous but still visually verifiable...</rationale>\n'
         f'  </question>'
         for i in range(1, n + 1)
     )
 
     return (
         "You are an Adversarial Fine-Grained Question Proposer.\n"
-        "GOAL: generate questions about SMALL, SUBTLE, or BACKGROUND details in the image "
-        "that a vision-language solver will FAIL to answer unanimously.\n"
+        "GOAL: make solver disagreement using reasoning-first construction, not question-first guesses.\n"
         "\n"
         "CRITICAL RULES:\n"
-        "- NEVER ask about the main/dominant subject, object, or text in the image.\n"
-        "- ALWAYS target secondary objects, background elements, partially visible items, "
-        "small text, fine textures, edge-of-frame objects, or ambiguous boundaries.\n"
-        "- The question must probe a SPECIFIC fine-grained visual detail where "
-        "reasonable observers could genuinely disagree.\n"
-        "- If you cannot identify TWO genuinely different plausible answers, "
-        "your question is too easy — find a harder visual target.\n"
-        "- Do NOT ask low-information binary questions likely to produce 'yes/no' unanimity.\n"
-        "- Do NOT ask latent-state or non-visual-inference questions (e.g., texture feel, taste, temperature, intent).\n"
-        "- Do NOT ask questions likely to produce fallback answers like 'not visible' or 'cannot tell'.\n"
-        "- Prefer 2-way or small-set alternatives tied to explicit visible evidence "
-        "(e.g., left/right, red/orange, 2/3, word A/word B).\n"
-        "- Use DISTINCT strategies across the generated questions; do not repeat the same strategy code.\n"
-        "- At least TWO questions must use HARD-tier strategies (H1-H8).\n"
+        "- NEVER ask about the main/dominant subject, object, or largest text.\n"
+        "- Question must be derived AFTER reasoning_chain is defined.\n"
+        "- Each question must use >=2 reasoning domains and include >=1 non-relational domain.\n"
+        "- Each question must include a valid two-answer ambiguity test with distinct alternatives.\n"
+        "- Avoid low-information yes/no forms and latent non-visual states.\n"
+        "- Use DISTINCT strategy codes across questions.\n"
         "\n"
         f"{diff_hint}\n"
         f"{dataset_hint}"
+        f"{reasoning_domains_block}"
+        f"{hard_task_cards}"
         f"{strategy_block}"
-        f"Generate exactly {n} questions, HARDEST first. For each:\n"
-        "  1. <strategy_used>: which strategy (e.g. H3).\n"
-        "  2. <visual_target>: the specific small/background/secondary element you are asking about.\n"
-        "  3. <two_answer_test>: two genuinely DIFFERENT plausible answers. "
-        "If you write the same answer twice or one is obviously absurd, STOP and pick a harder target.\n"
-        "  4. <text>: the question (ends with '?', uses concrete image objects, 1-5 word answer).\n"
-        "  5. <rationale>: why this fine-grained detail is hard to answer with certainty.\n"
-        "Rules: verifiable short answer, no subjective wording, no XML tags inside question text.\n"
+        f"Generate exactly {n} questions, HARDEST first.\n"
+        "For each, follow this order strictly: task_card -> reasoning_domains -> reasoning_chain -> "
+        "strategy_used -> visual_target -> two_answer_test -> text -> rationale.\n"
+        "Question must end with '?' and have short verifiable answer.\n"
+        "No XML tags inside question text.\n"
         "Final self-check before output:\n"
-        "- If any question is about the dominant subject, rewrite it.\n"
-        "- If any question is likely yes/no, rewrite it to a concrete alternative set.\n"
-        "- If any question likely yields 'not visible', retarget to a nearby visible ambiguous detail.\n"
+        "- If reasoning_domains has fewer than 2 domains, rewrite.\n"
+        "- If no non-relational domain is present, rewrite.\n"
+        "- If two_answer_test alternatives are not distinct, rewrite.\n"
+        "- If question is not grounded in visual_target/reasoning_chain, rewrite.\n"
         "Output XML only:\n"
         "<questions>\n"
         f"{qa_template}\n"
