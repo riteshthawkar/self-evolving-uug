@@ -27,7 +27,7 @@ from urllib.request import urlopen
 from PIL import Image
 
 try:
-    from datasets import Dataset, IterableDataset, get_dataset_split_names, load_dataset
+    from datasets import IterableDataset, load_dataset
 except Exception as exc:  # pragma: no cover
     raise RuntimeError(
         "This script requires `datasets`. Install with: pip install datasets pillow"
@@ -322,49 +322,44 @@ def allocate_alias_targets(
     return alias_targets
 
 
-def load_with_fallback(spec: DatasetSpec, *, streaming_only: bool):
+def load_with_fallback(spec: DatasetSpec) -> Tuple[IterableDataset, str, str]:
+    """Always loads as a streaming IterableDataset — never downloads the full dataset.
+
+    Tries each (dataset_id, split) pair in declaration order.
+    Does NOT call get_dataset_split_names() to avoid triggering metadata downloads.
+    """
     errors: List[str] = []
-    streaming_options = (True,) if streaming_only else (spec.prefer_streaming, not spec.prefer_streaming)
+    split_candidates: List[str] = [spec.split] + [
+        s for s in spec.fallback_splits if s != spec.split
+    ]
     for dataset_id in spec.dataset_ids:
-        split_candidates: List[str] = [spec.split]
-        for s in spec.fallback_splits:
-            if s not in split_candidates:
-                split_candidates.append(s)
-        try:
-            discovered_splits = get_dataset_split_names(
-                dataset_id,
-                config_name=spec.config_name,
-            )
-            for s in discovered_splits:
-                if s not in split_candidates:
-                    split_candidates.append(s)
-        except Exception:
-            # Best effort only; load_dataset attempts below remain authoritative.
-            pass
         for split_name in split_candidates:
-            for streaming in streaming_options:
-                try:
-                    kwargs = {
-                        "path": dataset_id,
-                        "split": split_name,
-                        "streaming": streaming,
-                    }
-                    if spec.config_name:
-                        kwargs["name"] = spec.config_name
-                    ds = load_dataset(**kwargs)
-                    if streaming_only and not isinstance(ds, IterableDataset):
-                        raise RuntimeError(
-                            "Expected IterableDataset in streaming-only mode "
-                            f"for dataset_id={dataset_id}, got {type(ds).__name__}."
-                        )
-                    return ds, dataset_id, streaming, split_name
-                except Exception as exc:  # pragma: no cover
+            try:
+                kwargs: Dict = {
+                    "path": dataset_id,
+                    "split": split_name,
+                    "streaming": True,   # ALWAYS streaming — never materialise on disk
+                    "trust_remote_code": False,
+                }
+                if spec.config_name:
+                    kwargs["name"] = spec.config_name
+                ds = load_dataset(**kwargs)
+                if not isinstance(ds, IterableDataset):
+                    # Refuse non-streaming result to avoid accidental full download.
                     errors.append(
-                        f"id={dataset_id} split={split_name} streaming={streaming}: {repr(exc)}"
+                        f"id={dataset_id} split={split_name}: "
+                        "load_dataset returned non-streaming Dataset despite "
+                        "streaming=True; skipping to next candidate."
                     )
-    joined = "\n  - ".join(errors)
+                    continue
+                return ds, dataset_id, split_name
+            except Exception as exc:
+                errors.append(
+                    f"id={dataset_id} split={split_name}: {repr(exc)[:160]}"
+                )
     raise RuntimeError(
-        f"Failed to load dataset preset '{spec.alias}'. Attempts:\n  - {joined}"
+        f"Could not stream dataset preset '{spec.alias}' from any source.\n"
+        + "\n".join(f"  • {e}" for e in errors)
     )
 
 
