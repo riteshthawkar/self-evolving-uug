@@ -249,7 +249,10 @@ class RolePolicyUpdater:
             tail_from_len_delta = max(0, full_len - min(prompt_raw_len, full_len))
             tail_from_completion = _estimate_completion_token_count(self.processor, completion)
             forced_tail_tokens = max(tail_from_len_delta, tail_from_completion)
-            forced_tail_tokens = max(0, min(forced_tail_tokens, max(0, full_len - 1)))
+            # Ensure at least 1 token is unmasked for non-empty completions.
+            # Short answers ("Yes", "No") can produce 0 from both heuristics
+            # due to prompt-alignment edge cases with single-token outputs.
+            forced_tail_tokens = max(1, min(forced_tail_tokens, max(1, full_len - 1)))
             if forced_tail_tokens > 0:
                 labels[:, : full_len - forced_tail_tokens] = -100
                 valid_mask = labels[:, 1:] != -100
