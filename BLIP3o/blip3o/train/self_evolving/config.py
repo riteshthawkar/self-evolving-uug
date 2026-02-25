@@ -116,6 +116,32 @@ class UnderstandingSelfEvolvingConfig:
     proposer_certificate_min_score: float = 0.55
     proposer_certificate_weight: float = 0.75
     proposer_certificate_strict_struct: bool = True
+    # Zero-extra-compute proposer warm start: when entropy signal is dead at
+    # cold start, use structure/certificate shaping to bootstrap proposer.
+    proposer_warm_start_enabled: bool = True
+    proposer_warm_start_max_steps: int = 30
+    proposer_warm_start_exit_window: int = 5
+    proposer_warm_start_exit_consecutive: int = 2
+    proposer_warm_start_entropy_exit_threshold: float = 0.10
+    proposer_warm_start_easy_reject_penalty_scale: float = 0.0
+    proposer_warm_start_certificate_weight: float = 0.50
+    # Hardness debt controller: fast steering away from prolonged easy collapse.
+    hardness_debt_enabled: bool = True
+    hardness_debt_inc_easy: float = 1.50
+    hardness_debt_dec_non_easy: float = 1.00
+    hardness_debt_max: float = 6.0
+    hardness_debt_hard_recovery_threshold: float = 3.0
+    hardness_debt_recovery_easy_weight: float = 0.0
+    hardness_debt_recovery_medium_weight: float = 0.30
+    hardness_debt_recovery_hard_weight: float = 0.70
+    hardness_debt_stale_steps: int = 8
+    hardness_debt_stale_reset_to: float = 3.0
+    hardness_debt_stale_escape_steps: int = 8
+    hardness_debt_stale_easy_weight: float = 0.05
+    hardness_debt_stale_medium_weight: float = 0.55
+    hardness_debt_stale_hard_weight: float = 0.40
+    hardness_debt_temp_boost_max: float = 0.30
+    hardness_debt_penalty_boost_max: float = 0.30
     proposer_easy_reward_floor: float = -0.35
     proposer_all_easy_rank_spread: float = 0.08
     # Contrastive self-consistency replay (no extra model calls).
@@ -483,6 +509,32 @@ class GenerationSelfEvolvingConfig:
     proposer_certificate_min_score: float = 0.55
     proposer_certificate_weight: float = 0.75
     proposer_certificate_strict_struct: bool = True
+    # Zero-extra-compute proposer warm start: when entropy signal is dead at
+    # cold start, use structure/certificate shaping to bootstrap proposer.
+    proposer_warm_start_enabled: bool = True
+    proposer_warm_start_max_steps: int = 30
+    proposer_warm_start_exit_window: int = 5
+    proposer_warm_start_exit_consecutive: int = 2
+    proposer_warm_start_entropy_exit_threshold: float = 0.10
+    proposer_warm_start_easy_reject_penalty_scale: float = 0.0
+    proposer_warm_start_certificate_weight: float = 0.50
+    # Hardness debt controller: fast steering away from prolonged easy collapse.
+    hardness_debt_enabled: bool = True
+    hardness_debt_inc_easy: float = 1.50
+    hardness_debt_dec_non_easy: float = 1.00
+    hardness_debt_max: float = 6.0
+    hardness_debt_hard_recovery_threshold: float = 3.0
+    hardness_debt_recovery_easy_weight: float = 0.0
+    hardness_debt_recovery_medium_weight: float = 0.30
+    hardness_debt_recovery_hard_weight: float = 0.70
+    hardness_debt_stale_steps: int = 8
+    hardness_debt_stale_reset_to: float = 3.0
+    hardness_debt_stale_escape_steps: int = 8
+    hardness_debt_stale_easy_weight: float = 0.05
+    hardness_debt_stale_medium_weight: float = 0.55
+    hardness_debt_stale_hard_weight: float = 0.40
+    hardness_debt_temp_boost_max: float = 0.30
+    hardness_debt_penalty_boost_max: float = 0.30
     proposer_easy_reward_floor: float = -0.35
     proposer_all_easy_rank_spread: float = 0.08
     # Contrastive self-consistency replay (no extra model calls).

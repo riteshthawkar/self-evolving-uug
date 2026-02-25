@@ -1443,6 +1443,26 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 temp_boost = float(getattr(self.cfg, "exploration_temp_boost_max", 0.60)) * ratio
                 top_p_boost = float(getattr(self.cfg, "exploration_top_p_boost_max", 0.10)) * ratio
                 penalty_boost += float(getattr(self.cfg, "exploration_penalty_boost_max", 1.0)) * ratio
+        if bool(getattr(self.cfg, "hardness_debt_enabled", True)):
+            debt = float(getattr(self, "_hardness_debt", 0.0))
+            debt_max = max(1e-6, float(getattr(self.cfg, "hardness_debt_max", 6.0)))
+            debt_thr = max(
+                0.0,
+                min(
+                    debt_max,
+                    float(getattr(self.cfg, "hardness_debt_hard_recovery_threshold", 3.0)),
+                ),
+            )
+            if debt > debt_thr:
+                debt_ratio = min(1.0, (debt - debt_thr) / max(1e-6, debt_max - debt_thr))
+                temp_boost = max(
+                    temp_boost,
+                    float(getattr(self.cfg, "hardness_debt_temp_boost_max", 0.30))
+                    * debt_ratio,
+                )
+                penalty_boost += float(
+                    getattr(self.cfg, "hardness_debt_penalty_boost_max", 0.30)
+                ) * debt_ratio
         trigger = max(1, int(getattr(self.cfg, "collapse_streak_trigger", 8)))
         collapse_active = bool(getattr(self, "_collapse_streak", 0) >= trigger)
         if collapse_active:
@@ -1564,6 +1584,22 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._collapse_streak = int(
             round(self._dist_mean(float(getattr(self, "_collapse_streak", 0))))
         )
+        self._hardness_debt = self._dist_mean(float(getattr(self, "_hardness_debt", 0.0)))
+        self._hardness_debt_cap_streak = int(
+            round(self._dist_mean(float(getattr(self, "_hardness_debt_cap_streak", 0))))
+        )
+        self._hardness_debt_escape_steps_left = int(
+            round(
+                self._dist_mean(float(getattr(self, "_hardness_debt_escape_steps_left", 0)))
+            )
+        )
+        self._warm_start_exit_streak = int(
+            round(self._dist_mean(float(getattr(self, "_warm_start_exit_streak", 0))))
+        )
+        self._warm_start_completed = bool(
+            self._dist_mean(1.0 if bool(getattr(self, "_warm_start_completed", False)) else 0.0)
+            > 0.5
+        )
 
     def _apply_grpo_pairwise_ranking(
         self,
@@ -1664,6 +1700,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._easy_lagrange_lambda = 0.0
         self._collapse_streak = 0
         self._forced_explore_steps_left = 0
+        warm_exit_window = max(1, int(getattr(self.cfg, "proposer_warm_start_exit_window", 5)))
+        self._warm_start_entropy_window = deque(maxlen=warm_exit_window)
+        self._warm_start_exit_streak = 0
+        self._warm_start_completed = False
+        self._hardness_debt = 0.0
+        self._hardness_debt_cap_streak = 0
+        self._hardness_debt_escape_steps_left = 0
 
     def _entropy_iqr_filter_state(self) -> Dict[str, float]:
         static_threshold = float(getattr(self.cfg, "sc_entropy_min", 0.15))
@@ -1739,6 +1782,127 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "hard": w_hard / total,
         }
 
+    def _normalize_bucket_weights(self, weights: Dict[str, float]) -> Dict[str, float]:
+        w_easy = max(0.0, float(weights.get("easy", 0.0)))
+        w_medium = max(0.0, float(weights.get("medium", 0.0)))
+        w_hard = max(0.0, float(weights.get("hard", 0.0)))
+        total = w_easy + w_medium + w_hard
+        if total <= 1e-8:
+            return {"easy": 0.2, "medium": 0.6, "hard": 0.2}
+        return {
+            "easy": w_easy / total,
+            "medium": w_medium / total,
+            "hard": w_hard / total,
+        }
+
+    def _is_proposer_warm_start_active(self, u_step: int) -> bool:
+        if not bool(getattr(self.cfg, "proposer_warm_start_enabled", True)):
+            return False
+        if bool(getattr(self, "_warm_start_completed", False)):
+            return False
+        max_steps = max(1, int(getattr(self.cfg, "proposer_warm_start_max_steps", 30)))
+        return int(u_step) <= max_steps
+
+    def _update_proposer_warm_start_state(self, entropy_nats: float, u_step: int) -> Dict[str, float]:
+        enabled = bool(getattr(self.cfg, "proposer_warm_start_enabled", True))
+        if not enabled:
+            return {
+                "enabled": 0.0,
+                "active_next": 0.0,
+                "completed": 1.0,
+                "entropy_mean": 0.0,
+                "exit_streak": 0.0,
+                "exit_pass": 0.0,
+            }
+        max_steps = max(1, int(getattr(self.cfg, "proposer_warm_start_max_steps", 30)))
+        exit_window = max(1, int(getattr(self.cfg, "proposer_warm_start_exit_window", 5)))
+        exit_consecutive = max(
+            1, int(getattr(self.cfg, "proposer_warm_start_exit_consecutive", 2))
+        )
+        exit_thr = max(
+            0.0, float(getattr(self.cfg, "proposer_warm_start_entropy_exit_threshold", 0.10))
+        )
+        if int(getattr(self._warm_start_entropy_window, "maxlen", 0) or 0) != exit_window:
+            self._warm_start_entropy_window = deque(
+                list(self._warm_start_entropy_window)[-exit_window:], maxlen=exit_window
+            )
+        self._warm_start_entropy_window.append(float(entropy_nats))
+        entropy_mean = (
+            float(sum(float(x) for x in self._warm_start_entropy_window))
+            / float(max(1, len(self._warm_start_entropy_window)))
+        )
+        exit_pass = bool(
+            len(self._warm_start_entropy_window) >= exit_window and entropy_mean >= exit_thr
+        )
+        if exit_pass:
+            self._warm_start_exit_streak = int(getattr(self, "_warm_start_exit_streak", 0)) + 1
+        else:
+            self._warm_start_exit_streak = 0
+        if (
+            int(u_step) >= max_steps
+            or int(getattr(self, "_warm_start_exit_streak", 0)) >= exit_consecutive
+        ):
+            self._warm_start_completed = True
+        active_next = self._is_proposer_warm_start_active(int(u_step) + 1)
+        return {
+            "enabled": 1.0,
+            "active_next": 1.0 if active_next else 0.0,
+            "completed": 1.0 if bool(getattr(self, "_warm_start_completed", False)) else 0.0,
+            "entropy_mean": float(entropy_mean),
+            "exit_streak": float(getattr(self, "_warm_start_exit_streak", 0)),
+            "exit_pass": 1.0 if exit_pass else 0.0,
+        }
+
+    def _update_hardness_debt(self, difficulty_bucket_observed: str) -> Dict[str, float]:
+        if not bool(getattr(self.cfg, "hardness_debt_enabled", True)):
+            return {
+                "enabled": 0.0,
+                "debt": 0.0,
+                "cap_streak": 0.0,
+                "escape_steps_left": 0.0,
+                "escape_triggered": 0.0,
+            }
+        debt = float(getattr(self, "_hardness_debt", 0.0))
+        debt_max = max(1e-6, float(getattr(self.cfg, "hardness_debt_max", 6.0)))
+        inc_easy = max(0.0, float(getattr(self.cfg, "hardness_debt_inc_easy", 1.5)))
+        dec_non_easy = max(0.0, float(getattr(self.cfg, "hardness_debt_dec_non_easy", 1.0)))
+        bucket = str(difficulty_bucket_observed or "").strip().lower()
+        if bucket == "easy":
+            debt += inc_easy
+        else:
+            debt -= dec_non_easy
+        debt = max(0.0, min(debt_max, debt))
+        cap_streak = int(getattr(self, "_hardness_debt_cap_streak", 0))
+        if bucket == "easy" and debt >= (debt_max - 1e-8):
+            cap_streak += 1
+        else:
+            cap_streak = 0
+        escape_triggered = False
+        stale_steps = max(1, int(getattr(self.cfg, "hardness_debt_stale_steps", 8)))
+        if cap_streak >= stale_steps:
+            reset_to = float(getattr(self.cfg, "hardness_debt_stale_reset_to", 3.0))
+            debt = max(0.0, min(debt_max, reset_to))
+            escape_steps = max(
+                1, int(getattr(self.cfg, "hardness_debt_stale_escape_steps", stale_steps))
+            )
+            self._hardness_debt_escape_steps_left = max(
+                int(getattr(self, "_hardness_debt_escape_steps_left", 0)),
+                escape_steps,
+            )
+            cap_streak = 0
+            escape_triggered = True
+        self._hardness_debt = debt
+        self._hardness_debt_cap_streak = cap_streak
+        return {
+            "enabled": 1.0,
+            "debt": float(debt),
+            "cap_streak": float(cap_streak),
+            "escape_steps_left": float(
+                max(0, int(getattr(self, "_hardness_debt_escape_steps_left", 0)))
+            ),
+            "escape_triggered": 1.0 if escape_triggered else 0.0,
+        }
+
     def _sample_bucket(self, weights: Dict[str, float]) -> str:
         r = random.random()
         c = 0.0
@@ -1777,6 +1941,58 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         elif not enabled:
             mode = "disabled"
 
+        debt = float(getattr(self, "_hardness_debt", 0.0))
+        debt_ratio = 0.0
+        debt_escape_active = False
+        if bool(getattr(self.cfg, "hardness_debt_enabled", True)):
+            weights_for_sampling = self._normalize_bucket_weights(weights_for_sampling)
+            if int(getattr(self, "_hardness_debt_escape_steps_left", 0)) > 0:
+                debt_escape_active = True
+                weights_for_sampling = self._normalize_bucket_weights(
+                    {
+                        "easy": float(getattr(self.cfg, "hardness_debt_stale_easy_weight", 0.05)),
+                        "medium": float(
+                            getattr(self.cfg, "hardness_debt_stale_medium_weight", 0.55)
+                        ),
+                        "hard": float(getattr(self.cfg, "hardness_debt_stale_hard_weight", 0.40)),
+                    }
+                )
+                self._hardness_debt_escape_steps_left = max(
+                    0, int(getattr(self, "_hardness_debt_escape_steps_left", 0)) - 1
+                )
+                mode = f"{mode}+debt_escape"
+            else:
+                debt_max = max(1e-6, float(getattr(self.cfg, "hardness_debt_max", 6.0)))
+                debt_thr = max(
+                    0.0,
+                    min(
+                        debt_max,
+                        float(getattr(self.cfg, "hardness_debt_hard_recovery_threshold", 3.0)),
+                    ),
+                )
+                if debt > debt_thr:
+                    debt_ratio = min(1.0, (debt - debt_thr) / max(1e-6, debt_max - debt_thr))
+                    recovery_weights = self._normalize_bucket_weights(
+                        {
+                            "easy": float(
+                                getattr(self.cfg, "hardness_debt_recovery_easy_weight", 0.0)
+                            ),
+                            "medium": float(
+                                getattr(self.cfg, "hardness_debt_recovery_medium_weight", 0.30)
+                            ),
+                            "hard": float(
+                                getattr(self.cfg, "hardness_debt_recovery_hard_weight", 0.70)
+                            ),
+                        }
+                    )
+                    mixed = {
+                        key: ((1.0 - debt_ratio) * float(weights_for_sampling.get(key, 0.0)))
+                        + (debt_ratio * float(recovery_weights.get(key, 0.0)))
+                        for key in ("easy", "medium", "hard")
+                    }
+                    weights_for_sampling = self._normalize_bucket_weights(mixed)
+                    mode = f"{mode}+debt_recovery"
+
         desired_bucket = self._sample_bucket(weights_for_sampling) if enabled else "medium"
         return {
             "enabled": enabled,
@@ -1787,6 +2003,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "target_weights": target,
             "observed_weights": observed,
             "sampling_weights": weights_for_sampling,
+            "hardness_debt": float(debt),
+            "hardness_debt_ratio": float(debt_ratio),
+            "hardness_debt_escape_active": bool(debt_escape_active),
         }
 
     def _mean_recent(self, values: deque, count: int) -> float:
@@ -1945,6 +2164,25 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         difficulty_sampler_enabled = bool(difficulty_target_state.get("enabled", False))
         desired_difficulty_bucket = str(difficulty_target_state.get("desired_bucket", "medium"))
         difficulty_sampler_mode = str(difficulty_target_state.get("mode", "target"))
+        u_step = max(0, self._phase_local_step_index(step, "understanding"))
+        proposer_warm_start_active = self._is_proposer_warm_start_active(max(1, u_step))
+        warm_start_state: Dict[str, float] = {
+            "enabled": 1.0
+            if bool(getattr(self.cfg, "proposer_warm_start_enabled", True))
+            else 0.0,
+            "active_next": 1.0 if proposer_warm_start_active else 0.0,
+            "completed": 0.0 if proposer_warm_start_active else 1.0,
+            "entropy_mean": 0.0,
+            "exit_streak": 0.0,
+            "exit_pass": 0.0,
+        }
+        hardness_debt_state: Dict[str, float] = {
+            "enabled": 1.0 if bool(getattr(self.cfg, "hardness_debt_enabled", True)) else 0.0,
+            "debt": float(getattr(self, "_hardness_debt", 0.0)),
+            "cap_streak": float(getattr(self, "_hardness_debt_cap_streak", 0)),
+            "escape_steps_left": float(getattr(self, "_hardness_debt_escape_steps_left", 0)),
+            "escape_triggered": 0.0,
+        }
         solver_temperatures = self._solver_temperature_schedule()
         solver_top_ps = self._solver_top_p_schedule()
         controller_state = self._proposer_controller_state()
@@ -2263,7 +2501,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             cand_bucket_bonus = 0.06 if sc_bucket == desired_difficulty_bucket else 0.0
             if sc_bucket == "easy":
                 cand_bucket_bonus -= 0.03
-            cand_bonus_enabled = sc_bucket in {"medium", "hard"}
+            cand_bonus_enabled = (sc_bucket in {"medium", "hard"}) or proposer_warm_start_active
             cand_text_bonus_used = cand_text_bonus if cand_bonus_enabled else 0.0
             cand_strategy_bonus_used = cand_strategy_bonus if cand_bonus_enabled else 0.0
             cand_anchor_bonus_used = cand_anchor_bonus if cand_bonus_enabled else 0.0
@@ -2645,6 +2883,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             solver_low_info_majority = True
         self._entropy_window.append(float(entropy_nats))
         self._difficulty_window.append(difficulty_bucket_observed)
+        hardness_debt_state = self._update_hardness_debt(difficulty_bucket_observed)
+        warm_start_state = self._update_proposer_warm_start_state(
+            entropy_nats=entropy_nats,
+            u_step=max(1, u_step),
+        )
         easy_solver_penalty_scale = max(
             0.0, float(getattr(self.cfg, "easy_solver_penalty_scale", 1.0))
         )
@@ -2795,7 +3038,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_anchor_bonus = self._anchor_replay_bonus(question, chosen_strategy_used)
         proposer_contrastive_replay_bonus = self._contrastive_replay_adjustment(question)
         proposer_bonus_enabled = difficulty_bucket_observed in {"medium", "hard"}
-        if not proposer_bonus_enabled:
+        proposer_bonus_warm_enabled = proposer_bonus_enabled or proposer_warm_start_active
+        if proposer_warm_start_active:
+            # Entropy-free warm start: bootstrap proposer from text/cert quality
+            # signals until disagreement appears.
+            proposer_reward = 0.0
+        if not proposer_bonus_warm_enabled:
             proposer_text_hardness_bonus = 0.0
             proposer_strategy_quota_bonus = 0.0
             proposer_anchor_bonus = 0.0
@@ -2808,10 +3056,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_reward += proposer_text_hardness_bonus
         proposer_reward += proposer_strategy_quota_bonus
         proposer_reward += proposer_anchor_bonus
-        if proposer_bonus_enabled:
+        proposer_certificate_weight_used = 0.0
+        if proposer_bonus_warm_enabled:
+            proposer_certificate_weight_used = max(
+                0.0, float(getattr(self.cfg, "proposer_certificate_weight", 0.75))
+            )
+            if proposer_warm_start_active and (not proposer_bonus_enabled):
+                proposer_certificate_weight_used = max(
+                    0.0,
+                    float(getattr(self.cfg, "proposer_warm_start_certificate_weight", 0.50)),
+                )
             proposer_reward += (
-                max(0.0, float(getattr(self.cfg, "proposer_certificate_weight", 0.75)))
-                * selected_cert_score
+                proposer_certificate_weight_used * selected_cert_score
             )
         if float(selected_cert.get("valid", 0.0)) < 0.5:
             proposer_reward -= 0.10
@@ -2853,6 +3109,19 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             reject_reasons.append("low_info_majority")
         question_rejected = len(reject_reasons) > 0
         question_reject_reason = "|".join(reject_reasons)
+        proposer_reject_penalty_scale_used = 1.0
+        warm_start_easy_only_reject = (
+            proposer_warm_start_active
+            and len(reject_reasons) > 0
+            and all(r in {"easy_bucket", "all_candidates_easy"} for r in reject_reasons)
+        )
+        if warm_start_easy_only_reject:
+            proposer_reject_penalty_scale_used = max(
+                0.0,
+                float(
+                    getattr(self.cfg, "proposer_warm_start_easy_reject_penalty_scale", 0.0)
+                ),
+            )
         if question_rejected and rejected_question_penalty > 0.0:
             # Scale penalty by how far entropy is from target: fully-easy
             # (entropy=0) gets full penalty, near-target gets none. Creates
@@ -2865,17 +3134,25 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     _rej_entropy = 0.0
                     break
             _easy_scale = max(0.0, 1.0 - min(1.0, _rej_entropy / max(1e-6, proposer_entropy_mu_used)))
-            proposer_reward -= rejected_question_penalty * _easy_scale
+            proposer_reward -= (
+                rejected_question_penalty
+                * proposer_reject_penalty_scale_used
+                * _easy_scale
+            )
 
         easy_constraint_penalty = 0.0
-        if easy_constraint_enabled and difficulty_bucket_observed == "easy":
+        if (
+            easy_constraint_enabled
+            and difficulty_bucket_observed == "easy"
+            and (not proposer_warm_start_active)
+        ):
             easy_constraint_penalty = (
                 float(getattr(self, "_easy_lagrange_lambda", 0.0))
                 * max(0.0, float(getattr(self.cfg, "easy_constraint_penalty_scale", 0.30)))
             )
             proposer_reward -= easy_constraint_penalty
 
-        if difficulty_bucket_observed == "easy":
+        if difficulty_bucket_observed == "easy" and (not proposer_warm_start_active):
             proposer_reward = min(proposer_reward, easy_reward_floor)
 
         proposer_reward_pre_clip = float(proposer_reward)
@@ -3781,6 +4058,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_reward": proposer_reward,
             "proposer_reward_pre_clip": proposer_reward_pre_clip,
             "proposer_reward_clipped": proposer_reward_clipped,
+            "proposer_bonus_enabled": proposer_bonus_enabled,
+            "proposer_bonus_warm_enabled": proposer_bonus_warm_enabled,
+            "proposer_certificate_weight_used": proposer_certificate_weight_used,
+            "proposer_reject_penalty_scale_used": proposer_reject_penalty_scale_used,
             "proposer_text_hardness_bonus": proposer_text_hardness_bonus,
             "proposer_strategy_quota_bonus": proposer_strategy_quota_bonus,
             "proposer_anchor_bonus": proposer_anchor_bonus,
@@ -3829,6 +4110,26 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 round(float(controller_state.get("forced_explore_steps_left", 0.0)))
             ),
             "proposer_controller_num_candidates": int(num_proposer_candidates),
+            "proposer_warm_start_active": bool(proposer_warm_start_active),
+            "proposer_warm_start_active_next": bool(
+                warm_start_state.get("active_next", 0.0) > 0.5
+            ),
+            "proposer_warm_start_completed": bool(
+                warm_start_state.get("completed", 0.0) > 0.5
+            ),
+            "proposer_warm_start_entropy_mean": warm_start_state.get("entropy_mean", 0.0),
+            "proposer_warm_start_exit_streak": warm_start_state.get("exit_streak", 0.0),
+            "proposer_warm_start_exit_pass": bool(
+                warm_start_state.get("exit_pass", 0.0) > 0.5
+            ),
+            "proposer_hardness_debt": hardness_debt_state.get("debt", 0.0),
+            "proposer_hardness_debt_cap_streak": hardness_debt_state.get("cap_streak", 0.0),
+            "proposer_hardness_debt_escape_steps_left": hardness_debt_state.get(
+                "escape_steps_left", 0.0
+            ),
+            "proposer_hardness_debt_escape_triggered": bool(
+                hardness_debt_state.get("escape_triggered", 0.0) > 0.5
+            ),
             "proposer_easy_rate_ema": easy_constraint_state.get("easy_rate_ema"),
             "proposer_easy_lagrange_lambda": easy_constraint_state.get("easy_lambda"),
             "proposer_easy_reward_floor": easy_reward_floor,
@@ -3864,6 +4165,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "difficulty_target_weights": difficulty_target_state.get("target_weights", {}),
             "difficulty_observed_weights": difficulty_target_state.get("observed_weights", {}),
             "difficulty_sampling_weights": difficulty_target_state.get("sampling_weights", {}),
+            "difficulty_hardness_debt": difficulty_target_state.get("hardness_debt", 0.0),
+            "difficulty_hardness_debt_ratio": difficulty_target_state.get(
+                "hardness_debt_ratio", 0.0
+            ),
+            "difficulty_hardness_debt_escape_active": bool(
+                difficulty_target_state.get("hardness_debt_escape_active", False)
+            ),
             "solver_baseline": self.solver_baseline,
             "proposer_baseline": self.proposer_baseline,
             "solver_update_due": solver_update_due,
@@ -3940,6 +4248,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "proposer_reward": proposer_reward,
                 "proposer_reward_pre_clip": proposer_reward_pre_clip,
                 "proposer_reward_clipped": proposer_reward_clipped,
+                "proposer_bonus_enabled": proposer_bonus_enabled,
+                "proposer_bonus_warm_enabled": proposer_bonus_warm_enabled,
+                "proposer_certificate_weight_used": proposer_certificate_weight_used,
+                "proposer_reject_penalty_scale_used": proposer_reject_penalty_scale_used,
                 "proposer_text_hardness_bonus": proposer_text_hardness_bonus,
                 "proposer_strategy_quota_bonus": proposer_strategy_quota_bonus,
                 "proposer_anchor_bonus": proposer_anchor_bonus,
@@ -3988,6 +4300,26 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     round(float(controller_state.get("forced_explore_steps_left", 0.0)))
                 ),
                 "proposer_controller_num_candidates": int(num_proposer_candidates),
+                "proposer_warm_start_active": bool(proposer_warm_start_active),
+                "proposer_warm_start_active_next": bool(
+                    warm_start_state.get("active_next", 0.0) > 0.5
+                ),
+                "proposer_warm_start_completed": bool(
+                    warm_start_state.get("completed", 0.0) > 0.5
+                ),
+                "proposer_warm_start_entropy_mean": warm_start_state.get("entropy_mean", 0.0),
+                "proposer_warm_start_exit_streak": warm_start_state.get("exit_streak", 0.0),
+                "proposer_warm_start_exit_pass": bool(
+                    warm_start_state.get("exit_pass", 0.0) > 0.5
+                ),
+                "proposer_hardness_debt": hardness_debt_state.get("debt", 0.0),
+                "proposer_hardness_debt_cap_streak": hardness_debt_state.get("cap_streak", 0.0),
+                "proposer_hardness_debt_escape_steps_left": hardness_debt_state.get(
+                    "escape_steps_left", 0.0
+                ),
+                "proposer_hardness_debt_escape_triggered": bool(
+                    hardness_debt_state.get("escape_triggered", 0.0) > 0.5
+                ),
                 "proposer_easy_rate_ema": easy_constraint_state.get("easy_rate_ema"),
                 "proposer_easy_lagrange_lambda": easy_constraint_state.get("easy_lambda"),
                 "proposer_easy_reward_floor": easy_reward_floor,
@@ -4029,6 +4361,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "difficulty_target_weights": difficulty_target_state.get("target_weights", {}),
                 "difficulty_observed_weights": difficulty_target_state.get("observed_weights", {}),
                 "difficulty_sampling_weights": difficulty_target_state.get("sampling_weights", {}),
+                "difficulty_hardness_debt": difficulty_target_state.get("hardness_debt", 0.0),
+                "difficulty_hardness_debt_ratio": difficulty_target_state.get(
+                    "hardness_debt_ratio", 0.0
+                ),
+                "difficulty_hardness_debt_escape_active": bool(
+                    difficulty_target_state.get("hardness_debt_escape_active", False)
+                ),
                 "proposer_early_u_step": int(early_failfast_state.get("u_step", 0.0)),
                 "proposer_early_hard_stop_min_u_step": int(
                     early_failfast_state.get("hard_stop_min_u_step", 0.0)
@@ -4057,6 +4396,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"T_B={proposer_text_hardness_bonus:.3f} R_P={proposer_repetition_penalty:.3f} "
                 f"C_NE={candidate_non_easy_rate:.2f} C_V={candidate_struct_valid_rate:.2f} "
                 f"ARM={curriculum_arm_score:.2f} "
+                f"WS={int(proposer_warm_start_active)} "
+                f"D={float(hardness_debt_state.get('debt', 0.0)):.2f} "
                 f"E_L={easy_constraint_state.get('easy_lambda', 0.0):.3f} "
                 f"E_R={easy_constraint_state.get('easy_rate_ema', 0.0):.2f} "
                 f"C_ST={int(collapse_state.get('collapse_streak', 0.0))} "
@@ -4118,6 +4459,22 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._update_metric("u_selected_cert_score", self._dist_mean(selected_cert_score))
         self._update_metric("u_curriculum_arm_score", self._dist_mean(curriculum_arm_score))
         self._update_metric(
+            "u_proposer_warm_start_active",
+            self._dist_mean(1.0 if proposer_warm_start_active else 0.0),
+        )
+        self._update_metric(
+            "u_proposer_warm_start_entropy_mean",
+            self._dist_mean(float(warm_start_state.get("entropy_mean", 0.0))),
+        )
+        self._update_metric(
+            "u_proposer_hardness_debt",
+            self._dist_mean(float(hardness_debt_state.get("debt", 0.0))),
+        )
+        self._update_metric(
+            "u_proposer_hardness_debt_escape",
+            self._dist_mean(1.0 if hardness_debt_state.get("escape_triggered", 0.0) > 0.5 else 0.0),
+        )
+        self._update_metric(
             "u_early_stage1_pass",
             self._dist_mean(float(early_failfast_state.get("stage1_pass", 1.0))),
         )
@@ -4178,6 +4535,22 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         state["unified_collapse_streak"] = int(getattr(self, "_collapse_streak", 0))
         state["unified_forced_explore_steps_left"] = int(
             getattr(self, "_forced_explore_steps_left", 0)
+        )
+        state["unified_warm_start_entropy_window"] = list(
+            getattr(self, "_warm_start_entropy_window", [])
+        )
+        state["unified_warm_start_exit_streak"] = int(
+            getattr(self, "_warm_start_exit_streak", 0)
+        )
+        state["unified_warm_start_completed"] = bool(
+            getattr(self, "_warm_start_completed", False)
+        )
+        state["unified_hardness_debt"] = float(getattr(self, "_hardness_debt", 0.0))
+        state["unified_hardness_debt_cap_streak"] = int(
+            getattr(self, "_hardness_debt_cap_streak", 0)
+        )
+        state["unified_hardness_debt_escape_steps_left"] = int(
+            getattr(self, "_hardness_debt_escape_steps_left", 0)
         )
         state["unified_proposer_bucket_baselines"] = dict(self._proposer_bucket_baselines)
         # Replay buffer metadata (not the images — too large for checkpoint;
@@ -4359,6 +4732,38 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             self._forced_explore_steps_left = int(
                 state.get("unified_forced_explore_steps_left", self._forced_explore_steps_left)
             )
+            warm_start_window = state.get("unified_warm_start_entropy_window")
+            if isinstance(warm_start_window, list):
+                self._warm_start_entropy_window.clear()
+                max_keep = int(
+                    self._warm_start_entropy_window.maxlen or len(warm_start_window)
+                )
+                for v in warm_start_window[-max_keep:]:
+                    try:
+                        self._warm_start_entropy_window.append(float(v))
+                    except Exception:
+                        continue
+            self._warm_start_exit_streak = int(
+                state.get("unified_warm_start_exit_streak", self._warm_start_exit_streak)
+            )
+            self._warm_start_completed = bool(
+                state.get("unified_warm_start_completed", self._warm_start_completed)
+            )
+            self._hardness_debt = float(
+                state.get("unified_hardness_debt", self._hardness_debt)
+            )
+            self._hardness_debt_cap_streak = int(
+                state.get(
+                    "unified_hardness_debt_cap_streak",
+                    self._hardness_debt_cap_streak,
+                )
+            )
+            self._hardness_debt_escape_steps_left = int(
+                state.get(
+                    "unified_hardness_debt_escape_steps_left",
+                    self._hardness_debt_escape_steps_left,
+                )
+            )
             bucket_baselines = state.get("unified_proposer_bucket_baselines")
             if isinstance(bucket_baselines, dict):
                 for b in ("easy", "medium", "hard"):
@@ -4396,6 +4801,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 self._easy_lagrange_lambda = 0.0
                 self._collapse_streak = 0
                 self._forced_explore_steps_left = 0
+                self._warm_start_entropy_window.clear()
+                self._warm_start_exit_streak = 0
+                self._warm_start_completed = False
+                self._hardness_debt = 0.0
+                self._hardness_debt_cap_streak = 0
+                self._hardness_debt_escape_steps_left = 0
                 self._proposer_bucket_baselines = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
             if self.is_main_process:
                 print(
