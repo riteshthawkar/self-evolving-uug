@@ -139,6 +139,10 @@ class UnderstandingSelfEvolvingConfig:
     solver_logit_margin_sigmoid_beta: float = 3.0  # sigmoid midpoint (fallback when window is cold)
     proposer_logit_margin_reward_weight: float = 0.30  # weight after warm-start (complementary to entropy)
     proposer_logit_margin_warm_start_weight: float = 0.70  # weight during warm-start (primary signal)
+    # Forced-choice penalty: "Is X A or B?" questions bypass visual reasoning by
+    # offering options in the question text.  This penalty makes them less rewarding
+    # than open-ended questions, driving the proposer toward genuine visual queries.
+    proposer_forced_choice_penalty: float = 0.40
     # Hardness debt controller: fast steering away from prolonged easy collapse.
     hardness_debt_enabled: bool = True
     hardness_debt_inc_easy: float = 1.50
@@ -546,6 +550,10 @@ class GenerationSelfEvolvingConfig:
     solver_logit_margin_sigmoid_beta: float = 3.0  # sigmoid midpoint (fallback when window is cold)
     proposer_logit_margin_reward_weight: float = 0.30  # weight after warm-start (complementary to entropy)
     proposer_logit_margin_warm_start_weight: float = 0.70  # weight during warm-start (primary signal)
+    # Forced-choice penalty: "Is X A or B?" questions bypass visual reasoning by
+    # offering options in the question text.  This penalty makes them less rewarding
+    # than open-ended questions, driving the proposer toward genuine visual queries.
+    proposer_forced_choice_penalty: float = 0.40
     # Hardness debt controller: fast steering away from prolonged easy collapse.
     hardness_debt_enabled: bool = True
     hardness_debt_inc_easy: float = 1.50
