@@ -494,6 +494,9 @@ class PackedAttention(Qwen2Attention):
             causal=is_causal,
         )
         packed_attn_output = packed_attn_output.reshape(-1, self.hidden_size)
+        proj_dtype = self.o_proj.weight.dtype
+        if packed_attn_output.dtype != proj_dtype:
+            packed_attn_output = packed_attn_output.to(proj_dtype)
         packed_attn_output = self.o_proj(packed_attn_output)
 
         if update_past_key_values:
@@ -717,10 +720,21 @@ class PackedAttentionMoT(Qwen2Attention):
         )
         packed_attn_output = packed_attn_output.reshape(-1, self.hidden_size)
         if mode == 'und':
+            proj_dtype = self.o_proj.weight.dtype
+            if packed_attn_output.dtype != proj_dtype:
+                packed_attn_output = packed_attn_output.to(proj_dtype)
             packed_attn_output = self.o_proj(packed_attn_output)
         elif mode == 'gen':
-            packed_attn_output[packed_text_indexes] = self.o_proj(packed_attn_output[packed_text_indexes])
-            packed_attn_output[packed_vae_token_indexes] = self.o_proj_moe_gen(packed_attn_output[packed_vae_token_indexes])
+            text_input = packed_attn_output[packed_text_indexes]
+            vae_input = packed_attn_output[packed_vae_token_indexes]
+            proj_dtype_text = self.o_proj.weight.dtype
+            proj_dtype_vae = self.o_proj_moe_gen.weight.dtype
+            if text_input.dtype != proj_dtype_text:
+                text_input = text_input.to(proj_dtype_text)
+            if vae_input.dtype != proj_dtype_vae:
+                vae_input = vae_input.to(proj_dtype_vae)
+            packed_attn_output[packed_text_indexes] = self.o_proj(text_input).to(packed_attn_output.dtype)
+            packed_attn_output[packed_vae_token_indexes] = self.o_proj_moe_gen(vae_input).to(packed_attn_output.dtype)
 
         if update_past_key_values:
             past_key_values.key_cache[self.layer_idx] = merged_key_states

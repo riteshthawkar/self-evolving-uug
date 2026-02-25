@@ -302,9 +302,10 @@ class InterleaveInferencer:
         except RuntimeError as exc:
             msg = str(exc).lower()
             hipblas_like = ("hipblas" in msg) and ("invalid_value" in msg or "heuristic" in msg)
-            if not hipblas_like:
+            dtype_mismatch = ("mat1 and mat2 must have the same dtype" in msg) or ("expected scalar type" in msg)
+            if not (hipblas_like or dtype_mismatch):
                 raise
-            print("[inferencer] HIPBLAS runtime failure detected; retrying once with autocast disabled.")
+            print("[inferencer] Runtime precision failure detected; retrying once with autocast disabled.")
             return _run_once(use_autocast=False)
     
     def __call__(

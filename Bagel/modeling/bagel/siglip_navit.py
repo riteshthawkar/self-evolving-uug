@@ -293,6 +293,9 @@ class SiglipFlashAttention2(SiglipAttention):
             max_seqlen=max_seqlen,
         )
 
+        proj_dtype = self.out_proj.weight.dtype
+        if attn_output.dtype != proj_dtype:
+            attn_output = attn_output.to(proj_dtype)
         attn_output = self.out_proj(attn_output.reshape(total_q_len, -1))
         return attn_output
 
