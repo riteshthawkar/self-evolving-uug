@@ -3053,6 +3053,29 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     1.0 + _math.exp(-_sig_alpha * (_intuitive_logit_min_margin - _sig_beta))
                 )
 
+        # --- Forced-choice LMDS discount ---
+        # "Is it A or B?" questions produce low logit margins cheaply because
+        # the solver is choosing between two words PRESENTED IN THE QUESTION,
+        # not reasoning about the image.  This is a reward hack — the margin
+        # reflects linguistic ambiguity, not visual difficulty.  Discount
+        # LMDS heavily for forced-choice patterns to push the proposer toward
+        # open-ended questions where low margins require real visual reasoning.
+        _lmds_forced_choice_discounted = False
+        if _lmds_enabled and _logit_margin_difficulty > 0.0 and question:
+            _q_has_or = bool(_BINARY_FORCED_CHOICE_RE.search(question))
+            # Also detect "A or B" at end of question (common pattern)
+            _q_is_binary_start = bool(
+                question.strip().lower().startswith(("is the", "is it", "are the", "was the", "does the"))
+            )
+            if _q_has_or and _q_is_binary_start:
+                # Strong forced-choice pattern: "Is the X A or B?" → heavy discount
+                _logit_margin_difficulty *= 0.10
+                _lmds_forced_choice_discounted = True
+            elif _q_has_or:
+                # Weaker forced-choice (e.g., "What is X: A or B?") → moderate discount
+                _logit_margin_difficulty *= 0.30
+                _lmds_forced_choice_discounted = True
+
         # --- Proposer reward: V-Zero dual-track learnability ---
         # The proposer is rewarded when the solver's "intuitive" (greedy)
         # answer DISAGREES with the "reasoned" (majority-voted, multi-temp)
@@ -4233,6 +4256,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_logit_margin_min": float(_intuitive_logit_min_margin),
             "proposer_logit_margin_mean": float(_intuitive_logit_mean_margin),
             "proposer_logit_margin_difficulty": float(_logit_margin_difficulty),
+            "proposer_logit_margin_forced_choice_discounted": bool(_lmds_forced_choice_discounted),
             "proposer_logit_margin_window_size": len(self._logit_margin_window),
             "proposer_hardness_debt": hardness_debt_state.get("debt", 0.0),
             "proposer_hardness_debt_cap_streak": hardness_debt_state.get("cap_streak", 0.0),
@@ -4510,7 +4534,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"ARM={curriculum_arm_score:.2f} "
                 f"WS={int(proposer_warm_start_active)} "
                 f"LM={_intuitive_logit_min_margin:.2f} "
-                f"LMD={_logit_margin_difficulty:.3f} "
+                f"LMD={_logit_margin_difficulty:.3f}{'*' if _lmds_forced_choice_discounted else ''} "
                 f"D={float(hardness_debt_state.get('debt', 0.0)):.2f} "
                 f"E_L={easy_constraint_state.get('easy_lambda', 0.0):.3f} "
                 f"E_R={easy_constraint_state.get('easy_rate_ema', 0.0):.2f} "
