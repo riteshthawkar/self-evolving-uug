@@ -8,6 +8,7 @@ from PIL import Image
 import torch
 
 from data.data_utils import pil_img2rgb
+from modeling.bagel.runtime_precision import autocast_context
 from modeling.bagel.qwen2_navit import NaiveCache
 
 
@@ -224,66 +225,87 @@ class InterleaveInferencer:
         image_shapes=(1024, 1024),
         enable_taylorseer=False,
     ) -> List[Union[str, Image.Image]]:
+        model_device = next(self.model.parameters()).device
 
-        output_list = []
-        gen_context = self.init_gen_context()
-        cfg_text_context = deepcopy(gen_context)
-        cfg_img_context = deepcopy(gen_context)
+        def _run_once(*, use_autocast: bool) -> List[Union[str, Image.Image]]:
+            output_list = []
+            gen_context = self.init_gen_context()
+            cfg_text_context = deepcopy(gen_context)
+            cfg_img_context = deepcopy(gen_context)
+            target_image_shapes = image_shapes
 
-        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
-            if think:
-                if understanding_output:
-                    system_prompt = VLM_THINK_SYSTEM_PROMPT 
-                else:
-                    system_prompt = GEN_THINK_SYSTEM_PROMPT
-                gen_context = self.update_context_text(system_prompt, gen_context)
-                cfg_img_context = self.update_context_text(system_prompt, cfg_img_context)
-
-            for input_term in input_lists:
-                if isinstance(input_term, str):
-                    cfg_text_context = deepcopy(gen_context)
-                    gen_context = self.update_context_text(input_term, gen_context)
-                    cfg_img_context = self.update_context_text(input_term, cfg_img_context)
-
-                elif isinstance(input_term, Image.Image):
-                    input_term = self.vae_transform.resize_transform(pil_img2rgb(input_term))
-                    gen_context = self.update_context_image(input_term, gen_context, vae=not understanding_output)
-
-                    image_shapes = input_term.size[::-1]
-                    cfg_text_context = deepcopy(gen_context)
-
-                else:
-                    raise ValueError(f"Unsupported input type: {type(input_term)}")
-
-            if understanding_output:
-                gen_text = self.gen_text(gen_context, do_sample=do_sample, temperature=text_temperature, max_length=max_think_token_n)
-                output_list.append(gen_text)
-
-            else:
+            with autocast_context(model_device, enabled=use_autocast):
                 if think:
-                    gen_text = self.gen_text(gen_context, do_sample=do_sample, temperature=text_temperature, max_length=max_think_token_n)
-                    gen_context = self.update_context_text(gen_text, gen_context)
+                    if understanding_output:
+                        system_prompt = VLM_THINK_SYSTEM_PROMPT
+                    else:
+                        system_prompt = GEN_THINK_SYSTEM_PROMPT
+                    gen_context = self.update_context_text(system_prompt, gen_context)
+                    cfg_img_context = self.update_context_text(system_prompt, cfg_img_context)
+
+                for input_term in input_lists:
+                    if isinstance(input_term, str):
+                        cfg_text_context = deepcopy(gen_context)
+                        gen_context = self.update_context_text(input_term, gen_context)
+                        cfg_img_context = self.update_context_text(input_term, cfg_img_context)
+
+                    elif isinstance(input_term, Image.Image):
+                        input_term = self.vae_transform.resize_transform(pil_img2rgb(input_term))
+                        gen_context = self.update_context_image(input_term, gen_context, vae=not understanding_output)
+
+                        target_image_shapes = input_term.size[::-1]
+                        cfg_text_context = deepcopy(gen_context)
+
+                    else:
+                        raise ValueError(f"Unsupported input type: {type(input_term)}")
+
+                if understanding_output:
+                    gen_text = self.gen_text(
+                        gen_context,
+                        do_sample=do_sample,
+                        temperature=text_temperature,
+                        max_length=max_think_token_n,
+                    )
                     output_list.append(gen_text)
 
-                img = self.gen_image(
-                    image_shapes, 
-                    gen_context, 
-                    cfg_text_precontext=cfg_text_context, 
-                    cfg_img_precontext=cfg_img_context,
+                else:
+                    if think:
+                        gen_text = self.gen_text(
+                            gen_context,
+                            do_sample=do_sample,
+                            temperature=text_temperature,
+                            max_length=max_think_token_n,
+                        )
+                        gen_context = self.update_context_text(gen_text, gen_context)
+                        output_list.append(gen_text)
 
-                    cfg_text_scale=cfg_text_scale, 
-                    cfg_img_scale=cfg_img_scale, 
-                    cfg_interval=cfg_interval, 
-                    timestep_shift=timestep_shift, 
-                    num_timesteps=num_timesteps,
-                    cfg_renorm_min=cfg_renorm_min,
-                    cfg_renorm_type=cfg_renorm_type,
-                    enable_taylorseer=enable_taylorseer,
-                )
+                    img = self.gen_image(
+                        target_image_shapes,
+                        gen_context,
+                        cfg_text_precontext=cfg_text_context,
+                        cfg_img_precontext=cfg_img_context,
+                        cfg_text_scale=cfg_text_scale,
+                        cfg_img_scale=cfg_img_scale,
+                        cfg_interval=cfg_interval,
+                        timestep_shift=timestep_shift,
+                        num_timesteps=num_timesteps,
+                        cfg_renorm_min=cfg_renorm_min,
+                        cfg_renorm_type=cfg_renorm_type,
+                        enable_taylorseer=enable_taylorseer,
+                    )
+                    output_list.append(img)
 
-                output_list.append(img)
+            return output_list
 
-        return output_list
+        try:
+            return _run_once(use_autocast=True)
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            hipblas_like = ("hipblas" in msg) and ("invalid_value" in msg or "heuristic" in msg)
+            if not hipblas_like:
+                raise
+            print("[inferencer] HIPBLAS runtime failure detected; retrying once with autocast disabled.")
+            return _run_once(use_autocast=False)
     
     def __call__(
         self, 
