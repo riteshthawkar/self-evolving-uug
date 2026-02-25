@@ -73,6 +73,7 @@ BASELINE_MOMENTUM="${BASELINE_MOMENTUM:-0.9}"
 SOLVER_REWARD_MIX_GAMMA="${SOLVER_REWARD_MIX_GAMMA:-0.7}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-100}"
 RESUME_FROM="${RESUME_FROM:-}"
+DISABLE_FLASH_ATTN="${DISABLE_FLASH_ATTN:-1}"
 TRAIN_UNDERSTANDING_PROPOSER="${TRAIN_UNDERSTANDING_PROPOSER:-1}"
 TRAIN_SOLVER="${TRAIN_SOLVER:-1}"
 TRAIN_GENERATION_PROPOSER="${TRAIN_GENERATION_PROPOSER:-1}"
@@ -252,6 +253,7 @@ echo "[B1]   Output:     $OUTPUT_DIR"
 echo "[B1]   Steps:      $STEPS"
 echo "[B1]   Device:     $DEVICE"
 echo "[B1]   SUDER:      $ENABLE_SUDER"
+echo "[B1]   FlashAttn:  disabled=$DISABLE_FLASH_ATTN"
 if [[ "$RUN_MODE" == "train" ]]; then
   echo "[B1]   Policy:     $POLICY_UPDATE_METHOD"
   echo "[B1]   LoRA:       enabled (r=$LORA_RANK, alpha=$LORA_ALPHA, dropout=$LORA_DROPOUT)"
@@ -259,6 +261,7 @@ fi
 
 # ── Launch ──────────────────────────────────────────────────────────────────
 export PYTHONPATH="$BAGEL_ROOT:$REPO_ROOT:${PYTHONPATH:-}"
+export BAGEL_DISABLE_FLASH_ATTN="$DISABLE_FLASH_ATTN"
 
 cd "$BAGEL_ROOT"
 "$PYTHON_BIN" train/train_self_evolving.py \

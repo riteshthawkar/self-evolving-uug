@@ -12,6 +12,7 @@
 
 from dataclasses import dataclass
 from functools import partial
+import os
 from typing import List, Optional, Tuple
 
 import torch
@@ -21,7 +22,12 @@ from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.functional import scaled_dot_product_attention
 from transformers.utils import ModelOutput
 
-from flash_attn import flash_attn_varlen_func
+try:
+    from flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
+    _HAS_FLASH_ATTN = True
+except Exception:
+    _flash_attn_varlen_func = None
+    _HAS_FLASH_ATTN = False
 from modeling.qwen2.modeling_qwen2 import (
     Qwen2Attention, 
     Qwen2MLP, 
@@ -41,6 +47,114 @@ torch._dynamo.config.cache_size_limit = 512
 torch._dynamo.config.accumulated_cache_size_limit = 4096
 # flex_attention = torch.compile(flex_attention) # , dynamic=True, mode='max-autotune'
 flex_attention = torch.compile(flex_attention)
+
+
+def _flash_attn_disabled_by_env() -> bool:
+    val = str(os.environ.get("BAGEL_DISABLE_FLASH_ATTN", "0")).strip().lower()
+    return val in {"1", "true", "yes", "on"}
+
+
+def _expand_kv_for_gqa(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    target_num_heads: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Repeat KV heads to match query heads for SDPA fallback."""
+    if int(k.shape[1]) == int(target_num_heads):
+        return k, v
+    num_kv_heads = int(k.shape[1])
+    if num_kv_heads <= 0 or int(target_num_heads) % num_kv_heads != 0:
+        raise ValueError(
+            f"Cannot expand KV heads for GQA: target_heads={target_num_heads}, kv_heads={num_kv_heads}"
+        )
+    num_groups = int(target_num_heads) // num_kv_heads
+    k = k[:, :, None, :].repeat(1, 1, num_groups, 1).reshape(k.shape[0], target_num_heads, k.shape[-1])
+    v = v[:, :, None, :].repeat(1, 1, num_groups, 1).reshape(v.shape[0], target_num_heads, v.shape[-1])
+    return k, v
+
+
+def _build_suffix_causal_mask(
+    *,
+    q_len: int,
+    k_len: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Causal mask for suffix queries over [prefix + query] keys."""
+    prefix_len = max(0, int(k_len) - int(q_len))
+    row = torch.arange(int(q_len), device=device, dtype=torch.long).unsqueeze(1)
+    col = torch.arange(int(k_len), device=device, dtype=torch.long).unsqueeze(0)
+    allowed = col <= (prefix_len + row)
+    mask = torch.full((int(q_len), int(k_len)), float("-inf"), device=device, dtype=dtype)
+    mask = mask.masked_fill(allowed, 0.0)
+    return mask.unsqueeze(0).unsqueeze(0)
+
+
+def _flash_attn_varlen_or_sdpa(
+    *,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    causal: bool,
+) -> torch.Tensor:
+    use_flash = bool(_HAS_FLASH_ATTN) and (not _flash_attn_disabled_by_env())
+    if use_flash:
+        return _flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q.to(torch.int32),
+            cu_seqlens_k=cu_seqlens_k.to(torch.int32),
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            causal=causal,
+        )
+
+    # SDPA fallback (works without flash-attn, including AMD ROCm).
+    q = q.to(torch.bfloat16)
+    k = k.to(torch.bfloat16)
+    v = v.to(torch.bfloat16)
+    k, v = _expand_kv_for_gqa(k, v, target_num_heads=int(q.shape[1]))
+
+    batch = int(cu_seqlens_q.numel()) - 1
+    outputs: List[torch.Tensor] = []
+    for idx in range(batch):
+        q_start = int(cu_seqlens_q[idx].item())
+        q_end = int(cu_seqlens_q[idx + 1].item())
+        k_start = int(cu_seqlens_k[idx].item())
+        k_end = int(cu_seqlens_k[idx + 1].item())
+
+        q_i = q[q_start:q_end]  # [Lq, H, D]
+        k_i = k[k_start:k_end]  # [Lk, H, D]
+        v_i = v[k_start:k_end]  # [Lk, H, D]
+
+        q_i = q_i.permute(1, 0, 2).unsqueeze(0)  # [1, H, Lq, D]
+        k_i = k_i.permute(1, 0, 2).unsqueeze(0)  # [1, H, Lk, D]
+        v_i = v_i.permute(1, 0, 2).unsqueeze(0)  # [1, H, Lk, D]
+
+        attn_mask = None
+        if causal:
+            attn_mask = _build_suffix_causal_mask(
+                q_len=int(q_i.shape[2]),
+                k_len=int(k_i.shape[2]),
+                device=q_i.device,
+                dtype=q_i.dtype,
+            )
+
+        out_i = scaled_dot_product_attention(
+            q_i,
+            k_i,
+            v_i,
+            attn_mask=attn_mask,
+            is_causal=False,
+        )
+        outputs.append(out_i.squeeze(0).permute(1, 0, 2))  # [Lq, H, D]
+
+    return torch.cat(outputs, dim=0)
 
 
 class Qwen2Config(_Qwen2Config):
@@ -358,7 +472,7 @@ class PackedAttention(Qwen2Attention):
         cu_seqlens_q = torch.nn.functional.pad(torch.cumsum(query_lens, dim=0), (1, 0))
         cu_seqlens_k = torch.nn.functional.pad(torch.cumsum(key_values_lens, dim=0), (1, 0))
 
-        packed_attn_output = flash_attn_varlen_func(
+        packed_attn_output = _flash_attn_varlen_or_sdpa(
             q=packed_query_states,
             k=merged_key_states,
             v=merged_value_states,
@@ -576,7 +690,7 @@ class PackedAttentionMoT(Qwen2Attention):
         cu_seqlens_q = torch.nn.functional.pad(torch.cumsum(query_lens, dim=0), (1, 0))
         cu_seqlens_k = torch.nn.functional.pad(torch.cumsum(key_values_lens, dim=0), (1, 0))
 
-        packed_attn_output = flash_attn_varlen_func(
+        packed_attn_output = _flash_attn_varlen_or_sdpa(
             q=packed_query_states,
             k=merged_key_states,
             v=merged_value_states,

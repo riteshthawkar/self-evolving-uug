@@ -9,13 +9,20 @@
 #
 # This modified file is released under the same license.
 
+import os
 import torch
 from torch import nn
+from torch.nn.functional import scaled_dot_product_attention
 
 from transformers.activations import ACT2FN
 from modeling.siglip.configuration_siglip import SiglipVisionConfig as _SiglipVisionConfig
 from modeling.siglip.modeling_siglip import SiglipAttention, SiglipPreTrainedModel
-from flash_attn import flash_attn_varlen_func
+try:
+    from flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
+    _HAS_FLASH_ATTN = True
+except Exception:
+    _flash_attn_varlen_func = None
+    _HAS_FLASH_ATTN = False
 
 
 class SiglipVisionConfig(_SiglipVisionConfig):
@@ -142,6 +149,51 @@ def apply_rotary_pos_emb(q, k, cos, sin):
     return q_embed, k_embed
 
 
+def _flash_attn_disabled_by_env() -> bool:
+    val = str(os.environ.get("BAGEL_DISABLE_FLASH_ATTN", "0")).strip().lower()
+    return val in {"1", "true", "yes", "on"}
+
+
+def _siglip_varlen_attn(
+    *,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    max_seqlen: int,
+) -> torch.Tensor:
+    use_flash = bool(_HAS_FLASH_ATTN) and (not _flash_attn_disabled_by_env())
+    if use_flash:
+        return _flash_attn_varlen_func(
+            q.to(torch.bfloat16),
+            k.to(torch.bfloat16),
+            v.to(torch.bfloat16),
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_k=max_seqlen,
+            causal=False,
+        )
+
+    outputs = []
+    batch = int(cu_seqlens.numel()) - 1
+    for idx in range(batch):
+        s = int(cu_seqlens[idx].item())
+        e = int(cu_seqlens[idx + 1].item())
+        q_i = q[s:e].permute(1, 0, 2).unsqueeze(0)  # [1, H, L, D]
+        k_i = k[s:e].permute(1, 0, 2).unsqueeze(0)
+        v_i = v[s:e].permute(1, 0, 2).unsqueeze(0)
+        out_i = scaled_dot_product_attention(
+            q_i.to(torch.bfloat16),
+            k_i.to(torch.bfloat16),
+            v_i.to(torch.bfloat16),
+            is_causal=False,
+        )
+        outputs.append(out_i.squeeze(0).permute(1, 0, 2))
+
+    return torch.cat(outputs, dim=0)
+
+
 class SiglipVisionEmbeddings(nn.Module):
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
@@ -229,15 +281,12 @@ class SiglipFlashAttention2(SiglipAttention):
             query_states = torch.cat([qh, qw], dim=-1)
             key_states = torch.cat([kh, kw], dim=-1)
 
-        attn_output = flash_attn_varlen_func(
-            query_states.to(torch.bfloat16),
-            key_states.to(torch.bfloat16),
-            value_states.to(torch.bfloat16),
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=max_seqlen,
-            max_seqlen_k=max_seqlen,
-            causal=False,
+        attn_output = _siglip_varlen_attn(
+            q=query_states,
+            k=key_states,
+            v=value_states,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
 
         attn_output = self.out_proj(attn_output.reshape(total_q_len, -1))
