@@ -63,6 +63,15 @@ class DualTrackReward:
     unsolvable_case: bool
 
 
+@dataclass
+class SuderJointReward:
+    reward: float
+    entropy_component: float
+    quality_component: float
+    mean_entropy_nats: float
+    entropy_weight_alpha: float
+
+
 def compute_dual_track_reward(
     *,
     answers: List[str],
@@ -104,3 +113,49 @@ def compute_dual_track_reward(
         unsolvable_case=unsolvable_case,
     )
 
+
+def answer_match_score(predicted: str, expected: str) -> float:
+    pred = normalize_answer(predicted)
+    exp = normalize_answer(expected)
+    if not pred or not exp:
+        return 0.0
+    if pred == exp:
+        return 1.0
+    p_tokens = pred.split()
+    e_tokens = exp.split()
+    if not p_tokens or not e_tokens:
+        return 0.0
+    common = Counter(p_tokens) & Counter(e_tokens)
+    overlap = float(sum(common.values()))
+    if overlap <= 0.0:
+        return 0.0
+    precision = overlap / float(len(p_tokens))
+    recall = overlap / float(len(e_tokens))
+    denom = precision + recall
+    return 0.0 if denom <= 0.0 else float(2.0 * precision * recall / denom)
+
+
+def compute_suder_joint_reward(
+    *,
+    mean_entropy_nats: float,
+    quality_component: float,
+    entropy_mu: float,
+    entropy_sigma: float,
+    entropy_weight_alpha: float,
+    zero_entropy_eps: float,
+    zero_entropy_reward_cap: float,
+) -> SuderJointReward:
+    entropy_component = gaussian_reward(mean_entropy_nats, entropy_mu, entropy_sigma)
+    if float(mean_entropy_nats) <= float(zero_entropy_eps):
+        entropy_component = -max(0.0, float(zero_entropy_reward_cap))
+    alpha = max(0.0, min(1.0, float(entropy_weight_alpha)))
+    quality = max(0.0, min(1.0, float(quality_component)))
+    reward = alpha * entropy_component + (1.0 - alpha) * quality
+    reward = max(-1.0, min(1.0, float(reward)))
+    return SuderJointReward(
+        reward=float(reward),
+        entropy_component=float(entropy_component),
+        quality_component=float(quality),
+        mean_entropy_nats=float(mean_entropy_nats),
+        entropy_weight_alpha=float(alpha),
+    )
