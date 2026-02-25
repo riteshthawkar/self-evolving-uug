@@ -136,6 +136,30 @@ class Bagel(PreTrainedModel):
                 return cand
         raise AttributeError("Could not resolve causal LM object with forward_inference/lm_head.")
 
+    def _model_device(self) -> torch.device:
+        try:
+            return next(self.parameters()).device
+        except StopIteration:
+            return torch.device("cpu")
+
+    def _to_model_device(self, value):
+        device = self._model_device()
+        if torch.is_tensor(value):
+            return value.to(device)
+        if isinstance(value, dict):
+            return {k: self._to_model_device(v) for k, v in value.items()}
+        if isinstance(value, list):
+            out = []
+            for item in value:
+                out.append(self._to_model_device(item) if torch.is_tensor(item) else item)
+            return out
+        if isinstance(value, tuple):
+            out = []
+            for item in value:
+                out.append(self._to_model_device(item) if torch.is_tensor(item) else item)
+            return tuple(out)
+        return value
+
     def forward(
         self,
         sequence_length: int,
@@ -299,7 +323,7 @@ class Bagel(PreTrainedModel):
             "key_values_lens": torch.tensor(curr_kvlens, dtype=torch.int),
         }
 
-        return generation_input, newlens, new_rope
+        return self._to_model_device(generation_input), newlens, new_rope
 
     @torch.no_grad
     def forward_cache_update_text(
@@ -394,7 +418,7 @@ class Bagel(PreTrainedModel):
             "key_values_lens": torch.tensor(curr_kvlens, dtype=torch.int),
         }
 
-        return generation_input, newlens, new_rope
+        return self._to_model_device(generation_input), newlens, new_rope
 
     @torch.no_grad
     def forward_cache_update_vit(
@@ -523,7 +547,7 @@ class Bagel(PreTrainedModel):
             "key_values_lens": torch.tensor(curr_kvlens, dtype=torch.int),
         }
 
-        return generation_input, newlens, new_rope
+        return self._to_model_device(generation_input), newlens, new_rope
 
     @torch.no_grad
     def forward_cache_update_vae(
@@ -643,7 +667,7 @@ class Bagel(PreTrainedModel):
             "packed_key_value_indexes": torch.tensor(packed_key_value_indexes, dtype=torch.long),
         }
 
-        return generation_input
+        return self._to_model_device(generation_input)
 
     def prepare_vae_latent_cfg(self, curr_kvlens, curr_rope, image_sizes):
         packed_position_ids, packed_indexes, packed_key_value_indexes = list(), list(), list()
@@ -676,7 +700,7 @@ class Bagel(PreTrainedModel):
             "cfg_packed_key_value_indexes": torch.tensor(packed_key_value_indexes, dtype=torch.long),
         }
 
-        return generation_input
+        return self._to_model_device(generation_input)
 
     @torch.no_grad
     def generate_image(
@@ -962,7 +986,7 @@ class Bagel(PreTrainedModel):
             "packed_key_value_indexes": torch.tensor(packed_key_value_indexes, dtype=torch.long),
         }
 
-        return generation_input
+        return self._to_model_device(generation_input)
 
     @torch.no_grad
     def generate_text(
