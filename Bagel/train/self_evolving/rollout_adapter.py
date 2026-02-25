@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import gc
+import os
 from dataclasses import dataclass
 from typing import Optional
 
 from PIL import Image
+import torch
 
 from .adapter_manager import ROLE_GENERATOR, ROLE_PROPOSER, ROLE_SOLVER, use_adapter
 from .model_loader import BagelRuntime
@@ -25,6 +28,54 @@ class BagelRolloutAdapter:
     def __init__(self, runtime: BagelRuntime) -> None:
         self.runtime = runtime
         self.inferencer = runtime.inferencer
+
+    @staticmethod
+    def _is_oom_error(exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return ("out of memory" in msg) or ("cuda out of memory" in msg) or ("hip out of memory" in msg)
+
+    @staticmethod
+    def _clear_memory() -> None:
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    @staticmethod
+    def _build_generation_retry_plan(
+        *,
+        image_size: int,
+        num_timesteps: int,
+    ) -> list[tuple[int, int]]:
+        max_attempts = max(1, int(os.environ.get("BAGEL_GEN_OOM_MAX_RETRIES", "4") or "4"))
+        min_image = max(256, int(os.environ.get("BAGEL_GEN_MIN_IMAGE_SIZE", "256") or "256"))
+        min_steps = max(8, int(os.environ.get("BAGEL_GEN_MIN_TIMESTEPS", "16") or "16"))
+        timestep_decay = float(os.environ.get("BAGEL_GEN_TIMESTEP_DECAY", "0.75") or "0.75")
+        if timestep_decay <= 0.0 or timestep_decay >= 1.0:
+            timestep_decay = 0.75
+
+        size = max(min_image, int(image_size))
+        # Default ROCm safety clamp to reduce OOM risk in VAE decode.
+        if getattr(torch.version, "hip", None):
+            rocm_cap = max(min_image, int(os.environ.get("BAGEL_GEN_ROCM_MAX_IMAGE_SIZE", "640") or "640"))
+            size = min(size, rocm_cap)
+        steps = max(min_steps, int(num_timesteps))
+
+        plan: list[tuple[int, int]] = [(size, steps)]
+        for _ in range(max_attempts - 1):
+            next_size = max(min_image, (size * 4) // 5)  # 20% downscale each retry
+            next_steps = max(min_steps, int(round(float(steps) * timestep_decay)))
+            # Ensure progress if one dimension cannot shrink further.
+            if next_size == size and next_steps == steps:
+                if next_steps > min_steps:
+                    next_steps -= 1
+                elif next_size > min_image:
+                    next_size -= 8
+                else:
+                    break
+            size, steps = next_size, next_steps
+            if (size, steps) != plan[-1]:
+                plan.append((size, steps))
+        return plan
 
     def _adapter_for_role(self, role: str) -> str:
         if not bool(self.runtime.lora_enabled):
@@ -131,16 +182,41 @@ class BagelRolloutAdapter:
         timestep_shift: float = 3.0,
         image_size: int = 1024,
     ) -> Optional[Image.Image]:
-        with use_adapter(self.runtime.model.language_model, self._adapter_for_role(ROLE_GENERATOR)):
-            out = self.inferencer(
-                text=spec,
-                think=False,
-                understanding_output=False,
-                cfg_text_scale=cfg_text_scale,
-                cfg_img_scale=cfg_img_scale,
-                cfg_interval=[0.4, 1.0],
-                timestep_shift=timestep_shift,
-                num_timesteps=num_timesteps,
-                image_shapes=(image_size, image_size),
-            )
-        return out.get("image")
+        retry_plan = self._build_generation_retry_plan(
+            image_size=int(image_size),
+            num_timesteps=int(num_timesteps),
+        )
+
+        for attempt_idx, (curr_size, curr_steps) in enumerate(retry_plan, start=1):
+            try:
+                with use_adapter(self.runtime.model.language_model, self._adapter_for_role(ROLE_GENERATOR)):
+                    out = self.inferencer(
+                        text=spec,
+                        think=False,
+                        understanding_output=False,
+                        cfg_text_scale=cfg_text_scale,
+                        cfg_img_scale=cfg_img_scale,
+                        cfg_interval=[0.4, 1.0],
+                        timestep_shift=timestep_shift,
+                        num_timesteps=int(curr_steps),
+                        image_shapes=(int(curr_size), int(curr_size)),
+                    )
+                image = out.get("image")
+                self._clear_memory()
+                return image
+            except RuntimeError as exc:
+                if not self._is_oom_error(exc):
+                    raise
+                self._clear_memory()
+                if attempt_idx >= len(retry_plan):
+                    print(
+                        "[rollout_adapter] generation OOM after retries; "
+                        f"failed at size={curr_size}, steps={curr_steps}. Skipping generation rollout."
+                    )
+                    return None
+                next_size, next_steps = retry_plan[attempt_idx]
+                print(
+                    "[rollout_adapter] generation OOM; retrying with "
+                    f"size={next_size}, steps={next_steps} (prev size={curr_size}, steps={curr_steps})."
+                )
+        return None
