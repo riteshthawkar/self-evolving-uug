@@ -125,6 +125,15 @@ class UnderstandingSelfEvolvingConfig:
     proposer_warm_start_entropy_exit_threshold: float = 0.10
     proposer_warm_start_easy_reject_penalty_scale: float = 0.0
     proposer_warm_start_certificate_weight: float = 0.50
+    # Budget-neutral diversity probe: during warm-start, reduce spot-check samples
+    # to free budget for probing whether the solver CAN disagree at extreme temps.
+    # This gives the proposer a real difficulty signal (not just text heuristics).
+    proposer_warm_start_spot_check_samples: int = 1  # reduced from 3 during warm-start
+    proposer_warm_start_diversity_probe_enabled: bool = True
+    proposer_warm_start_diversity_probe_max: int = 4  # max probe calls (from saved budget)
+    proposer_warm_start_diversity_probe_temp: float = 3.0  # extreme temp for probes
+    proposer_warm_start_diversity_probe_top_p: float = 1.0
+    proposer_warm_start_diversity_reward_weight: float = 0.40  # blend into proposer reward
     # Hardness debt controller: fast steering away from prolonged easy collapse.
     hardness_debt_enabled: bool = True
     hardness_debt_inc_easy: float = 1.50
@@ -518,6 +527,15 @@ class GenerationSelfEvolvingConfig:
     proposer_warm_start_entropy_exit_threshold: float = 0.10
     proposer_warm_start_easy_reject_penalty_scale: float = 0.0
     proposer_warm_start_certificate_weight: float = 0.50
+    # Budget-neutral diversity probe: during warm-start, reduce spot-check samples
+    # to free budget for probing whether the solver CAN disagree at extreme temps.
+    # This gives the proposer a real difficulty signal (not just text heuristics).
+    proposer_warm_start_spot_check_samples: int = 1  # reduced from 3 during warm-start
+    proposer_warm_start_diversity_probe_enabled: bool = True
+    proposer_warm_start_diversity_probe_max: int = 4  # max probe calls (from saved budget)
+    proposer_warm_start_diversity_probe_temp: float = 3.0  # extreme temp for probes
+    proposer_warm_start_diversity_probe_top_p: float = 1.0
+    proposer_warm_start_diversity_reward_weight: float = 0.40  # blend into proposer reward
     # Hardness debt controller: fast steering away from prolonged easy collapse.
     hardness_debt_enabled: bool = True
     hardness_debt_inc_easy: float = 1.50
