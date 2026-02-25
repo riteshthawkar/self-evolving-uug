@@ -91,22 +91,26 @@ def _build_understanding_train_batch(
     completion_start_pos = int(curr_rope[0])
     completion_len = len(completion_input_ids)
     completion_loss_len = len(shifted_completion_ids)
+    tensor_device = image_inputs["packed_text_ids"].device
 
-    completion_input_ids_t = torch.tensor(completion_input_ids, dtype=torch.long)
+    completion_input_ids_t = torch.tensor(completion_input_ids, dtype=torch.long, device=tensor_device)
     completion_indexes_t = torch.arange(
         completion_start_idx,
         completion_start_idx + completion_len,
         dtype=torch.long,
+        device=tensor_device,
     )
     completion_pos_t = torch.arange(
         completion_start_pos,
         completion_start_pos + completion_len,
         dtype=torch.long,
+        device=tensor_device,
     )
     ce_loss_indexes = torch.arange(
         completion_start_idx,
         completion_start_idx + completion_loss_len,
         dtype=torch.long,
+        device=tensor_device,
     )
 
     image_split_len = int(image_inputs["packed_seqlens"][0].item())
@@ -154,7 +158,7 @@ def _build_understanding_train_batch(
         "packed_vit_position_ids": image_inputs["packed_vit_position_ids"],
         "vit_token_seqlens": image_inputs["vit_token_seqlens"],
         "ce_loss_indexes": ce_loss_indexes,
-        "packed_label_ids": torch.tensor(completion_labels, dtype=torch.long),
+        "packed_label_ids": torch.tensor(completion_labels, dtype=torch.long, device=tensor_device),
     }
 
 
