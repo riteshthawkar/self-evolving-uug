@@ -4,13 +4,22 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict
 
 import torch
 from safetensors.torch import load_file
 from torchvision import transforms as tv_transforms
 from torchvision.transforms import functional as tv_functional, InterpolationMode
+
+# Ensure BAGEL imports resolve regardless of launch cwd/module style.
+_BAGEL_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = _BAGEL_ROOT.parent
+for _path in (str(_BAGEL_ROOT), str(_REPO_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from data.data_utils import add_special_tokens
 from inferencer import InterleaveInferencer

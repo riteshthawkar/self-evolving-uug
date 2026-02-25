@@ -11,11 +11,13 @@ import sys
 import numpy as np
 import torch
 
-# Allow direct execution via `python train/train_self_evolving.py`.
-if __package__ is None or __package__ == "":
-    _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if _ROOT not in sys.path:
-        sys.path.insert(0, _ROOT)
+# Ensure BAGEL imports resolve regardless of launch cwd/module style.
+_THIS_FILE = os.path.abspath(__file__)
+_BAGEL_ROOT = os.path.dirname(os.path.dirname(_THIS_FILE))
+_REPO_ROOT = os.path.dirname(_BAGEL_ROOT)
+for _path in (_BAGEL_ROOT, _REPO_ROOT):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from train.self_evolving.config import ModelLoadConfig, RolloutConfig
 
