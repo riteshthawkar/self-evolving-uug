@@ -44,7 +44,7 @@ class UnderstandingSelfEvolvingConfig:
     top_p: float = 1.0
     max_new_tokens_solver: int = 128
     max_new_tokens_proposer: int = 128
-    num_solver_samples: int = 7
+    num_solver_samples: int = 5
 
     # Reward shaping
     solver_soft_gamma: float = 0.7
@@ -360,7 +360,7 @@ class GenerationSelfEvolvingConfig:
     max_new_tokens_proposer: int = 256
     max_new_tokens_caption: int = 96
     max_new_tokens_generator: int = 768
-    num_solver_samples: int = 7
+    num_solver_samples: int = 5
     num_solver_samples_spec: int = 3
     num_generations: int = 4
 
