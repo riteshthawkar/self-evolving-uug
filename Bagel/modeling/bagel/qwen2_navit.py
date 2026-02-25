@@ -1287,7 +1287,11 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         packed_position_ids: torch.Tensor,
         packed_und_token_indexes: Optional[torch.LongTensor] = None,
         packed_gen_token_indexes: Optional[torch.LongTensor] = None,
+        **kwargs,
     ) -> torch.Tensor:
+        # PEFT wrappers may pass HF-standard kwargs (e.g., input_ids, labels) that
+        # are irrelevant for BAGEL's packed-sequence training path.
+        del kwargs
 
         outputs = self.model(
             packed_sequence=packed_sequence,
@@ -1313,7 +1317,10 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         mode="und",
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
+        **kwargs,
     ) -> BaseNavitOutputWithPast:
+        # Keep compatibility with generic wrappers that may send unused kwargs.
+        del kwargs
 
         outputs = self.model(
             packed_query_sequence=packed_query_sequence,
