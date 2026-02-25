@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -15,6 +16,54 @@ from modeling.bagel.runtime_precision import autocast_context
 from .adapter_manager import collect_adapter_parameters, use_adapter
 from .config import RolloutConfig
 from .model_loader import BagelRuntime
+
+
+def _build_single_sample_attention_mask(
+    *,
+    split_lens: List[int],
+    attn_modes: List[str],
+    device: torch.device,
+) -> torch.Tensor:
+    """Build a dense attention mask for one sample to avoid flex-attn OOM in policy updates."""
+    if len(split_lens) != len(attn_modes):
+        raise ValueError(
+            f"split_lens and attn_modes must have same length, got {len(split_lens)} vs {len(attn_modes)}."
+        )
+
+    sample_len = int(sum(int(v) for v in split_lens))
+    allow = torch.zeros((sample_len, sample_len), dtype=torch.bool, device=device)
+
+    csum = 0
+    for seg_len_raw, attn_mode in zip(split_lens, attn_modes):
+        seg_len = int(seg_len_raw)
+        if seg_len <= 0:
+            continue
+        seg_slice = slice(csum, csum + seg_len)
+        mode = str(attn_mode)
+        if mode == "causal":
+            allow[seg_slice, seg_slice] = torch.ones((seg_len, seg_len), dtype=torch.bool, device=device).tril()
+            if csum > 0:
+                allow[seg_slice, :csum] = True
+        elif mode in {"full", "noise"}:
+            allow[seg_slice, seg_slice] = True
+            if csum > 0:
+                allow[seg_slice, :csum] = True
+        else:
+            raise ValueError(f"Unsupported attn_mode={mode!r}.")
+        csum += seg_len
+
+    # For noise segments, block attending to other noise segments.
+    csum = 0
+    for seg_len_raw, attn_mode in zip(split_lens, attn_modes):
+        seg_len = int(seg_len_raw)
+        if seg_len > 0 and str(attn_mode) == "noise":
+            allow[:, csum : csum + seg_len] = False
+            allow[csum : csum + seg_len, csum : csum + seg_len] = True
+        csum += seg_len
+
+    mask = torch.full((sample_len, sample_len), float("-inf"), dtype=torch.float32, device=device)
+    mask = mask.masked_fill(allow, 0.0)
+    return mask
 
 
 def _to_device(batch: Dict, device: torch.device) -> Dict:
@@ -59,6 +108,15 @@ def _build_understanding_train_batch(
 
     curr_lens = [0]
     curr_rope = [0]
+    policy_max_edge = int(os.environ.get("BAGEL_POLICY_MAX_VIT_EDGE", "448") or "448")
+    if policy_max_edge > 0:
+        w, h = image.size
+        max_edge = max(int(w), int(h))
+        if max_edge > policy_max_edge:
+            scale = float(policy_max_edge) / float(max_edge)
+            new_w = max(1, int(round(float(w) * scale)))
+            new_h = max(1, int(round(float(h) * scale)))
+            image = image.resize((new_w, new_h), resample=Image.BICUBIC)
 
     image_inputs, curr_lens, curr_rope = model.prepare_vit_images(
         curr_kvlens=curr_lens,
@@ -144,10 +202,16 @@ def _build_understanding_train_batch(
     sequence_length = int(completion_start_idx + completion_len)
     split_lens = [int(image_split_len), int(prompt_split_len), int(completion_len)]
     attn_modes = ["full", "causal", "causal"]
+    nested_attention_mask = _build_single_sample_attention_mask(
+        split_lens=split_lens,
+        attn_modes=attn_modes,
+        device=tensor_device,
+    )
 
     return {
         "sequence_length": sequence_length,
-        "sample_lens": split_lens,
+        "sample_lens": [sequence_length],
+        "nested_attention_masks": [nested_attention_mask],
         "split_lens": split_lens,
         "attn_modes": attn_modes,
         "packed_text_ids": packed_text_ids,
@@ -378,6 +442,26 @@ class BagelRolePolicyUpdater:
                     self.optimizer.step()
                     opt_step = True
                     self._reset_grad_window()
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            oom_like = ("out of memory" in msg) or ("cuda out of memory" in msg) or ("hip out of memory" in msg)
+            if not oom_like:
+                raise
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            self._reset_grad_window()
+            return PolicyStepResult(
+                skipped=True,
+                reason="cuda_oom",
+                reward=scaled_reward,
+                baseline=scaled_baseline,
+                advantage=advantage,
+                loss=loss_value,
+                ce_loss=ce_value,
+                grad_norm=0.0,
+                optimizer_step_applied=False,
+                token_count=token_count,
+            ).to_dict()
         finally:
             model.config.visual_gen = prev_visual_gen
             model.train(was_training)
