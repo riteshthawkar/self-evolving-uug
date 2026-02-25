@@ -3109,24 +3109,40 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_anchor_bonus = self._anchor_replay_bonus(question, chosen_strategy_used)
         proposer_contrastive_replay_bonus = self._contrastive_replay_adjustment(question)
         proposer_bonus_enabled = difficulty_bucket_observed in {"medium", "hard"}
-        proposer_bonus_warm_enabled = proposer_bonus_enabled or proposer_warm_start_active
-        if proposer_warm_start_active:
-            # Logit-Margin warm start: the PRIMARY proposer signal is the
-            # continuous logit-margin difficulty from the V-Zero greedy call.
-            # This directly measures solver uncertainty — small margin means
-            # the model is near its decision boundary, i.e. a genuinely hard
-            # question.  Text/certificate bonuses remain as secondary quality
-            # signals.  This replaces the old diversity-probe approach.
-            _lm_ws_weight = max(
-                0.0,
-                float(
-                    getattr(self.cfg, "proposer_logit_margin_warm_start_weight", 0.70)
-                ),
-            )
-            proposer_reward = _lm_ws_weight * _logit_margin_difficulty
+        # Logit-Margin Difficulty Signal (LMDS) integration.
+        # LMDS is a PERMANENT fallback for the entropy dead zone, not just
+        # a warm-start crutch.  Whenever entropy=0, the entropy-based reward
+        # is degenerate (zero gradient) and LMDS provides the only
+        # continuous signal.  After entropy breaks zero, LMDS becomes a
+        # complementary signal that keeps rewarding questions near the
+        # solver's decision boundary.
+        _lmds_is_primary = bool(
+            _lmds_enabled
+            and (entropy_nats < 1e-6 or proposer_warm_start_active)
+            and _logit_margin_difficulty > 0.0
+        )
+        proposer_bonus_warm_enabled = proposer_bonus_enabled or proposer_warm_start_active or _lmds_is_primary
+        if _lmds_is_primary:
+            # LMDS overrides the entropy-based base reward.  Use higher
+            # weight during warm-start (model hasn't seen real entropy yet)
+            # and a slightly lower but still dominant weight afterwards.
+            if proposer_warm_start_active:
+                _lm_primary_weight = max(
+                    0.0,
+                    float(
+                        getattr(self.cfg, "proposer_logit_margin_warm_start_weight", 0.70)
+                    ),
+                )
+            else:
+                _lm_primary_weight = max(
+                    0.0,
+                    float(
+                        getattr(self.cfg, "proposer_logit_margin_warm_start_weight", 0.70)
+                    ),
+                ) * 0.85  # slightly reduced post-warm-start (~0.60)
+            proposer_reward = _lm_primary_weight * _logit_margin_difficulty
         elif _lmds_enabled and _logit_margin_difficulty > 0.0:
-            # After warm-start: logit margin as COMPLEMENTARY signal to entropy.
-            # This keeps a continuous difficulty gradient even when entropy works.
+            # Entropy is working (>0): LMDS as complementary signal.
             _lm_weight = max(
                 0.0,
                 float(
@@ -3202,7 +3218,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         question_reject_reason = "|".join(reject_reasons)
         proposer_reject_penalty_scale_used = 1.0
         warm_start_easy_only_reject = (
-            proposer_warm_start_active
+            (proposer_warm_start_active or _lmds_is_primary)
             and len(reject_reasons) > 0
             and all(r in {"easy_bucket", "all_candidates_easy"} for r in reject_reasons)
         )
@@ -3236,6 +3252,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             easy_constraint_enabled
             and difficulty_bucket_observed == "easy"
             and (not proposer_warm_start_active)
+            and (not _lmds_is_primary)
         ):
             easy_constraint_penalty = (
                 float(getattr(self, "_easy_lagrange_lambda", 0.0))
@@ -3243,7 +3260,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             )
             proposer_reward -= easy_constraint_penalty
 
-        if difficulty_bucket_observed == "easy" and (not proposer_warm_start_active):
+        if difficulty_bucket_observed == "easy" and (not proposer_warm_start_active) and (not _lmds_is_primary):
             proposer_reward = min(proposer_reward, easy_reward_floor)
 
         proposer_reward_pre_clip = float(proposer_reward)
