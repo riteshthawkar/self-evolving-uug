@@ -391,12 +391,23 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
     def _update_proposer_entropy_target(self, entropy_nats: float) -> float:
         if not bool(getattr(self.cfg, "adaptive_prop_entropy_target", True)):
             return float(self.cfg.prop_entropy_mu)
-        anchor = self._dist_mean(float(entropy_nats))
         prev = float(getattr(self, "proposer_entropy_mu_ema", self.cfg.prop_entropy_mu))
-        momentum = float(getattr(self.cfg, "prop_entropy_ema_momentum", 0.95))
-        momentum = max(0.0, min(0.9999, momentum))
-        ema = momentum * prev + (1.0 - momentum) * anchor
-        mu_min = float(getattr(self.cfg, "prop_entropy_mu_min", 0.0))
+        # Only incorporate observations with meaningful entropy into the EMA.
+        # Near-zero entropy (all solvers agree) carries no useful difficulty
+        # signal — incorporating it would drag the target toward zero,
+        # eliminating the gradient that pushes the proposer toward harder
+        # questions.  When entropy is near-zero, keep the target unchanged.
+        _ent_incorporate_floor = max(
+            0.0, float(getattr(self.cfg, "prop_entropy_incorporate_floor", 0.05))
+        )
+        if float(entropy_nats) > _ent_incorporate_floor:
+            anchor = self._dist_mean(float(entropy_nats))
+            momentum = float(getattr(self.cfg, "prop_entropy_ema_momentum", 0.95))
+            momentum = max(0.0, min(0.9999, momentum))
+            ema = momentum * prev + (1.0 - momentum) * anchor
+        else:
+            ema = prev
+        mu_min = float(getattr(self.cfg, "prop_entropy_mu_min", 0.40))
         mu_max = float(getattr(self.cfg, "prop_entropy_mu_max", 10.0))
         if mu_min > mu_max:
             mu_min, mu_max = mu_max, mu_min
@@ -424,29 +435,19 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         # Reject latent-state binary forms that are weakly grounded in a single frame.
         if _EASY_BINARY_START_RE.search(q) and _LATENT_NONVISUAL_RE.search(q_lower):
             return False
+        # Reject any question with a concrete forced-choice tail ("X or Y?"
+        # / "X: A or B?").  These collapse solver entropy to zero and
+        # prevent any learning signal, regardless of other quality signals.
+        # Only reject when both alternatives are short (<=3 words each) —
+        # longer matches indicate natural "or" usage, not forced-choice.
+        _fc_match = _BINARY_ALT_TAIL_RE.search(q)
+        if _fc_match:
+            _fc_left = _fc_match.group(1).strip()
+            _fc_right = _fc_match.group(2).strip()
+            if len(_fc_left.split()) <= 3 and len(_fc_right.split()) <= 3:
+                return False
         if _OBJECTIVE_QUESTION_RE.search(q):
             return True
-        # Accept concrete forced-choice binaries as objective even when they do
-        # not contain the explicit lexicon above.
-        if _EASY_BINARY_START_RE.search(q) and _BINARY_FORCED_CHOICE_RE.search(q):
-            m = _BINARY_ALT_TAIL_RE.search(q)
-            if m is not None:
-                left = normalize_answer(m.group(1), max_words=8)
-                right = normalize_answer(m.group(2), max_words=8)
-                if (
-                    left
-                    and right
-                    and left != right
-                    and (not _BINARY_LOW_INFO_ALT_RE.match(left))
-                    and (not _BINARY_LOW_INFO_ALT_RE.match(right))
-                ):
-                    has_hint = bool(_OBJECTIVE_BINARY_HINT_RE.search(q))
-                    structured_binary = (
-                        len(q_lower.split()) >= 6
-                        and (" is " in f" {q_lower} " or " are " in f" {q_lower} ")
-                    )
-                    if has_hint or structured_binary:
-                        return True
         if subjective_hit:
             return False
         return False
@@ -547,8 +548,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             if (task_card == "c5") or ("text" in qn) or ("word" in qn) or ("token" in qn):
                 return f"What exact text is visible on the {t}?"
             if len(alts) >= 2:
-                a, b = alts[0], alts[1]
-                return f"For the {t}, which is more consistent with visible evidence: {a} or {b}?"
+                # Keep question open-ended — NEVER inject the two_answer_test
+                # alternatives.  Forced-choice kills solver entropy.
+                return f"What is the {t}?"
             if "relation" in domains:
                 return f"What is immediately beside the {t}?"
             return f"What detail on the {t} is most clearly visible?"
@@ -606,11 +608,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if target and is_count:
             compiled = f"How many {target} are visible?"
         elif target and len(alts) >= 2:
-            a, b = alts[0], alts[1]
-            if qn.startswith(("is ", "are ", "was ", "were ")):
-                compiled = f"Is the {target} {a} or {b}?"
+            # Keep the original proposer question open-ended.  The
+            # two_answer_test alternatives stay as a HIDDEN validator and
+            # are NOT injected into the question text.  Forced-choice
+            # questions ("A or B?") collapse solver entropy to zero and
+            # prevent any learning signal.
+            if q.endswith("?") and not _BINARY_FORCED_CHOICE_RE.search(q):
+                compiled = q
             else:
-                compiled = f"What is the {target}: {a} or {b}?"
+                # Original already contains "or" / "vs" options or is
+                # malformed — rewrite as open-ended about the target.
+                compiled = f"What is the {target}?"
         elif target and qn.startswith("what color"):
             compiled = f"What color is the {target}?"
         elif target and qn.startswith("what pattern"):
@@ -1473,7 +1481,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
 
     def _get_proposer_bucket_baseline(self, bucket: str) -> float:
         b = str(bucket or "").strip().lower()
-        return float(self._proposer_bucket_baselines.get(b, self.proposer_baseline))
+        baseline = float(self._proposer_bucket_baselines.get(b, self.proposer_baseline))
+        if b == "easy":
+            # Prevent baseline collapse: when ALL questions are easy the
+            # easy baseline tracks the easy reward floor (≈ -0.35), making
+            # advantage ≈ 0 and killing the gradient.  Cap the easy baseline
+            # so that easy questions always have a meaningfully negative
+            # advantage, giving the proposer a consistent downward push.
+            easy_baseline_cap = float(
+                getattr(self.cfg, "proposer_easy_baseline_cap", -0.05)
+            )
+            baseline = min(baseline, easy_baseline_cap)
+        return baseline
 
     def _update_proposer_bucket_baseline(self, bucket: str, reward: float):
         b = str(bucket or "").strip().lower()
@@ -2717,6 +2736,115 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             if candidate_noncanonical_rate_list
             else 0.0
         )
+
+        # -----------------------------------------------------------------
+        # Difficulty-escalating retry: when ALL K candidates are easy,
+        # re-generate with target_difficulty="hard" and boosted temperature.
+        # This gives the proposer a second chance to produce a non-trivial
+        # question before we fall back to "best-of-easy".
+        # -----------------------------------------------------------------
+        _escalation_enabled = bool(
+            getattr(self.cfg, "proposer_difficulty_escalation_enabled", True)
+        )
+        if all_easy_candidate_group and _escalation_enabled and (not fallback_used):
+            _esc_temp_boost = max(
+                1.0,
+                float(getattr(self.cfg, "proposer_escalation_temp_boost", 1.3)),
+            )
+            _esc_temp = min(2.0, proposer_temp_ctrl * _esc_temp_boost)
+            _esc_prompt = build_proposer_multi_prompt(
+                target_difficulty="hard",
+                num_questions=num_proposer_candidates,
+                image_source_hint=_src_hint,
+                curriculum_arm_hint=curriculum_arm_hint,
+                replay_anchor_hints=replay_anchor_hints,
+            )
+            _esc_out = self._generate(
+                image=image,
+                prompt=_esc_prompt,
+                adapter_name="proposer" if self.cfg.use_lora else None,
+                max_new_tokens=self.cfg.max_new_tokens_proposer,
+                temperature=_esc_temp,
+                top_p=proposer_top_p_ctrl,
+            )
+            _esc_candidates = self._parse_proposer_question_candidates(_esc_out)
+            _esc_questions = [
+                c.get("text", "").strip()
+                for c in _esc_candidates
+                if c.get("text", "").strip()
+            ]
+            for esc_idx, esc_q in enumerate(_esc_questions):
+                esc_q = esc_q.replace("\n", " ").strip()
+                if not esc_q:
+                    continue
+                esc_meta = (
+                    _esc_candidates[esc_idx]
+                    if esc_idx < len(_esc_candidates)
+                    else {"text": esc_q}
+                )
+                esc_compiled, esc_ok, _esc_reason = self._compile_question_from_slots(
+                    esc_q, esc_meta
+                )
+                if esc_ok and esc_compiled:
+                    esc_q = esc_compiled
+                if not self._is_objective_question(esc_q):
+                    continue
+                esc_cert = self._proposer_certificate_score(esc_q, esc_meta)
+                if float(esc_cert.get("valid", 0.0)) < 0.5:
+                    continue
+                # Quick spot-check with solver
+                esc_solver_prompt = build_solver_prompt(esc_q)
+                esc_outputs: List[str] = []
+                esc_answers_raw: List[str] = []
+                esc_answers_norm: List[str] = []
+                esc_pre_words: List[int] = []
+                for sc_idx in range(spot_check_samples):
+                    real_idx = spot_check_offset + sc_idx
+                    sc_temp = (
+                        float(solver_temperatures[real_idx])
+                        if real_idx < len(solver_temperatures)
+                        else float(self.cfg.temp)
+                    )
+                    sc_solver_out = self._generate(
+                        image=image,
+                        prompt=esc_solver_prompt,
+                        adapter_name="default" if self.cfg.use_lora else None,
+                        max_new_tokens=self.cfg.max_new_tokens_solver,
+                        temperature=sc_temp,
+                    )
+                    sc_ans_raw = _parse_answer(sc_solver_out)
+                    sc_ans_text = normalize_answer(sc_ans_raw)
+                    esc_outputs.append(sc_solver_out)
+                    esc_answers_raw.append(sc_ans_raw)
+                    esc_answers_norm.append(sc_ans_text)
+                    esc_pre_words.append(pre_answer_word_count(sc_solver_out))
+                esc_hist: Dict[str, int] = {}
+                for _ea in esc_answers_norm:
+                    if _ea:
+                        esc_hist[_ea] = esc_hist.get(_ea, 0) + 1
+                esc_n = max(1, len([a for a in esc_answers_norm if a]))
+                esc_probs = [float(c) / float(esc_n) for c in esc_hist.values()] if esc_hist else [1.0]
+                esc_entropy = shannon_entropy_nats(esc_probs)
+                esc_maj_frac = float(max(esc_hist.values())) / float(esc_n) if esc_hist else 1.0
+                esc_margin = esc_maj_frac
+                esc_bucket = self._difficulty_bucket(
+                    esc_entropy, esc_margin, esc_maj_frac, entropy_easy_threshold
+                )
+                if esc_bucket != "easy":
+                    # Escalation found a non-easy question — accept it
+                    best_accept_question = esc_q
+                    best_accept_outputs = esc_outputs
+                    best_accept_answers_raw = esc_answers_raw
+                    best_accept_answers_norm = esc_answers_norm
+                    best_accept_pre_words = esc_pre_words
+                    best_accept_entropy = esc_entropy
+                    best_accept_margin = esc_margin
+                    best_accept_meta = dict(esc_meta)
+                    best_accept_choice_mode = False
+                    best_accept_choice_option_a = ""
+                    best_accept_choice_option_b = ""
+                    all_easy_candidate_group = False
+                    break
 
         # Minimum spot-check entropy gate: if all candidates are easy and even
         # the best spot-check entropy is near zero, force exploration for
