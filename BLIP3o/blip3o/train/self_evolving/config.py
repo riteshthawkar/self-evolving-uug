@@ -69,7 +69,7 @@ class UnderstandingSelfEvolvingConfig:
     len_penalty_target_words: int = 6
     prop_entropy_mu: float = 0.90
     prop_entropy_sigma: float = 0.35
-    adaptive_prop_entropy_target: bool = False  # disabled: EMA was chasing entropy=0 (failure mode)
+    adaptive_prop_entropy_target: bool = True  # re-enabled: EMA no longer incorporates zero-entropy observations
     prop_entropy_ema_momentum: float = 0.90
     prop_entropy_mu_min: float = 0.40
     prop_entropy_mu_max: float = 1.5
@@ -480,7 +480,7 @@ class GenerationSelfEvolvingConfig:
     len_penalty_target_words: int = 6
     prop_entropy_mu: float = 0.90
     prop_entropy_sigma: float = 0.35
-    adaptive_prop_entropy_target: bool = False  # disabled: EMA was chasing entropy=0 (failure mode)
+    adaptive_prop_entropy_target: bool = True  # re-enabled: EMA no longer incorporates zero-entropy observations
     prop_entropy_ema_momentum: float = 0.90
     prop_entropy_mu_min: float = 0.40
     prop_entropy_mu_max: float = 1.5
