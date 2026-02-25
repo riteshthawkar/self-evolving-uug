@@ -127,22 +127,22 @@ class UnderstandingSelfEvolvingConfig:
     proposer_warm_start_certificate_weight: float = 0.50
     # Logit-Margin Difficulty Signal (LMDS): continuous difficulty measurement
     # from the solver's internal confidence on its greedy (V-Zero) answer.
-    # The logit margin = gap between top-1 and top-2 logits at the model's
-    # weakest decision point.  Small margin → model is near its decision
-    # boundary → genuinely hard question.  This is a CONTINUOUS signal that
-    # works from step 0 (no cold-start problem) and requires ZERO extra
-    # compute — it piggybacks on the existing V-Zero greedy call.
-    solver_logit_margin_enabled: bool = True
-    solver_logit_margin_tokens: int = 5  # first K answer tokens to analyze
-    solver_logit_margin_window_size: int = 128  # rolling window for quantile normalization
-    solver_logit_margin_sigmoid_alpha: float = 1.5  # sigmoid steepness (fallback when window is cold)
-    solver_logit_margin_sigmoid_beta: float = 3.0  # sigmoid midpoint (fallback when window is cold)
-    proposer_logit_margin_reward_weight: float = 0.30  # weight after warm-start (complementary to entropy)
-    proposer_logit_margin_warm_start_weight: float = 0.70  # weight during warm-start (primary signal)
-    # Forced-choice penalty: "Is X A or B?" questions bypass visual reasoning by
-    # offering options in the question text.  This penalty makes them less rewarding
-    # than open-ended questions, driving the proposer toward genuine visual queries.
-    proposer_forced_choice_penalty: float = 0.40
+    # Solver Token Entropy (STE): full softmax entropy of logit distribution
+    # at each answer token.  Unlike logit margin (top1-top2 gap), STE captures
+    # genuine multi-way uncertainty.  Forced-choice "A or B?" gives H ≈ ln(2)
+    # ≈ 0.69; genuinely hard open-ended questions give H >> 1.0.  This makes
+    # STE naturally resistant to forced-choice gaming.
+    solver_token_entropy_enabled: bool = True
+    solver_token_entropy_tokens: int = 5  # first K answer tokens to analyze
+    solver_token_entropy_window_size: int = 128  # rolling window for quantile normalization
+    solver_token_entropy_sigmoid_alpha: float = 1.5  # sigmoid steepness (cold-window fallback)
+    solver_token_entropy_sigmoid_beta: float = 2.0  # sigmoid midpoint (in nats; ln(2)≈0.69, tuned for entropy scale)
+    proposer_ste_reward_weight: float = 0.30  # weight after warm-start (complementary to sample entropy)
+    proposer_ste_warm_start_weight: float = 0.70  # weight during warm-start (primary signal)
+    # Prompt-Perturbed Sampling (PPS): use 7 different prompt framings instead
+    # of repeating the same prompt.  Entropy now measures ROBUSTNESS of
+    # understanding rather than stochastic variation.
+    solver_pps_enabled: bool = True
     # Hardness debt controller: fast steering away from prolonged easy collapse.
     hardness_debt_enabled: bool = True
     hardness_debt_inc_easy: float = 1.50
@@ -538,22 +538,22 @@ class GenerationSelfEvolvingConfig:
     proposer_warm_start_certificate_weight: float = 0.50
     # Logit-Margin Difficulty Signal (LMDS): continuous difficulty measurement
     # from the solver's internal confidence on its greedy (V-Zero) answer.
-    # The logit margin = gap between top-1 and top-2 logits at the model's
-    # weakest decision point.  Small margin → model is near its decision
-    # boundary → genuinely hard question.  This is a CONTINUOUS signal that
-    # works from step 0 (no cold-start problem) and requires ZERO extra
-    # compute — it piggybacks on the existing V-Zero greedy call.
-    solver_logit_margin_enabled: bool = True
-    solver_logit_margin_tokens: int = 5  # first K answer tokens to analyze
-    solver_logit_margin_window_size: int = 128  # rolling window for quantile normalization
-    solver_logit_margin_sigmoid_alpha: float = 1.5  # sigmoid steepness (fallback when window is cold)
-    solver_logit_margin_sigmoid_beta: float = 3.0  # sigmoid midpoint (fallback when window is cold)
-    proposer_logit_margin_reward_weight: float = 0.30  # weight after warm-start (complementary to entropy)
-    proposer_logit_margin_warm_start_weight: float = 0.70  # weight during warm-start (primary signal)
-    # Forced-choice penalty: "Is X A or B?" questions bypass visual reasoning by
-    # offering options in the question text.  This penalty makes them less rewarding
-    # than open-ended questions, driving the proposer toward genuine visual queries.
-    proposer_forced_choice_penalty: float = 0.40
+    # Solver Token Entropy (STE): full softmax entropy of logit distribution
+    # at each answer token.  Unlike logit margin (top1-top2 gap), STE captures
+    # genuine multi-way uncertainty.  Forced-choice "A or B?" gives H ≈ ln(2)
+    # ≈ 0.69; genuinely hard open-ended questions give H >> 1.0.  This makes
+    # STE naturally resistant to forced-choice gaming.
+    solver_token_entropy_enabled: bool = True
+    solver_token_entropy_tokens: int = 5  # first K answer tokens to analyze
+    solver_token_entropy_window_size: int = 128  # rolling window for quantile normalization
+    solver_token_entropy_sigmoid_alpha: float = 1.5  # sigmoid steepness (cold-window fallback)
+    solver_token_entropy_sigmoid_beta: float = 2.0  # sigmoid midpoint (in nats; ln(2)≈0.69, tuned for entropy scale)
+    proposer_ste_reward_weight: float = 0.30  # weight after warm-start (complementary to sample entropy)
+    proposer_ste_warm_start_weight: float = 0.70  # weight during warm-start (primary signal)
+    # Prompt-Perturbed Sampling (PPS): use 7 different prompt framings instead
+    # of repeating the same prompt.  Entropy now measures ROBUSTNESS of
+    # understanding rather than stochastic variation.
+    solver_pps_enabled: bool = True
     # Hardness debt controller: fast steering away from prolonged easy collapse.
     hardness_debt_enabled: bool = True
     hardness_debt_inc_easy: float = 1.50

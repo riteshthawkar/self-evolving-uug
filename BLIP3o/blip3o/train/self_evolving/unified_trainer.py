@@ -26,6 +26,7 @@ from .generation_trainer import GenerationSelfEvolvingTrainer
 from .prompts import (
     build_proposer_multi_prompt,
     build_solver_prompt,
+    build_solver_prompt_pps,
 )
 from .replay_buffer import ReplayBuffer
 from .utils import (
@@ -1184,7 +1185,66 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         stats["progress_ema"] = alpha * prev_prog + (1.0 - alpha) * float(progress_now)
         self._curriculum_arm_stats[arm_key] = stats
 
-    def _top_replay_anchor_hints(self, k: int = 2) -> List[str]:
+    def _seed_anchor_exemplars(self) -> None:
+        """Pre-populate anchor replay with diverse hard question pattern seeds.
+
+        These cover the major VLM capability dimensions — spatial reasoning,
+        depth/3D, materials, actions/states, compositional reasoning,
+        counting, part-whole, and fine-grained attributes.  This diversity
+        ensures the proposer explores MANY types of hard questions from
+        step 0, not just counting or OCR.
+
+        Real high-STE questions from training will naturally displace these
+        seeds within ~10-15 steps because they have low priority scores.
+        """
+        _seeds = [
+            # --- Spatial reasoning ---
+            ("What is immediately to the left of the tallest object on the table?",
+             "H4", 0.30, 0.60),
+            # --- Depth & 3D understanding ---
+            ("Which object is closer to the camera: the item on the left or the one on the right side of the surface?",
+             "H11", 0.30, 0.60),
+            # --- Material / texture recognition ---
+            ("What material does the floor in the background appear to be made of?",
+             "H10", 0.30, 0.60),
+            # --- Action / state of non-dominant subject ---
+            ("What is the person furthest from the camera doing with their hands?",
+             "H9", 0.30, 0.60),
+            # --- Object state / condition ---
+            ("Is the container in the background open, closed, or partially open?",
+             "H14", 0.28, 0.58),
+            # --- Compositional multi-hop reference ---
+            ("What color is the item being held by the person who is closest to the right edge?",
+             "H13", 0.30, 0.60),
+            # --- Part-whole relationship ---
+            ("What is mounted on or attached to the top of the vertical structure on the left?",
+             "H12", 0.28, 0.58),
+            # --- Counting under occlusion ---
+            ("How many partially visible objects are on the shelf behind the main subject?",
+             "H1", 0.28, 0.58),
+            # --- Fine-grained attribute of background object ---
+            ("What pattern or design is visible on the non-dominant object in the background?",
+             "M4", 0.25, 0.55),
+            # --- Comparison / relative judgment ---
+            ("Which is larger: the object on the far left or the object nearest the center?",
+             "H2", 0.25, 0.55),
+        ]
+        for q, strat, priority, sted in _seeds:
+            self._proposer_anchor_replay.append({
+                "question": q,
+                "priority": priority,
+                "reward": 0.15,
+                "step": 0,
+                "ste_difficulty": sted,
+                "entropy": 0.0,
+                "source": "seed",
+                "qkey": "",
+                "q_tokens": [],
+                "strategy": strat,
+                "bucket": "easy",
+            })
+
+    def _top_replay_anchor_hints(self, k: int = 3) -> List[str]:
         if not bool(getattr(self.cfg, "replay_priority_enabled", True)):
             return []
         if not self._proposer_anchor_replay:
@@ -1198,10 +1258,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             reverse=True,
         )
         out: List[str] = []
+        seen_questions: set = set()
         for item in ranked:
             q = str(item.get("question", "") or "").strip()
-            if q and q not in out:
-                out.append(q)
+            if not q or q in seen_questions:
+                continue
+            seen_questions.add(q)
+            # Enrich the hint with WHY this question was hard.
+            src = str(item.get("source", "")).strip()
+            ent = float(item.get("entropy", 0.0))
+            sted = float(item.get("ste_difficulty", 0.0))
+            if ent > 0.05:
+                reason = f"(caused solver split, H={ent:.2f})"
+            elif sted > 0.5:
+                reason = f"(high model uncertainty, SD={sted:.2f})"
+            else:
+                reason = "(effective)"
+            hint = f"{q} {reason}"
+            out.append(hint)
             if len(out) >= kk:
                 break
         return out
@@ -1685,6 +1759,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._answer_family_window = deque(maxlen=qhist_window_size)
         self._strategy_window = deque(maxlen=strategy_window_size)
         self._proposer_anchor_replay = deque(maxlen=anchor_replay_size)
+        self._seed_anchor_exemplars()
         self._contrastive_pos_replay = deque(maxlen=contrastive_replay_size)
         self._contrastive_neg_replay = deque(maxlen=contrastive_replay_size)
         self._grpo_std_window = deque(maxlen=std_window_size)
@@ -1707,11 +1782,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._hardness_debt = 0.0
         self._hardness_debt_cap_streak = 0
         self._hardness_debt_escape_steps_left = 0
-        # Logit-margin difficulty signal (LMDS) rolling window.
-        _lm_window_size = max(
-            8, int(getattr(self.cfg, "solver_logit_margin_window_size", 128))
+        # Solver Token Entropy (STE) rolling window for quantile normalization.
+        _ste_window_size = max(
+            8, int(getattr(self.cfg, "solver_token_entropy_window_size", 128))
         )
-        self._logit_margin_window: List[float] = []
+        self._ste_window: List[float] = []
 
     def _entropy_iqr_filter_state(self) -> Dict[str, float]:
         static_threshold = float(getattr(self.cfg, "sc_entropy_min", 0.15))
@@ -2225,6 +2300,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         spot_check_samples = max(
             1, int(getattr(self.cfg, "proposer_spot_check_samples", 3))
         )
+        _pps_enabled = bool(getattr(self.cfg, "solver_pps_enabled", True))
         spot_entropy_min_gate = max(
             0.0, float(getattr(self.cfg, "proposer_spot_entropy_min_gate", 0.05))
         )
@@ -2261,17 +2337,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             _src_hint = "gqa"
         else:
             _src_hint = "coco"
-        replay_anchor_hints: List[str] = []
-        replay_anchor_streak = max(
-            1, int(getattr(self.cfg, "replay_anchor_inject_easy_streak", 2))
+        # Always inject anchor hints (not just during easy streaks).
+        # The proposer needs exemplars of what hard questions look like
+        # from step 1.  STE-qualified questions fill the buffer even when
+        # entropy is 0, so hints are available from early training.
+        replay_anchor_hints: List[str] = self._top_replay_anchor_hints(
+            int(getattr(self.cfg, "replay_anchor_inject_k", 3))
         )
-        if (
-            self._all_easy_streak() >= replay_anchor_streak
-            or bool(controller_state.get("forced_explore_active", 0.0) > 0.5)
-        ):
-            replay_anchor_hints = self._top_replay_anchor_hints(
-                int(getattr(self.cfg, "replay_anchor_inject_k", 2))
-            )
 
         multi_proposer_prompt = build_proposer_multi_prompt(
             target_difficulty=desired_difficulty_bucket,
@@ -2440,7 +2512,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     if real_idx < len(solver_top_ps)
                     else float(self.cfg.top_p)
                 )
-                sc_prompt = build_solver_prompt(cand_q, focus_hint=self._solver_focus_hint(real_idx))
+                if _pps_enabled:
+                    sc_prompt = build_solver_prompt_pps(
+                        cand_q,
+                        template_index=real_idx,
+                        focus_hint=self._solver_focus_hint(real_idx),
+                    )
+                else:
+                    sc_prompt = build_solver_prompt(cand_q, focus_hint=self._solver_focus_hint(real_idx))
                 sc_out = self._generate(
                     image=image,
                     prompt=sc_prompt,
@@ -2748,6 +2827,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         # Solver is always prompted in free-form mode.
         # Proposer two-answer alternatives are used only as a hidden scorer.
         solver_prompt = build_solver_prompt(question)
+        # --- Prompt-Perturbed Sampling (PPS) ---
+        # When PPS is enabled, each of the N solver samples uses a DIFFERENT
+        # prompt template (same question, different preamble framing).  This
+        # makes entropy measure ROBUSTNESS of understanding rather than
+        # stochastic variation from temperature sampling.
         if len(solver_answers_norm) < self.cfg.num_solver_samples:
             for sample_idx in range(len(solver_answers_norm), self.cfg.num_solver_samples):
                 solver_temp = (
@@ -2760,10 +2844,19 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     if sample_idx < len(solver_top_ps)
                     else float(self.cfg.top_p)
                 )
-                sample_solver_prompt = build_solver_prompt(
-                    question,
-                    focus_hint=self._solver_focus_hint(sample_idx),
-                )
+                if _pps_enabled:
+                    # PPS: each sample gets a different prompt template
+                    sample_solver_prompt = build_solver_prompt_pps(
+                        question,
+                        template_index=sample_idx,
+                        focus_hint=self._solver_focus_hint(sample_idx),
+                    )
+                else:
+                    # Fallback: original single-template behavior
+                    sample_solver_prompt = build_solver_prompt(
+                        question,
+                        focus_hint=self._solver_focus_hint(sample_idx),
+                    )
                 solver_out = self._generate(
                     image=image,
                     prompt=sample_solver_prompt,
@@ -2952,11 +3045,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         # Annotation" (arXiv:2601.10094)
         #
         # Logit-Margin Difficulty Signal (LMDS): the greedy call now also
-        # returns logit margins — the gap between top-1 and top-2 logits at
-        # each answer token.  The minimum margin is a continuous measure of
-        # solver uncertainty: small margin → model near decision boundary →
-        # genuinely hard question.  This signal works from step 0 and needs
-        # ZERO extra compute (piggybacks on the existing V-Zero call).
+        # --- V-Zero intuitive track with Solver Token Entropy (STE) ---
+        # The greedy generation extracts FULL token-level entropy at each
+        # answer token.  Unlike logit margin (top1-top2 gap), STE captures
+        # genuine multi-way uncertainty across the entire vocabulary:
+        #   forced-choice "A or B?" → H ≈ ln(2) ≈ 0.69  (binary)
+        #   genuinely hard question → H >> 1.0  (multi-way)
+        # STE is naturally resistant to forced-choice gaming.
         _intuitive_answer_raw = ""
         _intuitive_answer = ""
         _intuitive_answer_vote = ""
@@ -2964,24 +3059,32 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         _intuitive_attempted = False
         _intuitive_logit_min_margin = 999.0
         _intuitive_logit_mean_margin = 999.0
-        _lmds_enabled = bool(getattr(self.cfg, "solver_logit_margin_enabled", True))
-        _lmds_tokens = max(1, int(getattr(self.cfg, "solver_logit_margin_tokens", 5)))
+        _intuitive_token_entropy_max = 0.0
+        _intuitive_token_entropy_mean = 0.0
+        _ste_enabled = bool(getattr(self.cfg, "solver_token_entropy_enabled", True))
+        _ste_tokens = max(1, int(getattr(self.cfg, "solver_token_entropy_tokens", 5)))
         if question and solver_prompt:
             _intuitive_attempted = True
             try:
-                if _lmds_enabled:
-                    _intuitive_out, _margin_info = self._generate_with_confidence(
+                if _ste_enabled:
+                    _intuitive_out, _conf_info = self._generate_with_confidence(
                         image=image,
                         prompt=solver_prompt,
                         adapter_name="default" if self.cfg.use_lora else None,
                         max_new_tokens=self.cfg.max_new_tokens_solver,
-                        margin_tokens=_lmds_tokens,
+                        margin_tokens=_ste_tokens,
                     )
                     _intuitive_logit_min_margin = float(
-                        _margin_info.get("min_margin", 999.0)
+                        _conf_info.get("min_margin", 999.0)
                     )
                     _intuitive_logit_mean_margin = float(
-                        _margin_info.get("mean_margin", 999.0)
+                        _conf_info.get("mean_margin", 999.0)
+                    )
+                    _intuitive_token_entropy_max = float(
+                        _conf_info.get("max_entropy", 0.0)
+                    )
+                    _intuitive_token_entropy_mean = float(
+                        _conf_info.get("mean_entropy", 0.0)
                     )
                 else:
                     _intuitive_out = self._generate(
@@ -3015,66 +3118,56 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 _intuitive_generation_failed = True
                 _intuitive_logit_min_margin = 999.0
                 _intuitive_logit_mean_margin = 999.0
+                _intuitive_token_entropy_max = 0.0
+                _intuitive_token_entropy_mean = 0.0
 
-        # --- Compute logit-margin difficulty (LMDS) ---
+        # --- Compute Solver Token Entropy (STE) difficulty ---
+        # STE uses the MAX token-level entropy across the first K answer
+        # tokens as the raw signal.  High max-entropy = the model had at
+        # least one token where it was genuinely uncertain across many
+        # vocabulary items (not just 2 forced-choice options).
+        #
         # Self-calibrating: uses quantile rank in a rolling window so the
-        # signal adapts to the model's evolving confidence distribution.
+        # signal adapts to the model's evolving entropy distribution.
         # Falls back to sigmoid when the window is too small.
-        _logit_margin_difficulty = 0.0
-        if _lmds_enabled and _intuitive_logit_min_margin < 900.0:
-            self._logit_margin_window.append(_intuitive_logit_min_margin)
-            _lm_window_size = max(
+        #
+        # KEY ADVANTAGE over LMDS: forced-choice "A or B?" produces token
+        # entropy ≈ ln(2) ≈ 0.69.  Genuinely hard open-ended questions
+        # produce entropy >> 1.0.  No explicit forced-choice discount needed.
+        _ste_difficulty = 0.0
+        _ste_raw_value = _intuitive_token_entropy_max  # max across K tokens
+        if _ste_enabled and _ste_raw_value > 1e-6:
+            self._ste_window.append(_ste_raw_value)
+            _ste_window_size = max(
                 8,
-                int(getattr(self.cfg, "solver_logit_margin_window_size", 128)),
+                int(getattr(self.cfg, "solver_token_entropy_window_size", 128)),
             )
             # Trim window
-            while len(self._logit_margin_window) > _lm_window_size:
-                self._logit_margin_window.pop(0)
-            _lm_n = len(self._logit_margin_window)
-            if _lm_n >= 8:
-                # Quantile-based: fraction of window entries with LARGER
-                # margin (= more confident = easier).  High quantile = this
-                # question is harder than most recent questions.
-                _lm_rank = sum(
-                    1 for m in self._logit_margin_window
-                    if m > _intuitive_logit_min_margin
+            while len(self._ste_window) > _ste_window_size:
+                self._ste_window.pop(0)
+            _ste_n = len(self._ste_window)
+            if _ste_n >= 8:
+                # Quantile-based: fraction of window entries with LOWER
+                # entropy (= more confident = easier).  High quantile = this
+                # question triggered more uncertainty than most recent ones.
+                _ste_rank = sum(
+                    1 for e in self._ste_window
+                    if e < _ste_raw_value
                 )
-                _logit_margin_difficulty = float(_lm_rank) / float(_lm_n)
+                _ste_difficulty = float(_ste_rank) / float(_ste_n)
             else:
-                # Sigmoid fallback for cold window.
+                # Sigmoid fallback for cold window.  Note: the sigmoid is
+                # in ENTROPY space (higher = harder), so we DON'T negate.
                 import math as _math
                 _sig_alpha = float(
-                    getattr(self.cfg, "solver_logit_margin_sigmoid_alpha", 1.5)
+                    getattr(self.cfg, "solver_token_entropy_sigmoid_alpha", 1.5)
                 )
                 _sig_beta = float(
-                    getattr(self.cfg, "solver_logit_margin_sigmoid_beta", 3.0)
+                    getattr(self.cfg, "solver_token_entropy_sigmoid_beta", 2.0)
                 )
-                _logit_margin_difficulty = 1.0 - 1.0 / (
-                    1.0 + _math.exp(-_sig_alpha * (_intuitive_logit_min_margin - _sig_beta))
+                _ste_difficulty = 1.0 / (
+                    1.0 + _math.exp(-_sig_alpha * (_ste_raw_value - _sig_beta))
                 )
-
-        # --- Forced-choice LMDS discount ---
-        # "Is it A or B?" questions produce low logit margins cheaply because
-        # the solver is choosing between two words PRESENTED IN THE QUESTION,
-        # not reasoning about the image.  This is a reward hack — the margin
-        # reflects linguistic ambiguity, not visual difficulty.  Discount
-        # LMDS heavily for forced-choice patterns to push the proposer toward
-        # open-ended questions where low margins require real visual reasoning.
-        _lmds_forced_choice_discounted = False
-        if _lmds_enabled and _logit_margin_difficulty > 0.0 and question:
-            _q_has_or = bool(_BINARY_FORCED_CHOICE_RE.search(question))
-            # Also detect "A or B" at end of question (common pattern)
-            _q_is_binary_start = bool(
-                question.strip().lower().startswith(("is the", "is it", "are the", "was the", "does the"))
-            )
-            if _q_has_or and _q_is_binary_start:
-                # Strong forced-choice pattern: "Is the X A or B?" → heavy discount
-                _logit_margin_difficulty *= 0.10
-                _lmds_forced_choice_discounted = True
-            elif _q_has_or:
-                # Weaker forced-choice (e.g., "What is X: A or B?") → moderate discount
-                _logit_margin_difficulty *= 0.30
-                _lmds_forced_choice_discounted = True
 
         # --- Proposer reward: V-Zero dual-track learnability ---
         # The proposer is rewarded when the solver's "intuitive" (greedy)
@@ -3132,47 +3225,46 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_anchor_bonus = self._anchor_replay_bonus(question, chosen_strategy_used)
         proposer_contrastive_replay_bonus = self._contrastive_replay_adjustment(question)
         proposer_bonus_enabled = difficulty_bucket_observed in {"medium", "hard"}
-        # Logit-Margin Difficulty Signal (LMDS) integration.
-        # LMDS is a PERMANENT fallback for the entropy dead zone, not just
-        # a warm-start crutch.  Whenever entropy=0, the entropy-based reward
-        # is degenerate (zero gradient) and LMDS provides the only
-        # continuous signal.  After entropy breaks zero, LMDS becomes a
-        # complementary signal that keeps rewarding questions near the
-        # solver's decision boundary.
-        _lmds_is_primary = bool(
-            _lmds_enabled
+        # Solver Token Entropy (STE) integration.
+        # STE is a PERMANENT fallback for the sample-entropy dead zone, not
+        # just a warm-start crutch.  Whenever sample entropy=0 (all 7
+        # solver answers agree), STE provides the only continuous signal.
+        # After sample entropy breaks zero, STE becomes a complementary
+        # signal that rewards questions with high token-level uncertainty.
+        _ste_is_primary = bool(
+            _ste_enabled
             and (entropy_nats < 1e-6 or proposer_warm_start_active)
-            and _logit_margin_difficulty > 0.0
+            and _ste_difficulty > 0.0
         )
-        proposer_bonus_warm_enabled = proposer_bonus_enabled or proposer_warm_start_active or _lmds_is_primary
-        if _lmds_is_primary:
-            # LMDS overrides the entropy-based base reward.  Use higher
+        proposer_bonus_warm_enabled = proposer_bonus_enabled or proposer_warm_start_active or _ste_is_primary
+        if _ste_is_primary:
+            # STE overrides the entropy-based base reward.  Use higher
             # weight during warm-start (model hasn't seen real entropy yet)
             # and a slightly lower but still dominant weight afterwards.
             if proposer_warm_start_active:
-                _lm_primary_weight = max(
+                _ste_primary_weight = max(
                     0.0,
                     float(
-                        getattr(self.cfg, "proposer_logit_margin_warm_start_weight", 0.70)
+                        getattr(self.cfg, "proposer_ste_warm_start_weight", 0.70)
                     ),
                 )
             else:
-                _lm_primary_weight = max(
+                _ste_primary_weight = max(
                     0.0,
                     float(
-                        getattr(self.cfg, "proposer_logit_margin_warm_start_weight", 0.70)
+                        getattr(self.cfg, "proposer_ste_warm_start_weight", 0.70)
                     ),
                 ) * 0.85  # slightly reduced post-warm-start (~0.60)
-            proposer_reward = _lm_primary_weight * _logit_margin_difficulty
-        elif _lmds_enabled and _logit_margin_difficulty > 0.0:
-            # Entropy is working (>0): LMDS as complementary signal.
-            _lm_weight = max(
+            proposer_reward = _ste_primary_weight * _ste_difficulty
+        elif _ste_enabled and _ste_difficulty > 0.0:
+            # Sample entropy is working (>0): STE as complementary signal.
+            _ste_weight = max(
                 0.0,
                 float(
-                    getattr(self.cfg, "proposer_logit_margin_reward_weight", 0.30)
+                    getattr(self.cfg, "proposer_ste_reward_weight", 0.30)
                 ),
             )
-            proposer_reward += _lm_weight * _logit_margin_difficulty
+            proposer_reward += _ste_weight * _ste_difficulty
         if not proposer_bonus_warm_enabled:
             proposer_text_hardness_bonus = 0.0
             proposer_strategy_quota_bonus = 0.0
@@ -3206,16 +3298,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_reward -= proposer_repetition_penalty
         proposer_reward -= proposer_cooldown_penalty
 
-        # Forced-choice penalty: directly penalizes "A or B?" questions that
-        # bypass visual reasoning.  Applied on top of the LMDS discount so
-        # the total reward for forced-choice is significantly lower than for
-        # open-ended questions, even accounting for text/certificate bonuses.
-        if _lmds_forced_choice_discounted:
-            _fc_penalty = max(
-                0.0,
-                float(getattr(self.cfg, "proposer_forced_choice_penalty", 0.40)),
-            )
-            proposer_reward -= _fc_penalty
+        # NOTE: Forced-choice penalty removed — STE naturally penalizes
+        # forced-choice questions because binary "A or B?" uncertainty
+        # produces token entropy ≈ ln(2) ≈ 0.69, which ranks LOW in the
+        # quantile window compared to genuinely hard open-ended questions
+        # with entropy >> 1.0.  No explicit discount needed.
 
         # Non-objective penalty.
         proposer_non_objective_penalty = max(
@@ -3252,7 +3339,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         question_reject_reason = "|".join(reject_reasons)
         proposer_reject_penalty_scale_used = 1.0
         warm_start_easy_only_reject = (
-            (proposer_warm_start_active or _lmds_is_primary)
+            (proposer_warm_start_active or _ste_is_primary)
             and len(reject_reasons) > 0
             and all(r in {"easy_bucket", "all_candidates_easy"} for r in reject_reasons)
         )
@@ -3286,7 +3373,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             easy_constraint_enabled
             and difficulty_bucket_observed == "easy"
             and (not proposer_warm_start_active)
-            and (not _lmds_is_primary)
+            and (not _ste_is_primary)
         ):
             easy_constraint_penalty = (
                 float(getattr(self, "_easy_lagrange_lambda", 0.0))
@@ -3294,7 +3381,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             )
             proposer_reward -= easy_constraint_penalty
 
-        if difficulty_bucket_observed == "easy" and (not proposer_warm_start_active) and (not _lmds_is_primary):
+        if difficulty_bucket_observed == "easy" and (not proposer_warm_start_active) and (not _ste_is_primary):
             proposer_reward = min(proposer_reward, easy_reward_floor)
 
         proposer_reward_pre_clip = float(proposer_reward)
@@ -3485,14 +3572,43 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             solver_gain=arm_solver_gain,
         )
         self._last_curriculum_arm_key = selected_arm_key
-        if difficulty_bucket_observed in {"medium", "hard"} and proposer_reward >= float(
-            getattr(self.cfg, "proposer_anchor_min_reward", 0.20)
+        # --- Anchor replay: capture questions that showed genuine difficulty ---
+        # Original gate: medium/hard bucket + reward threshold.
+        # NEW: Also capture questions with HIGH STE difficulty (SD > 0.60),
+        # which means the solver had high token-level uncertainty even if
+        # sample-level entropy was 0 (unanimous).  This fills the anchor
+        # buffer from step 1, giving the proposer exemplars of what
+        # triggers real model uncertainty — solving the cold-start problem
+        # for the replay buffer.
+        _anchor_qualify_bucket = difficulty_bucket_observed in {"medium", "hard"}
+        _anchor_qualify_ste = bool(
+            _ste_enabled and _ste_difficulty >= 0.60 and question
+        )
+        _anchor_qualify_entropy = bool(entropy_nats > 0.05 and question)
+        _anchor_min_reward = float(getattr(self.cfg, "proposer_anchor_min_reward", 0.20))
+        if (
+            (_anchor_qualify_bucket and proposer_reward >= _anchor_min_reward)
+            or _anchor_qualify_ste
+            or _anchor_qualify_entropy
         ):
+            # Priority score: blend of hardness, solver gain, novelty.
+            # For STE-qualified entries, use ste_difficulty as hardness.
+            _effective_hardness = local_info_score
+            if _anchor_qualify_ste and _ste_difficulty > _effective_hardness:
+                _effective_hardness = _ste_difficulty
+            if _anchor_qualify_entropy and entropy_nats > 0:
+                _effective_hardness = max(_effective_hardness, min(1.0, entropy_nats / 1.5))
             anchor_priority = self._replay_anchor_priority(
                 question,
-                hardness_score=local_info_score,
+                hardness_score=_effective_hardness,
                 solver_gain=arm_solver_gain,
             )
+            # Tag with the source so we can present richer hints.
+            _anchor_source = "bucket"
+            if _anchor_qualify_entropy:
+                _anchor_source = "entropy"
+            elif _anchor_qualify_ste:
+                _anchor_source = "ste"
             self._proposer_anchor_replay.append(
                 {
                     "qkey": _qkey,
@@ -3503,6 +3619,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     "reward": float(proposer_reward),
                     "priority": float(anchor_priority),
                     "step": int(step),
+                    "ste_difficulty": float(_ste_difficulty),
+                    "entropy": float(entropy_nats),
+                    "source": _anchor_source,
                 }
             )
         self._candidate_non_easy_window.append(float(candidate_non_easy_rate))
@@ -3688,10 +3807,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                             if _real_idx < len(solver_top_ps)
                                             else float(self.cfg.top_p)
                                         )
-                                        _extra_solver_prompt = build_solver_prompt(
-                                            _extra_q,
-                                            focus_hint=self._solver_focus_hint(_real_idx),
-                                        )
+                                        if _pps_enabled:
+                                            _extra_solver_prompt = build_solver_prompt_pps(
+                                                _extra_q,
+                                                template_index=_real_idx,
+                                                focus_hint=self._solver_focus_hint(_real_idx),
+                                            )
+                                        else:
+                                            _extra_solver_prompt = build_solver_prompt(
+                                                _extra_q,
+                                                focus_hint=self._solver_focus_hint(_real_idx),
+                                            )
                                         try:
                                             _sc_out = self._generate(
                                                 image=image,
@@ -4266,9 +4392,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             ),
             "proposer_logit_margin_min": float(_intuitive_logit_min_margin),
             "proposer_logit_margin_mean": float(_intuitive_logit_mean_margin),
-            "proposer_logit_margin_difficulty": float(_logit_margin_difficulty),
-            "proposer_logit_margin_forced_choice_discounted": bool(_lmds_forced_choice_discounted),
-            "proposer_logit_margin_window_size": len(self._logit_margin_window),
+            "proposer_token_entropy_max": float(_intuitive_token_entropy_max),
+            "proposer_token_entropy_mean": float(_intuitive_token_entropy_mean),
+            "proposer_ste_difficulty": float(_ste_difficulty),
+            "proposer_ste_window_size": len(self._ste_window),
+            "proposer_pps_enabled": bool(_pps_enabled),
             "proposer_hardness_debt": hardness_debt_state.get("debt", 0.0),
             "proposer_hardness_debt_cap_streak": hardness_debt_state.get("cap_streak", 0.0),
             "proposer_hardness_debt_escape_steps_left": hardness_debt_state.get(
@@ -4544,8 +4672,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"C_NE={candidate_non_easy_rate:.2f} C_V={candidate_struct_valid_rate:.2f} "
                 f"ARM={curriculum_arm_score:.2f} "
                 f"WS={int(proposer_warm_start_active)} "
-                f"LM={_intuitive_logit_min_margin:.2f} "
-                f"LMD={_logit_margin_difficulty:.3f}{'*' if _lmds_forced_choice_discounted else ''} "
+                f"TE={_intuitive_token_entropy_max:.2f} "
+                f"SD={_ste_difficulty:.3f} "
                 f"D={float(hardness_debt_state.get('debt', 0.0)):.2f} "
                 f"E_L={easy_constraint_state.get('easy_lambda', 0.0):.3f} "
                 f"E_R={easy_constraint_state.get('easy_rate_ema', 0.0):.2f} "
@@ -4616,12 +4744,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             self._dist_mean(float(warm_start_state.get("entropy_mean", 0.0))),
         )
         self._update_metric(
-            "u_proposer_logit_margin_min",
-            self._dist_mean(float(_intuitive_logit_min_margin) if _intuitive_logit_min_margin < 900.0 else 0.0),
+            "u_proposer_token_entropy_max",
+            self._dist_mean(float(_intuitive_token_entropy_max)),
         )
         self._update_metric(
-            "u_proposer_logit_margin_difficulty",
-            self._dist_mean(float(_logit_margin_difficulty)),
+            "u_proposer_ste_difficulty",
+            self._dist_mean(float(_ste_difficulty)),
         )
         self._update_metric(
             "u_proposer_hardness_debt",
@@ -4709,8 +4837,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         state["unified_hardness_debt_escape_steps_left"] = int(
             getattr(self, "_hardness_debt_escape_steps_left", 0)
         )
-        state["unified_logit_margin_window"] = list(
-            getattr(self, "_logit_margin_window", [])
+        state["unified_ste_window"] = list(
+            getattr(self, "_ste_window", [])
         )
         state["unified_proposer_bucket_baselines"] = dict(self._proposer_bucket_baselines)
         # Replay buffer metadata (not the images — too large for checkpoint;
@@ -4924,9 +5052,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     self._hardness_debt_escape_steps_left,
                 )
             )
-            _restored_lm_window = state.get("unified_logit_margin_window")
-            if isinstance(_restored_lm_window, list):
-                self._logit_margin_window = [float(x) for x in _restored_lm_window]
+            _restored_ste_window = state.get("unified_ste_window")
+            if isinstance(_restored_ste_window, list):
+                self._ste_window = [float(x) for x in _restored_ste_window]
             bucket_baselines = state.get("unified_proposer_bucket_baselines")
             if isinstance(bucket_baselines, dict):
                 for b in ("easy", "medium", "hard"):
@@ -4950,6 +5078,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 self._answer_family_window.clear()
                 self._strategy_window.clear()
                 self._proposer_anchor_replay.clear()
+                # Re-seed with hard question exemplars after reset so
+                # the proposer has guidance from step 0 of the new run.
+                self._seed_anchor_exemplars()
                 self._contrastive_pos_replay.clear()
                 self._contrastive_neg_replay.clear()
                 self._grpo_std_window.clear()
@@ -4970,7 +5101,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 self._hardness_debt = 0.0
                 self._hardness_debt_cap_streak = 0
                 self._hardness_debt_escape_steps_left = 0
-                self._logit_margin_window = []
+                self._ste_window = []
                 self._proposer_bucket_baselines = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
             if self.is_main_process:
                 print(
