@@ -30,6 +30,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Model/runtime
     p.add_argument("--model_path", type=str, required=True)
     p.add_argument("--device", type=str, default="cuda")
+    p.add_argument("--vae_device", type=str, default="")
     p.add_argument("--max_latent_size", type=int, default=64)
     p.add_argument("--enable_lora", action="store_true", default=False)
     p.add_argument("--lora_rank", type=int, default=16)
@@ -191,6 +192,7 @@ def main() -> None:
     model_cfg = ModelLoadConfig(
         model_path=args.model_path,
         device=args.device,
+        vae_device=str(args.vae_device or ""),
         max_latent_size=int(args.max_latent_size),
         enable_lora=bool(args.enable_lora),
         lora_rank=int(args.lora_rank),

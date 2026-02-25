@@ -118,6 +118,7 @@ class BagelRuntime:
     vit_transform: object
     inferencer: InterleaveInferencer
     device: torch.device
+    vae_device: torch.device
     lora_enabled: bool = False
     role_to_adapter: Dict[str, str] = field(default_factory=dict)
     lora_adapters: Dict[str, bool] = field(default_factory=dict)
@@ -147,6 +148,7 @@ def _resolve_weights_path(model_path: str) -> str:
 
 def load_bagel_runtime(cfg: ModelLoadConfig) -> BagelRuntime:
     device = torch.device(cfg.device if cfg.device else ("cuda" if torch.cuda.is_available() else "cpu"))
+    vae_device = torch.device(cfg.vae_device if str(cfg.vae_device or "").strip() else str(device))
 
     llm_config = Qwen2Config.from_json_file(os.path.join(cfg.model_path, "llm_config.json"))
     llm_config.qk_norm = True
@@ -207,7 +209,8 @@ def load_bagel_runtime(cfg: ModelLoadConfig) -> BagelRuntime:
         )
 
     model = model.to(device).eval()
-    vae_model = vae_model.to(device).eval()
+    vae_model = vae_model.to(vae_device).eval()
+    print(f"[model_loader] runtime devices: model={device}, vae={vae_device}")
 
     vae_transform = _build_image_transform(
         max_image_size=cfg.vae_max_image_size,
@@ -238,6 +241,7 @@ def load_bagel_runtime(cfg: ModelLoadConfig) -> BagelRuntime:
         vit_transform=vit_transform,
         inferencer=inferencer,
         device=device,
+        vae_device=vae_device,
         lora_enabled=lora_enabled,
         role_to_adapter=role_to_adapter,
         lora_adapters=lora_adapters,

@@ -37,6 +37,11 @@ class InterleaveInferencer:
         self.vae_transform = vae_transform
         self.vit_transform = vit_transform
         self.new_token_ids = new_token_ids
+
+    def _vae_device_dtype(self):
+        for p in self.vae_model.parameters():
+            return p.device, p.dtype
+        return torch.device("cpu"), torch.float32
         
     def init_gen_context(self): 
         gen_context = {
@@ -200,6 +205,10 @@ class InterleaveInferencer:
     def decode_image(self, latent, image_shape):
         H, W = image_shape
         h, w = H // self.model.latent_downsample, W // self.model.latent_downsample
+
+        vae_device, vae_dtype = self._vae_device_dtype()
+        if latent.device != vae_device or latent.dtype != vae_dtype:
+            latent = latent.to(device=vae_device, dtype=vae_dtype)
 
         latent = latent.reshape(1, h, w, self.model.latent_patch_size, self.model.latent_patch_size, self.model.latent_channel)
         latent = torch.einsum("nhwpqc->nchpwq", latent)

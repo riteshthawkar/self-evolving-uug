@@ -47,6 +47,7 @@ TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RUN_MODE="${RUN_MODE:-train}"
 STEPS="${STEPS:-500}"
 DEVICE="${DEVICE:-cuda}"
+VAE_DEVICE="${VAE_DEVICE:-}"
 MAX_LATENT_SIZE="${MAX_LATENT_SIZE:-64}"
 ENABLE_SUDER="${ENABLE_SUDER:-1}"
 PROPOSER_GEN_ENTROPY_WEIGHT="${PROPOSER_GEN_ENTROPY_WEIGHT:-0.7}"
@@ -257,6 +258,9 @@ echo "[B1]   Data:       $DATA_DIR"
 echo "[B1]   Output:     $OUTPUT_DIR"
 echo "[B1]   Steps:      $STEPS"
 echo "[B1]   Device:     $DEVICE"
+if [[ -n "$VAE_DEVICE" ]]; then
+  echo "[B1]   VAE device: $VAE_DEVICE"
+fi
 echo "[B1]   SUDER:      $ENABLE_SUDER"
 echo "[B1]   FlashAttn:  disabled=$DISABLE_FLASH_ATTN"
 echo "[B1]   Autocast:   disabled=$DISABLE_AUTOCAST dtype=$BAGEL_AUTOCAST_DTYPE"
@@ -281,6 +285,7 @@ cd "$BAGEL_ROOT"
 "$PYTHON_BIN" train/train_self_evolving.py \
   --model_path "$MODEL_PATH" \
   --device "$DEVICE" \
+  --vae_device "$VAE_DEVICE" \
   --max_latent_size "$MAX_LATENT_SIZE" \
   --image_dir "$DATA_DIR" \
   --output_dir "$OUTPUT_DIR" \
