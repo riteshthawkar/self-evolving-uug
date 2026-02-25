@@ -60,6 +60,11 @@ def resolve_lowp_dtype(device: Union[str, torch.device]) -> Optional[torch.dtype
                 return None
             return mapped
 
+    # ROCm kernels are still unstable in several half/bfloat16 matmul paths for BAGEL.
+    # Keep autocast disabled by default on ROCm unless explicitly enabled.
+    if is_rocm_runtime() and (not _read_env_flag("BAGEL_ENABLE_ROCM_AUTOCAST", default=False)):
+        return None
+
     if is_rocm_runtime():
         return torch.float16
     if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
@@ -70,6 +75,8 @@ def resolve_lowp_dtype(device: Union[str, torch.device]) -> Optional[torch.dtype
 def lowp_dtype_for_tensor(tensor: torch.Tensor) -> torch.dtype:
     resolved = resolve_lowp_dtype(tensor.device)
     if resolved is None:
+        return tensor.dtype
+    if (not torch.is_autocast_enabled()) and (not _read_env_flag("BAGEL_FORCE_LOWP_CAST", default=False)):
         return tensor.dtype
     return resolved
 
