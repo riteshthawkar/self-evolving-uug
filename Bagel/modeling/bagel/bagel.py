@@ -98,6 +98,44 @@ class Bagel(PreTrainedModel):
             nn.init.constant_(self.llm2vae.weight, 0)
             nn.init.constant_(self.llm2vae.bias, 0)
 
+    def _lm_candidates(self):
+        lm = self.language_model
+        seen = set()
+        queue = [lm]
+
+        get_base_model = getattr(lm, "get_base_model", None)
+        if callable(get_base_model):
+            try:
+                queue.append(get_base_model())
+            except Exception:
+                pass
+
+        while queue:
+            cur = queue.pop(0)
+            if cur is None:
+                continue
+            obj_id = id(cur)
+            if obj_id in seen:
+                continue
+            seen.add(obj_id)
+            yield cur
+            queue.append(getattr(cur, "model", None))
+            queue.append(getattr(cur, "base_model", None))
+
+    def _lm_core_model(self):
+        # Qwen2Model-like object that has embed_tokens + TaylorSeer flags.
+        for cand in self._lm_candidates():
+            if hasattr(cand, "embed_tokens"):
+                return cand
+        raise AttributeError("Could not resolve LM core model with embed_tokens.")
+
+    def _lm_causal_model(self):
+        # Qwen2ForCausalLM-like object that has forward_inference + lm_head.
+        for cand in self._lm_candidates():
+            if hasattr(cand, "forward_inference") and hasattr(cand, "lm_head"):
+                return cand
+        raise AttributeError("Could not resolve causal LM object with forward_inference/lm_head.")
+
     def forward(
         self,
         sequence_length: int,
@@ -148,7 +186,7 @@ class Bagel(PreTrainedModel):
             packed_timesteps: 1-D float tensor, flow timesteps. 0 indicates use clean image.
             mse_loss_indexes: 1-D bool tensor, where to compute mse loss.
         """
-        packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
+        packed_text_embedding = self._lm_core_model().embed_tokens(packed_text_ids)
         packed_sequence = packed_text_embedding.new_zeros(size=(sequence_length, self.hidden_size))
         packed_sequence[packed_text_indexes] = packed_text_embedding
 
@@ -223,7 +261,7 @@ class Bagel(PreTrainedModel):
 
         ce = None
         if ce_loss_indexes is not None:
-            packed_ce_preds = self.language_model.lm_head(last_hidden_state[ce_loss_indexes])
+            packed_ce_preds = self._lm_causal_model().lm_head(last_hidden_state[ce_loss_indexes])
             ce = F.cross_entropy(packed_ce_preds, packed_label_ids, reduction="none")
 
         return dict(mse=mse, ce=ce)
@@ -274,13 +312,13 @@ class Bagel(PreTrainedModel):
         packed_key_value_indexes: torch.LongTensor,
         key_values_lens: torch.IntTensor,
     ):
-        packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
+        packed_text_embedding = self._lm_core_model().embed_tokens(packed_text_ids)
 
         extra_inputs = {}
         if self.use_moe:
             extra_inputs = {"mode": "und"}
 
-        output = self.language_model.forward_inference(
+        output = self._lm_causal_model().forward_inference(
             packed_query_sequence=packed_text_embedding,
             query_lens=text_token_lens,
             packed_query_position_ids=packed_text_position_ids,
@@ -374,7 +412,7 @@ class Bagel(PreTrainedModel):
         packed_key_value_indexes: torch.LongTensor,
         key_values_lens: torch.IntTensor,
     ):
-        packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
+        packed_text_embedding = self._lm_core_model().embed_tokens(packed_text_ids)
         packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
         packed_sequence[packed_text_indexes] = packed_text_embedding
 
@@ -398,7 +436,7 @@ class Bagel(PreTrainedModel):
         if self.use_moe:
             extra_inputs = {"mode": "und"}
 
-        output = self.language_model.forward_inference(
+        output = self._lm_causal_model().forward_inference(
             packed_query_sequence=packed_sequence,
             query_lens=packed_seqlens,
             packed_query_position_ids=packed_position_ids,
@@ -505,7 +543,7 @@ class Bagel(PreTrainedModel):
         key_values_lens: torch.IntTensor,
         packed_key_value_indexes: torch.Tensor,
     ):
-        packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
+        packed_text_embedding = self._lm_core_model().embed_tokens(packed_text_ids)
         packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
         packed_sequence[packed_text_indexes] = packed_text_embedding
 
@@ -533,7 +571,7 @@ class Bagel(PreTrainedModel):
                 "packed_text_indexes": packed_text_indexes
             }
 
-        output = self.language_model.forward_inference(
+        output = self._lm_causal_model().forward_inference(
             packed_query_sequence=packed_sequence,
             query_lens=packed_seqlens,
             packed_query_position_ids=packed_position_ids,
@@ -678,12 +716,12 @@ class Bagel(PreTrainedModel):
         enable_taylorseer=False,
     ):
         if enable_taylorseer:
-            self.language_model.model.enable_taylorseer = True
+            self._lm_core_model().enable_taylorseer = True
             model_pred_cache_dic, model_pred_current = cache_init(self, num_timesteps)
             model_pred_text_cache_dic, model_pred_text_current = cache_init(self, num_timesteps)
             model_pred_img_cache_dic, model_pred_img_current = cache_init(self, num_timesteps)
         else:
-            self.language_model.model.enable_taylorseer = False
+            self._lm_core_model().enable_taylorseer = False
             model_pred_cache_dic, model_pred_current = None, None
             model_pred_text_cache_dic, model_pred_text_current = None, None
             model_pred_img_cache_dic, model_pred_img_current = None, None
@@ -793,7 +831,7 @@ class Bagel(PreTrainedModel):
         model_pred_img_cache_dic: Optional[Dict[str, Any]] = None,
         model_pred_img_current: Optional[int] = None,
     ):
-        packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
+        packed_text_embedding = self._lm_core_model().embed_tokens(packed_text_ids)
         packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
         packed_sequence[packed_text_indexes] = packed_text_embedding
 
@@ -813,11 +851,11 @@ class Bagel(PreTrainedModel):
                 "packed_text_indexes": packed_text_indexes
             }
         
-        if self.language_model.model.enable_taylorseer:
-            self.language_model.model.cache_dic = model_pred_cache_dic
-            self.language_model.model.current = model_pred_current
+        if self._lm_core_model().enable_taylorseer:
+            self._lm_core_model().cache_dic = model_pred_cache_dic
+            self._lm_core_model().current = model_pred_current
 
-        output = self.language_model.forward_inference(
+        output = self._lm_causal_model().forward_inference(
             packed_query_sequence=packed_sequence,
             query_lens=packed_seqlens,
             packed_query_position_ids=packed_position_ids,
@@ -833,10 +871,10 @@ class Bagel(PreTrainedModel):
         v_t = v_t[packed_vae_token_indexes]
 
         if cfg_text_scale > 1.0:
-            if self.language_model.model.enable_taylorseer:
-                self.language_model.model.cache_dic = model_pred_text_cache_dic
-                self.language_model.model.current = model_pred_text_current
-            cfg_text_output = self.language_model.forward_inference(
+            if self._lm_core_model().enable_taylorseer:
+                self._lm_core_model().cache_dic = model_pred_text_cache_dic
+                self._lm_core_model().current = model_pred_text_current
+            cfg_text_output = self._lm_causal_model().forward_inference(
                 packed_query_sequence=packed_sequence,
                 query_lens=packed_seqlens,
                 packed_query_position_ids=cfg_text_packed_position_ids,
@@ -852,10 +890,10 @@ class Bagel(PreTrainedModel):
             cfg_text_v_t = cfg_text_v_t[packed_vae_token_indexes]
 
         if cfg_img_scale > 1.0:
-            if self.language_model.model.enable_taylorseer:
-                self.language_model.model.cache_dic = model_pred_img_cache_dic
-                self.language_model.model.current = model_pred_img_current
-            cfg_img_output = self.language_model.forward_inference(
+            if self._lm_core_model().enable_taylorseer:
+                self._lm_core_model().cache_dic = model_pred_img_cache_dic
+                self._lm_core_model().current = model_pred_img_current
+            cfg_img_output = self._lm_causal_model().forward_inference(
                 packed_query_sequence=packed_sequence,
                 query_lens=packed_seqlens,
                 packed_query_position_ids=cfg_img_packed_position_ids,
@@ -944,7 +982,7 @@ class Bagel(PreTrainedModel):
         curr_tokens = packed_start_tokens
         while step < max_length:
             generated_sequence.append(curr_tokens)
-            packed_text_embedding = self.language_model.model.embed_tokens(curr_tokens)
+            packed_text_embedding = self._lm_core_model().embed_tokens(curr_tokens)
             query_lens = torch.ones_like(curr_tokens)
             packed_query_indexes = torch.cumsum(key_values_lens, dim=0) + torch.arange(
                 0, len(key_values_lens), 
@@ -961,7 +999,7 @@ class Bagel(PreTrainedModel):
             if self.use_moe:
                 extra_inputs = {"mode": "und"}
 
-            output = self.language_model.forward_inference(
+            output = self._lm_causal_model().forward_inference(
                 packed_query_sequence=packed_text_embedding,
                 query_lens=query_lens,
                 packed_query_position_ids=packed_query_position_ids,
@@ -975,7 +1013,7 @@ class Bagel(PreTrainedModel):
             )
             past_key_values = output.past_key_values
             packed_query_sequence = output.packed_query_sequence
-            pred_logits = self.language_model.lm_head(packed_query_sequence)
+            pred_logits = self._lm_causal_model().lm_head(packed_query_sequence)
 
             if do_sample:
                 probs = nn.functional.softmax(pred_logits / temperature, dim=-1)
