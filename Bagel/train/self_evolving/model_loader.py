@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict
 
 import torch
@@ -25,6 +25,7 @@ from modeling.bagel import (
 )
 from modeling.qwen2 import Qwen2Tokenizer
 
+from .adapter_manager import setup_lora_role_adapters
 from .config import ModelLoadConfig
 
 try:
@@ -108,6 +109,17 @@ class BagelRuntime:
     vit_transform: object
     inferencer: InterleaveInferencer
     device: torch.device
+    lora_enabled: bool = False
+    role_to_adapter: Dict[str, str] = field(default_factory=dict)
+    lora_adapters: Dict[str, bool] = field(default_factory=dict)
+
+    def adapter_for_role(self, role: str) -> str:
+        key = str(role or "").strip().lower()
+        if key in self.role_to_adapter:
+            return str(self.role_to_adapter[key])
+        if self.role_to_adapter:
+            return str(next(iter(self.role_to_adapter.values())))
+        return ""
 
 
 def _resolve_weights_path(model_path: str) -> str:
@@ -166,6 +178,25 @@ def load_bagel_runtime(cfg: ModelLoadConfig) -> BagelRuntime:
     unexpected = len(getattr(msg, "unexpected_keys", []) or [])
     print(f"[model_loader] loaded weights from {weights_path} (missing={missing}, unexpected={unexpected})")
 
+    lora_enabled = bool(cfg.enable_lora)
+    role_to_adapter: Dict[str, str] = {}
+    lora_adapters: Dict[str, bool] = {}
+    if lora_enabled:
+        model.language_model, role_to_adapter, available = setup_lora_role_adapters(
+            model.language_model,
+            lora_rank=int(cfg.lora_rank),
+            lora_alpha=int(cfg.lora_alpha),
+            lora_dropout=float(cfg.lora_dropout),
+            target_modules=cfg.lora_target_modules(),
+            role_adapter_names=cfg.lora_role_adapters(),
+            default_adapter=str(cfg.lora_default_adapter),
+        )
+        lora_adapters = {str(name): True for name in available}
+        print(
+            "[model_loader] enabled LoRA role adapters "
+            f"(active_default={cfg.lora_default_adapter}, adapters={sorted(list(lora_adapters.keys()))})"
+        )
+
     model = model.to(device).eval()
     vae_model = vae_model.to(device).eval()
 
@@ -198,4 +229,7 @@ def load_bagel_runtime(cfg: ModelLoadConfig) -> BagelRuntime:
         vit_transform=vit_transform,
         inferencer=inferencer,
         device=device,
+        lora_enabled=lora_enabled,
+        role_to_adapter=role_to_adapter,
+        lora_adapters=lora_adapters,
     )

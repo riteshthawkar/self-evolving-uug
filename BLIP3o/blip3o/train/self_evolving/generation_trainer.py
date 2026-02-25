@@ -1389,6 +1389,190 @@ class GenerationSelfEvolvingTrainer:
         text = _decode_tokens(self.processor, completion_ids)
         return text.strip()
 
+    def _generate_with_confidence(
+        self,
+        image: Image.Image,
+        prompt: str,
+        adapter_name: Optional[str],
+        max_new_tokens: int,
+        margin_tokens: int = 5,
+    ) -> Tuple[str, Dict[str, float]]:
+        """Greedy generation that also returns logit-margin confidence info.
+
+        This method performs a **greedy** (do_sample=False) generation and
+        extracts the logit margin (gap between top-1 and top-2 logits) for
+        the first *margin_tokens* generated tokens.  The minimum margin
+        across these tokens measures the model's confidence at its weakest
+        decision point — a continuous proxy for question difficulty.
+
+        Returns
+        -------
+        (text, margin_info)
+            text : str — decoded answer (same as ``_generate``)
+            margin_info : dict with keys
+                ``min_margin``  — minimum margin across first K tokens
+                ``mean_margin`` — mean margin across first K tokens
+                ``margins``     — list of per-token margins
+        """
+        _NO_MARGIN = {"min_margin": 999.0, "mean_margin": 999.0, "margins": []}
+
+        chat_text = _build_chat_text(self.processor, image, prompt)
+        inputs = _prepare_mm_inputs(
+            self.processor, self.device, image, chat_text, model=self.model,
+        )
+
+        has_image_feats = ("pixel_values" in inputs) or ("images" in inputs)
+        if has_image_feats and "input_ids" in inputs:
+            image_token_ids = _collect_image_token_ids(self.model)
+            token_count = _count_image_tokens_in_inputs(
+                inputs["input_ids"], image_token_ids,
+            )
+            if token_count == 0:
+                mm_proc = getattr(self.processor, "multimodal_processor", None)
+                if mm_proc is not None and hasattr(mm_proc, "apply_chat_template"):
+                    try:
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "image"},
+                                    {"type": "text", "text": prompt},
+                                ],
+                            }
+                        ]
+                        chat_text_mm = mm_proc.apply_chat_template(
+                            messages, tokenize=False, add_generation_prompt=True,
+                        )
+                        inputs = mm_proc(
+                            text=[chat_text_mm],
+                            images=[image],
+                            return_tensors="pt",
+                            padding=True,
+                        ).to(self.device)
+                    except Exception:
+                        pass
+
+        gen_inputs = _adapt_mm_generate_inputs(self.model, dict(inputs))
+
+        # Fail fast on corrupted token IDs.
+        model_cfg = getattr(_unwrap_model(self.model), "config", None)
+        vocab_size = getattr(model_cfg, "vocab_size", None)
+        input_ids = gen_inputs.get("input_ids")
+        if (
+            torch.is_tensor(input_ids)
+            and isinstance(vocab_size, int)
+            and vocab_size > 0
+        ):
+            min_id = int(input_ids.min().item())
+            max_id = int(input_ids.max().item())
+            if min_id < 0 or max_id >= vocab_size:
+                raise RuntimeError(
+                    "Invalid token ids prepared for confidence generation: "
+                    f"min_id={min_id}, max_id={max_id}, vocab_size={vocab_size}."
+                )
+
+        _tok = _extract_tokenizer_from_processor(self.processor)
+        _pad_id = getattr(_tok, "eos_token_id", None) if _tok is not None else None
+
+        def _run_generate_conf(curr_inputs: Dict[str, torch.Tensor]):
+            base_kwargs = {
+                "max_new_tokens": max_new_tokens,
+                "do_sample": False,          # always greedy for confidence
+                "temperature": 1.0,          # unused when do_sample=False
+                "top_p": 1.0,                # unused when do_sample=False
+                "pad_token_id": _pad_id,
+                "remove_invalid_values": True,
+                "renormalize_logits": False,  # keep raw logits for margin
+                "output_scores": True,
+                "return_dict_in_generate": True,
+            }
+            try:
+                return self.model.generate(**curr_inputs, **base_kwargs)
+            except TypeError as exc:
+                msg = str(exc)
+                # Some model versions may not support all kwargs.
+                for kw in (
+                    "remove_invalid_values", "renormalize_logits",
+                    "output_scores", "return_dict_in_generate",
+                ):
+                    if kw in msg:
+                        base_kwargs.pop("remove_invalid_values", None)
+                        base_kwargs.pop("renormalize_logits", None)
+                        # If output_scores/return_dict fails, fall back to
+                        # plain generation (no margin info).
+                        if "output_scores" in msg or "return_dict" in msg:
+                            base_kwargs.pop("output_scores", None)
+                            base_kwargs.pop("return_dict_in_generate", None)
+                        return self.model.generate(**curr_inputs, **base_kwargs)
+                raise
+
+        with torch.no_grad():
+            with use_adapter(self.model, adapter_name):
+                try:
+                    outputs = _run_generate_conf(gen_inputs)
+                except ValueError as exc:
+                    unused = _parse_unused_model_kwargs_from_error(exc)
+                    if not unused:
+                        raise
+                    retry_inputs = dict(gen_inputs)
+                    if "images" in unused and "images" in retry_inputs and "pixel_values" not in retry_inputs:
+                        retry_inputs["pixel_values"] = retry_inputs["images"]
+                    if "pixel_values" in unused and "pixel_values" in retry_inputs and "images" not in retry_inputs:
+                        retry_inputs["images"] = retry_inputs["pixel_values"]
+                    if "image_grid_thw" in unused and "image_grid_thw" in retry_inputs and "grid_thw" not in retry_inputs:
+                        retry_inputs["grid_thw"] = retry_inputs["image_grid_thw"]
+                    if "grid_thw" in unused and "grid_thw" in retry_inputs and "image_grid_thw" not in retry_inputs:
+                        retry_inputs["image_grid_thw"] = retry_inputs["grid_thw"]
+                    for key in unused:
+                        retry_inputs.pop(key, None)
+                    if retry_inputs == gen_inputs:
+                        raise
+                    outputs = _run_generate_conf(retry_inputs)
+                    gen_inputs = retry_inputs
+
+        # --- Extract text ---
+        # outputs may be GenerateOutput (dict-like) or plain tensor.
+        if hasattr(outputs, "sequences"):
+            sequences = outputs.sequences
+        else:
+            sequences = outputs
+
+        input_len = (
+            gen_inputs["input_ids"].shape[1] if "input_ids" in gen_inputs else 0
+        )
+        completion_ids = sequences[0, input_len:]
+        text = _decode_tokens(self.processor, completion_ids)
+
+        # --- Extract logit margins ---
+        scores = getattr(outputs, "scores", None)
+        if scores is None or len(scores) == 0:
+            return text.strip(), _NO_MARGIN
+
+        K = min(max(1, margin_tokens), len(scores))
+        margins = []
+        for i in range(K):
+            logits_i = scores[i][0]  # [vocab_size] for batch element 0
+            if logits_i.numel() < 2:
+                continue
+            top2 = torch.topk(logits_i, k=2)
+            margin_val = float((top2.values[0] - top2.values[1]).item())
+            margins.append(margin_val)
+
+        # Free score tensors immediately to save GPU memory.
+        del scores
+        if hasattr(outputs, "scores"):
+            outputs.scores = None
+
+        if not margins:
+            return text.strip(), _NO_MARGIN
+
+        margin_info = {
+            "min_margin": min(margins),
+            "mean_margin": sum(margins) / len(margins),
+            "margins": margins,
+        }
+        return text.strip(), margin_info
+
     def _generate_text_only(
         self,
         prompt: str,

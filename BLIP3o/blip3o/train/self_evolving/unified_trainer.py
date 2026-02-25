@@ -1707,6 +1707,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._hardness_debt = 0.0
         self._hardness_debt_cap_streak = 0
         self._hardness_debt_escape_steps_left = 0
+        # Logit-margin difficulty signal (LMDS) rolling window.
+        _lm_window_size = max(
+            8, int(getattr(self.cfg, "solver_logit_margin_window_size", 128))
+        )
+        self._logit_margin_window: List[float] = []
 
     def _entropy_iqr_filter_state(self) -> Dict[str, float]:
         static_threshold = float(getattr(self.cfg, "sc_entropy_min", 0.15))
@@ -2216,16 +2221,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if controller_num_candidates > 0:
             num_proposer_candidates = max(num_proposer_candidates, controller_num_candidates)
         # How many solver samples to use for the spot-check of each candidate.
-        # Fewer samples = faster; default 3 gives ternary entropy outcomes.
-        # During warm-start, reduce to 1 to free budget for diversity probing.
-        if proposer_warm_start_active:
-            spot_check_samples = max(
-                1, int(getattr(self.cfg, "proposer_warm_start_spot_check_samples", 1))
-            )
-        else:
-            spot_check_samples = max(
-                1, int(getattr(self.cfg, "proposer_spot_check_samples", 3))
-            )
+        # 3 samples give ternary entropy outcomes (0, 0.637, 1.099).
+        spot_check_samples = max(
+            1, int(getattr(self.cfg, "proposer_spot_check_samples", 3))
+        )
         spot_entropy_min_gate = max(
             0.0, float(getattr(self.cfg, "proposer_spot_entropy_min_gate", 0.05))
         )
@@ -2895,72 +2894,6 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             u_step=max(1, u_step),
         )
 
-        # --- Budget-neutral diversity probe (warm-start only) ---
-        # When solver is unanimous during warm-start, use saved spot-check
-        # budget to probe whether extreme-temp sampling CAN produce a
-        # different answer.  This gives the proposer a REAL difficulty
-        # signal: "how hard is it to shake the solver's confidence?"
-        # Probe answers are NOT used for solver training.
-        diversity_probe_attempts = 0
-        diversity_probe_found_at = 0  # 0 = never found
-        diversity_probe_difficulty = 0.0
-        diversity_probe_active = bool(
-            proposer_warm_start_active
-            and bool(getattr(self.cfg, "proposer_warm_start_diversity_probe_enabled", True))
-            and entropy_nats < 1e-6  # unanimous
-            and maj_frac >= 1.0
-            and question
-            and solver_prompt
-        )
-        if diversity_probe_active:
-            _probe_max = max(
-                0,
-                int(getattr(self.cfg, "proposer_warm_start_diversity_probe_max", 4)),
-            )
-            _probe_temp = max(
-                0.1,
-                float(getattr(self.cfg, "proposer_warm_start_diversity_probe_temp", 3.0)),
-            )
-            _probe_top_p = max(
-                0.1,
-                min(
-                    1.0,
-                    float(
-                        getattr(self.cfg, "proposer_warm_start_diversity_probe_top_p", 1.0)
-                    ),
-                ),
-            )
-            for _pi in range(_probe_max):
-                diversity_probe_attempts += 1
-                try:
-                    _probe_out = self._generate(
-                        image=image,
-                        prompt=solver_prompt,
-                        adapter_name="default" if self.cfg.use_lora else None,
-                        max_new_tokens=self.cfg.max_new_tokens_solver,
-                        temperature=_probe_temp,
-                        top_p=_probe_top_p,
-                    )
-                    _probe_ans_raw = _parse_answer(_probe_out)
-                    _probe_ans_norm = normalize_answer(_probe_ans_raw)
-                    if solver_choice_mode:
-                        _probe_vote = _probe_ans_norm
-                    else:
-                        _probe_vote, _, _ = self._normalize_answer_for_type(
-                            _probe_ans_norm, solver_answer_type
-                        )
-                    if _probe_vote and _probe_vote != maj_answer_vote:
-                        diversity_probe_found_at = diversity_probe_attempts
-                        break
-                except Exception:
-                    continue
-            if diversity_probe_found_at > 0 and _probe_max > 0:
-                # Found diversity: earlier = question has more latent ambiguity
-                diversity_probe_difficulty = max(
-                    0.0,
-                    1.0 - ((diversity_probe_found_at - 1) / max(1.0, float(_probe_max))),
-                )
-
         easy_solver_penalty_scale = max(
             0.0, float(getattr(self.cfg, "easy_solver_penalty_scale", 1.0))
         )
@@ -3017,23 +2950,49 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         # --- Intuitive answer: one greedy solver call (V-Zero fast track) ---
         # Reference: "V-Zero: Self-Improving Multimodal Reasoning with Zero
         # Annotation" (arXiv:2601.10094)
+        #
+        # Logit-Margin Difficulty Signal (LMDS): the greedy call now also
+        # returns logit margins — the gap between top-1 and top-2 logits at
+        # each answer token.  The minimum margin is a continuous measure of
+        # solver uncertainty: small margin → model near decision boundary →
+        # genuinely hard question.  This signal works from step 0 and needs
+        # ZERO extra compute (piggybacks on the existing V-Zero call).
         _intuitive_answer_raw = ""
         _intuitive_answer = ""
         _intuitive_answer_vote = ""
         _intuitive_generation_failed = False
         _intuitive_attempted = False
+        _intuitive_logit_min_margin = 999.0
+        _intuitive_logit_mean_margin = 999.0
+        _lmds_enabled = bool(getattr(self.cfg, "solver_logit_margin_enabled", True))
+        _lmds_tokens = max(1, int(getattr(self.cfg, "solver_logit_margin_tokens", 5)))
         if question and solver_prompt:
             _intuitive_attempted = True
             try:
-                _intuitive_out = self._generate(
-                    image=image,
-                    prompt=solver_prompt,
-                    adapter_name="default" if self.cfg.use_lora else None,
-                    max_new_tokens=self.cfg.max_new_tokens_solver,
-                    temperature=0.01,   # near-greedy
-                    top_p=1.0,
-                    do_sample=False,    # truly greedy (V-Zero intuitive track)
-                )
+                if _lmds_enabled:
+                    _intuitive_out, _margin_info = self._generate_with_confidence(
+                        image=image,
+                        prompt=solver_prompt,
+                        adapter_name="default" if self.cfg.use_lora else None,
+                        max_new_tokens=self.cfg.max_new_tokens_solver,
+                        margin_tokens=_lmds_tokens,
+                    )
+                    _intuitive_logit_min_margin = float(
+                        _margin_info.get("min_margin", 999.0)
+                    )
+                    _intuitive_logit_mean_margin = float(
+                        _margin_info.get("mean_margin", 999.0)
+                    )
+                else:
+                    _intuitive_out = self._generate(
+                        image=image,
+                        prompt=solver_prompt,
+                        adapter_name="default" if self.cfg.use_lora else None,
+                        max_new_tokens=self.cfg.max_new_tokens_solver,
+                        temperature=0.01,
+                        top_p=1.0,
+                        do_sample=False,
+                    )
                 _intuitive_answer_raw = normalize_answer(_parse_answer(_intuitive_out))
                 _intuitive_answer = _intuitive_answer_raw
                 if solver_choice_mode:
@@ -3054,6 +3013,45 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 _intuitive_answer = ""
                 _intuitive_answer_vote = ""
                 _intuitive_generation_failed = True
+                _intuitive_logit_min_margin = 999.0
+                _intuitive_logit_mean_margin = 999.0
+
+        # --- Compute logit-margin difficulty (LMDS) ---
+        # Self-calibrating: uses quantile rank in a rolling window so the
+        # signal adapts to the model's evolving confidence distribution.
+        # Falls back to sigmoid when the window is too small.
+        _logit_margin_difficulty = 0.0
+        if _lmds_enabled and _intuitive_logit_min_margin < 900.0:
+            self._logit_margin_window.append(_intuitive_logit_min_margin)
+            _lm_window_size = max(
+                8,
+                int(getattr(self.cfg, "solver_logit_margin_window_size", 128)),
+            )
+            # Trim window
+            while len(self._logit_margin_window) > _lm_window_size:
+                self._logit_margin_window.pop(0)
+            _lm_n = len(self._logit_margin_window)
+            if _lm_n >= 8:
+                # Quantile-based: fraction of window entries with LARGER
+                # margin (= more confident = easier).  High quantile = this
+                # question is harder than most recent questions.
+                _lm_rank = sum(
+                    1 for m in self._logit_margin_window
+                    if m > _intuitive_logit_min_margin
+                )
+                _logit_margin_difficulty = float(_lm_rank) / float(_lm_n)
+            else:
+                # Sigmoid fallback for cold window.
+                import math as _math
+                _sig_alpha = float(
+                    getattr(self.cfg, "solver_logit_margin_sigmoid_alpha", 1.5)
+                )
+                _sig_beta = float(
+                    getattr(self.cfg, "solver_logit_margin_sigmoid_beta", 3.0)
+                )
+                _logit_margin_difficulty = 1.0 - 1.0 / (
+                    1.0 + _math.exp(-_sig_alpha * (_intuitive_logit_min_margin - _sig_beta))
+                )
 
         # --- Proposer reward: V-Zero dual-track learnability ---
         # The proposer is rewarded when the solver's "intuitive" (greedy)
@@ -3113,16 +3111,29 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_bonus_enabled = difficulty_bucket_observed in {"medium", "hard"}
         proposer_bonus_warm_enabled = proposer_bonus_enabled or proposer_warm_start_active
         if proposer_warm_start_active:
-            # Entropy-free warm start: bootstrap proposer from text/cert quality
-            # signals + diversity probe until disagreement appears.
-            # Base = diversity probe difficulty (real signal) + text heuristics
-            _div_weight = max(
+            # Logit-Margin warm start: the PRIMARY proposer signal is the
+            # continuous logit-margin difficulty from the V-Zero greedy call.
+            # This directly measures solver uncertainty — small margin means
+            # the model is near its decision boundary, i.e. a genuinely hard
+            # question.  Text/certificate bonuses remain as secondary quality
+            # signals.  This replaces the old diversity-probe approach.
+            _lm_ws_weight = max(
                 0.0,
                 float(
-                    getattr(self.cfg, "proposer_warm_start_diversity_reward_weight", 0.40)
+                    getattr(self.cfg, "proposer_logit_margin_warm_start_weight", 0.70)
                 ),
             )
-            proposer_reward = _div_weight * diversity_probe_difficulty
+            proposer_reward = _lm_ws_weight * _logit_margin_difficulty
+        elif _lmds_enabled and _logit_margin_difficulty > 0.0:
+            # After warm-start: logit margin as COMPLEMENTARY signal to entropy.
+            # This keeps a continuous difficulty gradient even when entropy works.
+            _lm_weight = max(
+                0.0,
+                float(
+                    getattr(self.cfg, "proposer_logit_margin_reward_weight", 0.30)
+                ),
+            )
+            proposer_reward += _lm_weight * _logit_margin_difficulty
         if not proposer_bonus_warm_enabled:
             proposer_text_hardness_bonus = 0.0
             proposer_strategy_quota_bonus = 0.0
@@ -4202,10 +4213,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_warm_start_exit_pass": bool(
                 warm_start_state.get("exit_pass", 0.0) > 0.5
             ),
-            "proposer_diversity_probe_active": bool(diversity_probe_active),
-            "proposer_diversity_probe_attempts": int(diversity_probe_attempts),
-            "proposer_diversity_probe_found_at": int(diversity_probe_found_at),
-            "proposer_diversity_probe_difficulty": float(diversity_probe_difficulty),
+            "proposer_logit_margin_min": float(_intuitive_logit_min_margin),
+            "proposer_logit_margin_mean": float(_intuitive_logit_mean_margin),
+            "proposer_logit_margin_difficulty": float(_logit_margin_difficulty),
+            "proposer_logit_margin_window_size": len(self._logit_margin_window),
             "proposer_hardness_debt": hardness_debt_state.get("debt", 0.0),
             "proposer_hardness_debt_cap_streak": hardness_debt_state.get("cap_streak", 0.0),
             "proposer_hardness_debt_escape_steps_left": hardness_debt_state.get(
@@ -4481,8 +4492,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"C_NE={candidate_non_easy_rate:.2f} C_V={candidate_struct_valid_rate:.2f} "
                 f"ARM={curriculum_arm_score:.2f} "
                 f"WS={int(proposer_warm_start_active)} "
-                f"DP={diversity_probe_found_at}/{diversity_probe_attempts} "
-                f"DD={diversity_probe_difficulty:.2f} "
+                f"LM={_intuitive_logit_min_margin:.2f} "
+                f"LMD={_logit_margin_difficulty:.3f} "
                 f"D={float(hardness_debt_state.get('debt', 0.0)):.2f} "
                 f"E_L={easy_constraint_state.get('easy_lambda', 0.0):.3f} "
                 f"E_R={easy_constraint_state.get('easy_rate_ema', 0.0):.2f} "
@@ -4553,12 +4564,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             self._dist_mean(float(warm_start_state.get("entropy_mean", 0.0))),
         )
         self._update_metric(
-            "u_proposer_diversity_probe_difficulty",
-            self._dist_mean(float(diversity_probe_difficulty)),
+            "u_proposer_logit_margin_min",
+            self._dist_mean(float(_intuitive_logit_min_margin) if _intuitive_logit_min_margin < 900.0 else 0.0),
         )
         self._update_metric(
-            "u_proposer_diversity_probe_found",
-            self._dist_mean(1.0 if diversity_probe_found_at > 0 else 0.0),
+            "u_proposer_logit_margin_difficulty",
+            self._dist_mean(float(_logit_margin_difficulty)),
         )
         self._update_metric(
             "u_proposer_hardness_debt",
@@ -4645,6 +4656,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         state["unified_hardness_debt_escape_steps_left"] = int(
             getattr(self, "_hardness_debt_escape_steps_left", 0)
+        )
+        state["unified_logit_margin_window"] = list(
+            getattr(self, "_logit_margin_window", [])
         )
         state["unified_proposer_bucket_baselines"] = dict(self._proposer_bucket_baselines)
         # Replay buffer metadata (not the images — too large for checkpoint;
@@ -4858,6 +4872,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     self._hardness_debt_escape_steps_left,
                 )
             )
+            _restored_lm_window = state.get("unified_logit_margin_window")
+            if isinstance(_restored_lm_window, list):
+                self._logit_margin_window = [float(x) for x in _restored_lm_window]
             bucket_baselines = state.get("unified_proposer_bucket_baselines")
             if isinstance(bucket_baselines, dict):
                 for b in ("easy", "medium", "hard"):
@@ -4901,6 +4918,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 self._hardness_debt = 0.0
                 self._hardness_debt_cap_streak = 0
                 self._hardness_debt_escape_steps_left = 0
+                self._logit_margin_window = []
                 self._proposer_bucket_baselines = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
             if self.is_main_process:
                 print(

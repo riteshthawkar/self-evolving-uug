@@ -1,16 +1,17 @@
-# BAGEL Self-Evolving (Phase 1)
+# BAGEL Self-Evolving
 
-This module implements the first production-grade slice of the self-evolving
-framework on BAGEL:
+This module now supports both rollout-only analysis and train-mode updates on
+BAGEL with role-specific LoRA adapters.
 
-- understanding rollouts on real images
-- proposer/solver self-consistency signals
-- V-Zero style dual-track reward shaping
-- structured JSONL logging for analysis and later policy updates
+## Supported modes
+
+- `rollout`:
+  proposer/solver/self-consistency diagnostics + JSONL logs only.
+- `train`:
+  rollout plus optimizer-backed proposer/solver updates with
+  `reinforce` or `grpo`-style normalized advantages.
 
 ## Entrypoint
-
-Run:
 
 ```bash
 python3 train/train_self_evolving.py \
@@ -20,23 +21,42 @@ python3 train/train_self_evolving.py \
   --steps 500
 ```
 
-## What this phase does
+## Train mode (LoRA + policy updates)
 
-For each step:
+```bash
+python3 train/train_self_evolving.py \
+  --model_path /path/to/BAGEL-7B-MoT \
+  --image_dir /path/to/images \
+  --output_dir /path/to/outputs \
+  --steps 500 \
+  --enable_lora \
+  --policy_updates_enabled \
+  --policy_update_method grpo
+```
 
-1. proposer generates one objective visual question
-2. solver answers the question with multi-temperature sampling
-3. compute entropy / majority fraction from sampled answers
-4. run one greedy intuitive solver pass
-5. compute proposer reward with dual-track shaping
-6. persist full record to `rollouts.jsonl`
+Key train-mode flags:
 
-## What this phase intentionally does not do yet
+- `--lora_rank`, `--lora_alpha`, `--lora_dropout`
+- `--lora_target_modules_csv`
+- `--lora_role_adapters_csv` (default: `proposer,solver,generator`)
+- `--policy_lr`, `--policy_grad_accum_steps`, `--policy_max_grad_norm`
+- `--checkpoint_every`, `--resume_from`
 
-- policy gradient or GRPO optimization updates
-- distributed training/FSDP for self-evolving loops
-- generation-phase optimization loop
+## SUDER generation phase
 
-These are extension points for phase 2+ and the current code is organized to
-add them cleanly without changing rollout correctness.
+Enable generation rollouts and proposer generation-side updates:
 
+```bash
+python3 train/train_self_evolving.py \
+  ... \
+  --suder_generation_enabled \
+  --train_generation_proposer \
+  --proposer_gen_entropy_weight 0.7
+```
+
+Outputs:
+
+- `rollouts.jsonl`: understanding phase traces + update diagnostics
+- `generation_rollouts.jsonl`: SUDER generation traces + update diagnostics
+- `summary.json`: run-level metrics
+- `checkpoints/step_*.pt`: adapter/update state checkpoints (train mode)
