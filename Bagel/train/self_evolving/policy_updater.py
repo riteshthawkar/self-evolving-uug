@@ -10,6 +10,8 @@ from typing import Dict, List, Optional
 import torch
 from PIL import Image
 
+from modeling.bagel.runtime_precision import autocast_context
+
 from .adapter_manager import collect_adapter_parameters, use_adapter
 from .config import RolloutConfig
 from .model_loader import BagelRuntime
@@ -317,8 +319,7 @@ class BagelRolePolicyUpdater:
         model.config.visual_gen = False
         model.train(True)
 
-        device_type = str(self.runtime.device.type)
-        autocast_enabled = bool(self.cfg.policy_use_bf16 and device_type == "cuda")
+        autocast_enabled = bool(self.cfg.policy_use_bf16)
         grad_norm = 0.0
         opt_step = False
         ce_value = 0.0
@@ -326,7 +327,7 @@ class BagelRolePolicyUpdater:
 
         try:
             with use_adapter(self.runtime.model.language_model, self.adapter_name):
-                with torch.autocast(device_type=device_type, enabled=autocast_enabled, dtype=torch.bfloat16):
+                with autocast_context(self.runtime.device, enabled=autocast_enabled):
                     outputs = model(**batch)
                     ce_loss = outputs.get("ce", None)
                     if ce_loss is None or int(ce_loss.numel()) <= 0:

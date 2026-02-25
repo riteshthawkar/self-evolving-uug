@@ -19,6 +19,7 @@ from data.data_utils import (
 )
 from .qwen2_navit import NaiveCache
 from .modeling_utils import MLPconnector, TimestepEmbedder, PositionEmbedding
+from .runtime_precision import autocast_context
 from modeling.cache_utils.taylorseer import cache_init
 
 from tqdm import tqdm
@@ -1100,7 +1101,7 @@ class Bagel(PreTrainedModel):
             for k, v in generation_input.items():
                 if torch.is_tensor(v):
                     generation_input[k] = v.to(device)
-            with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+            with autocast_context(device, enabled=True):
                 past_key_values = self.forward_cache_update_vit(past_key_values, **generation_input)
 
         # add text
@@ -1114,7 +1115,7 @@ class Bagel(PreTrainedModel):
         for k, v in generation_input.items():
             if torch.is_tensor(v):
                 generation_input[k] = v.to(device)
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+        with autocast_context(device, enabled=True):
             past_key_values = self.forward_cache_update_text(past_key_values, **generation_input)
 
         # decode
@@ -1122,7 +1123,7 @@ class Bagel(PreTrainedModel):
         for k, v in generation_input.items():
             if torch.is_tensor(v):
                 generation_input[k] = v.to(device)
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+        with autocast_context(device, enabled=True):
             unpacked_latent = self.generate_text(
                 past_key_values=past_key_values,
                 max_length=max_length,
