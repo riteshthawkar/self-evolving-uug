@@ -2217,9 +2217,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             num_proposer_candidates = max(num_proposer_candidates, controller_num_candidates)
         # How many solver samples to use for the spot-check of each candidate.
         # Fewer samples = faster; default 3 gives ternary entropy outcomes.
-        spot_check_samples = max(
-            1, int(getattr(self.cfg, "proposer_spot_check_samples", 3))
-        )
+        # During warm-start, reduce to 1 to free budget for diversity probing.
+        if proposer_warm_start_active:
+            spot_check_samples = max(
+                1, int(getattr(self.cfg, "proposer_warm_start_spot_check_samples", 1))
+            )
+        else:
+            spot_check_samples = max(
+                1, int(getattr(self.cfg, "proposer_spot_check_samples", 3))
+            )
         spot_entropy_min_gate = max(
             0.0, float(getattr(self.cfg, "proposer_spot_entropy_min_gate", 0.05))
         )
@@ -2888,6 +2894,73 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             entropy_nats=entropy_nats,
             u_step=max(1, u_step),
         )
+
+        # --- Budget-neutral diversity probe (warm-start only) ---
+        # When solver is unanimous during warm-start, use saved spot-check
+        # budget to probe whether extreme-temp sampling CAN produce a
+        # different answer.  This gives the proposer a REAL difficulty
+        # signal: "how hard is it to shake the solver's confidence?"
+        # Probe answers are NOT used for solver training.
+        diversity_probe_attempts = 0
+        diversity_probe_found_at = 0  # 0 = never found
+        diversity_probe_difficulty = 0.0
+        diversity_probe_active = bool(
+            proposer_warm_start_active
+            and bool(getattr(self.cfg, "proposer_warm_start_diversity_probe_enabled", True))
+            and entropy_nats < 1e-6  # unanimous
+            and maj_frac >= 1.0
+            and question
+            and solver_prompt
+        )
+        if diversity_probe_active:
+            _probe_max = max(
+                0,
+                int(getattr(self.cfg, "proposer_warm_start_diversity_probe_max", 4)),
+            )
+            _probe_temp = max(
+                0.1,
+                float(getattr(self.cfg, "proposer_warm_start_diversity_probe_temp", 3.0)),
+            )
+            _probe_top_p = max(
+                0.1,
+                min(
+                    1.0,
+                    float(
+                        getattr(self.cfg, "proposer_warm_start_diversity_probe_top_p", 1.0)
+                    ),
+                ),
+            )
+            for _pi in range(_probe_max):
+                diversity_probe_attempts += 1
+                try:
+                    _probe_out = self._generate(
+                        image=image,
+                        prompt=solver_prompt,
+                        adapter_name="default" if self.cfg.use_lora else None,
+                        max_new_tokens=self.cfg.max_new_tokens_solver,
+                        temperature=_probe_temp,
+                        top_p=_probe_top_p,
+                    )
+                    _probe_ans_raw = _parse_answer(_probe_out)
+                    _probe_ans_norm = normalize_answer(_probe_ans_raw)
+                    if solver_choice_mode:
+                        _probe_vote = _probe_ans_norm
+                    else:
+                        _probe_vote, _, _ = self._normalize_answer_for_type(
+                            _probe_ans_norm, solver_answer_type
+                        )
+                    if _probe_vote and _probe_vote != maj_answer_vote:
+                        diversity_probe_found_at = diversity_probe_attempts
+                        break
+                except Exception:
+                    continue
+            if diversity_probe_found_at > 0 and _probe_max > 0:
+                # Found diversity: earlier = question has more latent ambiguity
+                diversity_probe_difficulty = max(
+                    0.0,
+                    1.0 - ((diversity_probe_found_at - 1) / max(1.0, float(_probe_max))),
+                )
+
         easy_solver_penalty_scale = max(
             0.0, float(getattr(self.cfg, "easy_solver_penalty_scale", 1.0))
         )
@@ -3041,8 +3114,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_bonus_warm_enabled = proposer_bonus_enabled or proposer_warm_start_active
         if proposer_warm_start_active:
             # Entropy-free warm start: bootstrap proposer from text/cert quality
-            # signals until disagreement appears.
-            proposer_reward = 0.0
+            # signals + diversity probe until disagreement appears.
+            # Base = diversity probe difficulty (real signal) + text heuristics
+            _div_weight = max(
+                0.0,
+                float(
+                    getattr(self.cfg, "proposer_warm_start_diversity_reward_weight", 0.40)
+                ),
+            )
+            proposer_reward = _div_weight * diversity_probe_difficulty
         if not proposer_bonus_warm_enabled:
             proposer_text_hardness_bonus = 0.0
             proposer_strategy_quota_bonus = 0.0
@@ -4122,6 +4202,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_warm_start_exit_pass": bool(
                 warm_start_state.get("exit_pass", 0.0) > 0.5
             ),
+            "proposer_diversity_probe_active": bool(diversity_probe_active),
+            "proposer_diversity_probe_attempts": int(diversity_probe_attempts),
+            "proposer_diversity_probe_found_at": int(diversity_probe_found_at),
+            "proposer_diversity_probe_difficulty": float(diversity_probe_difficulty),
             "proposer_hardness_debt": hardness_debt_state.get("debt", 0.0),
             "proposer_hardness_debt_cap_streak": hardness_debt_state.get("cap_streak", 0.0),
             "proposer_hardness_debt_escape_steps_left": hardness_debt_state.get(
@@ -4397,6 +4481,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"C_NE={candidate_non_easy_rate:.2f} C_V={candidate_struct_valid_rate:.2f} "
                 f"ARM={curriculum_arm_score:.2f} "
                 f"WS={int(proposer_warm_start_active)} "
+                f"DP={diversity_probe_found_at}/{diversity_probe_attempts} "
+                f"DD={diversity_probe_difficulty:.2f} "
                 f"D={float(hardness_debt_state.get('debt', 0.0)):.2f} "
                 f"E_L={easy_constraint_state.get('easy_lambda', 0.0):.3f} "
                 f"E_R={easy_constraint_state.get('easy_rate_ema', 0.0):.2f} "
@@ -4465,6 +4551,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._update_metric(
             "u_proposer_warm_start_entropy_mean",
             self._dist_mean(float(warm_start_state.get("entropy_mean", 0.0))),
+        )
+        self._update_metric(
+            "u_proposer_diversity_probe_difficulty",
+            self._dist_mean(float(diversity_probe_difficulty)),
+        )
+        self._update_metric(
+            "u_proposer_diversity_probe_found",
+            self._dist_mean(1.0 if diversity_probe_found_at > 0 else 0.0),
         )
         self._update_metric(
             "u_proposer_hardness_debt",
