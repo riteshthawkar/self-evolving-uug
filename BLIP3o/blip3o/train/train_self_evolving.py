@@ -145,6 +145,41 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--proposer_trivial_archetype_penalty", type=float, default=0.25)
     p.add_argument("--proposer_answer_family_repeat_penalty", type=float, default=0.25)
     p.add_argument("--proposer_answer_family_repeat_target", type=float, default=0.25)
+    p.add_argument("--proposer_candidate_noncanonical_penalty", type=float, default=0.12)
+    p.add_argument("--proposer_candidate_low_info_penalty", type=float, default=0.10)
+    p.add_argument("--solver_noncanonical_answer_penalty", type=float, default=0.10)
+    p.add_argument("--solver_low_info_answer_penalty", type=float, default=0.08)
+    p.add_argument("--curriculum_arm_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_curriculum_arm",
+        dest="curriculum_arm_enabled",
+        action="store_false",
+    )
+    p.add_argument("--curriculum_arm_prompt_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_curriculum_arm_prompt",
+        dest="curriculum_arm_prompt_enabled",
+        action="store_false",
+    )
+    p.add_argument("--curriculum_arm_ema_momentum", type=float, default=0.90)
+    p.add_argument("--curriculum_arm_progress_weight", type=float, default=0.20)
+    p.add_argument("--curriculum_arm_underuse_weight", type=float, default=0.12)
+    p.add_argument("--curriculum_arm_easy_penalty_weight", type=float, default=0.15)
+    p.add_argument("--curriculum_arm_solver_gain_weight", type=float, default=0.10)
+    p.add_argument("--curriculum_arm_prompt_temp", type=float, default=0.60)
+    p.add_argument("--curriculum_arm_candidate_bonus", type=float, default=0.08)
+    p.add_argument("--curriculum_arm_reward_scale", type=float, default=0.10)
+    p.add_argument("--replay_priority_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_replay_priority",
+        dest="replay_priority_enabled",
+        action="store_false",
+    )
+    p.add_argument("--replay_priority_hardness_weight", type=float, default=0.50)
+    p.add_argument("--replay_priority_update_weight", type=float, default=0.30)
+    p.add_argument("--replay_priority_novelty_weight", type=float, default=0.20)
+    p.add_argument("--replay_anchor_inject_k", type=int, default=2)
+    p.add_argument("--replay_anchor_inject_easy_streak", type=int, default=2)
     p.add_argument("--proposer_require_objective", action="store_true", default=True)
     p.add_argument(
         "--disable_proposer_require_objective",
@@ -232,7 +267,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="proposer_early_failfast_enabled",
         action="store_false",
     )
-    p.add_argument("--proposer_early_failfast_stop", action="store_true", default=True)
+    p.add_argument("--proposer_early_failfast_stop", action="store_true", default=False)
     p.add_argument(
         "--disable_proposer_early_failfast_stop",
         dest="proposer_early_failfast_stop",
@@ -245,6 +280,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
     p.add_argument("--proposer_early_failfast_recover_steps", type=int, default=20)
+    p.add_argument("--proposer_early_hard_stop_min_u_step", type=int, default=80)
     p.add_argument("--reward_spec_weight", type=float, default=0.65)
     p.add_argument("--reward_cycle_weight", type=float, default=0.20)
     p.add_argument("--reward_diversity_weight", type=float, default=0.10)
@@ -533,6 +569,26 @@ def _build_understanding_config(args):
         proposer_trivial_archetype_penalty=args.proposer_trivial_archetype_penalty,
         proposer_answer_family_repeat_penalty=args.proposer_answer_family_repeat_penalty,
         proposer_answer_family_repeat_target=args.proposer_answer_family_repeat_target,
+        proposer_candidate_noncanonical_penalty=args.proposer_candidate_noncanonical_penalty,
+        proposer_candidate_low_info_penalty=args.proposer_candidate_low_info_penalty,
+        solver_noncanonical_answer_penalty=args.solver_noncanonical_answer_penalty,
+        solver_low_info_answer_penalty=args.solver_low_info_answer_penalty,
+        curriculum_arm_enabled=args.curriculum_arm_enabled,
+        curriculum_arm_prompt_enabled=args.curriculum_arm_prompt_enabled,
+        curriculum_arm_ema_momentum=args.curriculum_arm_ema_momentum,
+        curriculum_arm_progress_weight=args.curriculum_arm_progress_weight,
+        curriculum_arm_underuse_weight=args.curriculum_arm_underuse_weight,
+        curriculum_arm_easy_penalty_weight=args.curriculum_arm_easy_penalty_weight,
+        curriculum_arm_solver_gain_weight=args.curriculum_arm_solver_gain_weight,
+        curriculum_arm_prompt_temp=args.curriculum_arm_prompt_temp,
+        curriculum_arm_candidate_bonus=args.curriculum_arm_candidate_bonus,
+        curriculum_arm_reward_scale=args.curriculum_arm_reward_scale,
+        replay_priority_enabled=args.replay_priority_enabled,
+        replay_priority_hardness_weight=args.replay_priority_hardness_weight,
+        replay_priority_update_weight=args.replay_priority_update_weight,
+        replay_priority_novelty_weight=args.replay_priority_novelty_weight,
+        replay_anchor_inject_k=args.replay_anchor_inject_k,
+        replay_anchor_inject_easy_streak=args.replay_anchor_inject_easy_streak,
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
@@ -584,6 +640,7 @@ def _build_understanding_config(args):
         proposer_early_failfast_stop=args.proposer_early_failfast_stop,
         proposer_early_failfast_recover=args.proposer_early_failfast_recover,
         proposer_early_failfast_recover_steps=args.proposer_early_failfast_recover_steps,
+        proposer_early_hard_stop_min_u_step=args.proposer_early_hard_stop_min_u_step,
         kl_coef=args.kl_coef,
         kl_target=args.kl_target,
         kl_adapt_rate=args.kl_adapt_rate,
@@ -734,6 +791,26 @@ def _build_generation_config(args):
         proposer_trivial_archetype_penalty=args.proposer_trivial_archetype_penalty,
         proposer_answer_family_repeat_penalty=args.proposer_answer_family_repeat_penalty,
         proposer_answer_family_repeat_target=args.proposer_answer_family_repeat_target,
+        proposer_candidate_noncanonical_penalty=args.proposer_candidate_noncanonical_penalty,
+        proposer_candidate_low_info_penalty=args.proposer_candidate_low_info_penalty,
+        solver_noncanonical_answer_penalty=args.solver_noncanonical_answer_penalty,
+        solver_low_info_answer_penalty=args.solver_low_info_answer_penalty,
+        curriculum_arm_enabled=args.curriculum_arm_enabled,
+        curriculum_arm_prompt_enabled=args.curriculum_arm_prompt_enabled,
+        curriculum_arm_ema_momentum=args.curriculum_arm_ema_momentum,
+        curriculum_arm_progress_weight=args.curriculum_arm_progress_weight,
+        curriculum_arm_underuse_weight=args.curriculum_arm_underuse_weight,
+        curriculum_arm_easy_penalty_weight=args.curriculum_arm_easy_penalty_weight,
+        curriculum_arm_solver_gain_weight=args.curriculum_arm_solver_gain_weight,
+        curriculum_arm_prompt_temp=args.curriculum_arm_prompt_temp,
+        curriculum_arm_candidate_bonus=args.curriculum_arm_candidate_bonus,
+        curriculum_arm_reward_scale=args.curriculum_arm_reward_scale,
+        replay_priority_enabled=args.replay_priority_enabled,
+        replay_priority_hardness_weight=args.replay_priority_hardness_weight,
+        replay_priority_update_weight=args.replay_priority_update_weight,
+        replay_priority_novelty_weight=args.replay_priority_novelty_weight,
+        replay_anchor_inject_k=args.replay_anchor_inject_k,
+        replay_anchor_inject_easy_streak=args.replay_anchor_inject_easy_streak,
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
@@ -784,6 +861,7 @@ def _build_generation_config(args):
         proposer_early_failfast_stop=args.proposer_early_failfast_stop,
         proposer_early_failfast_recover=args.proposer_early_failfast_recover,
         proposer_early_failfast_recover_steps=args.proposer_early_failfast_recover_steps,
+        proposer_early_hard_stop_min_u_step=args.proposer_early_hard_stop_min_u_step,
         reward_spec_weight=args.reward_spec_weight,
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
@@ -952,6 +1030,26 @@ def _build_unified_config(args):
         proposer_trivial_archetype_penalty=args.proposer_trivial_archetype_penalty,
         proposer_answer_family_repeat_penalty=args.proposer_answer_family_repeat_penalty,
         proposer_answer_family_repeat_target=args.proposer_answer_family_repeat_target,
+        proposer_candidate_noncanonical_penalty=args.proposer_candidate_noncanonical_penalty,
+        proposer_candidate_low_info_penalty=args.proposer_candidate_low_info_penalty,
+        solver_noncanonical_answer_penalty=args.solver_noncanonical_answer_penalty,
+        solver_low_info_answer_penalty=args.solver_low_info_answer_penalty,
+        curriculum_arm_enabled=args.curriculum_arm_enabled,
+        curriculum_arm_prompt_enabled=args.curriculum_arm_prompt_enabled,
+        curriculum_arm_ema_momentum=args.curriculum_arm_ema_momentum,
+        curriculum_arm_progress_weight=args.curriculum_arm_progress_weight,
+        curriculum_arm_underuse_weight=args.curriculum_arm_underuse_weight,
+        curriculum_arm_easy_penalty_weight=args.curriculum_arm_easy_penalty_weight,
+        curriculum_arm_solver_gain_weight=args.curriculum_arm_solver_gain_weight,
+        curriculum_arm_prompt_temp=args.curriculum_arm_prompt_temp,
+        curriculum_arm_candidate_bonus=args.curriculum_arm_candidate_bonus,
+        curriculum_arm_reward_scale=args.curriculum_arm_reward_scale,
+        replay_priority_enabled=args.replay_priority_enabled,
+        replay_priority_hardness_weight=args.replay_priority_hardness_weight,
+        replay_priority_update_weight=args.replay_priority_update_weight,
+        replay_priority_novelty_weight=args.replay_priority_novelty_weight,
+        replay_anchor_inject_k=args.replay_anchor_inject_k,
+        replay_anchor_inject_easy_streak=args.replay_anchor_inject_easy_streak,
         proposer_require_objective=args.proposer_require_objective,
         proposer_num_candidates=args.proposer_num_candidates,
         proposer_spot_check_samples=args.proposer_spot_check_samples,
@@ -1002,6 +1100,7 @@ def _build_unified_config(args):
         proposer_early_failfast_stop=args.proposer_early_failfast_stop,
         proposer_early_failfast_recover=args.proposer_early_failfast_recover,
         proposer_early_failfast_recover_steps=args.proposer_early_failfast_recover_steps,
+        proposer_early_hard_stop_min_u_step=args.proposer_early_hard_stop_min_u_step,
         reward_spec_weight=args.reward_spec_weight,
         reward_cycle_weight=args.reward_cycle_weight,
         reward_diversity_weight=args.reward_diversity_weight,
