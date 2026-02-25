@@ -83,6 +83,26 @@ class UnderstandingSelfEvolvingConfig:
     proposer_trivial_archetype_penalty: float = 0.25
     proposer_answer_family_repeat_penalty: float = 0.25
     proposer_answer_family_repeat_target: float = 0.25
+    proposer_candidate_noncanonical_penalty: float = 0.12
+    proposer_candidate_low_info_penalty: float = 0.10
+    solver_noncanonical_answer_penalty: float = 0.10
+    solver_low_info_answer_penalty: float = 0.08
+    curriculum_arm_enabled: bool = True
+    curriculum_arm_prompt_enabled: bool = True
+    curriculum_arm_ema_momentum: float = 0.90
+    curriculum_arm_progress_weight: float = 0.20
+    curriculum_arm_underuse_weight: float = 0.12
+    curriculum_arm_easy_penalty_weight: float = 0.15
+    curriculum_arm_solver_gain_weight: float = 0.10
+    curriculum_arm_prompt_temp: float = 0.60
+    curriculum_arm_candidate_bonus: float = 0.08
+    curriculum_arm_reward_scale: float = 0.10
+    replay_priority_enabled: bool = True
+    replay_priority_hardness_weight: float = 0.50
+    replay_priority_update_weight: float = 0.30
+    replay_priority_novelty_weight: float = 0.20
+    replay_anchor_inject_k: int = 2
+    replay_anchor_inject_easy_streak: int = 2
     proposer_require_objective: bool = True
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
@@ -105,9 +125,10 @@ class UnderstandingSelfEvolvingConfig:
     proposer_contrastive_neg_penalty: float = 0.08
     # Early fail-fast health checks to stop collapsed runs quickly.
     proposer_early_failfast_enabled: bool = True
-    proposer_early_failfast_stop: bool = True
+    proposer_early_failfast_stop: bool = False
     proposer_early_failfast_recover: bool = True
     proposer_early_failfast_recover_steps: int = 20
+    proposer_early_hard_stop_min_u_step: int = 80
     proposer_early_step1: int = 12
     proposer_early_step2: int = 24
     proposer_early_candidate_non_easy_min: float = 0.08
@@ -429,6 +450,26 @@ class GenerationSelfEvolvingConfig:
     proposer_trivial_archetype_penalty: float = 0.25
     proposer_answer_family_repeat_penalty: float = 0.25
     proposer_answer_family_repeat_target: float = 0.25
+    proposer_candidate_noncanonical_penalty: float = 0.12
+    proposer_candidate_low_info_penalty: float = 0.10
+    solver_noncanonical_answer_penalty: float = 0.10
+    solver_low_info_answer_penalty: float = 0.08
+    curriculum_arm_enabled: bool = True
+    curriculum_arm_prompt_enabled: bool = True
+    curriculum_arm_ema_momentum: float = 0.90
+    curriculum_arm_progress_weight: float = 0.20
+    curriculum_arm_underuse_weight: float = 0.12
+    curriculum_arm_easy_penalty_weight: float = 0.15
+    curriculum_arm_solver_gain_weight: float = 0.10
+    curriculum_arm_prompt_temp: float = 0.60
+    curriculum_arm_candidate_bonus: float = 0.08
+    curriculum_arm_reward_scale: float = 0.10
+    replay_priority_enabled: bool = True
+    replay_priority_hardness_weight: float = 0.50
+    replay_priority_update_weight: float = 0.30
+    replay_priority_novelty_weight: float = 0.20
+    replay_anchor_inject_k: int = 2
+    replay_anchor_inject_easy_streak: int = 2
     proposer_require_objective: bool = True
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
     proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
@@ -451,9 +492,10 @@ class GenerationSelfEvolvingConfig:
     proposer_contrastive_neg_penalty: float = 0.08
     # Early fail-fast health checks to stop collapsed runs quickly.
     proposer_early_failfast_enabled: bool = True
-    proposer_early_failfast_stop: bool = True
+    proposer_early_failfast_stop: bool = False
     proposer_early_failfast_recover: bool = True
     proposer_early_failfast_recover_steps: int = 20
+    proposer_early_hard_stop_min_u_step: int = 80
     proposer_early_step1: int = 12
     proposer_early_step2: int = 24
     proposer_early_candidate_non_easy_min: float = 0.08

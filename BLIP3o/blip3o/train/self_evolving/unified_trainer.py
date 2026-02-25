@@ -155,6 +155,31 @@ _NUMERIC_ANSWER_RE = re.compile(
     r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
     flags=re.IGNORECASE,
 )
+_COUNT_QUESTION_RE = re.compile(
+    r"\b(?:how many|number of|count)\b",
+    flags=re.IGNORECASE,
+)
+_BINARY_QUESTION_RE = re.compile(
+    r"^(?:is|are|was|were|do|does|did|can|could|should|has|have|had)\b",
+    flags=re.IGNORECASE,
+)
+_NUM_WORD_TO_INT = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
+_YES_SET = {"yes", "y", "true", "present", "exists", "visible"}
+_NO_SET = {"no", "n", "false", "absent", "missing", "none"}
 _GENERIC_TARGET_TOKEN_RE = re.compile(
     r"^(?:"
     r"person|people|man|woman|child|player|car|vehicle|bike|bicycle|shoe|wheel|"
@@ -899,6 +924,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         a = normalize_answer(str(majority_answer or ""), max_words=12)
         if not a:
             return True
+        if a == "ood":
+            return True
         if a in {"yes", "no"} or a.startswith("yes ") or a.startswith("no "):
             return True
         if _LOW_INFO_ANSWER_RE.match(a):
@@ -964,6 +991,242 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 0.0, float(getattr(self.cfg, "proposer_trivial_archetype_penalty", 0.25))
             )
         return float(repeat_pen + trivial_pen)
+
+    def _question_answer_type(self, question: str) -> str:
+        q = normalize_answer(str(question or ""), max_words=28)
+        if not q:
+            return "other"
+        if _COUNT_QUESTION_RE.search(q):
+            return "count"
+        if _BINARY_QUESTION_RE.search(q):
+            return "binary"
+        if any(k in q for k in ("text", "word", "token", "letter", "sign")):
+            return "text"
+        if any(k in q for k in ("left", "right", "above", "below", "between", "beside")):
+            return "spatial"
+        if any(k in q for k in ("color", "material", "pattern", "shape", "type")):
+            return "attribute"
+        return "other"
+
+    def _normalize_answer_for_type(
+        self,
+        answer_norm: str,
+        answer_type: str,
+    ) -> Tuple[str, bool, bool]:
+        a = normalize_answer(str(answer_norm or ""), max_words=12)
+        if not a:
+            return "ood", True, True
+        low_info = bool(_LOW_INFO_ANSWER_RE.match(a) or _VAGUE_COUNT_ANSWER_RE.search(a))
+        noncanonical = False
+        out = a
+        at = str(answer_type or "other").strip().lower()
+
+        if at == "count":
+            m = re.search(r"\b\d+\b", a)
+            if m:
+                out = str(int(m.group(0)))
+            elif a in _NUM_WORD_TO_INT:
+                out = str(int(_NUM_WORD_TO_INT[a]))
+            else:
+                out = "ood"
+                noncanonical = True
+            if low_info:
+                noncanonical = True
+        elif at == "binary":
+            tok = a.split()[0]
+            if tok in _YES_SET:
+                out = "yes"
+            elif tok in _NO_SET:
+                out = "no"
+            else:
+                out = "ood"
+                noncanonical = True
+            if low_info:
+                noncanonical = True
+        else:
+            if low_info:
+                noncanonical = True
+
+        return out, low_info, noncanonical
+
+    def _arm_domain_bucket(self, reasoning_domains_raw: str) -> str:
+        domains = self._parse_reasoning_domains(reasoning_domains_raw)
+        for d in domains:
+            if d != "relation":
+                return d
+        return domains[0] if domains else "relation"
+
+    def _arm_key(self, task_card: str, domain_bucket: str, answer_type: str) -> str:
+        tc = normalize_answer(str(task_card or ""), max_words=2).replace(" ", "")
+        db = normalize_answer(str(domain_bucket or ""), max_words=2).replace(" ", "")
+        at = normalize_answer(str(answer_type or ""), max_words=2).replace(" ", "")
+        if not tc:
+            tc = "c0"
+        if not db:
+            db = "relation"
+        if not at:
+            at = "other"
+        return f"{tc}|{db}|{at}"
+
+    def _arm_from_key(self, key: str) -> Tuple[str, str, str]:
+        raw = str(key or "").strip().lower()
+        parts = raw.split("|")
+        if len(parts) != 3:
+            return "c0", "relation", "other"
+        tc, db, at = (parts[0].strip(), parts[1].strip(), parts[2].strip())
+        return tc or "c0", db or "relation", at or "other"
+
+    def _default_curriculum_arms(self) -> List[str]:
+        return [
+            self._arm_key("C6", "relation", "count"),
+            self._arm_key("C5", "commonsense", "text"),
+            self._arm_key("C4", "scientific", "attribute"),
+            self._arm_key("C2", "action", "binary"),
+            self._arm_key("C3", "behavior", "spatial"),
+            self._arm_key("C1", "physics", "attribute"),
+        ]
+
+    def _curriculum_arm_score(self, arm_key: str) -> float:
+        stats = dict(getattr(self, "_curriculum_arm_stats", {}).get(arm_key, {}))
+        if not stats:
+            return 0.0
+        all_counts = float(
+            sum(float(v.get("count", 0.0)) for v in getattr(self, "_curriculum_arm_stats", {}).values())
+        )
+        my_count = float(stats.get("count", 0.0))
+        share = my_count / max(1e-6, all_counts) if all_counts > 0.0 else 0.0
+        n_arms = max(1, len(getattr(self, "_curriculum_arm_stats", {})))
+        target_share = 1.0 / float(n_arms)
+        under = max(0.0, target_share - share)
+        progress = float(stats.get("progress_ema", 0.0))
+        non_easy = float(stats.get("non_easy_ema", 0.0))
+        solver_gain = float(stats.get("solver_gain_ema", 0.0))
+        score = (
+            float(getattr(self.cfg, "curriculum_arm_progress_weight", 0.20)) * progress
+            + float(getattr(self.cfg, "curriculum_arm_underuse_weight", 0.12)) * under
+            - float(getattr(self.cfg, "curriculum_arm_easy_penalty_weight", 0.15)) * max(0.0, 1.0 - non_easy)
+            + float(getattr(self.cfg, "curriculum_arm_solver_gain_weight", 0.10)) * solver_gain
+        )
+        return float(score)
+
+    def _sample_curriculum_arm(self) -> Dict[str, object]:
+        enabled = bool(getattr(self.cfg, "curriculum_arm_enabled", True))
+        arms = set(self._default_curriculum_arms())
+        stats_map = getattr(self, "_curriculum_arm_stats", {})
+        for key in stats_map.keys():
+            if str(key).strip():
+                arms.add(str(key).strip().lower())
+        arm_list = sorted(arms)
+        if not arm_list:
+            return {"enabled": enabled, "key": "", "score": 0.0, "hint": ""}
+        # Ensure stats entries exist so undersampled arms can be selected.
+        for key in arm_list:
+            if key not in stats_map:
+                stats_map[key] = {
+                    "count": 0.0,
+                    "non_easy_ema": 0.0,
+                    "solver_gain_ema": 0.0,
+                    "prev_solver_gain_ema": 0.0,
+                    "progress_ema": 0.0,
+                }
+        self._curriculum_arm_stats = stats_map
+        if not enabled:
+            tc, db, at = self._arm_from_key(arm_list[0])
+            return {
+                "enabled": False,
+                "key": arm_list[0],
+                "score": 0.0,
+                "hint": f"task_card={tc.upper()}, domain={db}, answer_type={at}",
+            }
+        scores = [self._curriculum_arm_score(k) for k in arm_list]
+        temp = max(1e-3, float(getattr(self.cfg, "curriculum_arm_prompt_temp", 0.60)))
+        m = max(scores) if scores else 0.0
+        exps = [math.exp((s - m) / temp) for s in scores]
+        total = sum(exps)
+        probs = [e / total for e in exps] if total > 0 else [1.0 / len(arm_list)] * len(arm_list)
+        r = random.random()
+        c = 0.0
+        pick_idx = 0
+        for i, p in enumerate(probs):
+            c += float(p)
+            if r <= c:
+                pick_idx = i
+                break
+        key = arm_list[pick_idx]
+        tc, db, at = self._arm_from_key(key)
+        hint = f"task_card={tc.upper()}, domain={db}, answer_type={at}"
+        return {"enabled": True, "key": key, "score": float(scores[pick_idx]), "hint": hint}
+
+    def _update_curriculum_arm_stats(
+        self,
+        arm_key: str,
+        non_easy: float,
+        solver_gain: float,
+    ) -> None:
+        if not arm_key:
+            return
+        if not bool(getattr(self.cfg, "curriculum_arm_enabled", True)):
+            return
+        alpha = max(0.0, min(0.9999, float(getattr(self.cfg, "curriculum_arm_ema_momentum", 0.90))))
+        stats = dict(getattr(self, "_curriculum_arm_stats", {}).get(arm_key, {}))
+        prev_gain_ema = float(stats.get("solver_gain_ema", 0.0))
+        new_gain_ema = alpha * prev_gain_ema + (1.0 - alpha) * float(max(0.0, solver_gain))
+        progress_now = new_gain_ema - prev_gain_ema
+        prev_prog = float(stats.get("progress_ema", 0.0))
+        stats["count"] = float(stats.get("count", 0.0)) + 1.0
+        stats["non_easy_ema"] = alpha * float(stats.get("non_easy_ema", 0.0)) + (1.0 - alpha) * float(
+            max(0.0, min(1.0, non_easy))
+        )
+        stats["prev_solver_gain_ema"] = prev_gain_ema
+        stats["solver_gain_ema"] = new_gain_ema
+        stats["progress_ema"] = alpha * prev_prog + (1.0 - alpha) * float(progress_now)
+        self._curriculum_arm_stats[arm_key] = stats
+
+    def _top_replay_anchor_hints(self, k: int = 2) -> List[str]:
+        if not bool(getattr(self.cfg, "replay_priority_enabled", True)):
+            return []
+        if not self._proposer_anchor_replay:
+            return []
+        kk = max(0, int(k))
+        if kk <= 0:
+            return []
+        ranked = sorted(
+            list(self._proposer_anchor_replay),
+            key=lambda x: (float(x.get("priority", 0.0)), float(x.get("reward", 0.0)), float(x.get("step", 0.0))),
+            reverse=True,
+        )
+        out: List[str] = []
+        for item in ranked:
+            q = str(item.get("question", "") or "").strip()
+            if q and q not in out:
+                out.append(q)
+            if len(out) >= kk:
+                break
+        return out
+
+    def _replay_anchor_priority(
+        self,
+        question: str,
+        hardness_score: float,
+        solver_gain: float,
+    ) -> float:
+        if not bool(getattr(self.cfg, "replay_priority_enabled", True)):
+            return 0.0
+        w_hard = max(0.0, float(getattr(self.cfg, "replay_priority_hardness_weight", 0.50)))
+        w_gain = max(0.0, float(getattr(self.cfg, "replay_priority_update_weight", 0.30)))
+        w_novel = max(0.0, float(getattr(self.cfg, "replay_priority_novelty_weight", 0.20)))
+        qset = self._question_token_set(question)
+        max_sim = 0.0
+        if qset:
+            for item in self._proposer_anchor_replay:
+                toks = set(item.get("q_tokens", []) or [])
+                if not toks:
+                    toks = self._question_token_set(str(item.get("question", "") or ""))
+                max_sim = max(max_sim, self._jaccard_similarity(qset, toks))
+        novelty = max(0.0, 1.0 - max_sim)
+        hard = max(0.0, min(1.0, float(hardness_score)))
+        gain = max(0.0, min(1.0, float(solver_gain)))
+        return float(w_hard * hard + w_gain * gain + w_novel * novelty)
 
     def _question_template_key(self, question: str) -> str:
         q = normalize_answer(str(question or ""), max_words=16)
@@ -1392,6 +1655,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._proposer_reward_clipped_window = deque(maxlen=health_window_size)
         self._selected_non_easy_window = deque(maxlen=health_window_size)
         self._solver_update_applied_window = deque(maxlen=health_window_size)
+        self._curriculum_arm_stats = {}
+        self._last_curriculum_arm_key = ""
         self._proposer_bucket_baselines = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
         self._easy_rate_ema = 0.0
         self._easy_lagrange_lambda = 0.0
@@ -1552,6 +1817,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "solver_update_applied_count": 0.0,
             "recovery_armed": 0.0,
             "triggered": 0.0,
+            "hard_stop_min_u_step": 0.0,
         }
         if not enabled:
             return state
@@ -1577,6 +1843,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         solver_updates_min = max(0, int(getattr(self.cfg, "proposer_early_solver_updates_min", 2)))
         collapse_max = max(0, int(getattr(self.cfg, "proposer_early_collapse_streak_max", 5)))
+        hard_stop_min_u_step = max(
+            0, int(getattr(self.cfg, "proposer_early_hard_stop_min_u_step", 80))
+        )
+        state["hard_stop_min_u_step"] = float(hard_stop_min_u_step)
 
         state["candidate_non_easy_rate"] = self._dist_mean(
             self._mean_recent(self._candidate_non_easy_window, u_step)
@@ -1634,7 +1904,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     recover_steps,
                 )
                 state["recovery_armed"] = 1.0
-            if bool(getattr(self.cfg, "proposer_early_failfast_stop", True)) and (not recover_enabled):
+            if (
+                bool(getattr(self.cfg, "proposer_early_failfast_stop", True))
+                and (not recover_enabled)
+                and (u_step >= hard_stop_min_u_step)
+            ):
                 msg = (
                     "[EarlyFailFast] unhealthy run detected: "
                     f"u_step={u_step} cand_non_easy_rate={state['candidate_non_easy_rate']:.3f} "
@@ -1719,7 +1993,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             ),
         )
         solver_use_forced_choice_from_proposer = bool(
-            getattr(self.cfg, "solver_use_forced_choice_from_proposer", True)
+            getattr(self.cfg, "solver_use_forced_choice_from_proposer", False)
+        )
+        curriculum_arm_state = self._sample_curriculum_arm()
+        curriculum_arm_key = str(curriculum_arm_state.get("key", "") or "")
+        curriculum_arm_hint = (
+            str(curriculum_arm_state.get("hint", "") or "")
+            if bool(getattr(self.cfg, "curriculum_arm_prompt_enabled", True))
+            else ""
         )
 
         # Derive image source hint from path so the proposer can apply
@@ -1735,11 +2016,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             _src_hint = "gqa"
         else:
             _src_hint = "coco"
+        replay_anchor_hints: List[str] = []
+        replay_anchor_streak = max(
+            1, int(getattr(self.cfg, "replay_anchor_inject_easy_streak", 2))
+        )
+        if (
+            self._all_easy_streak() >= replay_anchor_streak
+            or bool(controller_state.get("forced_explore_active", 0.0) > 0.5)
+        ):
+            replay_anchor_hints = self._top_replay_anchor_hints(
+                int(getattr(self.cfg, "replay_anchor_inject_k", 2))
+            )
 
         multi_proposer_prompt = build_proposer_multi_prompt(
             target_difficulty=desired_difficulty_bucket,
             num_questions=num_proposer_candidates,
             image_source_hint=_src_hint,
+            curriculum_arm_hint=curriculum_arm_hint,
+            replay_anchor_hints=replay_anchor_hints,
         )
 
         proposer_out = ""
@@ -1828,6 +2122,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         candidate_bucket_list: List[str] = []
         candidate_valid_list: List[float] = []
         candidate_cert_list: List[float] = []
+        candidate_low_info_rate_list: List[float] = []
+        candidate_noncanonical_rate_list: List[float] = []
         candidate_non_easy_rate = 0.0
         candidate_struct_valid_rate = 0.0
         all_easy_candidate_group = True
@@ -1877,10 +2173,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             cand_choice_mode = bool(
                 solver_use_forced_choice_from_proposer and cand_option_a and cand_option_b
             )
+            cand_answer_type = self._question_answer_type(cand_q)
             cand_outputs: List[str] = []
             cand_answers_raw: List[str] = []
             cand_answers_norm: List[str] = []
             cand_vote_labels: List[str] = []
+            cand_low_info_flags: List[bool] = []
+            cand_noncanonical_flags: List[bool] = []
             cand_pre_words: List[int] = []
 
             # Spot-check with a subset of solver samples for speed.
@@ -1907,17 +2206,25 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 )
                 sc_ans_raw = _parse_answer(sc_out)
                 sc_ans_text = normalize_answer(sc_ans_raw)
-                sc_vote = (
-                    self._parse_forced_choice_answer(sc_ans_raw, cand_option_a, cand_option_b)
-                    if cand_choice_mode
-                    else sc_ans_text
-                )
-                if not sc_vote:
-                    sc_vote = "ood" if cand_choice_mode else sc_ans_text
+                if cand_choice_mode:
+                    sc_vote = self._parse_forced_choice_answer(
+                        sc_ans_raw, cand_option_a, cand_option_b
+                    )
+                    if not sc_vote:
+                        sc_vote = "ood"
+                    sc_low_info = False
+                    sc_noncanonical = False
+                else:
+                    sc_vote, sc_low_info, sc_noncanonical = self._normalize_answer_for_type(
+                        sc_ans_text,
+                        cand_answer_type,
+                    )
                 cand_outputs.append(sc_out)
                 cand_answers_raw.append(sc_ans_raw)
                 cand_answers_norm.append(sc_ans_text)
                 cand_vote_labels.append(sc_vote)
+                cand_low_info_flags.append(sc_low_info)
+                cand_noncanonical_flags.append(sc_noncanonical)
                 cand_pre_words.append(pre_answer_word_count(sc_out))
 
             sc_hist: Dict[str, int] = {}
@@ -1930,6 +2237,21 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             sc_p2 = float(sc_sorted[1]) if len(sc_sorted) > 1 else 0.0
             sc_margin = max(0.0, sc_p1 - sc_p2)
             sc_maj_frac = sc_p1
+            cand_low_info_rate = (
+                float(sum(1.0 for x in cand_low_info_flags if x)) / float(max(1, len(cand_low_info_flags)))
+            )
+            cand_noncanonical_rate = (
+                float(sum(1.0 for x in cand_noncanonical_flags if x))
+                / float(max(1, len(cand_noncanonical_flags)))
+            )
+            cand_quality_penalty = (
+                cand_noncanonical_rate
+                * max(0.0, float(getattr(self.cfg, "proposer_candidate_noncanonical_penalty", 0.12)))
+                + cand_low_info_rate
+                * max(0.0, float(getattr(self.cfg, "proposer_candidate_low_info_penalty", 0.10)))
+            )
+            cand_meta["_spot_low_info_rate"] = f"{cand_low_info_rate:.6f}"
+            cand_meta["_spot_noncanonical_rate"] = f"{cand_noncanonical_rate:.6f}"
             sc_bucket = self._difficulty_bucket(
                 sc_entropy, sc_margin, sc_maj_frac, entropy_easy_threshold
             )
@@ -1958,11 +2280,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 + cand_contrastive_replay
                 - cand_cooldown_penalty
                 - cand_easy_constraint_penalty
+                - cand_quality_penalty
             )
             cand_pick_score = cand_sc_core * (1.0 + cand_cert_weight_used * cand_cert_score)
             candidate_bucket_list.append(sc_bucket)
             candidate_valid_list.append(1.0 if cand_cert_valid else 0.0)
             candidate_cert_list.append(cand_cert_score)
+            candidate_low_info_rate_list.append(cand_low_info_rate)
+            candidate_noncanonical_rate_list.append(cand_noncanonical_rate)
 
             # Always remember the best candidate seen so far.
             if (not strict_slot_compiler) or cand_cert_valid:
@@ -2058,6 +2383,16 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             all_easy_candidate_group = bool(all(b == "easy" for b in candidate_bucket_list))
         else:
             all_easy_candidate_group = True
+        candidate_low_info_rate_mean = (
+            float(sum(candidate_low_info_rate_list) / max(1, len(candidate_low_info_rate_list)))
+            if candidate_low_info_rate_list
+            else 0.0
+        )
+        candidate_noncanonical_rate_mean = (
+            float(sum(candidate_noncanonical_rate_list) / max(1, len(candidate_noncanonical_rate_list)))
+            if candidate_noncanonical_rate_list
+            else 0.0
+        )
 
         # Minimum spot-check entropy gate: if all candidates are easy and even
         # the best spot-check entropy is near zero, force exploration for
@@ -2150,6 +2485,20 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             },
         )
         selected_cert_score = float(selected_cert.get("score", 0.0))
+        selected_domain_bucket = self._arm_domain_bucket(chosen_reasoning_domains)
+        selected_answer_type = self._question_answer_type(question)
+        selected_arm_key = self._arm_key(
+            chosen_task_card,
+            selected_domain_bucket,
+            selected_answer_type,
+        )
+        if (not str(chosen_task_card or "").strip()) and curriculum_arm_key:
+            selected_arm_key = curriculum_arm_key
+        curriculum_arm_score = self._curriculum_arm_score(selected_arm_key)
+        curriculum_arm_reward_bonus = (
+            max(0.0, float(getattr(self.cfg, "curriculum_arm_reward_scale", 0.10)))
+            * curriculum_arm_score
+        )
 
         # Solver is always prompted in free-form mode.
         # Proposer two-answer alternatives are used only as a hidden scorer.
@@ -2200,17 +2549,42 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         template_fallback_used = False
 
         solver_choice_mode = False
-        solver_vote_labels: List[str] = list(solver_answers_norm)
+        solver_answer_type = self._question_answer_type(question)
+        solver_vote_labels: List[str] = []
+        solver_low_info_flags: List[bool] = []
+        solver_noncanonical_flags: List[bool] = []
+        for ans_norm in solver_answers_norm:
+            if solver_choice_mode:
+                vote_label = ans_norm
+                low_info_flag = False
+                noncanonical_flag = False
+            else:
+                vote_label, low_info_flag, noncanonical_flag = self._normalize_answer_for_type(
+                    ans_norm,
+                    solver_answer_type,
+                )
+            solver_vote_labels.append(vote_label or "ood")
+            solver_low_info_flags.append(bool(low_info_flag))
+            solver_noncanonical_flags.append(bool(noncanonical_flag))
         raw_majority_answer, _ = majority_vote(solver_answers_norm)
+        canonical_majority_answer, _ = majority_vote(solver_vote_labels)
         maj_answer_vote, maj_count = majority_vote(solver_vote_labels)
-        maj_frac = maj_count / float(self.cfg.num_solver_samples)
+        _vote_count = max(1, len(solver_vote_labels))
+        maj_frac = maj_count / float(_vote_count)
         hist: Dict[str, int] = {}
         for ans in solver_vote_labels:
             hist[ans] = hist.get(ans, 0) + 1
-        probs = [count / float(self.cfg.num_solver_samples) for count in hist.values()]
+        probs = [count / float(_vote_count) for count in hist.values()]
         entropy_nats = shannon_entropy_nats(probs)
 
         maj_answer = maj_answer_vote
+        solver_low_info_rate = (
+            float(sum(1.0 for x in solver_low_info_flags if x)) / float(max(1, len(solver_low_info_flags)))
+        )
+        solver_noncanonical_rate = (
+            float(sum(1.0 for x in solver_noncanonical_flags if x))
+            / float(max(1, len(solver_noncanonical_flags)))
+        )
 
         sorted_probs = sorted(probs, reverse=True)
         p1 = float(sorted_probs[0]) if sorted_probs else 0.0
@@ -2263,8 +2637,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         solver_low_info_majority = self._is_low_info_majority_answer(
             question,
-            raw_majority_answer,
+            canonical_majority_answer or raw_majority_answer,
         )
+        if solver_low_info_rate >= 0.5:
+            solver_low_info_majority = True
         self._entropy_window.append(float(entropy_nats))
         self._difficulty_window.append(difficulty_bucket_observed)
         easy_solver_penalty_scale = max(
@@ -2295,6 +2671,20 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 sc_signal if ans == maj_answer_vote else (-neg_weight * sc_signal)
                 for ans in solver_vote_labels
             ]
+        solver_noncanonical_answer_penalty = max(
+            0.0, float(getattr(self.cfg, "solver_noncanonical_answer_penalty", 0.10))
+        )
+        solver_low_info_answer_penalty = max(
+            0.0, float(getattr(self.cfg, "solver_low_info_answer_penalty", 0.08))
+        )
+        solver_quality_penalties = [
+            (solver_noncanonical_answer_penalty if noncanon else 0.0)
+            + (solver_low_info_answer_penalty if low_info else 0.0)
+            for noncanon, low_info in zip(solver_noncanonical_flags, solver_low_info_flags)
+        ]
+        solver_rewards_raw = [
+            float(r) - float(p) for r, p in zip(solver_rewards_raw, solver_quality_penalties)
+        ]
 
         target_w = max(1, self.cfg.len_penalty_target_words)
         penalties = [min(1.0, max(0.0, (w - target_w) / float(target_w))) for w in pre_words]
@@ -2337,7 +2727,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                     if not _intuitive_answer_vote:
                         _intuitive_answer_vote = "ood"
                 else:
-                    _intuitive_answer_vote = _intuitive_answer_raw
+                    _intuitive_answer_vote, _, _ = self._normalize_answer_for_type(
+                        _intuitive_answer_raw,
+                        solver_answer_type,
+                    )
             except Exception:
                 _intuitive_answer_raw = ""
                 _intuitive_answer = ""
@@ -2421,6 +2814,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if float(selected_cert.get("valid", 0.0)) < 0.5:
             proposer_reward -= 0.10
         proposer_reward += proposer_contrastive_replay_bonus
+        proposer_reward += curriculum_arm_reward_bonus
         proposer_reward -= proposer_repetition_penalty
         proposer_reward -= proposer_cooldown_penalty
 
@@ -2487,9 +2881,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_reward_clipped = bool(abs(proposer_reward - proposer_reward_pre_clip) > 1e-8)
         # Track selected question template to discourage repeated easy loops.
         _qkey = self._question_template_key(question)
+        _qtoken_set = self._question_token_set(question)
         if _qkey:
             self._question_template_window.append(_qkey)
-            _qtoken_set = self._question_token_set(question)
             if difficulty_bucket_observed in {"medium", "hard"}:
                 if _qtoken_set:
                     self._contrastive_pos_replay.append(_qtoken_set)
@@ -2501,18 +2895,6 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         _strategy_key = self._normalize_strategy_key(chosen_strategy_used)
         if _strategy_key:
             self._strategy_window.append(_strategy_key)
-        if difficulty_bucket_observed in {"medium", "hard"} and proposer_reward >= float(
-            getattr(self.cfg, "proposer_anchor_min_reward", 0.20)
-        ):
-            self._proposer_anchor_replay.append(
-                {
-                    "qkey": _qkey,
-                    "strategy": _strategy_key,
-                    "bucket": difficulty_bucket_observed,
-                    "reward": float(proposer_reward),
-                    "step": int(step),
-                }
-            )
 
         solver_stats_list = []
         solver_update_due = (
@@ -2675,6 +3057,33 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 else "all_ranks_solver_update_blocked"
             )
         selected_non_easy = 1.0 if difficulty_bucket_observed in {"medium", "hard"} else 0.0
+        arm_solver_gain = float(solver_update_scale) if solver_update_applied else 0.0
+        self._update_curriculum_arm_stats(
+            selected_arm_key,
+            non_easy=selected_non_easy,
+            solver_gain=arm_solver_gain,
+        )
+        self._last_curriculum_arm_key = selected_arm_key
+        if difficulty_bucket_observed in {"medium", "hard"} and proposer_reward >= float(
+            getattr(self.cfg, "proposer_anchor_min_reward", 0.20)
+        ):
+            anchor_priority = self._replay_anchor_priority(
+                question,
+                hardness_score=local_info_score,
+                solver_gain=arm_solver_gain,
+            )
+            self._proposer_anchor_replay.append(
+                {
+                    "qkey": _qkey,
+                    "q_tokens": sorted(list(_qtoken_set)) if _qtoken_set else [],
+                    "question": question,
+                    "strategy": _strategy_key,
+                    "bucket": difficulty_bucket_observed,
+                    "reward": float(proposer_reward),
+                    "priority": float(anchor_priority),
+                    "step": int(step),
+                }
+            )
         self._candidate_non_easy_window.append(float(candidate_non_easy_rate))
         self._all_easy_group_window.append(1.0 if all_easy_candidate_group else 0.0)
         self._proposer_reward_clipped_window.append(1.0 if proposer_reward_clipped else 0.0)
@@ -2826,8 +3235,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                         and _extra_opt_a
                                         and _extra_opt_b
                                     )
+                                    _extra_answer_type = self._question_answer_type(_extra_q)
                                     _extra_answers_norm: List[str] = []
                                     _extra_vote_labels: List[str] = []
+                                    _extra_low_info_flags: List[bool] = []
+                                    _extra_noncanonical_flags: List[bool] = []
                                     _extra_raw_majority = ""
                                     # Offset extras spot-check to use hotter solver
                                     # temperatures. With schedule [0.5..2.5] and 3
@@ -2870,20 +3282,30 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                             )
                                             _sc_ans_raw = _parse_answer(_sc_out)
                                             _sc_ans_text = normalize_answer(_sc_ans_raw)
-                                            _sc_vote = (
-                                                self._parse_forced_choice_answer(
+                                            if _extra_choice_mode:
+                                                _sc_vote = self._parse_forced_choice_answer(
                                                     _sc_ans_raw, _extra_opt_a, _extra_opt_b
                                                 )
-                                                if _extra_choice_mode
-                                                else _sc_ans_text
-                                            )
-                                            if not _sc_vote:
-                                                _sc_vote = "ood" if _extra_choice_mode else _sc_ans_text
+                                                if not _sc_vote:
+                                                    _sc_vote = "ood"
+                                                _sc_low_info = False
+                                                _sc_noncanonical = False
+                                            else:
+                                                _sc_vote, _sc_low_info, _sc_noncanonical = (
+                                                    self._normalize_answer_for_type(
+                                                        _sc_ans_text,
+                                                        _extra_answer_type,
+                                                    )
+                                                )
                                             _extra_answers_norm.append(_sc_ans_text)
                                             _extra_vote_labels.append(_sc_vote)
+                                            _extra_low_info_flags.append(bool(_sc_low_info))
+                                            _extra_noncanonical_flags.append(bool(_sc_noncanonical))
                                         except Exception:
                                             pass
 
+                                    _extra_low_info_rate = 0.0
+                                    _extra_noncanonical_rate = 0.0
                                     if _extra_answers_norm:
                                         _extra_raw_majority, _ = majority_vote(_extra_answers_norm)
                                         _extra_hist: Dict[str, int] = {}
@@ -2914,6 +3336,12 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                         _extra_local_info = max(
                                             0.0, min(1.0, 0.5 * _extra_entropy_band + 0.5 * _extra_margin_damp)
                                         )
+                                        _extra_low_info_rate = float(
+                                            sum(1.0 for x in _extra_low_info_flags if x)
+                                        ) / float(max(1, len(_extra_low_info_flags)))
+                                        _extra_noncanonical_rate = float(
+                                            sum(1.0 for x in _extra_noncanonical_flags if x)
+                                        ) / float(max(1, len(_extra_noncanonical_flags)))
 
                                         # Compute reward using same logic as chosen candidate.
                                         _extra_reward_raw = self._proposer_base_reward(
@@ -2943,11 +3371,19 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                                         _extra_intuitive_raw, _extra_opt_a, _extra_opt_b
                                                     )
                                                     if _extra_choice_mode
-                                                    else normalize_answer(_extra_intuitive_raw)
+                                                    else self._normalize_answer_for_type(
+                                                        normalize_answer(_extra_intuitive_raw),
+                                                        _extra_answer_type,
+                                                    )[0]
                                                 )
                                                 if not _extra_intuitive:
                                                     _extra_intuitive = (
-                                                        "ood" if _extra_choice_mode else normalize_answer(_extra_intuitive_raw)
+                                                        "ood"
+                                                        if _extra_choice_mode
+                                                        else self._normalize_answer_for_type(
+                                                            normalize_answer(_extra_intuitive_raw),
+                                                            _extra_answer_type,
+                                                        )[0]
                                                     )
                                             except Exception:
                                                 _extra_intuitive_failed = True
@@ -3030,6 +3466,30 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                                 _extra_reward += _extra_strategy_bonus
                                 _extra_reward += _extra_anchor_bonus
                                 _extra_reward += _extra_contrastive_bonus
+                                _extra_reward -= (
+                                    _extra_noncanonical_rate
+                                    * max(
+                                        0.0,
+                                        float(
+                                            getattr(
+                                                self.cfg,
+                                                "proposer_candidate_noncanonical_penalty",
+                                                0.12,
+                                            )
+                                        ),
+                                    )
+                                    + _extra_low_info_rate
+                                    * max(
+                                        0.0,
+                                        float(
+                                            getattr(
+                                                self.cfg,
+                                                "proposer_candidate_low_info_penalty",
+                                                0.10,
+                                            )
+                                        ),
+                                    )
+                                )
                                 if _extra_bonus_enabled:
                                     _extra_reward += (
                                         max(
@@ -3079,6 +3539,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                             proposer_stats[f"grpo_extra_{_gi}_cert_valid"] = _extra_cert_valid
                             proposer_stats[f"grpo_extra_{_gi}_repeat_penalty"] = _extra_repeat_penalty
                             proposer_stats[f"grpo_extra_{_gi}_cooldown_penalty"] = _extra_cooldown_penalty
+                            proposer_stats[f"grpo_extra_{_gi}_low_info_rate"] = _extra_low_info_rate
+                            proposer_stats[f"grpo_extra_{_gi}_noncanonical_rate"] = _extra_noncanonical_rate
                         except Exception:
                             pass
 
@@ -3268,6 +3730,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "solver_answers_raw": solver_answers_raw,
             "solver_answers_norm": solver_answers_norm,
             "solver_vote_labels": solver_vote_labels,
+            "solver_answer_type": solver_answer_type,
+            "solver_low_info_rate": solver_low_info_rate,
+            "solver_noncanonical_rate": solver_noncanonical_rate,
+            "solver_noncanonical_answer_penalty": solver_noncanonical_answer_penalty,
+            "solver_low_info_answer_penalty": solver_low_info_answer_penalty,
             "solver_rewards_raw": solver_rewards_raw,
             "solver_rewards_soft": solver_rewards_soft,
             "majority_answer": maj_answer,
@@ -3338,7 +3805,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             ),
             "proposer_candidate_non_easy_rate": candidate_non_easy_rate,
             "proposer_candidate_struct_valid_rate": candidate_struct_valid_rate,
+            "proposer_candidate_low_info_rate_mean": candidate_low_info_rate_mean,
+            "proposer_candidate_noncanonical_rate_mean": candidate_noncanonical_rate_mean,
             "proposer_all_easy_candidate_group": all_easy_candidate_group,
+            "curriculum_arm_sampled_key": curriculum_arm_key,
+            "curriculum_arm_sampled_hint": curriculum_arm_hint,
+            "curriculum_arm_sampled_score": float(curriculum_arm_state.get("score", 0.0)),
+            "curriculum_arm_selected_key": selected_arm_key,
+            "curriculum_arm_selected_score": curriculum_arm_score,
+            "curriculum_arm_reward_bonus": curriculum_arm_reward_bonus,
+            "replay_anchor_hints": replay_anchor_hints,
+            "replay_anchor_hints_count": len(replay_anchor_hints),
+            "replay_anchor_queue_size": len(self._proposer_anchor_replay),
             "proposer_controller_temp": proposer_temp_ctrl,
             "proposer_controller_top_p": proposer_top_p_ctrl,
             "proposer_controller_penalty_boost": proposer_penalty_boost,
@@ -3395,6 +3873,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_stats": proposer_stats,
             "proposer_early_failfast_enabled": bool(early_failfast_state.get("enabled", 0.0)),
             "proposer_early_u_step": int(early_failfast_state.get("u_step", 0.0)),
+            "proposer_early_hard_stop_min_u_step": int(
+                early_failfast_state.get("hard_stop_min_u_step", 0.0)
+            ),
             "proposer_early_stage1_active": bool(early_failfast_state.get("stage1_active", 0.0)),
             "proposer_early_stage1_pass": bool(early_failfast_state.get("stage1_pass", 1.0)),
             "proposer_early_stage2_active": bool(early_failfast_state.get("stage2_active", 0.0)),
@@ -3415,6 +3896,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "majority_answer": maj_answer,
                 "majority_answer_vote": maj_answer_vote,
                 "majority_answer_raw": raw_majority_answer,
+                "solver_answer_type": solver_answer_type,
+                "solver_low_info_rate": solver_low_info_rate,
+                "solver_noncanonical_rate": solver_noncanonical_rate,
+                "solver_noncanonical_answer_penalty": solver_noncanonical_answer_penalty,
+                "solver_low_info_answer_penalty": solver_low_info_answer_penalty,
                 "majority_fraction": maj_frac,
                 "solver_top1_prob": p1,
                 "solver_top2_prob": p2,
@@ -3478,7 +3964,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 ),
                 "proposer_candidate_non_easy_rate": candidate_non_easy_rate,
                 "proposer_candidate_struct_valid_rate": candidate_struct_valid_rate,
+                "proposer_candidate_low_info_rate_mean": candidate_low_info_rate_mean,
+                "proposer_candidate_noncanonical_rate_mean": candidate_noncanonical_rate_mean,
                 "proposer_all_easy_candidate_group": all_easy_candidate_group,
+                "curriculum_arm_sampled_key": curriculum_arm_key,
+                "curriculum_arm_sampled_hint": curriculum_arm_hint,
+                "curriculum_arm_sampled_score": float(curriculum_arm_state.get("score", 0.0)),
+                "curriculum_arm_selected_key": selected_arm_key,
+                "curriculum_arm_selected_score": curriculum_arm_score,
+                "curriculum_arm_reward_bonus": curriculum_arm_reward_bonus,
+                "replay_anchor_hints": replay_anchor_hints,
+                "replay_anchor_hints_count": len(replay_anchor_hints),
+                "replay_anchor_queue_size": len(self._proposer_anchor_replay),
                 "proposer_controller_temp": proposer_temp_ctrl,
                 "proposer_controller_top_p": proposer_top_p_ctrl,
                 "proposer_controller_penalty_boost": proposer_penalty_boost,
@@ -3531,6 +4028,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "difficulty_observed_weights": difficulty_target_state.get("observed_weights", {}),
                 "difficulty_sampling_weights": difficulty_target_state.get("sampling_weights", {}),
                 "proposer_early_u_step": int(early_failfast_state.get("u_step", 0.0)),
+                "proposer_early_hard_stop_min_u_step": int(
+                    early_failfast_state.get("hard_stop_min_u_step", 0.0)
+                ),
                 "proposer_early_stage1_active": bool(early_failfast_state.get("stage1_active", 0.0)),
                 "proposer_early_stage1_pass": bool(early_failfast_state.get("stage1_pass", 1.0)),
                 "proposer_early_stage2_active": bool(early_failfast_state.get("stage2_active", 0.0)),
@@ -3548,11 +4048,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"maj_frac={maj_frac:.2f} H={entropy_nats:.3f} M={margin:.3f} "
                 f"info_local={int(solver_informative_local)} "
                 f"info_ratio={informative_ratio:.2f} info_gate={int(solver_informative_gate)} "
-                f"li_maj={int(solver_low_info_majority)} "
+                f"li_maj={int(solver_low_info_majority)} li_rate={solver_low_info_rate:.2f} "
+                f"nc_rate={solver_noncanonical_rate:.2f} "
                 f"ch={int(solver_choice_mode)} "
                 f"up_scale={solver_update_scale:.2f} P_R={proposer_reward:.3f} "
                 f"T_B={proposer_text_hardness_bonus:.3f} R_P={proposer_repetition_penalty:.3f} "
                 f"C_NE={candidate_non_easy_rate:.2f} C_V={candidate_struct_valid_rate:.2f} "
+                f"ARM={curriculum_arm_score:.2f} "
                 f"E_L={easy_constraint_state.get('easy_lambda', 0.0):.3f} "
                 f"E_R={easy_constraint_state.get('easy_rate_ema', 0.0):.2f} "
                 f"C_ST={int(collapse_state.get('collapse_streak', 0.0))} "
@@ -3566,6 +4068,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._update_metric("u_majority_fraction", self._dist_mean(maj_frac))
         self._update_metric("u_entropy_nats", self._dist_mean(entropy_nats))
         self._update_metric("u_solver_margin", self._dist_mean(margin))
+        self._update_metric("u_solver_low_info_rate", self._dist_mean(solver_low_info_rate))
+        self._update_metric("u_solver_noncanonical_rate", self._dist_mean(solver_noncanonical_rate))
         self._update_metric("u_solver_informative", self._dist_mean(informative_ratio))
         self._update_metric("u_entropy_easy_threshold", self._dist_mean(entropy_easy_threshold))
         self._update_metric(
@@ -3600,8 +4104,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         self._update_metric("u_proposer_reward_clipped", self._dist_mean(1.0 if proposer_reward_clipped else 0.0))
         self._update_metric("u_candidate_non_easy_rate", self._dist_mean(candidate_non_easy_rate))
         self._update_metric("u_candidate_struct_valid_rate", self._dist_mean(candidate_struct_valid_rate))
+        self._update_metric(
+            "u_candidate_low_info_rate",
+            self._dist_mean(candidate_low_info_rate_mean),
+        )
+        self._update_metric(
+            "u_candidate_noncanonical_rate",
+            self._dist_mean(candidate_noncanonical_rate_mean),
+        )
         self._update_metric("u_candidate_all_easy_group", self._dist_mean(1.0 if all_easy_candidate_group else 0.0))
         self._update_metric("u_selected_cert_score", self._dist_mean(selected_cert_score))
+        self._update_metric("u_curriculum_arm_score", self._dist_mean(curriculum_arm_score))
         self._update_metric(
             "u_early_stage1_pass",
             self._dist_mean(float(early_failfast_state.get("stage1_pass", 1.0))),
@@ -3654,6 +4167,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         state["unified_proposer_reward_clipped_window"] = list(self._proposer_reward_clipped_window)
         state["unified_selected_non_easy_window"] = list(self._selected_non_easy_window)
         state["unified_solver_update_applied_window"] = list(self._solver_update_applied_window)
+        state["unified_curriculum_arm_stats"] = dict(getattr(self, "_curriculum_arm_stats", {}))
+        state["unified_last_curriculum_arm_key"] = str(
+            getattr(self, "_last_curriculum_arm_key", "")
+        )
         state["unified_easy_rate_ema"] = float(getattr(self, "_easy_rate_ema", 0.0))
         state["unified_easy_lagrange_lambda"] = float(getattr(self, "_easy_lagrange_lambda", 0.0))
         state["unified_collapse_streak"] = int(getattr(self, "_collapse_streak", 0))
@@ -3814,6 +4331,24 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         self._solver_update_applied_window.append(float(v))
                     except Exception:
                         continue
+            curr_stats = state.get("unified_curriculum_arm_stats")
+            if isinstance(curr_stats, dict):
+                self._curriculum_arm_stats = {}
+                for key, val in curr_stats.items():
+                    k = str(key).strip().lower()
+                    if not k:
+                        continue
+                    if isinstance(val, dict):
+                        self._curriculum_arm_stats[k] = {
+                            "count": float(val.get("count", 0.0) or 0.0),
+                            "non_easy_ema": float(val.get("non_easy_ema", 0.0) or 0.0),
+                            "solver_gain_ema": float(val.get("solver_gain_ema", 0.0) or 0.0),
+                            "prev_solver_gain_ema": float(val.get("prev_solver_gain_ema", 0.0) or 0.0),
+                            "progress_ema": float(val.get("progress_ema", 0.0) or 0.0),
+                        }
+            self._last_curriculum_arm_key = str(
+                state.get("unified_last_curriculum_arm_key", getattr(self, "_last_curriculum_arm_key", ""))
+            )
             self._easy_rate_ema = float(state.get("unified_easy_rate_ema", self._easy_rate_ema))
             self._easy_lagrange_lambda = float(
                 state.get("unified_easy_lagrange_lambda", self._easy_lagrange_lambda)
@@ -3853,6 +4388,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 self._proposer_reward_clipped_window.clear()
                 self._selected_non_easy_window.clear()
                 self._solver_update_applied_window.clear()
+                self._curriculum_arm_stats = {}
+                self._last_curriculum_arm_key = ""
                 self._easy_rate_ema = 0.0
                 self._easy_lagrange_lambda = 0.0
                 self._collapse_streak = 0

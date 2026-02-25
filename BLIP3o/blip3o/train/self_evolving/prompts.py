@@ -362,6 +362,8 @@ def build_proposer_multi_prompt(
     target_difficulty: str = "medium",
     num_questions: int = 3,
     image_source_hint: str = "",
+    curriculum_arm_hint: str = "",
+    replay_anchor_hints: list[str] | None = None,
 ) -> str:
     """Single-shot multi-question proposer prompt with reasoning-first structure."""
     level = (target_difficulty or "medium").strip().lower()
@@ -475,6 +477,24 @@ def build_proposer_multi_prompt(
             "partially visible items, or fine-grained attributes of non-dominant objects. "
             "Prefer H1, H3, H6, M4, M5. NEVER ask about the main subject.\n"
         )
+    arm_hint = (curriculum_arm_hint or "").strip()
+    arm_block = ""
+    if arm_hint:
+        arm_block = (
+            "CURRICULUM ARM PRIORITY (high utility for current solver):\n"
+            f"- {arm_hint}\n"
+            "Try to satisfy this priority in at least one candidate while keeping strict visual grounding.\n"
+        )
+    anchors = replay_anchor_hints or []
+    anchor_block = ""
+    if anchors:
+        trimmed = [str(x).strip() for x in anchors if str(x).strip()]
+        if trimmed:
+            anchor_lines = "\n".join(f"- {x}" for x in trimmed[:3])
+            anchor_block = (
+                "HARD REPLAY ANCHORS (successful non-easy patterns; adapt them to THIS image, do not copy):\n"
+                f"{anchor_lines}\n"
+            )
 
     n = max(1, int(num_questions))
     qa_template = "\n".join(
@@ -509,6 +529,8 @@ def build_proposer_multi_prompt(
         "\n"
         f"{diff_hint}\n"
         f"{dataset_hint}"
+        f"{arm_block}"
+        f"{anchor_block}"
         f"{reasoning_domains_block}"
         f"{hard_task_cards}"
         f"{strategy_block}"

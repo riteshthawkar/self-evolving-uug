@@ -291,7 +291,6 @@ fi
   \
   `# ── Difficulty curriculum (still active for proposer) ──────────────────` \
   --difficulty_sampler_enabled \
-  --solver_skip_update_on_easy \
   \
   `# ── Reward weights ──────────────────────────────────────────────────────` \
   --reward_spec_weight 0.65 \
