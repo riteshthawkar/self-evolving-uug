@@ -266,13 +266,48 @@ class Qwen2Tokenizer(PreTrainedTokenizer):
     # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer._convert_id_to_token
     def _convert_id_to_token(self, index):
         """Converts an index (integer) in a token (str) using the vocab."""
-        return self.decoder.get(index)
+        if hasattr(index, "item"):
+            try:
+                index = index.item()
+            except Exception:
+                pass
+        try:
+            index = int(index)
+        except Exception:
+            index = None
+
+        token = self.decoder.get(index) if index is not None else None
+        if token is not None:
+            return token
+
+        # Fallback to unknown token id/string for invalid or out-of-vocab ids.
+        unk_token = str(self.unk_token)
+        unk_id = self.encoder.get(unk_token, None)
+        if unk_id is not None:
+            unk_decoded = self.decoder.get(int(unk_id), None)
+            if unk_decoded is not None:
+                return unk_decoded
+        return unk_token
 
     # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer.convert_tokens_to_string
     def convert_tokens_to_string(self, tokens):
         """Converts a sequence of tokens (string) in a single string."""
-        text = "".join(tokens)
-        text = bytearray([self.byte_decoder[c] for c in text]).decode("utf-8", errors=self.errors)
+        safe_tokens = []
+        unk_token = str(self.unk_token)
+        for tok in tokens:
+            if isinstance(tok, str):
+                safe_tokens.append(tok)
+            elif tok is None:
+                safe_tokens.append(unk_token)
+            else:
+                safe_tokens.append(str(tok))
+
+        text = "".join(safe_tokens)
+        try:
+            text = bytearray([self.byte_decoder[c] for c in text]).decode("utf-8", errors=self.errors)
+        except KeyError:
+            # Fallback path for any non-byte-decoder-safe token fragments.
+            return text
         return text
 
     def decode(

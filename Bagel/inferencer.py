@@ -12,6 +12,15 @@ from modeling.bagel.runtime_precision import autocast_context
 from modeling.bagel.qwen2_navit import NaiveCache
 
 
+def _extract_assistant_segment(decoded_text: str) -> str:
+    text = str(decoded_text or "")
+    if "<|im_end|>" in text:
+        text = text.split("<|im_end|>", 1)[0]
+    if "<|im_start|>" in text:
+        text = text.rsplit("<|im_start|>", 1)[-1]
+    return text
+
+
 
 VLM_THINK_SYSTEM_PROMPT = '''You should first think about the reasoning process in the mind and then provide the user with the answer. 
 The reasoning process is enclosed within <think> </think> tags, i.e. <think> reasoning process here </think> answer here'''
@@ -201,9 +210,9 @@ class InterleaveInferencer:
             end_token_id=self.new_token_ids['eos_token_id'],
             **generation_input,
         )
-        output = self.tokenizer.decode(unpacked_latent[:,0])
-        output = output.split('<|im_end|>')[0].split('<|im_start|>')[1]
-        return output
+        token_ids = unpacked_latent[:, 0].detach().to("cpu").tolist()
+        output = self.tokenizer.decode(token_ids)
+        return _extract_assistant_segment(output)
         
     @torch.no_grad()
     def interleave_inference(
