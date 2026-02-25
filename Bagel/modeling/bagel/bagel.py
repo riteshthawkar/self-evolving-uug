@@ -1132,7 +1132,11 @@ class Bagel(PreTrainedModel):
                 end_token_id=new_token_ids['eos_token_id'],
                 **generation_input,
             )
-        output = tokenizer.decode(unpacked_latent[:,0])
-        output = output.split('<|im_end|>')[0].split('<|im_start|>')[1]
+        token_ids = unpacked_latent[:, 0].detach().to("cpu").tolist()
+        output = tokenizer.decode(token_ids)
+        if '<|im_end|>' in output:
+            output = output.split('<|im_end|>', 1)[0]
+        if '<|im_start|>' in output:
+            output = output.rsplit('<|im_start|>', 1)[-1]
 
         return output
