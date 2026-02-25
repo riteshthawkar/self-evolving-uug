@@ -3206,6 +3206,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_reward -= proposer_repetition_penalty
         proposer_reward -= proposer_cooldown_penalty
 
+        # Forced-choice penalty: directly penalizes "A or B?" questions that
+        # bypass visual reasoning.  Applied on top of the LMDS discount so
+        # the total reward for forced-choice is significantly lower than for
+        # open-ended questions, even accounting for text/certificate bonuses.
+        if _lmds_forced_choice_discounted:
+            _fc_penalty = max(
+                0.0,
+                float(getattr(self.cfg, "proposer_forced_choice_penalty", 0.40)),
+            )
+            proposer_reward -= _fc_penalty
+
         # Non-objective penalty.
         proposer_non_objective_penalty = max(
             0.0, float(getattr(self.cfg, "proposer_non_objective_penalty", 0.0))
