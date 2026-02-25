@@ -76,6 +76,106 @@ def build_solver_prompt(question_text: str, focus_hint: str = "") -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Prompt-Perturbed Sampling (PPS): 7 semantically-equivalent but
+# syntactically-different solver prompt templates.  By sampling the solver
+# with different prompt framings (instead of the same prompt 7 times),
+# entropy now measures ROBUSTNESS OF UNDERSTANDING rather than stochastic
+# variation.  A model that truly understands gives the same answer across
+# all framings; fragile understanding yields different answers → entropy > 0.
+# ---------------------------------------------------------------------------
+_PPS_TEMPLATES = [
+    # Template 0 — canonical (same as build_solver_prompt baseline)
+    (
+        "You are a precise vision-language solver.\n"
+        "Answer the question using only the provided image.\n"
+    ),
+    # Template 1 — observation framing
+    (
+        "Look at the image carefully and provide a precise answer.\n"
+        "Base your response solely on what is visible.\n"
+    ),
+    # Template 2 — analyst framing
+    (
+        "You are a visual analyst examining this image.\n"
+        "Provide a factual answer derived from the visual evidence.\n"
+    ),
+    # Template 3 — direct framing
+    (
+        "Study the image and answer the following question directly.\n"
+        "Use only observable evidence from the image.\n"
+    ),
+    # Template 4 — examiner framing
+    (
+        "As an image examiner, answer the question below.\n"
+        "Your answer must be grounded in what the image shows.\n"
+    ),
+    # Template 5 — concise framing
+    (
+        "Based on the image provided, give a brief factual answer.\n"
+        "Respond with only what you can verify visually.\n"
+    ),
+    # Template 6 — evidence framing
+    (
+        "Examine the visual evidence in this image.\n"
+        "Answer the question using only observable details.\n"
+    ),
+]
+
+# The shared rules suffix is identical across all PPS templates so that
+# the ONLY variation is the preamble framing — not the task specification.
+_PPS_RULES_SUFFIX = (
+    "Rules:\n"
+    "- Your answer MUST be 1-5 words only. No full sentences.\n"
+    "- Give only the core answer, not an explanation.\n"
+    "- The answer must be concrete and exact, not vague.\n"
+    "{focus_line}"
+    "- If the question asks 'how many' or 'number of', answer with a single integer (e.g., 0, 1, 2, 3).\n"
+    "- Never output vague count words: 'too many', 'several', 'many', 'a lot', 'multiple', 'few'.\n"
+    "- Never output uncertainty phrases: 'unclear', 'unknown', 'cannot tell', 'not visible'.\n"
+    "- If unsure, still choose the single most likely concrete answer from visible evidence.\n"
+    "- Examples of good answers: 'primary producer', '42%', 'increases then decreases', 'red circle'\n"
+    "- Return only the final answer inside XML:\n"
+    "<answer>...</answer>\n"
+    "Question: {question_text}"
+)
+
+
+def build_solver_prompt_pps(
+    question_text: str,
+    template_index: int,
+    focus_hint: str = "",
+) -> str:
+    """Build solver prompt using Prompt-Perturbed Sampling template.
+
+    Parameters
+    ----------
+    question_text : str
+        The question to answer.
+    template_index : int
+        Which PPS template to use (0-6).  Wraps around via modulo.
+    focus_hint : str, optional
+        Optional focus hint (same as build_solver_prompt).
+
+    Returns
+    -------
+    str
+        The complete solver prompt with the selected preamble variation.
+    """
+    hint = (focus_hint or "").strip()
+    focus_line = (
+        f"- Focus mode for this sample: {hint}. Prefer evidence consistent with this focus.\n"
+        if hint
+        else ""
+    )
+    idx = int(template_index) % len(_PPS_TEMPLATES)
+    preamble = _PPS_TEMPLATES[idx]
+    return preamble + _PPS_RULES_SUFFIX.format(
+        focus_line=focus_line,
+        question_text=question_text,
+    )
+
+
 def build_caption_prompt() -> str:
     return "Describe this image in detail."
 
@@ -391,34 +491,58 @@ def build_proposer_multi_prompt(
 
     strategy_block = (
         "STRATEGIES (pick one per question; apply to a SPECIFIC fine-grained element in THIS image):\n"
-        "HARD:\n"
+        "HARD — SPATIAL & COMPOSITIONAL:\n"
         "  H1=occlusion-count: Count objects that overlap or are partially hidden behind others.\n"
         "     Ask about SMALL or BACKGROUND objects (not the main subject).\n"
-        "     Example: 'How many chairs are partially visible behind the table?' (NOT 'How many people?')\n"
+        "     Example: 'How many chairs are partially visible behind the table?'\n"
         "  H2=boundary-comparison: Compare sizes, distances, or positions of two similar objects.\n"
-        "     Example: 'Is the left window wider than the right window?' (NOT 'What color is the car?')\n"
-        "  H3=occluded-attribute: Ask about an attribute of an object that is partially hidden.\n"
-        "     Example: 'What color is the shoe of the person whose legs are behind the counter?'\n"
+        "     Example: 'Is the left window wider than the right window?'\n"
         "  H4=multi-hop-relation: Chain two spatial or logical relations.\n"
         "     Example: 'What is to the left of the object that is on top of the bookshelf?'\n"
-        "  H5=edge-condition: Ask about objects at the very edge of the image (cropped/cut off).\n"
-        "     Example: 'Is the object at the right edge of the image a car or a truck?'\n"
-        "  H6=secondary-count: Count small or background objects (NOT the main subject).\n"
-        "     Example: 'How many bottles are on the shelf in the background?'\n"
+        "  H13=compositional-reference: Identify a subject by one attribute, then ask about a different attribute.\n"
+        "     Example: 'What color is the hat of the person who is holding a bag?'\n"
+        "     Example: 'How many legs does the animal closest to the bottom edge have visible?'\n"
+        "HARD — DEPTH & 3D UNDERSTANDING:\n"
+        "  H5=edge-condition: Ask about objects at the very edge or corner of the image.\n"
+        "     Example: 'What object is partially cropped at the right edge of the image?'\n"
+        "  H11=depth-ordering: Ask which of two overlapping/nearby objects is in front or behind.\n"
+        "     Example: 'Which is closer to the camera: the mug or the keyboard?'\n"
+        "     Example: 'What object is immediately behind the chair?'\n"
+        "  H12=part-whole: Ask about a component, attachment, or sub-part of a larger object.\n"
+        "     Example: 'What is mounted on top of the pole on the left?'\n"
+        "     Example: 'How many handles does the cabinet beneath the counter have?'\n"
+        "HARD — ATTRIBUTES & MATERIALS:\n"
+        "  H3=occluded-attribute: Ask about an attribute of an object that is partially hidden.\n"
+        "     Example: 'What color is the shoe of the person whose legs are behind the counter?'\n"
+        "  H10=material-texture: Ask about the material, texture, or surface finish of a specific object.\n"
+        "     Example: 'What material does the floor in the background appear to be?'\n"
+        "     Example: 'What is the surface texture of the wall behind the shelf?'\n"
+        "HARD — ACTIONS, STATES & DYNAMICS:\n"
+        "  H9=background-action: Ask about the action, pose, or activity of a NON-DOMINANT person/animal.\n"
+        "     Example: 'What is the person in the far background doing?'\n"
+        "     Example: 'Which direction is the smaller animal facing?'\n"
+        "  H14=object-state: Ask about the state or condition of a specific non-obvious object.\n"
+        "     Example: 'Is the laptop in the background open or closed?'\n"
+        "     Example: 'Is the container on the counter empty or does it contain something?'\n"
+        "HARD — TEXT & DATA:\n"
         "  H7=occluded-text: Ask about small, partially visible, or distant text.\n"
-        "     Example: 'What is the last word on the small sign in the background?' (NOT 'What brand is on the banner?')\n"
+        "     Example: 'What is the last word on the small sign in the background?'\n"
         "  H8=chart-delta: Ask about small differences between bars/lines in a chart.\n"
         "MEDIUM:\n"
         "  M1=precise-count: Count non-obvious objects requiring careful scanning.\n"
-        "     Example: 'How many buttons are on the shirt?' (NOT 'How many people are in the image?')\n"
+        "     Example: 'How many buttons are on the shirt?'\n"
         "  M2=relative-spatial: Ask about relative position of non-dominant objects.\n"
         "     Example: 'Is the cup to the left or right of the napkin?'\n"
         "  M3=comparative-attr: Compare attributes of secondary objects.\n"
         "     Example: 'Which is taller, the lamp or the vase on the table?'\n"
         "  M4=secondary-attr: Ask about an attribute of a non-salient object.\n"
-        "     Example: 'What pattern is on the tablecloth?' (NOT 'What color is the main object?')\n"
+        "     Example: 'What pattern is on the tablecloth?'\n"
         "  M5=non-obvious-existence: Ask whether a small or non-obvious object exists.\n"
         "     Example: 'Is there a clock visible anywhere in the image?'\n"
+        "  M6=state-condition: Ask about the open/closed, on/off, or full/empty state of an object.\n"
+        "     Example: 'Are the curtains in the window open or drawn?'\n"
+        "  M7=viewpoint-angle: Ask about the camera angle, orientation, or perspective.\n"
+        "     Example: 'Is this scene viewed from above, at eye level, or from below?'\n"
         "\n"
         "BANNED PATTERNS (these ALWAYS produce easy/unanimous answers — NEVER use them):\n"
         "  X main-subject-identity: 'What animal is this?' 'What sport is being played?'\n"
@@ -427,6 +551,7 @@ def build_proposer_multi_prompt(
         "  X main-subject-count: 'How many people are in the image?' 'How many dogs?'\n"
         "  X obvious-yes-no: 'Is there a person in the image?' 'Is the sky blue?'\n"
         "  X main-action: 'What is the person doing?' 'What sport is being played?'\n"
+        "  X forced-choice-leak: 'Is the X red or blue?' 'Is it A or B?' (NEVER put options in the question)\n"
     )
     reasoning_domains_block = (
         "REASONING DOMAINS (must include >=2 domains per question; include >=1 non-relational domain):\n"
@@ -452,6 +577,12 @@ def build_proposer_multi_prompt(
         "     chain=glyph fragments -> lexical plausibility -> scene compatibility.\n"
         "  C6 causal+count: target=occluded count source; discriminate=two concrete count outcomes (e.g., 4 vs 5);\n"
         "     chain=occlusion map -> boundary ownership -> count consistency.\n"
+        "  C7 depth+spatial: target=overlapping objects; discriminate=two possible front-back orderings;\n"
+        "     chain=occlusion edges -> relative size cues -> depth conclusion.\n"
+        "  C8 compositional+attribute: target=subject identified by one attribute; discriminate=two values of a different attribute;\n"
+        "     chain=reference resolution -> attribute isolation -> evidence grounding.\n"
+        "  C9 part-whole+function: target=sub-component of a larger structure; discriminate=two plausible component identities;\n"
+        "     chain=structural context -> attachment point -> functional inference.\n"
     )
 
     # Dataset-specific one-liner hint (kept short to save tokens).
@@ -469,13 +600,15 @@ def build_proposer_multi_prompt(
     elif src == "gqa":
         dataset_hint = (
             "IMAGE: relational scene. Ask about BACKGROUND objects, secondary actors, "
-            "or partially visible items. Prefer H4, H2, H1, M2. Avoid the main subject.\n"
+            "spatial relations, depth ordering, or partially visible items. "
+            "Prefer H4, H11, H13, H9, H2, M2. Avoid the main subject.\n"
         )
     else:
         dataset_hint = (
-            "IMAGE: natural photo. Ask about BACKGROUND details, secondary objects, "
-            "partially visible items, or fine-grained attributes of non-dominant objects. "
-            "Prefer H1, H3, H6, M4, M5. NEVER ask about the main subject.\n"
+            "IMAGE: natural photo. Target a MIX of: background object attributes (H3, H10, M4), "
+            "spatial/depth relations (H4, H11, H13), actions of non-dominant subjects (H9, H14), "
+            "part-whole details (H12), or precise counting (H1, M1). "
+            "NEVER ask about the main subject. VARY strategy across candidates.\n"
         )
     arm_hint = (curriculum_arm_hint or "").strip()
     arm_block = ""
@@ -490,10 +623,21 @@ def build_proposer_multi_prompt(
     if anchors:
         trimmed = [str(x).strip() for x in anchors if str(x).strip()]
         if trimmed:
-            anchor_lines = "\n".join(f"- {x}" for x in trimmed[:3])
+            anchor_lines = "\n".join(f"  {i+1}. {x}" for i, x in enumerate(trimmed[:3]))
             anchor_block = (
-                "HARD REPLAY ANCHORS (successful non-easy patterns; adapt them to THIS image, do not copy):\n"
+                "HARD QUESTION EXEMPLARS (these question patterns triggered genuine model uncertainty — "
+                "learn what makes them effective and apply similar strategies to THIS image):\n"
                 f"{anchor_lines}\n"
+                "KEY PATTERNS that create genuine difficulty:\n"
+                "  - Spatial: relative positions, multi-hop relations, depth ordering of non-obvious objects\n"
+                "  - Materials: surface texture, material type, finish of background objects\n"
+                "  - Actions: what non-dominant subjects are doing, hand/body pose details\n"
+                "  - States: open/closed, full/empty, on/off conditions of secondary objects\n"
+                "  - Compositional: identify subject by one attribute, ask about a different one\n"
+                "  - Part-whole: components, attachments, sub-parts of larger structures\n"
+                "  - Counting: precise counts of small/occluded/overlapping items (NOT main subject)\n"
+                "  - Comparison: size/height/distance judgments between similar objects\n"
+                "Your questions for THIS image MUST match or exceed this difficulty level.\n"
             )
 
     n = max(1, int(num_questions))

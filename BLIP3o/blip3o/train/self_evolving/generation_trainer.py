@@ -1397,24 +1397,38 @@ class GenerationSelfEvolvingTrainer:
         max_new_tokens: int,
         margin_tokens: int = 5,
     ) -> Tuple[str, Dict[str, float]]:
-        """Greedy generation that also returns logit-margin confidence info.
+        """Greedy generation that returns Solver Token Entropy (STE) info.
 
         This method performs a **greedy** (do_sample=False) generation and
-        extracts the logit margin (gap between top-1 and top-2 logits) for
-        the first *margin_tokens* generated tokens.  The minimum margin
-        across these tokens measures the model's confidence at its weakest
-        decision point — a continuous proxy for question difficulty.
+        computes the full softmax entropy of the logit distribution at each
+        of the first *margin_tokens* generated tokens.  Unlike the logit
+        margin (gap between top-1 and top-2), full token entropy captures
+        genuine multi-way uncertainty across the entire vocabulary:
+
+        - Forced-choice "A or B?" → mass on 2 tokens → entropy ≈ ln(2) ≈ 0.69
+        - Genuinely hard question → mass spread across many answers → entropy >> 1.0
+
+        This makes STE **naturally resistant to forced-choice gaming** because
+        binary uncertainty always produces less entropy than multi-way uncertainty.
 
         Returns
         -------
-        (text, margin_info)
+        (text, confidence_info)
             text : str — decoded answer (same as ``_generate``)
-            margin_info : dict with keys
-                ``min_margin``  — minimum margin across first K tokens
-                ``mean_margin`` — mean margin across first K tokens
-                ``margins``     — list of per-token margins
+            confidence_info : dict with keys
+                ``min_margin``     — minimum logit margin (top1-top2) across K tokens
+                ``mean_margin``    — mean logit margin across K tokens
+                ``margins``        — list of per-token logit margins
+                ``min_entropy``    — minimum token-level entropy across K tokens
+                ``mean_entropy``   — mean token-level entropy across K tokens
+                ``max_entropy``    — maximum token-level entropy across K tokens
+                ``token_entropies``— list of per-token entropies (nats)
         """
-        _NO_MARGIN = {"min_margin": 999.0, "mean_margin": 999.0, "margins": []}
+        _NO_CONFIDENCE = {
+            "min_margin": 999.0, "mean_margin": 999.0, "margins": [],
+            "min_entropy": 0.0, "mean_entropy": 0.0, "max_entropy": 0.0,
+            "token_entropies": [],
+        }
 
         chat_text = _build_chat_text(self.processor, image, prompt)
         inputs = _prepare_mm_inputs(
@@ -1543,20 +1557,30 @@ class GenerationSelfEvolvingTrainer:
         completion_ids = sequences[0, input_len:]
         text = _decode_tokens(self.processor, completion_ids)
 
-        # --- Extract logit margins ---
+        # --- Extract logit margins AND full token entropy ---
         scores = getattr(outputs, "scores", None)
         if scores is None or len(scores) == 0:
-            return text.strip(), _NO_MARGIN
+            return text.strip(), _NO_CONFIDENCE
 
         K = min(max(1, margin_tokens), len(scores))
         margins = []
+        token_entropies = []
         for i in range(K):
             logits_i = scores[i][0]  # [vocab_size] for batch element 0
             if logits_i.numel() < 2:
                 continue
+            # Logit margin (kept for backward compatibility / logging)
             top2 = torch.topk(logits_i, k=2)
             margin_val = float((top2.values[0] - top2.values[1]).item())
             margins.append(margin_val)
+            # Full token entropy: H = -sum(p * log(p)) over entire vocab
+            # This is the KEY metric — captures genuine multi-way uncertainty.
+            # Forced-choice gives H ≈ ln(2) ≈ 0.69; genuinely hard gives H >> 1.0
+            probs_i = torch.softmax(logits_i.float(), dim=0)
+            # Clamp to avoid log(0)
+            log_probs_i = torch.log(probs_i.clamp(min=1e-12))
+            entropy_i = float(-(probs_i * log_probs_i).sum().item())
+            token_entropies.append(entropy_i)
 
         # Free score tensors immediately to save GPU memory.
         del scores
@@ -1564,14 +1588,21 @@ class GenerationSelfEvolvingTrainer:
             outputs.scores = None
 
         if not margins:
-            return text.strip(), _NO_MARGIN
+            return text.strip(), _NO_CONFIDENCE
 
-        margin_info = {
+        confidence_info = {
             "min_margin": min(margins),
             "mean_margin": sum(margins) / len(margins),
             "margins": margins,
+            "min_entropy": min(token_entropies) if token_entropies else 0.0,
+            "mean_entropy": (
+                sum(token_entropies) / len(token_entropies)
+                if token_entropies else 0.0
+            ),
+            "max_entropy": max(token_entropies) if token_entropies else 0.0,
+            "token_entropies": token_entropies,
         }
-        return text.strip(), margin_info
+        return text.strip(), confidence_info
 
     def _generate_text_only(
         self,
