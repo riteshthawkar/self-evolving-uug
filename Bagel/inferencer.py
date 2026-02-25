@@ -177,7 +177,23 @@ class InterleaveInferencer:
             enable_taylorseer=enable_taylorseer,
         )
 
-        image = self.decode_image(unpacked_latent[0], image_shape)
+        latent0 = unpacked_latent[0]
+
+        # Release large KV-cache references before VAE decode to reduce peak memory.
+        if isinstance(gen_context, dict):
+            gen_context["past_key_values"] = None
+        if isinstance(cfg_text_precontext, dict):
+            cfg_text_precontext["past_key_values"] = None
+        if isinstance(cfg_img_precontext, dict):
+            cfg_img_precontext["past_key_values"] = None
+
+        del unpacked_latent
+        del past_key_values, cfg_text_past_key_values, cfg_img_past_key_values
+        del generation_input, generation_input_cfg_text, generation_input_cfg_img
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        image = self.decode_image(latent0, image_shape)
         return image
 
         
