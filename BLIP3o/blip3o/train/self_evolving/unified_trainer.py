@@ -998,7 +998,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             return "other"
         if _COUNT_QUESTION_RE.search(q):
             return "count"
-        if _BINARY_QUESTION_RE.search(q):
+        # Treat only pure yes/no style prompts as binary. Many "is ... A or B?"
+        # prompts are forced-choice attribute questions, not yes/no.
+        if _BINARY_QUESTION_RE.search(q) and (not _BINARY_FORCED_CHOICE_RE.search(q)):
             return "binary"
         if any(k in q for k in ("text", "word", "token", "letter", "sign")):
             return "text"
