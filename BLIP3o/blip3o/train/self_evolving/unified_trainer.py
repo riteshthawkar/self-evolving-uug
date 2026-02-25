@@ -2805,12 +2805,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         if real_idx < len(solver_temperatures)
                         else float(self.cfg.temp)
                     )
+                    sc_top_p = (
+                        float(solver_top_ps[real_idx])
+                        if real_idx < len(solver_top_ps)
+                        else float(self.cfg.top_p)
+                    )
                     sc_solver_out = self._generate(
                         image=image,
                         prompt=esc_solver_prompt,
                         adapter_name="default" if self.cfg.use_lora else None,
                         max_new_tokens=self.cfg.max_new_tokens_solver,
                         temperature=sc_temp,
+                        top_p=sc_top_p,
                     )
                     sc_ans_raw = _parse_answer(sc_solver_out)
                     sc_ans_text = normalize_answer(sc_ans_raw)
