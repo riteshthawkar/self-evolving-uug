@@ -641,16 +641,20 @@ def build_proposer_multi_prompt(
             )
 
     n = max(1, int(num_questions))
+    # CRITICAL: <text> is generated BEFORE <two_answer_test>.  This makes
+    # it structurally impossible for the model to leak binary options into
+    # the question text — it hasn't generated them yet when writing <text>.
     qa_template = "\n".join(
         f'  <question id="{i}">\n'
-        f'    <task_card>...C1/C2/C3/C4/C5/C6...</task_card>\n'
+        f'    <task_card>...C1/C2/C3/C4/C5/C6/C7/C8/C9...</task_card>\n'
         f'    <reasoning_domains>...comma-separated D-codes, minimum 2...</reasoning_domains>\n'
         f'    <reasoning_chain>...2-4 short steps with visible evidence...</reasoning_chain>\n'
-        f'    <strategy_used>...which strategy from the library above (e.g. H2, M3)...</strategy_used>\n'
+        f'    <strategy_used>...which strategy from the library above (e.g. H2, H11, M3)...</strategy_used>\n'
         f'    <visual_target>...specific small/secondary/background element (must NOT be main subject)...</visual_target>\n'
+        f'    <text>...OPEN-ENDED question ending with "?" — must NOT contain answer options...</text>\n'
         f'    <two_answer_test>...two genuinely DIFFERENT, concrete, image-grounded candidate answers '
-        f'(never placeholders; never vague words like many/several/unclear)...</two_answer_test>\n'
-        f'    <text>...final question text ending with "?" derived from reasoning_chain...</text>\n'
+        f'(never placeholders; never vague words like many/several/unclear). '
+        f'This is a HIDDEN validator — the question in <text> must NOT mention these options...</two_answer_test>\n'
         f'    <rationale>...why this is hard but still objectively and exactly verifiable from visible evidence...</rationale>\n'
         f'  </question>'
         for i in range(1, n + 1)
@@ -662,7 +666,8 @@ def build_proposer_multi_prompt(
         "\n"
         "CRITICAL RULES:\n"
         "- NEVER ask about the main/dominant subject, object, or largest text.\n"
-        "- Question must be derived AFTER reasoning_chain is defined.\n"
+        "- <text> is written BEFORE <two_answer_test>. Write the question FIRST as an open-ended question, "
+        "THEN define the two-answer validator. The question must stand alone without options.\n"
         "- Each question must use >=2 reasoning domains and include >=1 non-relational domain.\n"
         "- Each question must include a valid two-answer precision test with distinct concrete alternatives.\n"
         "- Final question must have one exact answer grounded in visible evidence.\n"
@@ -670,10 +675,6 @@ def build_proposer_multi_prompt(
         "- Avoid low-information yes/no forms and latent non-visual states.\n"
         "- Do not ask hidden-state intent or speculative timeline questions (e.g., about to/just/recently/trying to).\n"
         "- Use DISTINCT strategy codes across questions.\n"
-        "- CRITICAL: The <text> field must be an OPEN-ENDED question (e.g., 'What color is...?', "
-        "'How many...?', 'What is immediately beside...?'). NEVER put the two_answer_test "
-        "alternatives inside the question text. NEVER use 'A or B?' format in <text>. "
-        "The two_answer_test is a HIDDEN validator only — the solver must NOT see the options.\n"
         "\n"
         f"{diff_hint}\n"
         f"{dataset_hint}"
@@ -684,16 +685,17 @@ def build_proposer_multi_prompt(
         f"{strategy_block}"
         f"Generate exactly {n} questions, HARDEST first.\n"
         "For each, follow this order strictly: task_card -> reasoning_domains -> reasoning_chain -> "
-        "strategy_used -> visual_target -> two_answer_test -> text -> rationale.\n"
+        "strategy_used -> visual_target -> text -> two_answer_test -> rationale.\n"
+        "IMPORTANT: <text> comes BEFORE <two_answer_test>. Write the open-ended question FIRST.\n"
         "Question must end with '?' and have short verifiable answer.\n"
         "No XML tags inside question text.\n"
         "Final self-check before output:\n"
         "- If reasoning_domains has fewer than 2 domains, rewrite.\n"
         "- If no non-relational domain is present, rewrite.\n"
+        "- If <text> contains 'or' offering two choices, or mentions the two_answer_test options, rewrite as open-ended.\n"
         "- If two_answer_test alternatives are not distinct, rewrite.\n"
         "- If two_answer_test contains vague alternatives (many/several/unclear/unknown), rewrite.\n"
         "- If question is not grounded in visual_target/reasoning_chain, rewrite.\n"
-        "- If <text> contains 'or' offering two choices (e.g., 'X or Y?'), rewrite as open-ended.\n"
         "Output XML only:\n"
         "<questions>\n"
         f"{qa_template}\n"
