@@ -11,6 +11,7 @@ from typing import List
 class ModelLoadConfig:
     model_path: str
     device: str = "cuda"
+    vae_device: str = ""
     max_latent_size: int = 64
     vit_max_num_patch_per_side: int = 70
     latent_patch_size: int = 2

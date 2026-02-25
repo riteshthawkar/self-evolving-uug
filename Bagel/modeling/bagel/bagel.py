@@ -143,6 +143,14 @@ class Bagel(PreTrainedModel):
         except StopIteration:
             return torch.device("cpu")
 
+    @staticmethod
+    def _module_device_dtype(module) -> Tuple[torch.device, torch.dtype]:
+        for p in module.parameters():
+            return p.device, p.dtype
+        for b in module.buffers():
+            return b.device, b.dtype
+        return torch.device("cpu"), torch.float32
+
     def _to_model_device(self, value):
         device = self._model_device()
         if torch.is_tensor(value):
@@ -572,7 +580,12 @@ class Bagel(PreTrainedModel):
         packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
         packed_sequence[packed_text_indexes] = packed_text_embedding
 
+        vae_device, vae_dtype = self._module_device_dtype(vae_model)
+        if padded_images.device != vae_device or padded_images.dtype != vae_dtype:
+            padded_images = padded_images.to(device=vae_device, dtype=vae_dtype)
         padded_latent = vae_model.encode(padded_images)
+        if padded_latent.device != packed_sequence.device:
+            padded_latent = padded_latent.to(packed_sequence.device)
 
         p = self.latent_patch_size
         packed_latent = list()
