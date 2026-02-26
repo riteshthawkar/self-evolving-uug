@@ -322,6 +322,25 @@ class SelfEvolvingUnderstandingTrainer:
             min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs),
         )
         spec = parse_generation_spec(spec_out.text, min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs))
+        spec_retry_attempted = False
+        spec_retry_temperature = 0.0
+        if spec is None:
+            spec_retry_attempted = True
+            spec_retry_temperature = max(0.1, min(0.7, float(self.cfg.gen_spec_temperature) * 0.5))
+            spec_out_retry = self.adapter.propose_generation_spec(
+                image=image,
+                max_new_tokens=self.cfg.max_new_tokens_gen_spec,
+                temperature=float(spec_retry_temperature),
+                min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs),
+            )
+            spec_retry = parse_generation_spec(
+                spec_out_retry.text,
+                min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs),
+            )
+            if spec_retry is not None:
+                spec = spec_retry
+                spec_out = spec_out_retry
+
         if spec is None:
             return {
                 "step": int(step),
@@ -332,6 +351,8 @@ class SelfEvolvingUnderstandingTrainer:
                 "policy_update_attempted": False,
                 "policy_update_applied": False,
                 "policy_update_reason": "invalid_generation_spec",
+                "spec_retry_attempted": bool(spec_retry_attempted),
+                "spec_retry_temperature": float(spec_retry_temperature),
             }
 
         generated = self.adapter.generate_image_from_spec(
@@ -494,6 +515,8 @@ class SelfEvolvingUnderstandingTrainer:
             "policy_update_reason": policy_update_reason,
             "policy_update_stats": policy_update_stats,
             "solver_temperatures": solver_temps,
+            "spec_retry_attempted": bool(spec_retry_attempted),
+            "spec_retry_temperature": float(spec_retry_temperature),
         }
 
     def run(self) -> Dict[str, float]:
