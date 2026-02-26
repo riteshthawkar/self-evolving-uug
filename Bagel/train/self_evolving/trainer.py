@@ -7,6 +7,7 @@ import json
 import math
 import os
 import random
+import time
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -95,6 +96,8 @@ class SelfEvolvingUnderstandingTrainer:
         self.output_dir = self._prepare_output_dir(cfg.output_dir)
         self.rollouts_log_path = os.path.join(self.output_dir, "rollouts.jsonl")
         self.generation_rollouts_log_path = os.path.join(self.output_dir, "generation_rollouts.jsonl")
+        self.metrics_log_path = os.path.join(self.output_dir, "metrics.jsonl")
+        self.status_path = os.path.join(self.output_dir, "status.json")
         self.summary_path = os.path.join(self.output_dir, "summary.json")
         self.config_path = os.path.join(self.output_dir, "config.json")
         self.generated_images_dir = os.path.join(self.output_dir, "generated_images")
@@ -131,6 +134,55 @@ class SelfEvolvingUnderstandingTrainer:
         payload = asdict(self.cfg)
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+
+    @staticmethod
+    def _write_json_atomic(path: str, payload: Dict) -> None:
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp_path, path)
+
+    def _progress_core(self, *, step: int, phase: str, run_started_at: float) -> Dict[str, float]:
+        now = float(time.time())
+        elapsed_sec = max(1e-9, now - float(run_started_at))
+        total = max(1, int(self.cfg.steps) - int(self.start_step) + 1)
+        done = max(0, int(step) - int(self.start_step) + 1)
+        done = min(total, done)
+        progress = float(done) / float(total)
+        steps_per_sec = float(done) / float(elapsed_sec) if elapsed_sec > 0.0 else 0.0
+        remaining = max(0, total - done)
+        eta_sec = float(remaining) / float(steps_per_sec) if steps_per_sec > 0.0 else -1.0
+        return {
+            "step": int(step),
+            "phase": str(phase),
+            "steps_total": int(self.cfg.steps),
+            "steps_started_from": int(self.start_step),
+            "steps_done": int(done),
+            "steps_remaining": int(remaining),
+            "progress": float(progress),
+            "elapsed_sec": float(elapsed_sec),
+            "steps_per_sec": float(steps_per_sec),
+            "eta_sec": float(eta_sec),
+            "timestamp_unix": float(now),
+            "timestamp_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+
+    def _append_metrics(self, record: Dict) -> None:
+        _write_jsonl(self.metrics_log_path, record)
+
+    def _write_status(self, *, state: str, progress: Dict, metrics: Dict, last_error: str = "") -> None:
+        payload = {
+            "state": str(state),
+            "output_dir": str(self.output_dir),
+            "summary_path": str(self.summary_path),
+            "rollouts_log_path": str(self.rollouts_log_path),
+            "generation_rollouts_log_path": str(self.generation_rollouts_log_path),
+            "metrics_log_path": str(self.metrics_log_path),
+            "last_error": str(last_error or ""),
+            "progress": progress,
+            "metrics": metrics,
+        }
+        self._write_json_atomic(self.status_path, payload)
 
     def _sample_image_path(self, step: int) -> str:
         idx = (step - 1) % len(self.image_paths)
@@ -462,6 +514,49 @@ class SelfEvolvingUnderstandingTrainer:
 
         solver_temps = self.cfg.solver_temperatures()
         baseline_momentum = _clamp01(self.cfg.baseline_momentum)
+        run_started_at = float(time.time())
+        last_step = int(self.start_step) - 1
+
+        def _status_metrics(step_time_sec: float) -> Dict[str, float]:
+            return {
+                "step_time_sec": float(step_time_sec),
+                "understanding_steps_valid": int(valid_steps),
+                "understanding_steps_skipped": int(skipped_steps),
+                "understanding_mean_reward": float(reward_sum / float(max(1, valid_steps))),
+                "dual_track_disagree_rate": float(dual_track_disagree / float(max(1, valid_steps))),
+                "suder_generation_enabled": bool(self.cfg.suder_generation_enabled),
+                "generation_steps_valid": int(suder_valid_steps),
+                "generation_steps_skipped": int(suder_skipped_steps),
+                "generation_mean_reward": float(suder_reward_sum / float(max(1, suder_valid_steps))),
+                "generation_mean_entropy_nats": float(suder_entropy_sum / float(max(1, suder_valid_steps))),
+                "generation_mean_quality": float(suder_quality_sum / float(max(1, suder_valid_steps))),
+                "policy_updates_attempted": int(policy_updates_attempted),
+                "policy_updates_applied": int(policy_updates_applied),
+                "proposer_baseline": float(self.proposer_baseline),
+                "solver_baseline": float(self.solver_baseline),
+                "proposer_gen_baseline": float(self.proposer_gen_baseline),
+            }
+
+        def _emit_training_logs(step_id: int, *, phase: str, step_time_sec: float) -> None:
+            progress = self._progress_core(
+                step=int(step_id),
+                phase=str(phase),
+                run_started_at=run_started_at,
+            )
+            metrics = _status_metrics(step_time_sec)
+            self._write_status(state="running", progress=progress, metrics=metrics)
+            if int(step_id) % max(1, int(self.cfg.log_every)) == 0:
+                self._append_metrics({"kind": "heartbeat", **progress, **metrics})
+
+        self._write_status(
+            state="running",
+            progress=self._progress_core(
+                step=int(self.start_step) - 1,
+                phase="init",
+                run_started_at=run_started_at,
+            ),
+            metrics=_status_metrics(0.0),
+        )
 
         def _run_and_accumulate_suder(step_id: int, path: str, src_image: Image.Image) -> None:
             nonlocal suder_valid_steps
@@ -493,6 +588,7 @@ class SelfEvolvingUnderstandingTrainer:
                 policy_updates_applied += int(bool(suder_record.get("policy_update_applied", False)))
 
         for step in range(int(self.start_step), int(self.cfg.steps) + 1):
+            step_t0 = float(time.time())
             image_path = self._sample_image_path(step)
             image = self._load_image(image_path)
 
@@ -515,6 +611,7 @@ class SelfEvolvingUnderstandingTrainer:
                     },
                 )
                 _run_and_accumulate_suder(step, image_path, image)
+                _emit_training_logs(step, phase="understanding", step_time_sec=float(time.time() - step_t0))
                 continue
 
             solver_outputs_raw: List[str] = []
@@ -548,6 +645,7 @@ class SelfEvolvingUnderstandingTrainer:
                     },
                 )
                 _run_and_accumulate_suder(step, image_path, image)
+                _emit_training_logs(step, phase="understanding", step_time_sec=float(time.time() - step_t0))
                 continue
 
             intuitive = self.adapter.intuitive_answer(
@@ -704,6 +802,7 @@ class SelfEvolvingUnderstandingTrainer:
             )
 
             _run_and_accumulate_suder(step, image_path, image)
+            _emit_training_logs(step, phase="understanding", step_time_sec=float(time.time() - step_t0))
 
             if step % max(1, self.cfg.log_every) == 0:
                 mean_reward = reward_sum / float(max(1, valid_steps))
@@ -772,4 +871,24 @@ class SelfEvolvingUnderstandingTrainer:
         }
         with open(self.summary_path, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
+        self._append_metrics(
+            {
+                "kind": "final_summary",
+                **self._progress_core(
+                    step=int(self.cfg.steps),
+                    phase="completed",
+                    run_started_at=run_started_at,
+                ),
+                **summary,
+            }
+        )
+        self._write_status(
+            state="completed",
+            progress=self._progress_core(
+                step=int(self.cfg.steps),
+                phase="completed",
+                run_started_at=run_started_at,
+            ),
+            metrics={k: v for k, v in summary.items() if isinstance(v, (bool, int, float, str))},
+        )
         return summary

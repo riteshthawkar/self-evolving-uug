@@ -26,8 +26,12 @@ set -euo pipefail
 # Optional:
 #   TRAIN_STAGE=warmup|strict
 #   RUN_MODE=train|rollout             # default: train (unified strategy)
+#   EXPERIMENT=unified_self_evolving   # default: unified
 #   STEPS=500
 #   DEVICE=cuda
+#   MULTI_GPU_SPLIT=auto|on|off        # default: auto (model/vae split)
+#   MODEL_DEVICE_INDEX=0
+#   VAE_DEVICE_INDEX=1
 #   OUTPUT_DIR=/custom/output
 #   ENABLE_SUDER=1                     # default: 1 in train mode
 #   PROPOSER_GEN_ENTROPY_WEIGHT=0.7 # alpha in joint reward blend
@@ -45,9 +49,13 @@ OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/BAGEL/B1_unified_training}"
 
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RUN_MODE="${RUN_MODE:-train}"
+EXPERIMENT="${EXPERIMENT:-unified_self_evolving}"
 STEPS="${STEPS:-500}"
 DEVICE="${DEVICE:-cuda}"
 VAE_DEVICE="${VAE_DEVICE:-}"
+MULTI_GPU_SPLIT="${MULTI_GPU_SPLIT:-auto}"   # auto|on|off
+MODEL_DEVICE_INDEX="${MODEL_DEVICE_INDEX:-0}"
+VAE_DEVICE_INDEX="${VAE_DEVICE_INDEX:-1}"
 MAX_LATENT_SIZE="${MAX_LATENT_SIZE:-64}"
 ENABLE_SUDER="${ENABLE_SUDER:-1}"
 PROPOSER_GEN_ENTROPY_WEIGHT="${PROPOSER_GEN_ENTROPY_WEIGHT:-0.7}"
@@ -83,6 +91,27 @@ TORCH_BLAS_PREFER_HIPBLASLT="${TORCH_BLAS_PREFER_HIPBLASLT:-0}"
 TRAIN_UNDERSTANDING_PROPOSER="${TRAIN_UNDERSTANDING_PROPOSER:-1}"
 TRAIN_SOLVER="${TRAIN_SOLVER:-1}"
 TRAIN_GENERATION_PROPOSER="${TRAIN_GENERATION_PROPOSER:-1}"
+UNDERSTANDING_STEPS_PER_CYCLE="${UNDERSTANDING_STEPS_PER_CYCLE:-3}"
+GENERATION_STEPS_PER_CYCLE="${GENERATION_STEPS_PER_CYCLE:-2}"
+GEN_MIX_SOURCE_MODE="${GEN_MIX_SOURCE_MODE:-buffer}"
+GEN_MIX_RATIO_START="${GEN_MIX_RATIO_START:-0.02}"
+GEN_MIX_RATIO_MAX="${GEN_MIX_RATIO_MAX:-0.25}"
+GEN_MIX_RATIO_WARMUP_STEPS="${GEN_MIX_RATIO_WARMUP_STEPS:-1000}"
+REPLAY_BUFFER_SIZE="${REPLAY_BUFFER_SIZE:-1000}"
+REPLAY_MIN_REWARD="${REPLAY_MIN_REWARD:-0.5}"
+REPLAY_MAX_STALENESS="${REPLAY_MAX_STALENESS:-500}"
+GENERATED_MIX_DIR="${GENERATED_MIX_DIR:-}"
+GENERATED_MIX_MIN_REWARD="${GENERATED_MIX_MIN_REWARD:-0.5}"
+GENERATED_MIX_MAX_FILES="${GENERATED_MIX_MAX_FILES:-5000}"
+GENERATED_MIX_REFRESH_EVERY="${GENERATED_MIX_REFRESH_EVERY:-10}"
+UNDERSTANDING_GENERATED_ONLY="${UNDERSTANDING_GENERATED_ONLY:-0}"
+PROPOSER_NUM_CANDIDATES="${PROPOSER_NUM_CANDIDATES:-3}"
+PROPOSER_SPOT_CHECK_SAMPLES="${PROPOSER_SPOT_CHECK_SAMPLES:-3}"
+PROPOSER_SPOT_ENTROPY_MIN_GATE="${PROPOSER_SPOT_ENTROPY_MIN_GATE:-0.05}"
+PROPOSER_GRPO_GEN_GROUP_SIZE="${PROPOSER_GRPO_GEN_GROUP_SIZE:-3}"
+SCORE_GRPO_EXTRAS="${SCORE_GRPO_EXTRAS:-1}"
+GRPO_EXTRA_TEMP_MULTIPLIER="${GRPO_EXTRA_TEMP_MULTIPLIER:-1.5}"
+SOLVER_TOKEN_ENTROPY_ENABLED="${SOLVER_TOKEN_ENTROPY_ENABLED:-1}"
 
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
@@ -121,6 +150,16 @@ if [[ "$RUN_MODE" != "rollout" && "$RUN_MODE" != "train" ]]; then
   exit 1
 fi
 
+if [[ "$MULTI_GPU_SPLIT" != "auto" && "$MULTI_GPU_SPLIT" != "on" && "$MULTI_GPU_SPLIT" != "off" ]]; then
+  echo "[B1] ERROR: MULTI_GPU_SPLIT must be one of: auto, on, off (got: $MULTI_GPU_SPLIT)" >&2
+  exit 1
+fi
+
+if [[ "$EXPERIMENT" != "understanding_self_evolving" && "$EXPERIMENT" != "generation_self_evolving" && "$EXPERIMENT" != "unified_self_evolving" ]]; then
+  echo "[B1] ERROR: EXPERIMENT must be one of: understanding_self_evolving, generation_self_evolving, unified_self_evolving (got: $EXPERIMENT)" >&2
+  exit 1
+fi
+
 if [[ "$RUN_MODE" == "train" ]]; then
   ENABLE_LORA=1
   ENABLE_SUDER=1
@@ -129,8 +168,35 @@ if [[ "$RUN_MODE" == "train" ]]; then
   TRAIN_GENERATION_PROPOSER=1
 fi
 
+# ── Multi-GPU split config (supported path: model + VAE on different GPUs) ──
+GPU_COUNT="$("$PYTHON_BIN" - <<'PY'
+try:
+    import torch
+    print(torch.cuda.device_count() if torch.cuda.is_available() else 0)
+except Exception:
+    print(0)
+PY
+)"
+
+if [[ "$DEVICE" == cuda* ]]; then
+  if [[ -z "$VAE_DEVICE" ]]; then
+    if [[ "$MULTI_GPU_SPLIT" == "on" ]]; then
+      if [[ "$GPU_COUNT" -lt 2 ]]; then
+        echo "[B1] ERROR: MULTI_GPU_SPLIT=on requires >=2 GPUs, found $GPU_COUNT" >&2
+        exit 1
+      fi
+      DEVICE="cuda:${MODEL_DEVICE_INDEX}"
+      VAE_DEVICE="cuda:${VAE_DEVICE_INDEX}"
+    elif [[ "$MULTI_GPU_SPLIT" == "auto" && "$GPU_COUNT" -ge 2 && "$DEVICE" == "cuda" ]]; then
+      DEVICE="cuda:${MODEL_DEVICE_INDEX}"
+      VAE_DEVICE="cuda:${VAE_DEVICE_INDEX}"
+    fi
+  fi
+fi
+
 # ── Shared arguments ────────────────────────────────────────────────────────
 SHARED_ARGS=(
+  --experiment "$EXPERIMENT"
   --max_new_tokens_proposer 256
   --max_new_tokens_solver 96
   --solver_unsolvable_maj_threshold 0.20
@@ -138,7 +204,43 @@ SHARED_ARGS=(
   --seed 42
   --log_every 10
   --save_raw_generations
+  --understanding_steps_per_cycle "$UNDERSTANDING_STEPS_PER_CYCLE"
+  --generation_steps_per_cycle "$GENERATION_STEPS_PER_CYCLE"
+  --gen_mix_source_mode "$GEN_MIX_SOURCE_MODE"
+  --gen_mix_ratio_start "$GEN_MIX_RATIO_START"
+  --gen_mix_ratio_max "$GEN_MIX_RATIO_MAX"
+  --gen_mix_ratio_warmup_steps "$GEN_MIX_RATIO_WARMUP_STEPS"
+  --replay_buffer_size "$REPLAY_BUFFER_SIZE"
+  --replay_min_reward "$REPLAY_MIN_REWARD"
+  --replay_max_staleness "$REPLAY_MAX_STALENESS"
+  --generated_mix_min_reward "$GENERATED_MIX_MIN_REWARD"
+  --generated_mix_max_files "$GENERATED_MIX_MAX_FILES"
+  --generated_mix_refresh_every "$GENERATED_MIX_REFRESH_EVERY"
+  --proposer_num_candidates "$PROPOSER_NUM_CANDIDATES"
+  --proposer_spot_check_samples "$PROPOSER_SPOT_CHECK_SAMPLES"
+  --proposer_spot_entropy_min_gate "$PROPOSER_SPOT_ENTROPY_MIN_GATE"
+  --proposer_grpo_gen_group_size "$PROPOSER_GRPO_GEN_GROUP_SIZE"
+  --grpo_extra_temp_multiplier "$GRPO_EXTRA_TEMP_MULTIPLIER"
 )
+
+if [[ -n "$GENERATED_MIX_DIR" ]]; then
+  SHARED_ARGS+=(--generated_mix_dir "$GENERATED_MIX_DIR")
+fi
+if [[ "$UNDERSTANDING_GENERATED_ONLY" == "1" ]]; then
+  SHARED_ARGS+=(--understanding_generated_only)
+else
+  SHARED_ARGS+=(--disable_understanding_generated_only)
+fi
+if [[ "$SCORE_GRPO_EXTRAS" == "1" ]]; then
+  SHARED_ARGS+=(--score_grpo_extras)
+else
+  SHARED_ARGS+=(--disable_score_grpo_extras)
+fi
+if [[ "$SOLVER_TOKEN_ENTROPY_ENABLED" == "1" ]]; then
+  SHARED_ARGS+=(--solver_token_entropy_enabled)
+else
+  SHARED_ARGS+=(--disable_solver_token_entropy)
+fi
 
 # ── Optional SUDER-style generation-phase rollout args ───────────────────────
 SUDER_ARGS=()
@@ -230,6 +332,11 @@ if [[ ! -d "$DATA_DIR" ]]; then
   exit 1
 fi
 
+if [[ "$DEVICE" == "$VAE_DEVICE" && "$MULTI_GPU_SPLIT" == "on" ]]; then
+  echo "[B1] ERROR: MULTI_GPU_SPLIT=on requires model and VAE on different GPUs (DEVICE=$DEVICE, VAE_DEVICE=$VAE_DEVICE)" >&2
+  exit 1
+fi
+
 if ! find "$DATA_DIR" -type f \
   \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" -o -iname "*.bmp" \) \
   -print -quit | grep -q .; then
@@ -249,15 +356,19 @@ PY
 fi
 
 mkdir -p "$OUTPUT_DIR"
+RUN_TS="$(date +%Y%m%d_%H%M%S)"
+LAUNCH_LOG="$OUTPUT_DIR/b1_unified_${RUN_TS}.log"
 
 echo "[B1] Starting BAGEL self-evolving experiment"
 echo "[B1]   Run mode:   $RUN_MODE"
 echo "[B1]   Stage:      $TRAIN_STAGE"
+echo "[B1]   Exp:        $EXPERIMENT"
 echo "[B1]   Model:      $MODEL_PATH"
 echo "[B1]   Data:       $DATA_DIR"
 echo "[B1]   Output:     $OUTPUT_DIR"
 echo "[B1]   Steps:      $STEPS"
 echo "[B1]   Device:     $DEVICE"
+echo "[B1]   GPUs:       count=$GPU_COUNT split=$MULTI_GPU_SPLIT"
 if [[ -n "$VAE_DEVICE" ]]; then
   echo "[B1]   VAE device: $VAE_DEVICE"
 fi
@@ -266,11 +377,16 @@ echo "[B1]   FlashAttn:  disabled=$DISABLE_FLASH_ATTN"
 echo "[B1]   Autocast:   disabled=$DISABLE_AUTOCAST dtype=$BAGEL_AUTOCAST_DTYPE"
 echo "[B1]   ROCm AMP:   enable=$ENABLE_ROCM_AUTOCAST"
 echo "[B1]   BLAS:       TORCH_BLAS_PREFER_HIPBLASLT=$TORCH_BLAS_PREFER_HIPBLASLT"
+echo "[B1]   Schedule:   U=$UNDERSTANDING_STEPS_PER_CYCLE G=$GENERATION_STEPS_PER_CYCLE mix=$GEN_MIX_SOURCE_MODE"
+echo "[B1]   Proposer:   K=$PROPOSER_NUM_CANDIDATES spot=$PROPOSER_SPOT_CHECK_SAMPLES"
 if [[ "$RUN_MODE" == "train" ]]; then
   echo "[B1]   Policy:     $POLICY_UPDATE_METHOD"
   echo "[B1]   PolicyImg:  max_vit_edge=$POLICY_MAX_VIT_EDGE"
+  echo "[B1]   Gen-GRPO:   group=$PROPOSER_GRPO_GEN_GROUP_SIZE score_extras=$SCORE_GRPO_EXTRAS temp_mult=$GRPO_EXTRA_TEMP_MULTIPLIER"
   echo "[B1]   LoRA:       enabled (r=$LORA_RANK, alpha=$LORA_ALPHA, dropout=$LORA_DROPOUT)"
 fi
+echo "[B1]   LauncherLog:$LAUNCH_LOG"
+echo "[B1]   Monitor:    tail -f \"$LAUNCH_LOG\""
 
 # ── Launch ──────────────────────────────────────────────────────────────────
 export PYTHONPATH="$BAGEL_ROOT:$REPO_ROOT:${PYTHONPATH:-}"
@@ -282,6 +398,7 @@ export TORCH_BLAS_PREFER_HIPBLASLT="$TORCH_BLAS_PREFER_HIPBLASLT"
 export BAGEL_POLICY_MAX_VIT_EDGE="$POLICY_MAX_VIT_EDGE"
 
 cd "$BAGEL_ROOT"
+set +e
 "$PYTHON_BIN" train/train_self_evolving.py \
   --model_path "$MODEL_PATH" \
   --device "$DEVICE" \
@@ -293,6 +410,21 @@ cd "$BAGEL_ROOT"
   "${SHARED_ARGS[@]}" \
   "${STAGE_ARGS[@]}" \
   "${TRAIN_ARGS[@]}" \
-  "${SUDER_ARGS[@]}"
+  "${SUDER_ARGS[@]}" \
+  2>&1 | tee -a "$LAUNCH_LOG"
+PY_EXIT_CODE="${PIPESTATUS[0]}"
+set -e
+
+LATEST_RUN_DIR="$(ls -td "$OUTPUT_DIR"/unified_rollout_* 2>/dev/null | head -1 || true)"
+if [[ -n "$LATEST_RUN_DIR" ]]; then
+  echo "[B1]   LatestRun:  $LATEST_RUN_DIR"
+  echo "[B1]   Status:     $LATEST_RUN_DIR/status.json"
+  echo "[B1]   Metrics:    $LATEST_RUN_DIR/metrics.jsonl"
+fi
+
+if [[ "$PY_EXIT_CODE" -ne 0 ]]; then
+  echo "[B1] ERROR: Training exited with code $PY_EXIT_CODE" >&2
+  exit "$PY_EXIT_CODE"
+fi
 
 echo "[B1] Completed."

@@ -7,6 +7,8 @@ import argparse
 import os
 import random
 import sys
+import time
+import traceback
 
 import numpy as np
 import torch
@@ -25,6 +27,13 @@ from train.self_evolving.config import ModelLoadConfig, RolloutConfig
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="BAGEL self-evolving framework (rollout + optional policy updates)."
+    )
+    p.add_argument(
+        "--experiment",
+        type=str,
+        default="understanding_self_evolving",
+        choices=["understanding_self_evolving", "generation_self_evolving", "unified_self_evolving"],
+        help="Training mode: understanding only, generation only, or unified alternating U/G.",
     )
 
     # Model/runtime
@@ -54,6 +63,32 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--steps", type=int, default=500)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log_every", type=int, default=10)
+    p.add_argument("--understanding_steps_per_cycle", type=int, default=3)
+    p.add_argument("--generation_steps_per_cycle", type=int, default=2)
+    p.add_argument("--replay_buffer_size", type=int, default=1000)
+    p.add_argument("--replay_min_reward", type=float, default=0.5)
+    p.add_argument("--replay_max_staleness", type=int, default=500)
+    p.add_argument(
+        "--gen_mix_source_mode",
+        type=str,
+        default="buffer",
+        choices=["buffer", "folder"],
+        help="Source for generation->understanding mixing in unified mode.",
+    )
+    p.add_argument("--generated_mix_dir", type=str, default="")
+    p.add_argument("--generated_mix_min_reward", type=float, default=0.5)
+    p.add_argument("--generated_mix_max_files", type=int, default=5000)
+    p.add_argument("--generated_mix_refresh_every", type=int, default=10)
+    p.add_argument("--understanding_generated_only", action="store_true", default=False)
+    p.add_argument(
+        "--disable_understanding_generated_only",
+        dest="understanding_generated_only",
+        action="store_false",
+    )
+    p.add_argument("--gen_mix_ratio_start", type=float, default=0.02)
+    p.add_argument("--gen_mix_ratio_max", type=float, default=0.25)
+    p.add_argument("--gen_mix_ratio_warmup_steps", type=int, default=1000)
+    p.add_argument("--reward_ema_momentum", type=float, default=0.95)
 
     # Generation/reward knobs
     p.add_argument("--max_new_tokens_proposer", type=int, default=256)
@@ -140,6 +175,30 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
     p.add_argument("--solver_easy_update_majority_threshold", type=float, default=0.98)
+    p.add_argument("--proposer_num_candidates", type=int, default=3)
+    p.add_argument("--proposer_spot_check_samples", type=int, default=3)
+    p.add_argument("--proposer_spot_entropy_min_gate", type=float, default=0.05)
+    p.add_argument("--proposer_grpo_gen_group_size", type=int, default=3)
+    p.add_argument("--score_grpo_extras", action="store_true", default=True)
+    p.add_argument(
+        "--disable_score_grpo_extras",
+        dest="score_grpo_extras",
+        action="store_false",
+    )
+    p.add_argument("--grpo_extra_temp_multiplier", type=float, default=1.5)
+    p.add_argument("--solver_token_entropy_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_solver_token_entropy",
+        dest="solver_token_entropy_enabled",
+        action="store_false",
+    )
+    p.add_argument("--solver_token_entropy_tokens", type=int, default=5)
+    p.add_argument("--solver_token_entropy_window_size", type=int, default=128)
+    p.add_argument("--solver_token_entropy_sigmoid_alpha", type=float, default=1.5)
+    p.add_argument("--solver_token_entropy_sigmoid_beta", type=float, default=2.0)
+    p.add_argument("--ste_spot_easy_quantile", type=float, default=0.30)
+    p.add_argument("--proposer_ste_primary_weight", type=float, default=0.70)
+    p.add_argument("--proposer_sample_entropy_weight", type=float, default=0.30)
     p.add_argument("--train_understanding_proposer", action="store_true", default=True)
     p.add_argument(
         "--disable_train_understanding_proposer",
@@ -203,6 +262,7 @@ def main() -> None:
         lora_default_adapter=str(args.lora_default_adapter),
     )
     rollout_cfg = RolloutConfig(
+        experiment_name=str(args.experiment),
         image_dir=args.image_dir,
         output_dir=args.output_dir,
         steps=int(args.steps),
@@ -248,18 +308,102 @@ def main() -> None:
         solver_reward_mix_gamma=float(args.solver_reward_mix_gamma),
         solver_skip_easy_updates=bool(args.solver_skip_easy_updates),
         solver_easy_update_majority_threshold=float(args.solver_easy_update_majority_threshold),
+        proposer_num_candidates=int(args.proposer_num_candidates),
+        proposer_spot_check_samples=int(args.proposer_spot_check_samples),
+        proposer_spot_entropy_min_gate=float(args.proposer_spot_entropy_min_gate),
+        proposer_grpo_gen_group_size=max(1, int(args.proposer_grpo_gen_group_size)),
+        score_grpo_extras=bool(args.score_grpo_extras),
+        grpo_extra_temp_multiplier=float(args.grpo_extra_temp_multiplier),
+        solver_token_entropy_enabled=bool(args.solver_token_entropy_enabled),
+        solver_token_entropy_tokens=int(args.solver_token_entropy_tokens),
+        solver_token_entropy_window_size=int(args.solver_token_entropy_window_size),
+        solver_token_entropy_sigmoid_alpha=float(args.solver_token_entropy_sigmoid_alpha),
+        solver_token_entropy_sigmoid_beta=float(args.solver_token_entropy_sigmoid_beta),
+        ste_spot_easy_quantile=float(args.ste_spot_easy_quantile),
+        proposer_ste_primary_weight=float(args.proposer_ste_primary_weight),
+        proposer_sample_entropy_weight=float(args.proposer_sample_entropy_weight),
         train_understanding_proposer=bool(args.train_understanding_proposer),
         train_solver=bool(args.train_solver),
         train_generation_proposer=bool(args.train_generation_proposer),
         checkpoint_every=int(args.checkpoint_every),
         resume_from=str(args.resume_from),
         save_lora_only=bool(args.save_lora_only),
+        understanding_steps_per_cycle=max(0, int(args.understanding_steps_per_cycle)),
+        generation_steps_per_cycle=max(0, int(args.generation_steps_per_cycle)),
+        replay_buffer_size=max(1, int(args.replay_buffer_size)),
+        replay_min_reward=float(args.replay_min_reward),
+        replay_max_staleness=max(0, int(args.replay_max_staleness)),
+        gen_mix_source_mode=str(args.gen_mix_source_mode),
+        generated_mix_dir=str(args.generated_mix_dir or ""),
+        generated_mix_min_reward=float(args.generated_mix_min_reward),
+        generated_mix_max_files=max(1, int(args.generated_mix_max_files)),
+        generated_mix_refresh_every=max(1, int(args.generated_mix_refresh_every)),
+        understanding_generated_only=bool(args.understanding_generated_only),
+        gen_mix_ratio_start=float(args.gen_mix_ratio_start),
+        gen_mix_ratio_max=float(args.gen_mix_ratio_max),
+        gen_mix_ratio_warmup_steps=max(1, int(args.gen_mix_ratio_warmup_steps)),
+        reward_ema_momentum=float(args.reward_ema_momentum),
     )
 
     os.makedirs(rollout_cfg.output_dir, exist_ok=True)
     runtime = load_bagel_runtime(model_cfg)
-    trainer = SelfEvolvingUnderstandingTrainer(runtime=runtime, cfg=rollout_cfg)
-    summary = trainer.run()
+    exp = rollout_cfg.normalized_experiment_name()
+    if exp == "understanding_self_evolving":
+        trainer = SelfEvolvingUnderstandingTrainer(runtime=runtime, cfg=rollout_cfg)
+    else:
+        from train.self_evolving.unified_trainer import UnifiedSelfEvolvingTrainer
+        # generation-only convenience mode.
+        if exp == "generation_self_evolving":
+            rollout_cfg.understanding_steps_per_cycle = 0
+            rollout_cfg.generation_steps_per_cycle = max(1, int(rollout_cfg.generation_steps_per_cycle))
+        trainer = UnifiedSelfEvolvingTrainer(runtime=runtime, cfg=rollout_cfg)
+    run_started_at = float(time.time())
+    try:
+        summary = trainer.run()
+    except Exception as exc:
+        # Best-effort fatal status emission for external monitoring tools.
+        if hasattr(trainer, "_write_status") and hasattr(trainer, "_progress_core"):
+            error_text = f"{type(exc).__name__}: {exc}"
+            step_hint = int(getattr(trainer, "start_step", 1)) - 1
+            try:
+                progress = trainer._progress_core(  # type: ignore[attr-defined]
+                    step=step_hint,
+                    phase="failed",
+                    run_started_at=run_started_at,
+                )
+            except Exception:
+                progress = {
+                    "step": int(step_hint),
+                    "phase": "failed",
+                    "timestamp_unix": float(time.time()),
+                }
+            metrics = {
+                "fatal_error": error_text,
+                "fatal_error_type": type(exc).__name__,
+            }
+            try:
+                if hasattr(trainer, "_append_metrics"):
+                    trainer._append_metrics(  # type: ignore[attr-defined]
+                        {
+                            "kind": "fatal_error",
+                            "error": error_text,
+                            "traceback": traceback.format_exc(),
+                            **progress,
+                            **metrics,
+                        }
+                    )
+            except Exception:
+                pass
+            try:
+                trainer._write_status(  # type: ignore[attr-defined]
+                    state="failed",
+                    progress=progress,
+                    metrics=metrics,
+                    last_error=error_text,
+                )
+            except Exception:
+                pass
+        raise
     print("[self_evolving] run summary:")
     for key, value in summary.items():
         print(f"  {key}: {value}")

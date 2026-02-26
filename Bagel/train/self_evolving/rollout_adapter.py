@@ -13,7 +13,12 @@ import torch
 
 from .adapter_manager import ROLE_GENERATOR, ROLE_PROPOSER, ROLE_SOLVER, use_adapter
 from .model_loader import BagelRuntime
-from .prompts import build_generation_spec_prompt, build_proposer_prompt, build_solver_prompt
+from .prompts import (
+    build_generation_spec_prompt,
+    build_proposer_multi_prompt,
+    build_proposer_prompt,
+    build_solver_prompt,
+)
 
 
 @dataclass
@@ -111,6 +116,31 @@ class BagelRolloutAdapter:
         temperature: float,
     ) -> GenerationResult:
         proposer_prompt = build_proposer_prompt()
+        with use_adapter(self.runtime.model.language_model, self._adapter_for_role(ROLE_PROPOSER)):
+            return self._generate_understanding_text(
+                image=image,
+                prompt=proposer_prompt,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=temperature,
+            )
+
+    def propose_questions(
+        self,
+        *,
+        image: Image.Image,
+        max_new_tokens: int,
+        temperature: float,
+        num_questions: int,
+    ) -> GenerationResult:
+        n = max(1, int(num_questions))
+        if n <= 1:
+            return self.propose_question(
+                image=image,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+            )
+        proposer_prompt = build_proposer_multi_prompt(num_questions=n)
         with use_adapter(self.runtime.model.language_model, self._adapter_for_role(ROLE_PROPOSER)):
             return self._generate_understanding_text(
                 image=image,

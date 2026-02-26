@@ -7,7 +7,10 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
-_QUESTION_TAG_RE = re.compile(r"<question>\s*(.*?)\s*</question>", flags=re.IGNORECASE | re.DOTALL)
+_QUESTION_TAG_RE = re.compile(
+    r"<question(?:\s+[^>]*)?>\s*(.*?)\s*</question>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 _ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", flags=re.IGNORECASE | re.DOTALL)
 _PROMPT_TAG_RE = re.compile(r"<prompt>\s*(.*?)\s*</prompt>", flags=re.IGNORECASE | re.DOTALL)
 _QA_PAIR_RE = re.compile(
@@ -42,6 +45,23 @@ def build_proposer_prompt() -> str:
         "3) Keep it specific and verifiable.\n"
         "Output format:\n"
         "<question>...</question>"
+    )
+
+
+def build_proposer_multi_prompt(num_questions: int = 3) -> str:
+    n = max(1, int(num_questions))
+    return (
+        "You are an objective visual-question creator.\n"
+        "Given the image, produce multiple diverse, factual questions.\n"
+        "Rules:\n"
+        "1) Every question must be answerable from visible content only.\n"
+        "2) Avoid subjective or open-ended wording.\n"
+        "3) Keep questions specific and verifiable.\n"
+        f"4) Output exactly {n} questions.\n"
+        "Output format:\n"
+        "<questions>\n"
+        "  <question>...</question>\n"
+        "</questions>"
     )
 
 
@@ -82,6 +102,48 @@ def parse_first_question(text: str) -> str:
         if "?" in line and len(line) > 3:
             return " ".join(line.split())
     return ""
+
+
+def parse_all_questions(text: str) -> List[str]:
+    raw = text or ""
+    matches = _QUESTION_TAG_RE.findall(raw)
+    if matches:
+        out: List[str] = []
+        seen = set()
+        for m in matches:
+            q = " ".join(str(m).strip().split())
+            if not q:
+                continue
+            key = q.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(q)
+        if out:
+            return out
+
+    out: List[str] = []
+    seen = set()
+    for line in raw.splitlines():
+        val = line.strip()
+        if not val:
+            continue
+        val = re.sub(r"^\d+[\).\-\s]*", "", val).strip()
+        if not val:
+            continue
+        if "?" not in val:
+            continue
+        q = " ".join(val.split())
+        key = q.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
+    if out:
+        return out
+
+    first = parse_first_question(raw)
+    return [first] if first else []
 
 
 def parse_answer(text: str) -> str:

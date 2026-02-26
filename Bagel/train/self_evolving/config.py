@@ -50,6 +50,7 @@ class ModelLoadConfig:
 class RolloutConfig:
     image_dir: str
     output_dir: str
+    experiment_name: str = "understanding_self_evolving"
     steps: int = 500
     seed: int = 42
     log_every: int = 10
@@ -113,6 +114,41 @@ class RolloutConfig:
     resume_from: str = ""
     save_lora_only: bool = True
 
+    # Unified scheduler controls (BLIP3o-style alternating phases).
+    understanding_steps_per_cycle: int = 3
+    generation_steps_per_cycle: int = 2
+
+    # Generation -> understanding feedback loop.
+    replay_buffer_size: int = 1000
+    replay_min_reward: float = 0.5
+    replay_max_staleness: int = 500
+    gen_mix_source_mode: str = "buffer"  # buffer|folder
+    generated_mix_dir: str = ""
+    generated_mix_min_reward: float = 0.5
+    generated_mix_max_files: int = 5000
+    generated_mix_refresh_every: int = 10
+    understanding_generated_only: bool = False
+    gen_mix_ratio_start: float = 0.02
+    gen_mix_ratio_max: float = 0.25
+    gen_mix_ratio_warmup_steps: int = 1000
+    reward_ema_momentum: float = 0.95
+
+    # Proposer framework parity knobs (progressively wired in trainer updates).
+    proposer_num_candidates: int = 3
+    proposer_spot_check_samples: int = 3
+    proposer_spot_entropy_min_gate: float = 0.05
+    proposer_grpo_gen_group_size: int = 3
+    score_grpo_extras: bool = True
+    grpo_extra_temp_multiplier: float = 1.5
+    solver_token_entropy_enabled: bool = True
+    solver_token_entropy_tokens: int = 5
+    solver_token_entropy_window_size: int = 128
+    solver_token_entropy_sigmoid_alpha: float = 1.5
+    solver_token_entropy_sigmoid_beta: float = 2.0
+    ste_spot_easy_quantile: float = 0.30
+    proposer_ste_primary_weight: float = 0.70
+    proposer_sample_entropy_weight: float = 0.30
+
     def solver_temperatures(self) -> List[float]:
         n = max(1, int(self.num_solver_samples))
         if n == 1:
@@ -129,3 +165,30 @@ class RolloutConfig:
         if method not in {"reinforce", "grpo"}:
             return "reinforce"
         return method
+
+    def normalized_experiment_name(self) -> str:
+        exp = str(self.experiment_name or "understanding_self_evolving").strip().lower()
+        if exp not in {"understanding_self_evolving", "generation_self_evolving", "unified_self_evolving"}:
+            return "understanding_self_evolving"
+        return exp
+
+    def normalized_gen_mix_source_mode(self) -> str:
+        mode = str(self.gen_mix_source_mode or "buffer").strip().lower()
+        if mode not in {"buffer", "folder"}:
+            return "buffer"
+        return mode
+
+    def cycle_length(self) -> int:
+        u = max(0, int(self.understanding_steps_per_cycle))
+        g = max(0, int(self.generation_steps_per_cycle))
+        return max(1, u + g)
+
+    def current_gen_mix_ratio(self, step: int, start_step: int) -> float:
+        start = max(0.0, min(1.0, float(self.gen_mix_ratio_start)))
+        mx = max(0.0, min(1.0, float(self.gen_mix_ratio_max)))
+        if mx <= 0.0:
+            return 0.0
+        warmup = max(1, int(self.gen_mix_ratio_warmup_steps))
+        elapsed = max(0, int(step) - int(start_step))
+        frac = min(1.0, float(elapsed) / float(warmup))
+        return float(start + frac * (mx - start))
