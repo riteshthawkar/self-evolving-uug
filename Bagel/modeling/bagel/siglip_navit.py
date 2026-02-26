@@ -17,7 +17,7 @@ from torch.nn.functional import scaled_dot_product_attention
 from transformers.activations import ACT2FN
 from modeling.siglip.configuration_siglip import SiglipVisionConfig as _SiglipVisionConfig
 from modeling.siglip.modeling_siglip import SiglipAttention, SiglipPreTrainedModel
-from .runtime_precision import cast_to_lowp
+from .runtime_precision import cast_to_lowp, sdpa_context_for_runtime
 try:
     from flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
     _HAS_FLASH_ATTN = True
@@ -187,12 +187,13 @@ def _siglip_varlen_attn(
         q_i = q[s:e].permute(1, 0, 2).unsqueeze(0)  # [1, H, L, D]
         k_i = k[s:e].permute(1, 0, 2).unsqueeze(0)
         v_i = v[s:e].permute(1, 0, 2).unsqueeze(0)
-        out_i = scaled_dot_product_attention(
-            q_i,
-            k_i,
-            v_i,
-            is_causal=False,
-        )
+        with sdpa_context_for_runtime():
+            out_i = scaled_dot_product_attention(
+                q_i,
+                k_i,
+                v_i,
+                is_causal=False,
+            )
         outputs.append(out_i.squeeze(0).permute(1, 0, 2))
 
     return torch.cat(outputs, dim=0)

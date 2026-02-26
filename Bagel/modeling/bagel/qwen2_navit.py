@@ -17,7 +17,6 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
-from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.functional import scaled_dot_product_attention
 from transformers.utils import ModelOutput
@@ -41,7 +40,7 @@ from modeling.qwen2.configuration_qwen2 import Qwen2Config as _Qwen2Config
 from modeling.cache_utils.taylorseer import (
     cal_type, taylor_cache_init, derivative_approximation, taylor_formula,
 )
-from .runtime_precision import cast_to_lowp, lowp_dtype_for_tensor
+from .runtime_precision import cast_to_lowp, lowp_dtype_for_tensor, sdpa_context_for_runtime
 
 
 torch._dynamo.config.cache_size_limit = 512
@@ -154,13 +153,14 @@ def _flash_attn_varlen_or_sdpa(
                 dtype=q_i.dtype,
             )
 
-        out_i = scaled_dot_product_attention(
-            q_i,
-            k_i,
-            v_i,
-            attn_mask=attn_mask,
-            is_causal=False,
-        )
+        with sdpa_context_for_runtime():
+            out_i = scaled_dot_product_attention(
+                q_i,
+                k_i,
+                v_i,
+                attn_mask=attn_mask,
+                is_causal=False,
+            )
         outputs.append(out_i.squeeze(0).permute(1, 0, 2))  # [Lq, H, D]
 
     return torch.cat(outputs, dim=0)
@@ -405,7 +405,7 @@ class PackedAttention(Qwen2Attention):
             for query_states, key_states, value_states, attention_mask_per_sample in zip(
                 unpacked_query_states, unpacked_key_states, unpacked_value_states, attention_mask
             ):
-                with sdpa_kernel(backends=[SDPBackend.EFFICIENT_ATTENTION]):
+                with sdpa_context_for_runtime():
                     attn_output = scaled_dot_product_attention(
                         query_states.to(attn_dtype).unsqueeze(0),
                         key_states.to(attn_dtype).unsqueeze(0),
@@ -594,7 +594,7 @@ class PackedAttentionMoT(Qwen2Attention):
             for query_states, key_states, value_states, attention_mask_per_sample in zip(
                 unpacked_query_states, unpacked_key_states, unpacked_value_states, attention_mask
             ):
-                with sdpa_kernel(backends=[SDPBackend.EFFICIENT_ATTENTION]):
+                with sdpa_context_for_runtime():
                     attn_output = scaled_dot_product_attention(
                         query_states.to(attn_dtype).unsqueeze(0),
                         key_states.to(attn_dtype).unsqueeze(0),

@@ -1,0 +1,161 @@
+% Main comparison tables (LaTeX-ready, ECCV-style table format)
+% Requires: \usepackage{booktabs}
+% Requires for resize: \usepackage{graphicx}
+
+\subsection{Main Comparison Targets}
+
+\begin{table}[tb]
+  \caption{Related unified self-evolving methods compared in this work (year column intentionally removed).}
+  \label{tab:main_related_methods}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}p{2.6cm}p{3.2cm}p{2.7cm}p{2.1cm}p{2.1cm}@{}}
+    \toprule
+    Method & Core self-evolution mechanism & Training signal & Optimization & Primary gain focus \\
+    \midrule
+    UniCorn \cite{han2026unicorn} & Proposer--Solver--Judge self-play with cognitive pattern reconstruction & Internal judging and reflection & Self-generated post-training supervision & T2I generation + U/G coupling \\
+    SEER / Endogenous Reprompting \cite{tang2026endogenous} & Endogenous evaluator + reprompter loop & Endogenous reward + model-rated thinking traces & RLVR then RLMT & Generation quality and evaluator quality \\
+    UniMRG \cite{su2026unimrg} & Generation-as-auxiliary signal for understanding & Self/aux generation-derived supervision & Post-training with generation objectives & Understanding uplift \\
+    UniGame \cite{su2025unigame} & Self-adversarial perturbation at unified interface & Model exposes own weak spots & Adversarial post-training & Robustness and consistency \\
+    SRUM \cite{jin2025srum} & Understanding module as internal evaluator for generation & Global + local self-rewards & Reward-based iterative post-training & Compositional generation \\
+    UAE + Unified-GRPO \cite{yan2025understandinggeneration} & UMM as auto-encoder with bidirectional reconstruction loop & Reconstruction similarity (I$\leftrightarrow$T$\leftrightarrow$I) & Two-stage Unified-GRPO RL & Bidirectional U/G transfer \\
+    Skywork UniPic 2.0 \cite{wei2025skyworkunipic2} & Progressive dual-task online RL for unified kontext model & Online RL rewards & Online RL post-training & Unified generation/editing + understanding \\
+    RecA \cite{xie2025reconstruction} & Reconstruction alignment using internal encoder semantics & Dense semantic signal from U-encoder & Reconstruction-alignment post-training & Generation fidelity/alignment \\
+    Turning Internal Gap into Self-Improvement \cite{han2025internalgap} & Internal-gap scoring and curriculum data curation & Understanding-based internal scoring & SFT + DPO pipeline & Generation uplift from U signal \\
+    SUDER \cite{hong2025dualselfrewards} & Dual-task likelihood self-reward via task reversal & Dual self-likelihood rewards & SimPO / GRPO variants & Both understanding and generation \\
+    UniRL \cite{mao2025unirl} & Iterative self-training with self-generated images/data & Self-generated data and cross-task supervision & SFT + GRPO iterative loop & Joint U/G improvement \\
+    Co-Reinforcement Learning \cite{jiang2025coreinforcement} & Joint RL then task-specific RL refinement & Reward-designed cross-task reinforcement & Multi-stage RL & Unified optimization efficiency \\
+    VARGPT-v1.1 \cite{zhuang2025vargpt} & Iterative instruction tuning + RL refinement & Iterative post-training alignment signals & Iterative IT + RL & Generation-centric unified lift \\
+    SILMM \cite{qu2024silmm} & Model-agnostic iterative self-feedback for alignment & Preference signal from self-feedback & DPO-style preference optimization & Compositional T2I alignment \\
+    ILLUME \cite{wang2024illume} & Self-assessment between text and self-generated images & Self-consistency + mismatch reasons & Multi-stage alignment training & U + G + editing gains \\
+    Unified Reward Model \cite{wang2025unifiedreward} & Shared reward model across understanding + generation & Learned reward from preference data & Reward model for PO/RLHF pipelines & Unified alignment infrastructure \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+\subsection{Common Benchmark Suite}
+
+\begin{table}[tb]
+  \caption{Recommended common benchmark suite (favoring high overlap across prior unified-method papers).}
+  \label{tab:benchmark_suite}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}p{1.9cm}p{2.3cm}p{1.2cm}p{4.8cm}@{}}
+    \toprule
+    Task & Benchmark & Metric & Why keep it in the shared comparison set \\
+    \midrule
+    Understanding & MMBench & Acc. & Very common in unified model reporting; strong broad perception/reasoning signal. \\
+    Understanding & MMMU & Acc. & High-coverage expert-level multimodal reasoning benchmark. \\
+    Understanding & TextVQA & Acc. & OCR-grounded reasoning benchmark frequently reported by unified models. \\
+    Understanding & SEED-Bench & Acc. & Commonly used generative-comprehension benchmark in UMM papers. \\
+    Understanding & RealWorldQA & Acc. & Real-world visual reasoning coverage used by recent unified systems. \\
+    Understanding & MMVet & Score & Fine-grained capability stress test with broad adoption in unified evaluations. \\
+    Understanding & MME-P & Score & Perception-focused diagnostic from the MME benchmark family. \\
+    Understanding & MME-C & Score & Cognition-focused diagnostic from the MME benchmark family. \\
+    Generation & GenEval (overall) & Score & Most common compositional prompt-following generation benchmark. \\
+    Generation & DPG-Bench & Score & Dense prompt-grounding benchmark commonly paired with GenEval. \\
+    Generation & WISE & Score & World-knowledge-aware generation reasoning benchmark used in recent UMM papers. \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+\subsection{Understanding Results Table (Template)}
+
+\begin{table}[tb]
+  \caption{Unified understanding benchmark comparison (fill with reported numbers; use -- when unavailable).}
+  \label{tab:understanding_results_main}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}p{2.8cm}cccccccc@{}}
+    \toprule
+    Method & MMBench & MMMU & TextVQA & SEED-Bench & RealWorldQA & MMVet & MME-P & MME-C \\
+    \midrule
+    UniCorn \cite{han2026unicorn} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SEER \cite{tang2026endogenous} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    UniMRG \cite{su2026unimrg} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    UniGame \cite{su2025unigame} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SRUM \cite{jin2025srum} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    UAE + Unified-GRPO \cite{yan2025understandinggeneration} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    Skywork UniPic 2.0 \cite{wei2025skyworkunipic2} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    RecA \cite{xie2025reconstruction} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    Turning Internal Gap \cite{han2025internalgap} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SUDER \cite{hong2025dualselfrewards} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    UniRL \cite{mao2025unirl} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    Co-RL \cite{jiang2025coreinforcement} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    VARGPT-v1.1 \cite{zhuang2025vargpt} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SILMM \cite{qu2024silmm} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    ILLUME \cite{wang2024illume} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \textbf{Ours} & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+\subsection{Generation Results Tables (Separate)}
+
+\begin{table}[tb]
+  \caption{Unified generation benchmark comparison (overall metrics).}
+  \label{tab:generation_results_overall}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}p{2.8cm}cccc@{}}
+    \toprule
+    Method & GenEval (overall) & DPG-Bench & WISE & Notes \\
+    \midrule
+    UniCorn \cite{han2026unicorn} & -- & -- & -- & -- \\
+    SEER \cite{tang2026endogenous} & -- & -- & -- & -- \\
+    UniMRG \cite{su2026unimrg} & -- & -- & -- & -- \\
+    UniGame \cite{su2025unigame} & -- & -- & -- & -- \\
+    SRUM \cite{jin2025srum} & -- & -- & -- & -- \\
+    UAE + Unified-GRPO \cite{yan2025understandinggeneration} & -- & -- & -- & -- \\
+    Skywork UniPic 2.0 \cite{wei2025skyworkunipic2} & -- & -- & -- & -- \\
+    RecA \cite{xie2025reconstruction} & -- & -- & -- & -- \\
+    Turning Internal Gap \cite{han2025internalgap} & -- & -- & -- & -- \\
+    SUDER \cite{hong2025dualselfrewards} & -- & -- & -- & -- \\
+    UniRL \cite{mao2025unirl} & -- & -- & -- & -- \\
+    Co-RL \cite{jiang2025coreinforcement} & -- & -- & -- & -- \\
+    VARGPT-v1.1 \cite{zhuang2025vargpt} & -- & -- & -- & -- \\
+    SILMM \cite{qu2024silmm} & -- & -- & -- & -- \\
+    ILLUME \cite{wang2024illume} & -- & -- & -- & -- \\
+    \textbf{Ours} & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+\begin{table}[tb]
+  \caption{GenEval subcategory breakdown (separate table). Subcategories follow the standard tags: single\_object, two\_object, counting, colors, position, color\_attr.}
+  \label{tab:generation_geneval_subcats}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}p{2.6cm}ccccccc@{}}
+    \toprule
+    Method & single\_object & two\_object & counting & colors & position & color\_attr & GenEval overall \\
+    \midrule
+    UniCorn \cite{han2026unicorn} & -- & -- & -- & -- & -- & -- & -- \\
+    SEER \cite{tang2026endogenous} & -- & -- & -- & -- & -- & -- & -- \\
+    UniMRG \cite{su2026unimrg} & -- & -- & -- & -- & -- & -- & -- \\
+    UniGame \cite{su2025unigame} & -- & -- & -- & -- & -- & -- & -- \\
+    SRUM \cite{jin2025srum} & -- & -- & -- & -- & -- & -- & -- \\
+    UAE + Unified-GRPO \cite{yan2025understandinggeneration} & -- & -- & -- & -- & -- & -- & -- \\
+    Skywork UniPic 2.0 \cite{wei2025skyworkunipic2} & -- & -- & -- & -- & -- & -- & -- \\
+    RecA \cite{xie2025reconstruction} & -- & -- & -- & -- & -- & -- & -- \\
+    Turning Internal Gap \cite{han2025internalgap} & -- & -- & -- & -- & -- & -- & -- \\
+    SUDER \cite{hong2025dualselfrewards} & -- & -- & -- & -- & -- & -- & -- \\
+    UniRL \cite{mao2025unirl} & -- & -- & -- & -- & -- & -- & -- \\
+    Co-RL \cite{jiang2025coreinforcement} & -- & -- & -- & -- & -- & -- & -- \\
+    VARGPT-v1.1 \cite{zhuang2025vargpt} & -- & -- & -- & -- & -- & -- & -- \\
+    SILMM \cite{qu2024silmm} & -- & -- & -- & -- & -- & -- & -- \\
+    ILLUME \cite{wang2024illume} & -- & -- & -- & -- & -- & -- & -- \\
+    \textbf{Ours} & -- & -- & -- & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
