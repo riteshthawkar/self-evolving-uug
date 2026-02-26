@@ -2518,75 +2518,64 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             cand_noncanonical_flags: List[bool] = []
             cand_pre_words: List[int] = []
 
-            # Spot-check with a subset of solver samples for speed.
-            for sc_idx in range(spot_check_samples):
-                real_idx = spot_check_offset + sc_idx
-                sc_temp = (
-                    float(solver_temperatures[real_idx])
-                    if real_idx < len(solver_temperatures)
-                    else float(self.cfg.temp)
-                )
-                sc_top_p = (
-                    float(solver_top_ps[real_idx])
-                    if real_idx < len(solver_top_ps)
-                    else float(self.cfg.top_p)
-                )
-                if _pps_enabled:
-                    sc_prompt = build_solver_prompt_pps(
-                        cand_q,
-                        template_index=real_idx,
-                        focus_hint=self._solver_focus_hint(real_idx),
-                    )
-                else:
-                    sc_prompt = build_solver_prompt(cand_q, focus_hint=self._solver_focus_hint(real_idx))
-                sc_out = self._generate(
-                    image=image,
-                    prompt=sc_prompt,
-                    adapter_name="default" if self.cfg.use_lora else None,
-                    max_new_tokens=self.cfg.max_new_tokens_solver,
-                    temperature=sc_temp,
-                    top_p=sc_top_p,
-                )
-                sc_ans_raw = _parse_answer(sc_out)
-                sc_ans_text = normalize_answer(sc_ans_raw)
-                if cand_choice_mode:
-                    sc_vote = self._parse_forced_choice_answer(
-                        sc_ans_raw, cand_option_a, cand_option_b
-                    )
-                    if not sc_vote:
-                        sc_vote = "ood"
-                    sc_low_info = False
-                    sc_noncanonical = False
-                else:
-                    sc_vote, sc_low_info, sc_noncanonical = self._normalize_answer_for_type(
-                        sc_ans_text,
-                        cand_answer_type,
-                    )
-                cand_outputs.append(sc_out)
-                cand_answers_raw.append(sc_ans_raw)
-                cand_answers_norm.append(sc_ans_text)
-                cand_vote_labels.append(sc_vote)
-                cand_low_info_flags.append(sc_low_info)
-                cand_noncanonical_flags.append(sc_noncanonical)
-                cand_pre_words.append(pre_answer_word_count(sc_out))
+            # ---------------------------------------------------------
+            # STE-first spot-check: ONE greedy call with token entropy
+            # instead of multiple temperature samples.  STE provides a
+            # continuous difficulty signal that has no dead zone, unlike
+            # sample entropy which is almost always 0 for easy questions.
+            # This reduces spot-check cost from 3 calls → 1 call per
+            # candidate while giving a BETTER difficulty ranking.
+            # ---------------------------------------------------------
+            _ste_spot_prompt = build_solver_prompt(cand_q, focus_hint=self._solver_focus_hint(0))
+            _ste_spot_tokens = max(1, int(getattr(self.cfg, "solver_token_entropy_tokens", 5)))
+            _ste_spot_out, _ste_spot_conf = self._generate_with_confidence(
+                image=image,
+                prompt=_ste_spot_prompt,
+                adapter_name="default" if self.cfg.use_lora else None,
+                max_new_tokens=self.cfg.max_new_tokens_solver,
+                margin_tokens=_ste_spot_tokens,
+            )
+            sc_ans_raw = _parse_answer(_ste_spot_out)
+            sc_ans_text = normalize_answer(sc_ans_raw)
+            sc_vote, sc_low_info, sc_noncanonical = self._normalize_answer_for_type(
+                sc_ans_text, cand_answer_type,
+            )
+            cand_outputs.append(_ste_spot_out)
+            cand_answers_raw.append(sc_ans_raw)
+            cand_answers_norm.append(sc_ans_text)
+            cand_vote_labels.append(sc_vote)
+            cand_low_info_flags.append(sc_low_info)
+            cand_noncanonical_flags.append(sc_noncanonical)
+            cand_pre_words.append(pre_answer_word_count(_ste_spot_out))
 
-            sc_hist: Dict[str, int] = {}
-            for ans in cand_vote_labels:
-                sc_hist[ans] = sc_hist.get(ans, 0) + 1
-            sc_probs = [c / float(spot_check_samples) for c in sc_hist.values()]
-            sc_entropy = shannon_entropy_nats(sc_probs)
-            sc_sorted = sorted(sc_probs, reverse=True)
-            sc_p1 = float(sc_sorted[0]) if sc_sorted else 0.0
-            sc_p2 = float(sc_sorted[1]) if len(sc_sorted) > 1 else 0.0
-            sc_margin = max(0.0, sc_p1 - sc_p2)
-            sc_maj_frac = sc_p1
-            cand_low_info_rate = (
-                float(sum(1.0 for x in cand_low_info_flags if x)) / float(max(1, len(cand_low_info_flags)))
+            # STE difficulty: use max token entropy as difficulty proxy.
+            # Higher max_entropy → model is more uncertain → harder question.
+            cand_ste_max = float(_ste_spot_conf.get("max_entropy", 0.0))
+            cand_ste_mean = float(_ste_spot_conf.get("mean_entropy", 0.0))
+
+            # Map STE to pseudo-entropy for compatibility with existing
+            # bucket classification.  Use the STE window for calibration
+            # if available, otherwise use a sigmoid.
+            _ste_window_vals = list(getattr(self, "_ste_window", []))
+            if len(_ste_window_vals) >= 8:
+                _ste_rank = sum(1 for e in _ste_window_vals if e < cand_ste_max)
+                _ste_quantile = float(_ste_rank) / float(len(_ste_window_vals))
+            else:
+                import math as _math
+                _sig_a = float(getattr(self.cfg, "solver_token_entropy_sigmoid_alpha", 1.5))
+                _sig_b = float(getattr(self.cfg, "solver_token_entropy_sigmoid_beta", 2.0))
+                _ste_quantile = 1.0 / (1.0 + _math.exp(-_sig_a * (cand_ste_max - _sig_b)))
+
+            # Use STE quantile to determine easy/non-easy.
+            # Candidates above the 30th percentile are considered non-easy.
+            _ste_easy_threshold = max(
+                0.0, float(getattr(self.cfg, "ste_spot_easy_quantile", 0.30))
             )
-            cand_noncanonical_rate = (
-                float(sum(1.0 for x in cand_noncanonical_flags if x))
-                / float(max(1, len(cand_noncanonical_flags)))
-            )
+            sc_entropy = cand_ste_max  # use raw STE as entropy proxy for scoring
+            sc_margin = 1.0 - _ste_quantile  # invert: high quantile → low margin
+            sc_maj_frac = 1.0  # single sample → always unanimous
+            cand_low_info_rate = 1.0 if sc_low_info else 0.0
+            cand_noncanonical_rate = 1.0 if sc_noncanonical else 0.0
             cand_quality_penalty = (
                 cand_noncanonical_rate
                 * max(0.0, float(getattr(self.cfg, "proposer_candidate_noncanonical_penalty", 0.12)))
@@ -2595,12 +2584,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             )
             cand_meta["_spot_low_info_rate"] = f"{cand_low_info_rate:.6f}"
             cand_meta["_spot_noncanonical_rate"] = f"{cand_noncanonical_rate:.6f}"
-            sc_bucket = self._difficulty_bucket(
-                sc_entropy, sc_margin, sc_maj_frac, entropy_easy_threshold
+            cand_meta["_ste_max_entropy"] = f"{cand_ste_max:.6f}"
+            cand_meta["_ste_quantile"] = f"{_ste_quantile:.6f}"
+
+            # Classify difficulty using STE quantile instead of sample entropy.
+            sc_bucket = "easy" if _ste_quantile < _ste_easy_threshold else (
+                "hard" if _ste_quantile > 0.70 else "medium"
             )
-            sc_is_easy = bool(
-                (sc_entropy < entropy_easy_threshold) and (sc_margin > margin_max)
-            )
+            sc_is_easy = bool(_ste_quantile < _ste_easy_threshold)
             cand_bucket_bonus = 0.06 if sc_bucket == desired_difficulty_bucket else 0.0
             if sc_bucket == "easy":
                 cand_bucket_bonus -= 0.03
@@ -2736,121 +2727,6 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             if candidate_noncanonical_rate_list
             else 0.0
         )
-
-        # -----------------------------------------------------------------
-        # Difficulty-escalating retry: when ALL K candidates are easy,
-        # re-generate with target_difficulty="hard" and boosted temperature.
-        # This gives the proposer a second chance to produce a non-trivial
-        # question before we fall back to "best-of-easy".
-        # -----------------------------------------------------------------
-        _escalation_enabled = bool(
-            getattr(self.cfg, "proposer_difficulty_escalation_enabled", True)
-        )
-        if all_easy_candidate_group and _escalation_enabled and (not fallback_used):
-            _esc_temp_boost = max(
-                1.0,
-                float(getattr(self.cfg, "proposer_escalation_temp_boost", 1.3)),
-            )
-            _esc_temp = min(2.0, proposer_temp_ctrl * _esc_temp_boost)
-            _esc_prompt = build_proposer_multi_prompt(
-                target_difficulty="hard",
-                num_questions=num_proposer_candidates,
-                image_source_hint=_src_hint,
-                curriculum_arm_hint=curriculum_arm_hint,
-                replay_anchor_hints=replay_anchor_hints,
-            )
-            _esc_out = self._generate(
-                image=image,
-                prompt=_esc_prompt,
-                adapter_name="proposer" if self.cfg.use_lora else None,
-                max_new_tokens=self.cfg.max_new_tokens_proposer,
-                temperature=_esc_temp,
-                top_p=proposer_top_p_ctrl,
-            )
-            _esc_candidates = self._parse_proposer_question_candidates(_esc_out)
-            _esc_questions = [
-                c.get("text", "").strip()
-                for c in _esc_candidates
-                if c.get("text", "").strip()
-            ]
-            for esc_idx, esc_q in enumerate(_esc_questions):
-                esc_q = esc_q.replace("\n", " ").strip()
-                if not esc_q:
-                    continue
-                esc_meta = (
-                    _esc_candidates[esc_idx]
-                    if esc_idx < len(_esc_candidates)
-                    else {"text": esc_q}
-                )
-                esc_compiled, esc_ok, _esc_reason = self._compile_question_from_slots(
-                    esc_q, esc_meta
-                )
-                if esc_ok and esc_compiled:
-                    esc_q = esc_compiled
-                if not self._is_objective_question(esc_q):
-                    continue
-                esc_cert = self._proposer_certificate_score(esc_q, esc_meta)
-                if float(esc_cert.get("valid", 0.0)) < 0.5:
-                    continue
-                # Quick spot-check with solver
-                esc_solver_prompt = build_solver_prompt(esc_q)
-                esc_outputs: List[str] = []
-                esc_answers_raw: List[str] = []
-                esc_answers_norm: List[str] = []
-                esc_pre_words: List[int] = []
-                for sc_idx in range(spot_check_samples):
-                    real_idx = spot_check_offset + sc_idx
-                    sc_temp = (
-                        float(solver_temperatures[real_idx])
-                        if real_idx < len(solver_temperatures)
-                        else float(self.cfg.temp)
-                    )
-                    sc_top_p = (
-                        float(solver_top_ps[real_idx])
-                        if real_idx < len(solver_top_ps)
-                        else float(self.cfg.top_p)
-                    )
-                    sc_solver_out = self._generate(
-                        image=image,
-                        prompt=esc_solver_prompt,
-                        adapter_name="default" if self.cfg.use_lora else None,
-                        max_new_tokens=self.cfg.max_new_tokens_solver,
-                        temperature=sc_temp,
-                        top_p=sc_top_p,
-                    )
-                    sc_ans_raw = _parse_answer(sc_solver_out)
-                    sc_ans_text = normalize_answer(sc_ans_raw)
-                    esc_outputs.append(sc_solver_out)
-                    esc_answers_raw.append(sc_ans_raw)
-                    esc_answers_norm.append(sc_ans_text)
-                    esc_pre_words.append(pre_answer_word_count(sc_solver_out))
-                esc_hist: Dict[str, int] = {}
-                for _ea in esc_answers_norm:
-                    if _ea:
-                        esc_hist[_ea] = esc_hist.get(_ea, 0) + 1
-                esc_n = max(1, len([a for a in esc_answers_norm if a]))
-                esc_probs = [float(c) / float(esc_n) for c in esc_hist.values()] if esc_hist else [1.0]
-                esc_entropy = shannon_entropy_nats(esc_probs)
-                esc_maj_frac = float(max(esc_hist.values())) / float(esc_n) if esc_hist else 1.0
-                esc_margin = esc_maj_frac
-                esc_bucket = self._difficulty_bucket(
-                    esc_entropy, esc_margin, esc_maj_frac, entropy_easy_threshold
-                )
-                if esc_bucket != "easy":
-                    # Escalation found a non-easy question — accept it
-                    best_accept_question = esc_q
-                    best_accept_outputs = esc_outputs
-                    best_accept_answers_raw = esc_answers_raw
-                    best_accept_answers_norm = esc_answers_norm
-                    best_accept_pre_words = esc_pre_words
-                    best_accept_entropy = esc_entropy
-                    best_accept_margin = esc_margin
-                    best_accept_meta = dict(esc_meta)
-                    best_accept_choice_mode = False
-                    best_accept_choice_option_a = ""
-                    best_accept_choice_option_b = ""
-                    all_easy_candidate_group = False
-                    break
 
         # Minimum spot-check entropy gate: if all candidates are easy and even
         # the best spot-check entropy is near zero, force exploration for
@@ -3359,39 +3235,40 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         proposer_anchor_bonus = self._anchor_replay_bonus(question, chosen_strategy_used)
         proposer_contrastive_replay_bonus = self._contrastive_replay_adjustment(question)
         proposer_bonus_enabled = difficulty_bucket_observed in {"medium", "hard"}
-        # Solver Token Entropy (STE) integration.
-        # STE is a PERMANENT fallback for the sample-entropy dead zone, not
-        # just a warm-start crutch.  Whenever sample entropy=0 (all 7
-        # solver answers agree), STE provides the only continuous signal.
-        # After sample entropy breaks zero, STE becomes a complementary
-        # signal that rewards questions with high token-level uncertainty.
+        # -----------------------------------------------------------
+        # STE-primary reward architecture.
+        # STE is the PRIMARY difficulty signal — it provides a continuous
+        # gradient even when sample entropy is dead (all solvers agree).
+        # Sample entropy is a complementary bonus when it's non-zero.
+        # This eliminates the fundamental dead-zone problem: STE always
+        # differentiates easy from hard questions via token-level
+        # uncertainty, costing only 1 greedy call vs 5-7 samples.
+        # -----------------------------------------------------------
         _ste_is_primary = bool(
-            _ste_enabled
-            and (entropy_nats < 1e-6 or proposer_warm_start_active)
-            and _ste_difficulty > 0.0
+            _ste_enabled and _ste_difficulty > 0.0
         )
         proposer_bonus_warm_enabled = proposer_bonus_enabled or proposer_warm_start_active or _ste_is_primary
         if _ste_is_primary:
-            # STE overrides the entropy-based base reward.  Use higher
-            # weight during warm-start (model hasn't seen real entropy yet)
-            # and a slightly lower but still dominant weight afterwards.
-            if proposer_warm_start_active:
-                _ste_primary_weight = max(
+            # STE is always the dominant reward component.
+            _ste_primary_weight = max(
+                0.0,
+                float(
+                    getattr(self.cfg, "proposer_ste_primary_weight", 0.70)
+                ),
+            )
+            # Blend: STE dominates, sample entropy provides bonus when available
+            _sample_entropy_bonus = 0.0
+            if entropy_nats > 1e-6:
+                _sample_weight = max(
                     0.0,
                     float(
-                        getattr(self.cfg, "proposer_ste_warm_start_weight", 0.70)
+                        getattr(self.cfg, "proposer_sample_entropy_weight", 0.30)
                     ),
                 )
-            else:
-                _ste_primary_weight = max(
-                    0.0,
-                    float(
-                        getattr(self.cfg, "proposer_ste_warm_start_weight", 0.70)
-                    ),
-                ) * 0.85  # slightly reduced post-warm-start (~0.60)
-            proposer_reward = _ste_primary_weight * _ste_difficulty
+                _sample_entropy_bonus = _sample_weight * proposer_reward_raw
+            proposer_reward = _ste_primary_weight * _ste_difficulty + _sample_entropy_bonus
         elif _ste_enabled and _ste_difficulty > 0.0:
-            # Sample entropy is working (>0): STE as complementary signal.
+            # Fallback: STE available but not dominant — use as complement
             _ste_weight = max(
                 0.0,
                 float(

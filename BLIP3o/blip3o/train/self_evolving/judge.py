@@ -13,28 +13,34 @@ if TYPE_CHECKING:
 
 
 def _clone_solver_lightweight(solver):
-    """Clone a solver by copying state_dict instead of full deepcopy.
+    """Clone a solver without deepcopying non-model state.
 
-    For large models (e.g. 8B params) ``copy.deepcopy`` doubles memory.
-    Instead we create a shallow structural copy and only clone the
-    ``state_dict`` tensors so that the original and clone share no
-    gradient graph but we avoid the multi-GB overhead of deepcopy.
-
-    Falls back to ``copy.deepcopy`` if the solver does not expose a
-    standard ``model`` attribute with ``state_dict``.
+    For large training objects, ``copy.deepcopy(solver)`` can duplicate
+    processor/tokenizer/runtime fields that the judge does not need.
+    We keep a shallow solver copy but deep-copy only ``solver.model`` so
+    the frozen judge never shares train-time parameters with the live model.
     """
     if not hasattr(solver, "model") or not hasattr(solver.model, "state_dict"):
         return copy.deepcopy(solver)
 
     # Shallow-copy the solver object (fields like processor are shared — fine)
     cloned = copy.copy(solver)
-    # Deep-copy only the model state tensors
-    cloned.model = copy.copy(solver.model)
-    cloned.model.load_state_dict(
-        {k: v.clone() for k, v in solver.model.state_dict().items()}
-    )
+
+    # Deep-copy only the model to avoid parameter aliasing with live training.
+    # If this fails for a custom module, fall back to full deepcopy for safety.
+    try:
+        cloned_model = copy.deepcopy(solver.model)
+    except Exception:
+        return copy.deepcopy(solver)
+
+    src_param_ids = {id(param) for param in solver.model.parameters()}
+    if any(id(param) in src_param_ids for param in cloned_model.parameters()):
+        return copy.deepcopy(solver)
+
+    cloned.model = cloned_model
+    cloned.model.eval()
     for param in cloned.model.parameters():
-        param.requires_grad = False
+        param.requires_grad_(False)
     return cloned
 
 

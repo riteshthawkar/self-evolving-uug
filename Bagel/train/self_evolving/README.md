@@ -10,11 +10,15 @@ BAGEL with role-specific LoRA adapters.
 - `train`:
   rollout plus optimizer-backed proposer/solver updates with
   `reinforce` or `grpo`-style normalized advantages.
+- `unified_self_evolving`:
+  alternating understanding/generation phases with generation→understanding
+  replay mixing (buffer or folder-backed pool).
 
 ## Entrypoint
 
 ```bash
 python3 train/train_self_evolving.py \
+  --experiment understanding_self_evolving \
   --model_path /path/to/BAGEL-7B-MoT \
   --image_dir /path/to/images \
   --output_dir /path/to/outputs \
@@ -25,6 +29,7 @@ python3 train/train_self_evolving.py \
 
 ```bash
 python3 train/train_self_evolving.py \
+  --experiment understanding_self_evolving \
   --model_path /path/to/BAGEL-7B-MoT \
   --image_dir /path/to/images \
   --output_dir /path/to/outputs \
@@ -32,6 +37,38 @@ python3 train/train_self_evolving.py \
   --enable_lora \
   --policy_updates_enabled \
   --policy_update_method grpo
+```
+
+## Unified mode
+
+```bash
+python3 train/train_self_evolving.py \
+  --experiment unified_self_evolving \
+  --model_path /path/to/BAGEL-7B-MoT \
+  --image_dir /path/to/images \
+  --output_dir /path/to/outputs \
+  --steps 2000 \
+  --suder_generation_enabled \
+  --understanding_steps_per_cycle 3 \
+  --generation_steps_per_cycle 2 \
+  --gen_mix_source_mode buffer \
+  --enable_lora \
+  --policy_updates_enabled \
+  --policy_update_method grpo
+```
+
+Generation-only loop (no U-phase):
+
+```bash
+python3 train/train_self_evolving.py \
+  --experiment generation_self_evolving \
+  --model_path /path/to/BAGEL-7B-MoT \
+  --image_dir /path/to/images \
+  --output_dir /path/to/outputs \
+  --steps 1000 \
+  --suder_generation_enabled \
+  --generation_steps_per_cycle 1 \
+  --understanding_steps_per_cycle 0
 ```
 
 Key train-mode flags:
@@ -58,5 +95,7 @@ Outputs:
 
 - `rollouts.jsonl`: understanding phase traces + update diagnostics
 - `generation_rollouts.jsonl`: SUDER generation traces + update diagnostics
+- `metrics.jsonl`: periodic heartbeat records (`log_every`) + final summary/error rows
+- `status.json`: latest run state snapshot (`running`/`completed`/`failed`) with progress + ETA
 - `summary.json`: run-level metrics
 - `checkpoints/step_*.pt`: adapter/update state checkpoints (train mode)
