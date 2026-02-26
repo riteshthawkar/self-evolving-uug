@@ -64,6 +64,7 @@ GEN_SPEC_MIN_QA_PAIRS="${GEN_SPEC_MIN_QA_PAIRS:-2}"
 GEN_SPEC_TEMPERATURE="${GEN_SPEC_TEMPERATURE:-0.9}"
 MAX_NEW_TOKENS_GEN_SPEC="${MAX_NEW_TOKENS_GEN_SPEC:-384}"
 GEN_IMAGE_SIZE="${GEN_IMAGE_SIZE:-640}"
+GEN_NUM_TIMESTEPS="${GEN_NUM_TIMESTEPS:-50}"
 SAVE_GENERATED_IMAGES="${SAVE_GENERATED_IMAGES:-0}"
 ENABLE_LORA="${ENABLE_LORA:-0}"
 LORA_RANK="${LORA_RANK:-16}"
@@ -94,6 +95,9 @@ ENABLE_ROCM_AUTOCAST="${ENABLE_ROCM_AUTOCAST:-0}"
 TORCH_BLAS_PREFER_HIPBLASLT="${TORCH_BLAS_PREFER_HIPBLASLT:-0}"
 FORCE_MATH_SDPA="${FORCE_MATH_SDPA:-auto}"                 # auto|0|1
 BAGEL_COMPILE_BLOCK_MASK="${BAGEL_COMPILE_BLOCK_MASK:-auto}" # auto|0|1
+ROCM_SAFE_MODE="${ROCM_SAFE_MODE:-1}"                      # 1 => conservative defaults on AMD/ROCm
+ROCM_SAFE_GEN_IMAGE_SIZE="${ROCM_SAFE_GEN_IMAGE_SIZE:-512}"
+ROCM_SAFE_GEN_TIMESTEPS="${ROCM_SAFE_GEN_TIMESTEPS:-24}"
 TRAIN_UNDERSTANDING_PROPOSER="${TRAIN_UNDERSTANDING_PROPOSER:-1}"
 TRAIN_SOLVER="${TRAIN_SOLVER:-1}"
 TRAIN_GENERATION_PROPOSER="${TRAIN_GENERATION_PROPOSER:-1}"
@@ -193,15 +197,39 @@ PY
 )"
 
 if [[ "$ROCM_RUNTIME" == "1" ]]; then
-  if [[ "$MULTI_GPU_SPLIT" == "auto" ]]; then
-    MULTI_GPU_SPLIT="off"
-    echo "[B1] ROCm detected: forcing MULTI_GPU_SPLIT=off in auto mode for stability."
-  fi
-  if [[ "$FORCE_MATH_SDPA" == "auto" ]]; then
+  if [[ "$ROCM_SAFE_MODE" == "1" ]]; then
+    if [[ "$MULTI_GPU_SPLIT" != "off" ]]; then
+      echo "[B1] ROCm safe mode: forcing MULTI_GPU_SPLIT=off."
+      MULTI_GPU_SPLIT="off"
+    fi
+    if [[ -n "$VAE_DEVICE" ]]; then
+      echo "[B1] ROCm safe mode: ignoring explicit VAE_DEVICE='$VAE_DEVICE' and using model device."
+      VAE_DEVICE=""
+    fi
     FORCE_MATH_SDPA="1"
-  fi
-  if [[ "$BAGEL_COMPILE_BLOCK_MASK" == "auto" ]]; then
     BAGEL_COMPILE_BLOCK_MASK="0"
+    DISABLE_FLASH_ATTN="1"
+    DISABLE_AUTOCAST="1"
+
+    if [[ "$GEN_IMAGE_SIZE" -gt "$ROCM_SAFE_GEN_IMAGE_SIZE" ]]; then
+      echo "[B1] ROCm safe mode: capping GEN_IMAGE_SIZE $GEN_IMAGE_SIZE -> $ROCM_SAFE_GEN_IMAGE_SIZE."
+      GEN_IMAGE_SIZE="$ROCM_SAFE_GEN_IMAGE_SIZE"
+    fi
+    if [[ "$GEN_NUM_TIMESTEPS" -gt "$ROCM_SAFE_GEN_TIMESTEPS" ]]; then
+      echo "[B1] ROCm safe mode: capping GEN_NUM_TIMESTEPS $GEN_NUM_TIMESTEPS -> $ROCM_SAFE_GEN_TIMESTEPS."
+      GEN_NUM_TIMESTEPS="$ROCM_SAFE_GEN_TIMESTEPS"
+    fi
+  else
+    if [[ "$MULTI_GPU_SPLIT" == "auto" ]]; then
+      MULTI_GPU_SPLIT="off"
+      echo "[B1] ROCm detected: forcing MULTI_GPU_SPLIT=off in auto mode for stability."
+    fi
+    if [[ "$FORCE_MATH_SDPA" == "auto" ]]; then
+      FORCE_MATH_SDPA="1"
+    fi
+    if [[ "$BAGEL_COMPILE_BLOCK_MASK" == "auto" ]]; then
+      BAGEL_COMPILE_BLOCK_MASK="0"
+    fi
   fi
 fi
 
@@ -279,6 +307,7 @@ if [[ "$ENABLE_SUDER" == "1" ]]; then
     --gen_spec_min_qa_pairs "$GEN_SPEC_MIN_QA_PAIRS"
     --gen_spec_temperature "$GEN_SPEC_TEMPERATURE"
     --max_new_tokens_gen_spec "$MAX_NEW_TOKENS_GEN_SPEC"
+    --generation_num_timesteps "$GEN_NUM_TIMESTEPS"
     --generation_image_size "$GEN_IMAGE_SIZE"
   )
   if [[ "$SAVE_GENERATED_IMAGES" == "1" ]]; then
@@ -397,6 +426,7 @@ echo "[B1]   Steps:      $STEPS"
 echo "[B1]   Device:     $DEVICE"
 echo "[B1]   GPUs:       count=$GPU_COUNT split=$MULTI_GPU_SPLIT"
 echo "[B1]   Runtime:    rocm=$ROCM_RUNTIME force_math_sdpa=$FORCE_MATH_SDPA"
+echo "[B1]   SafeMode:   rocm_safe_mode=$ROCM_SAFE_MODE"
 if [[ -n "$VAE_DEVICE" ]]; then
   echo "[B1]   VAE device: $VAE_DEVICE"
 fi
@@ -406,6 +436,7 @@ echo "[B1]   Autocast:   disabled=$DISABLE_AUTOCAST dtype=$BAGEL_AUTOCAST_DTYPE"
 echo "[B1]   ROCm AMP:   enable=$ENABLE_ROCM_AUTOCAST"
 echo "[B1]   BLAS:       TORCH_BLAS_PREFER_HIPBLASLT=$TORCH_BLAS_PREFER_HIPBLASLT"
 echo "[B1]   BlockMask:  compile=$BAGEL_COMPILE_BLOCK_MASK"
+echo "[B1]   GenCfg:     image_size=$GEN_IMAGE_SIZE timesteps=$GEN_NUM_TIMESTEPS"
 echo "[B1]   Schedule:   U=$UNDERSTANDING_STEPS_PER_CYCLE G=$GENERATION_STEPS_PER_CYCLE mix=$GEN_MIX_SOURCE_MODE"
 echo "[B1]   Proposer:   K=$PROPOSER_NUM_CANDIDATES spot=$PROPOSER_SPOT_CHECK_SAMPLES"
 if [[ "$RUN_MODE" == "train" ]]; then
@@ -433,10 +464,12 @@ export BAGEL_POLICY_MIN_VIT_EDGE="$POLICY_MIN_VIT_EDGE"
 export BAGEL_POLICY_OOM_MAX_RETRIES="$POLICY_OOM_MAX_RETRIES"
 export BAGEL_POLICY_OOM_EDGE_DECAY="$POLICY_OOM_EDGE_DECAY"
 export BAGEL_POLICY_MAX_COMPLETION_TOKENS="$POLICY_MAX_COMPLETION_TOKENS"
+export PYTHONUNBUFFERED=1
+export PYTHONFAULTHANDLER=1
 
 cd "$BAGEL_ROOT"
 set +e
-"$PYTHON_BIN" train/train_self_evolving.py \
+"$PYTHON_BIN" -u train/train_self_evolving.py \
   --model_path "$MODEL_PATH" \
   --device "$DEVICE" \
   --vae_device "$VAE_DEVICE" \

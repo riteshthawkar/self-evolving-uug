@@ -61,7 +61,7 @@ class BagelRolloutAdapter:
         size = max(min_image, int(image_size))
         # Default ROCm safety clamp to reduce OOM risk in VAE decode.
         if getattr(torch.version, "hip", None):
-            rocm_cap = max(min_image, int(os.environ.get("BAGEL_GEN_ROCM_MAX_IMAGE_SIZE", "640") or "640"))
+            rocm_cap = max(min_image, int(os.environ.get("BAGEL_GEN_ROCM_MAX_IMAGE_SIZE", "512") or "512"))
             size = min(size, rocm_cap)
         steps = max(min_steps, int(num_timesteps))
 

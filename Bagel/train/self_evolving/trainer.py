@@ -355,8 +355,20 @@ class SelfEvolvingUnderstandingTrainer:
                 "spec_retry_temperature": float(spec_retry_temperature),
             }
 
+        max_spec_prompt_chars = max(
+            64,
+            int(os.environ.get("BAGEL_MAX_SPEC_PROMPT_CHARS", "384") or "384"),
+        )
+        gen_spec_prompt = str(spec.prompt or "").strip()
+        spec_prompt_truncated = False
+        if len(gen_spec_prompt) > max_spec_prompt_chars:
+            spec_prompt_truncated = True
+            clipped = gen_spec_prompt[:max_spec_prompt_chars]
+            clipped_ws = clipped.rsplit(" ", 1)[0].strip()
+            gen_spec_prompt = clipped_ws if clipped_ws else clipped.strip()
+
         generated = self.adapter.generate_image_from_spec(
-            spec=spec.prompt,
+            spec=gen_spec_prompt,
             cfg_text_scale=float(self.cfg.generation_cfg_text_scale),
             cfg_img_scale=float(self.cfg.generation_cfg_img_scale),
             num_timesteps=int(self.cfg.generation_num_timesteps),
@@ -372,6 +384,7 @@ class SelfEvolvingUnderstandingTrainer:
                 "spec_prompt": spec.prompt,
                 "qa_pair_count": len(spec.qa_pairs),
                 "proposer_spec_raw": spec_out.text if self.cfg.save_raw_generations else "",
+                "spec_prompt_truncated": bool(spec_prompt_truncated),
                 "policy_update_attempted": False,
                 "policy_update_applied": False,
                 "policy_update_reason": "generation_failed",
@@ -497,6 +510,8 @@ class SelfEvolvingUnderstandingTrainer:
             "status": "ok",
             "image_path": image_path,
             "spec_prompt": spec.prompt,
+            "spec_prompt_for_generation": gen_spec_prompt,
+            "spec_prompt_truncated": bool(spec_prompt_truncated),
             "qa_pair_count": len(spec.qa_pairs),
             "qa_pairs": [{"question": qa.question, "answer": normalize_answer(qa.answer)} for qa in spec.qa_pairs],
             "proposer_spec_raw": spec_out.text if self.cfg.save_raw_generations else "",
