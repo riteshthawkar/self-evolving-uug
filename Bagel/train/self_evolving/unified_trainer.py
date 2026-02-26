@@ -709,7 +709,13 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
 
                 per_candidate_stats: List[Dict[str, Any]] = []
                 applied_count = 0
+                max_proposer_updates = max(
+                    0,
+                    int(os.environ.get("BAGEL_PROPOSER_POLICY_MAX_CANDIDATES", "0") or "0"),
+                )
                 for cand, cand_reward in zip(valid_candidates, group_rewards):
+                    if max_proposer_updates > 0 and len(per_candidate_stats) >= max_proposer_updates:
+                        break
                     stats = self.proposer_updater.step(
                         image=image,
                         prompt=build_proposer_prompt(),
@@ -788,7 +794,13 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             solver_update_reason = "easy_question_skip"
         elif self.policy_updates_enabled and self.cfg.train_solver and self.solver_updater is not None:
             solver_prompt = build_solver_prompt(question)
+            max_solver_updates = max(
+                0,
+                int(os.environ.get("BAGEL_SOLVER_POLICY_MAX_SAMPLES", "0") or "0"),
+            )
             for idx, (sample_raw, _) in enumerate(solver_samples):
+                if max_solver_updates > 0 and idx >= max_solver_updates:
+                    break
                 sample_reward = (
                     float(solver_group_rewards[idx])
                     if idx < len(solver_group_rewards)

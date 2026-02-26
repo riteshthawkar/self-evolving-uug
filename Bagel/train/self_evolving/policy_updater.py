@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 import math
 from dataclasses import dataclass
@@ -95,6 +96,27 @@ def _compute_advantage(
     return float(reward - baseline)
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+    return str(os.environ.get(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_retry_caps(initial_cap: int, *, min_cap: int) -> List[int]:
+    caps: List[int] = []
+    curr = max(int(min_cap), int(initial_cap))
+    while True:
+        if not caps or caps[-1] != curr:
+            caps.append(curr)
+        if curr <= int(min_cap):
+            break
+        next_cap = max(int(min_cap), int(round(float(curr) * 0.75)))
+        if next_cap >= curr:
+            next_cap = max(int(min_cap), curr - 8)
+        if next_cap == curr:
+            break
+        curr = int(next_cap)
+    return caps
+
+
 def _build_understanding_train_batch(
     runtime: BagelRuntime,
     *,
@@ -134,10 +156,25 @@ def _build_understanding_train_batch(
         )
         image_split_len = int(image_inputs["packed_seqlens"][0].item())
 
+    prompt_text = str(prompt or "")
+    max_prompt_tokens = max(
+        8,
+        int(os.environ.get("BAGEL_POLICY_MAX_PROMPT_TOKENS", "64") or "64"),
+    )
+    try:
+        prompt_ids = tokenizer.encode(prompt_text)
+        if len(prompt_ids) > max_prompt_tokens:
+            prompt_text = tokenizer.decode(prompt_ids[:max_prompt_tokens])
+    except Exception:
+        # Fallback to character clipping if tokenizer decode path fails.
+        max_prompt_chars = max(32, int(os.environ.get("BAGEL_POLICY_MAX_PROMPT_CHARS", "256") or "256"))
+        if len(prompt_text) > max_prompt_chars:
+            prompt_text = prompt_text[:max_prompt_chars]
+
     prompt_inputs, curr_lens, curr_rope = model.prepare_prompts(
         curr_kvlens=curr_lens,
         curr_rope=curr_rope,
-        prompts=[str(prompt or "")],
+        prompts=[prompt_text],
         tokenizer=tokenizer,
         new_token_ids=new_token_ids,
     )
@@ -325,6 +362,27 @@ class BagelRolePolicyUpdater:
             lr=float(cfg.policy_lr),
             weight_decay=float(cfg.policy_weight_decay),
         )
+        self._rocm_runtime = bool(getattr(torch.version, "hip", None))
+        self._rocm_force_text_only = _env_flag("BAGEL_POLICY_ROCM_FORCE_TEXT_ONLY", "1")
+        self._empty_cache_each_step = _env_flag(
+            "BAGEL_POLICY_EMPTY_CACHE_EACH_STEP",
+            "1" if self._rocm_runtime else "0",
+        )
+        self._oom_force_text_only_steps = max(
+            1,
+            int(os.environ.get("BAGEL_POLICY_OOM_FORCE_TEXT_ONLY_STEPS", "64") or "64"),
+        )
+        self._oom_pause_after = max(
+            1,
+            int(os.environ.get("BAGEL_POLICY_OOM_PAUSE_AFTER_CONSECUTIVE", "6") or "6"),
+        )
+        self._oom_pause_steps = max(
+            1,
+            int(os.environ.get("BAGEL_POLICY_OOM_PAUSE_STEPS", "32") or "32"),
+        )
+        self._consecutive_oom = 0
+        self._force_text_only_until_step = 0
+        self._pause_until_step = 0
 
     def state_dict(self) -> Dict:
         return {
@@ -397,6 +455,24 @@ class BagelRolePolicyUpdater:
             eps=float(self.cfg.grpo_eps),
         )
 
+        if self.step_id <= self._pause_until_step:
+            return PolicyStepResult(
+                skipped=True,
+                reason="oom_pause_cooldown",
+                reward=scaled_reward,
+                baseline=scaled_baseline,
+                advantage=advantage,
+                loss=0.0,
+                ce_loss=0.0,
+                grad_norm=0.0,
+                optimizer_step_applied=False,
+                token_count=0,
+            ).to_dict()
+
+        if self._empty_cache_each_step and torch.cuda.is_available():
+            gc.collect()
+            torch.cuda.empty_cache()
+
         base_policy_edge = max(64, int(os.environ.get("BAGEL_POLICY_MAX_VIT_EDGE", "448") or "448"))
         min_policy_edge = max(64, int(os.environ.get("BAGEL_POLICY_MIN_VIT_EDGE", "224") or "224"))
         if min_policy_edge > base_policy_edge:
@@ -422,36 +498,78 @@ class BagelRolePolicyUpdater:
                 or str(min(max_completion_tokens, 96))
             ),
         )
+        text_only_max_retries = max(
+            1,
+            int(os.environ.get("BAGEL_POLICY_TEXT_ONLY_MAX_RETRIES", "3") or "3"),
+        )
+        min_completion_floor = max(
+            8,
+            int(os.environ.get("BAGEL_POLICY_MIN_COMPLETION_TOKENS", "24") or "24"),
+        )
+        text_only_mode_requested = _env_flag("BAGEL_POLICY_TEXT_ONLY_MODE", "0")
+        text_only_mode_active = bool(
+            text_only_mode_requested
+            or (self._rocm_runtime and self._rocm_force_text_only)
+            or (self.step_id <= self._force_text_only_until_step)
+        )
+        text_only_caps = _build_retry_caps(
+            text_only_max_completion_tokens,
+            min_cap=min_completion_floor,
+        )[:text_only_max_retries]
 
-        attempt_specs: List[Dict[str, object]] = [{"include_image": True, "policy_edge": int(base_policy_edge)}]
-        while len(attempt_specs) < oom_max_retries:
-            prev_edge = int(attempt_specs[-1]["policy_edge"])
-            next_edge = max(min_policy_edge, int(round(float(prev_edge) * edge_decay)))
-            if next_edge >= prev_edge:
-                next_edge = max(min_policy_edge, int(prev_edge) - 32)
-            if next_edge == prev_edge:
-                break
-            attempt_specs.append({"include_image": True, "policy_edge": int(next_edge)})
-        if text_only_fallback:
-            attempt_specs.append({"include_image": False, "policy_edge": 0})
+        if text_only_mode_active:
+            attempt_specs: List[Dict[str, object]] = [
+                {"include_image": False, "policy_edge": 0, "completion_cap": int(cap)}
+                for cap in text_only_caps
+            ]
+        else:
+            attempt_specs = [
+                {
+                    "include_image": True,
+                    "policy_edge": int(base_policy_edge),
+                    "completion_cap": int(max_completion_tokens),
+                }
+            ]
+            while len(attempt_specs) < oom_max_retries:
+                prev_edge = int(attempt_specs[-1].get("policy_edge", base_policy_edge))
+                next_edge = max(min_policy_edge, int(round(float(prev_edge) * edge_decay)))
+                if next_edge >= prev_edge:
+                    next_edge = max(min_policy_edge, int(prev_edge) - 32)
+                if next_edge == prev_edge:
+                    break
+                attempt_specs.append(
+                    {
+                        "include_image": True,
+                        "policy_edge": int(next_edge),
+                        "completion_cap": int(max_completion_tokens),
+                    }
+                )
+            if text_only_fallback:
+                for cap in text_only_caps:
+                    attempt_specs.append(
+                        {"include_image": False, "policy_edge": 0, "completion_cap": int(cap)}
+                    )
 
         model = self.runtime.model
         was_training = bool(model.training)
         prev_visual_gen = bool(model.config.visual_gen)
+        prev_visual_und = bool(model.config.visual_und)
         model.config.visual_gen = False
         model.train(True)
 
         autocast_enabled = bool(self.cfg.policy_use_bf16)
         token_count = 0
+        oom_attempts_this_step = 0
 
         try:
             for attempt_idx, attempt in enumerate(attempt_specs, start=1):
                 include_image = bool(attempt.get("include_image", True))
                 policy_edge = int(attempt.get("policy_edge", 0))
-                completion_cap = (
-                    int(max_completion_tokens)
-                    if include_image
-                    else int(text_only_max_completion_tokens)
+                completion_cap = int(
+                    attempt.get(
+                        "completion_cap",
+                        max_completion_tokens if include_image else text_only_max_completion_tokens,
+                    )
                 )
                 batch = _build_understanding_train_batch(
                     self.runtime,
@@ -537,6 +655,7 @@ class BagelRolePolicyUpdater:
                             opt_step = True
                             self._reset_grad_window()
 
+                    self._consecutive_oom = 0
                     return PolicyStepResult(
                         skipped=False,
                         reason="ok",
@@ -554,26 +673,57 @@ class BagelRolePolicyUpdater:
                     oom_like = ("out of memory" in msg) or ("cuda out of memory" in msg) or ("hip out of memory" in msg)
                     if not oom_like:
                         raise
+                    oom_attempts_this_step += 1
                     if torch.cuda.is_available():
+                        gc.collect()
                         torch.cuda.empty_cache()
                     self._reset_grad_window()
                     if attempt_idx < len(attempt_specs):
                         next_attempt = attempt_specs[attempt_idx]
-                        if bool(next_attempt.get("include_image", True)):
+                        next_include_image = bool(next_attempt.get("include_image", True))
+                        next_cap = int(
+                            next_attempt.get(
+                                "completion_cap",
+                                max_completion_tokens
+                                if next_include_image
+                                else text_only_max_completion_tokens,
+                            )
+                        )
+                        if next_include_image:
                             next_edge = int(next_attempt.get("policy_edge", 0))
                             print(
                                 f"[policy_updater][role={self.role}] OOM at max_vit_edge={policy_edge}; "
-                                f"retrying with max_vit_edge={next_edge}."
+                                f"retrying with max_vit_edge={next_edge}, completion_cap={next_cap}."
                             )
                         else:
                             print(
                                 f"[policy_updater][role={self.role}] OOM at max_vit_edge={policy_edge}; "
-                                "retrying with text-only policy fallback."
+                                f"retrying with text-only policy fallback, completion_cap={next_cap}."
                             )
                         continue
+                    self._consecutive_oom += 1
+                    reason = "cuda_oom"
+                    if include_image:
+                        self._force_text_only_until_step = max(
+                            int(self._force_text_only_until_step),
+                            int(self.step_id + self._oom_force_text_only_steps),
+                        )
+                        reason = "cuda_oom_force_text_only"
+                        print(
+                            f"[policy_updater][role={self.role}] forcing text-only updates for next "
+                            f"{self._oom_force_text_only_steps} steps."
+                        )
+                    if self._consecutive_oom >= self._oom_pause_after:
+                        self._pause_until_step = int(self.step_id + self._oom_pause_steps)
+                        self._consecutive_oom = 0
+                        reason = "cuda_oom_pause"
+                        print(
+                            f"[policy_updater][role={self.role}] pausing policy updates for "
+                            f"{self._oom_pause_steps} steps after repeated OOM."
+                        )
                     return PolicyStepResult(
                         skipped=True,
-                        reason="cuda_oom",
+                        reason=reason,
                         reward=scaled_reward,
                         baseline=scaled_baseline,
                         advantage=advantage,
@@ -585,7 +735,11 @@ class BagelRolePolicyUpdater:
                     ).to_dict()
         finally:
             model.config.visual_gen = prev_visual_gen
+            model.config.visual_und = prev_visual_und
             model.train(was_training)
+
+        if oom_attempts_this_step <= 0:
+            self._consecutive_oom = 0
 
         return PolicyStepResult(
             skipped=True,
