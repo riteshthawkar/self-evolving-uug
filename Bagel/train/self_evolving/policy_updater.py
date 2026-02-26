@@ -103,6 +103,7 @@ def _build_understanding_train_batch(
     completion: str,
     policy_max_edge: Optional[int] = None,
     max_completion_tokens: Optional[int] = None,
+    include_image: bool = True,
 ) -> Optional[Dict]:
     model = runtime.model
     tokenizer = runtime.tokenizer
@@ -110,24 +111,28 @@ def _build_understanding_train_batch(
 
     curr_lens = [0]
     curr_rope = [0]
-    if policy_max_edge is None:
-        policy_max_edge = int(os.environ.get("BAGEL_POLICY_MAX_VIT_EDGE", "448") or "448")
-    if policy_max_edge > 0:
-        w, h = image.size
-        max_edge = max(int(w), int(h))
-        if max_edge > policy_max_edge:
-            scale = float(policy_max_edge) / float(max_edge)
-            new_w = max(1, int(round(float(w) * scale)))
-            new_h = max(1, int(round(float(h) * scale)))
-            image = image.resize((new_w, new_h), resample=Image.BICUBIC)
+    image_inputs: Optional[Dict] = None
+    image_split_len = 0
+    if bool(include_image):
+        if policy_max_edge is None:
+            policy_max_edge = int(os.environ.get("BAGEL_POLICY_MAX_VIT_EDGE", "448") or "448")
+        if policy_max_edge > 0:
+            w, h = image.size
+            max_edge = max(int(w), int(h))
+            if max_edge > policy_max_edge:
+                scale = float(policy_max_edge) / float(max_edge)
+                new_w = max(1, int(round(float(w) * scale)))
+                new_h = max(1, int(round(float(h) * scale)))
+                image = image.resize((new_w, new_h), resample=Image.BICUBIC)
 
-    image_inputs, curr_lens, curr_rope = model.prepare_vit_images(
-        curr_kvlens=curr_lens,
-        curr_rope=curr_rope,
-        images=[image],
-        transforms=runtime.vit_transform,
-        new_token_ids=new_token_ids,
-    )
+        image_inputs, curr_lens, curr_rope = model.prepare_vit_images(
+            curr_kvlens=curr_lens,
+            curr_rope=curr_rope,
+            images=[image],
+            transforms=runtime.vit_transform,
+            new_token_ids=new_token_ids,
+        )
+        image_split_len = int(image_inputs["packed_seqlens"][0].item())
 
     prompt_inputs, curr_lens, curr_rope = model.prepare_prompts(
         curr_kvlens=curr_lens,
@@ -157,7 +162,7 @@ def _build_understanding_train_batch(
     completion_start_pos = int(curr_rope[0])
     completion_len = len(completion_input_ids)
     completion_loss_len = len(shifted_completion_ids)
-    tensor_device = image_inputs["packed_text_ids"].device
+    tensor_device = prompt_inputs["packed_text_ids"].device
 
     completion_input_ids_t = torch.tensor(completion_input_ids, dtype=torch.long, device=tensor_device)
     completion_indexes_t = torch.arange(
@@ -179,44 +184,68 @@ def _build_understanding_train_batch(
         device=tensor_device,
     )
 
-    image_split_len = int(image_inputs["packed_seqlens"][0].item())
     prompt_split_len = int(prompt_inputs["text_token_lens"][0].item())
 
-    packed_text_ids = torch.cat(
-        [
-            image_inputs["packed_text_ids"],
-            prompt_inputs["packed_text_ids"],
-            completion_input_ids_t,
-        ],
-        dim=0,
-    )
-    packed_text_indexes = torch.cat(
-        [
-            image_inputs["packed_text_indexes"],
-            prompt_inputs["packed_text_indexes"],
-            completion_indexes_t,
-        ],
-        dim=0,
-    )
-    packed_position_ids = torch.cat(
-        [
-            image_inputs["packed_position_ids"],
-            prompt_inputs["packed_text_position_ids"],
-            completion_pos_t,
-        ],
-        dim=0,
-    )
+    if bool(include_image) and image_inputs is not None:
+        packed_text_ids = torch.cat(
+            [
+                image_inputs["packed_text_ids"],
+                prompt_inputs["packed_text_ids"],
+                completion_input_ids_t,
+            ],
+            dim=0,
+        )
+        packed_text_indexes = torch.cat(
+            [
+                image_inputs["packed_text_indexes"],
+                prompt_inputs["packed_text_indexes"],
+                completion_indexes_t,
+            ],
+            dim=0,
+        )
+        packed_position_ids = torch.cat(
+            [
+                image_inputs["packed_position_ids"],
+                prompt_inputs["packed_text_position_ids"],
+                completion_pos_t,
+            ],
+            dim=0,
+        )
+        split_lens = [int(image_split_len), int(prompt_split_len), int(completion_len)]
+        attn_modes = ["full", "causal", "causal"]
+    else:
+        packed_text_ids = torch.cat(
+            [
+                prompt_inputs["packed_text_ids"],
+                completion_input_ids_t,
+            ],
+            dim=0,
+        )
+        packed_text_indexes = torch.cat(
+            [
+                prompt_inputs["packed_text_indexes"],
+                completion_indexes_t,
+            ],
+            dim=0,
+        )
+        packed_position_ids = torch.cat(
+            [
+                prompt_inputs["packed_text_position_ids"],
+                completion_pos_t,
+            ],
+            dim=0,
+        )
+        split_lens = [int(prompt_split_len), int(completion_len)]
+        attn_modes = ["causal", "causal"]
 
     sequence_length = int(completion_start_idx + completion_len)
-    split_lens = [int(image_split_len), int(prompt_split_len), int(completion_len)]
-    attn_modes = ["full", "causal", "causal"]
     nested_attention_mask = _build_single_sample_attention_mask(
         split_lens=split_lens,
         attn_modes=attn_modes,
         device=tensor_device,
     )
 
-    return {
+    out = {
         "sequence_length": sequence_length,
         "sample_lens": [sequence_length],
         "nested_attention_masks": [nested_attention_mask],
@@ -225,13 +254,15 @@ def _build_understanding_train_batch(
         "packed_text_ids": packed_text_ids,
         "packed_text_indexes": packed_text_indexes,
         "packed_position_ids": packed_position_ids,
-        "packed_vit_tokens": image_inputs["packed_vit_tokens"],
-        "packed_vit_token_indexes": image_inputs["packed_vit_token_indexes"],
-        "packed_vit_position_ids": image_inputs["packed_vit_position_ids"],
-        "vit_token_seqlens": image_inputs["vit_token_seqlens"],
         "ce_loss_indexes": ce_loss_indexes,
         "packed_label_ids": torch.tensor(completion_labels, dtype=torch.long, device=tensor_device),
     }
+    if bool(include_image) and image_inputs is not None:
+        out["packed_vit_tokens"] = image_inputs["packed_vit_tokens"]
+        out["packed_vit_token_indexes"] = image_inputs["packed_vit_token_indexes"]
+        out["packed_vit_position_ids"] = image_inputs["packed_vit_position_ids"]
+        out["vit_token_seqlens"] = image_inputs["vit_token_seqlens"]
+    return out
 
 
 @dataclass
@@ -378,15 +409,31 @@ class BagelRolePolicyUpdater:
             8,
             int(os.environ.get("BAGEL_POLICY_MAX_COMPLETION_TOKENS", "192") or "192"),
         )
+        text_only_fallback = str(
+            os.environ.get("BAGEL_POLICY_TEXT_ONLY_FALLBACK", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        text_only_max_completion_tokens = max(
+            8,
+            int(
+                os.environ.get(
+                    "BAGEL_POLICY_TEXT_ONLY_MAX_COMPLETION_TOKENS",
+                    str(min(max_completion_tokens, 96)),
+                )
+                or str(min(max_completion_tokens, 96))
+            ),
+        )
 
-        policy_edges: List[int] = [base_policy_edge]
-        while len(policy_edges) < oom_max_retries:
-            next_edge = max(min_policy_edge, int(round(float(policy_edges[-1]) * edge_decay)))
-            if next_edge >= policy_edges[-1]:
-                next_edge = max(min_policy_edge, int(policy_edges[-1]) - 32)
-            if next_edge == policy_edges[-1]:
+        attempt_specs: List[Dict[str, object]] = [{"include_image": True, "policy_edge": int(base_policy_edge)}]
+        while len(attempt_specs) < oom_max_retries:
+            prev_edge = int(attempt_specs[-1]["policy_edge"])
+            next_edge = max(min_policy_edge, int(round(float(prev_edge) * edge_decay)))
+            if next_edge >= prev_edge:
+                next_edge = max(min_policy_edge, int(prev_edge) - 32)
+            if next_edge == prev_edge:
                 break
-            policy_edges.append(next_edge)
+            attempt_specs.append({"include_image": True, "policy_edge": int(next_edge)})
+        if text_only_fallback:
+            attempt_specs.append({"include_image": False, "policy_edge": 0})
 
         model = self.runtime.model
         was_training = bool(model.training)
@@ -398,14 +445,22 @@ class BagelRolePolicyUpdater:
         token_count = 0
 
         try:
-            for attempt_idx, policy_edge in enumerate(policy_edges, start=1):
+            for attempt_idx, attempt in enumerate(attempt_specs, start=1):
+                include_image = bool(attempt.get("include_image", True))
+                policy_edge = int(attempt.get("policy_edge", 0))
+                completion_cap = (
+                    int(max_completion_tokens)
+                    if include_image
+                    else int(text_only_max_completion_tokens)
+                )
                 batch = _build_understanding_train_batch(
                     self.runtime,
                     image=image,
                     prompt=prompt,
                     completion=completion_text,
-                    policy_max_edge=int(policy_edge),
-                    max_completion_tokens=int(max_completion_tokens),
+                    policy_max_edge=(int(policy_edge) if include_image else None),
+                    max_completion_tokens=int(completion_cap),
+                    include_image=bool(include_image),
                 )
                 if batch is None:
                     return PolicyStepResult(
@@ -430,6 +485,7 @@ class BagelRolePolicyUpdater:
 
                 try:
                     with use_adapter(self.runtime.model.language_model, self.adapter_name):
+                        model.config.visual_und = bool(include_image)
                         with autocast_context(self.runtime.device, enabled=autocast_enabled):
                             outputs = model(**batch)
                             ce_loss = outputs.get("ce", None)
@@ -501,12 +557,19 @@ class BagelRolePolicyUpdater:
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     self._reset_grad_window()
-                    if attempt_idx < len(policy_edges):
-                        next_edge = policy_edges[attempt_idx]
-                        print(
-                            f"[policy_updater][role={self.role}] OOM at max_vit_edge={policy_edge}; "
-                            f"retrying with max_vit_edge={next_edge}."
-                        )
+                    if attempt_idx < len(attempt_specs):
+                        next_attempt = attempt_specs[attempt_idx]
+                        if bool(next_attempt.get("include_image", True)):
+                            next_edge = int(next_attempt.get("policy_edge", 0))
+                            print(
+                                f"[policy_updater][role={self.role}] OOM at max_vit_edge={policy_edge}; "
+                                f"retrying with max_vit_edge={next_edge}."
+                            )
+                        else:
+                            print(
+                                f"[policy_updater][role={self.role}] OOM at max_vit_edge={policy_edge}; "
+                                "retrying with text-only policy fallback."
+                            )
                         continue
                     return PolicyStepResult(
                         skipped=True,
