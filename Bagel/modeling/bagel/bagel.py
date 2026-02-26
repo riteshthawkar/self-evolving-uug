@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import os
 from typing import List, Tuple, Optional, Dict, Any
 
 import torch
@@ -19,10 +20,24 @@ from data.data_utils import (
 )
 from .qwen2_navit import NaiveCache
 from .modeling_utils import MLPconnector, TimestepEmbedder, PositionEmbedding
-from .runtime_precision import autocast_context
+from .runtime_precision import autocast_context, is_rocm_runtime
 from modeling.cache_utils.taylorseer import cache_init
 
 from tqdm import tqdm
+
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
+
+
+def _compile_block_mask_enabled() -> bool:
+    raw = str(os.environ.get("BAGEL_COMPILE_BLOCK_MASK", "auto")).strip().lower()
+    if raw in _TRUE_VALUES:
+        return True
+    if raw in _FALSE_VALUES:
+        return False
+    # auto mode: avoid torch compile path on ROCm for stability.
+    return not is_rocm_runtime()
 
 
 class BagelConfig(PretrainedConfig):
@@ -228,7 +243,9 @@ class Bagel(PreTrainedModel):
             seqlen = sum(sample_lens)
             block_mask = create_block_mask(
                 sparse_mask, B=1, H=self.num_heads, Q_LEN=seqlen, KV_LEN=seqlen, 
-                device=packed_text_embedding.device, BLOCK_SIZE=128, _compile=True
+                device=packed_text_embedding.device,
+                BLOCK_SIZE=128,
+                _compile=_compile_block_mask_enabled(),
             )
             attention_mask = block_mask
         else:

@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from typing import Optional, Union
 
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -42,6 +43,36 @@ def _read_env_flag(name: str, default: bool = False) -> bool:
     if val in _FALSE_VALUES:
         return False
     return bool(default)
+
+
+def _read_env_tri_state(name: str, default: str = "auto") -> str:
+    raw = os.environ.get(name)
+    if raw is None:
+        return str(default)
+    val = str(raw).strip().lower()
+    if val in _TRUE_VALUES:
+        return "true"
+    if val in _FALSE_VALUES:
+        return "false"
+    if val == "auto":
+        return "auto"
+    return str(default)
+
+
+def force_math_sdpa() -> bool:
+    mode = _read_env_tri_state("BAGEL_FORCE_MATH_SDPA", default="auto")
+    if mode == "true":
+        return True
+    if mode == "false":
+        return False
+    # auto: ROCm defaults to math SDPA to avoid kernel instability.
+    return is_rocm_runtime()
+
+
+def sdpa_context_for_runtime():
+    if force_math_sdpa():
+        return sdpa_kernel(backends=[SDPBackend.MATH])
+    return nullcontext()
 
 
 def resolve_lowp_dtype(device: Union[str, torch.device]) -> Optional[torch.dtype]:

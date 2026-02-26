@@ -88,6 +88,8 @@ DISABLE_AUTOCAST="${DISABLE_AUTOCAST:-0}"
 BAGEL_AUTOCAST_DTYPE="${BAGEL_AUTOCAST_DTYPE:-auto}"
 ENABLE_ROCM_AUTOCAST="${ENABLE_ROCM_AUTOCAST:-0}"
 TORCH_BLAS_PREFER_HIPBLASLT="${TORCH_BLAS_PREFER_HIPBLASLT:-0}"
+FORCE_MATH_SDPA="${FORCE_MATH_SDPA:-auto}"                 # auto|0|1
+BAGEL_COMPILE_BLOCK_MASK="${BAGEL_COMPILE_BLOCK_MASK:-auto}" # auto|0|1
 TRAIN_UNDERSTANDING_PROPOSER="${TRAIN_UNDERSTANDING_PROPOSER:-1}"
 TRAIN_SOLVER="${TRAIN_SOLVER:-1}"
 TRAIN_GENERATION_PROPOSER="${TRAIN_GENERATION_PROPOSER:-1}"
@@ -177,6 +179,27 @@ except Exception:
     print(0)
 PY
 )"
+ROCM_RUNTIME="$("$PYTHON_BIN" - <<'PY'
+try:
+    import torch
+    print(1 if getattr(torch.version, "hip", None) else 0)
+except Exception:
+    print(0)
+PY
+)"
+
+if [[ "$ROCM_RUNTIME" == "1" ]]; then
+  if [[ "$MULTI_GPU_SPLIT" == "auto" ]]; then
+    MULTI_GPU_SPLIT="off"
+    echo "[B1] ROCm detected: forcing MULTI_GPU_SPLIT=off in auto mode for stability."
+  fi
+  if [[ "$FORCE_MATH_SDPA" == "auto" ]]; then
+    FORCE_MATH_SDPA="1"
+  fi
+  if [[ "$BAGEL_COMPILE_BLOCK_MASK" == "auto" ]]; then
+    BAGEL_COMPILE_BLOCK_MASK="0"
+  fi
+fi
 
 if [[ "$DEVICE" == cuda* ]]; then
   if [[ -z "$VAE_DEVICE" ]]; then
@@ -369,6 +392,7 @@ echo "[B1]   Output:     $OUTPUT_DIR"
 echo "[B1]   Steps:      $STEPS"
 echo "[B1]   Device:     $DEVICE"
 echo "[B1]   GPUs:       count=$GPU_COUNT split=$MULTI_GPU_SPLIT"
+echo "[B1]   Runtime:    rocm=$ROCM_RUNTIME force_math_sdpa=$FORCE_MATH_SDPA"
 if [[ -n "$VAE_DEVICE" ]]; then
   echo "[B1]   VAE device: $VAE_DEVICE"
 fi
@@ -377,6 +401,7 @@ echo "[B1]   FlashAttn:  disabled=$DISABLE_FLASH_ATTN"
 echo "[B1]   Autocast:   disabled=$DISABLE_AUTOCAST dtype=$BAGEL_AUTOCAST_DTYPE"
 echo "[B1]   ROCm AMP:   enable=$ENABLE_ROCM_AUTOCAST"
 echo "[B1]   BLAS:       TORCH_BLAS_PREFER_HIPBLASLT=$TORCH_BLAS_PREFER_HIPBLASLT"
+echo "[B1]   BlockMask:  compile=$BAGEL_COMPILE_BLOCK_MASK"
 echo "[B1]   Schedule:   U=$UNDERSTANDING_STEPS_PER_CYCLE G=$GENERATION_STEPS_PER_CYCLE mix=$GEN_MIX_SOURCE_MODE"
 echo "[B1]   Proposer:   K=$PROPOSER_NUM_CANDIDATES spot=$PROPOSER_SPOT_CHECK_SAMPLES"
 if [[ "$RUN_MODE" == "train" ]]; then
@@ -395,6 +420,8 @@ export BAGEL_DISABLE_AUTOCAST="$DISABLE_AUTOCAST"
 export BAGEL_AUTOCAST_DTYPE="$BAGEL_AUTOCAST_DTYPE"
 export BAGEL_ENABLE_ROCM_AUTOCAST="$ENABLE_ROCM_AUTOCAST"
 export TORCH_BLAS_PREFER_HIPBLASLT="$TORCH_BLAS_PREFER_HIPBLASLT"
+export BAGEL_FORCE_MATH_SDPA="$FORCE_MATH_SDPA"
+export BAGEL_COMPILE_BLOCK_MASK="$BAGEL_COMPILE_BLOCK_MASK"
 export BAGEL_POLICY_MAX_VIT_EDGE="$POLICY_MAX_VIT_EDGE"
 
 cd "$BAGEL_ROOT"
