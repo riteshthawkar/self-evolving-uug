@@ -101,6 +101,8 @@ def _build_understanding_train_batch(
     image: Image.Image,
     prompt: str,
     completion: str,
+    policy_max_edge: Optional[int] = None,
+    max_completion_tokens: Optional[int] = None,
 ) -> Optional[Dict]:
     model = runtime.model
     tokenizer = runtime.tokenizer
@@ -108,7 +110,8 @@ def _build_understanding_train_batch(
 
     curr_lens = [0]
     curr_rope = [0]
-    policy_max_edge = int(os.environ.get("BAGEL_POLICY_MAX_VIT_EDGE", "448") or "448")
+    if policy_max_edge is None:
+        policy_max_edge = int(os.environ.get("BAGEL_POLICY_MAX_VIT_EDGE", "448") or "448")
     if policy_max_edge > 0:
         w, h = image.size
         max_edge = max(int(w), int(h))
@@ -135,6 +138,11 @@ def _build_understanding_train_batch(
     )
 
     completion_ids = tokenizer.encode(str(completion or ""))
+    if max_completion_tokens is None:
+        max_completion_tokens = int(os.environ.get("BAGEL_POLICY_MAX_COMPLETION_TOKENS", "192") or "192")
+    max_completion_tokens = max(8, int(max_completion_tokens))
+    if len(completion_ids) > max_completion_tokens:
+        completion_ids = completion_ids[:max_completion_tokens]
     if not completion_ids:
         return None
 
@@ -358,28 +366,27 @@ class BagelRolePolicyUpdater:
             eps=float(self.cfg.grpo_eps),
         )
 
-        batch = _build_understanding_train_batch(
-            self.runtime,
-            image=image,
-            prompt=prompt,
-            completion=completion_text,
+        base_policy_edge = max(64, int(os.environ.get("BAGEL_POLICY_MAX_VIT_EDGE", "448") or "448"))
+        min_policy_edge = max(64, int(os.environ.get("BAGEL_POLICY_MIN_VIT_EDGE", "224") or "224"))
+        if min_policy_edge > base_policy_edge:
+            min_policy_edge = base_policy_edge
+        oom_max_retries = max(1, int(os.environ.get("BAGEL_POLICY_OOM_MAX_RETRIES", "3") or "3"))
+        edge_decay = float(os.environ.get("BAGEL_POLICY_OOM_EDGE_DECAY", "0.8") or "0.8")
+        if edge_decay <= 0.1 or edge_decay >= 1.0:
+            edge_decay = 0.8
+        max_completion_tokens = max(
+            8,
+            int(os.environ.get("BAGEL_POLICY_MAX_COMPLETION_TOKENS", "192") or "192"),
         )
-        if batch is None:
-            return PolicyStepResult(
-                skipped=True,
-                reason="empty_completion_ids",
-                reward=scaled_reward,
-                baseline=scaled_baseline,
-                advantage=0.0,
-                loss=0.0,
-                ce_loss=0.0,
-                grad_norm=0.0,
-                optimizer_step_applied=False,
-                token_count=0,
-            ).to_dict()
 
-        batch = _to_device(batch, self.runtime.device)
-        token_count = int(batch["packed_label_ids"].numel())
+        policy_edges: List[int] = [base_policy_edge]
+        while len(policy_edges) < oom_max_retries:
+            next_edge = max(min_policy_edge, int(round(float(policy_edges[-1]) * edge_decay)))
+            if next_edge >= policy_edges[-1]:
+                next_edge = max(min_policy_edge, int(policy_edges[-1]) - 32)
+            if next_edge == policy_edges[-1]:
+                break
+            policy_edges.append(next_edge)
 
         model = self.runtime.model
         was_training = bool(model.training)
@@ -388,93 +395,144 @@ class BagelRolePolicyUpdater:
         model.train(True)
 
         autocast_enabled = bool(self.cfg.policy_use_bf16)
-        grad_norm = 0.0
-        opt_step = False
-        ce_value = 0.0
-        loss_value = 0.0
+        token_count = 0
 
         try:
-            with use_adapter(self.runtime.model.language_model, self.adapter_name):
-                with autocast_context(self.runtime.device, enabled=autocast_enabled):
-                    outputs = model(**batch)
-                    ce_loss = outputs.get("ce", None)
-                    if ce_loss is None or int(ce_loss.numel()) <= 0:
-                        return PolicyStepResult(
-                            skipped=True,
-                            reason="empty_ce_loss",
-                            reward=scaled_reward,
-                            baseline=scaled_baseline,
-                            advantage=advantage,
-                            loss=0.0,
-                            ce_loss=0.0,
-                            grad_norm=0.0,
-                            optimizer_step_applied=False,
-                            token_count=token_count,
-                        ).to_dict()
-                    ce_mean = ce_loss.mean()
-                    loss = ce_mean * float(advantage)
-
-                if not bool(torch.isfinite(loss.detach()).all().item()):
+            for attempt_idx, policy_edge in enumerate(policy_edges, start=1):
+                batch = _build_understanding_train_batch(
+                    self.runtime,
+                    image=image,
+                    prompt=prompt,
+                    completion=completion_text,
+                    policy_max_edge=int(policy_edge),
+                    max_completion_tokens=int(max_completion_tokens),
+                )
+                if batch is None:
                     return PolicyStepResult(
                         skipped=True,
-                        reason="non_finite_loss",
+                        reason="empty_completion_ids",
+                        reward=scaled_reward,
+                        baseline=scaled_baseline,
+                        advantage=0.0,
+                        loss=0.0,
+                        ce_loss=0.0,
+                        grad_norm=0.0,
+                        optimizer_step_applied=False,
+                        token_count=0,
+                    ).to_dict()
+
+                batch = _to_device(batch, self.runtime.device)
+                token_count = int(batch["packed_label_ids"].numel())
+                grad_norm = 0.0
+                opt_step = False
+                ce_value = 0.0
+                loss_value = 0.0
+
+                try:
+                    with use_adapter(self.runtime.model.language_model, self.adapter_name):
+                        with autocast_context(self.runtime.device, enabled=autocast_enabled):
+                            outputs = model(**batch)
+                            ce_loss = outputs.get("ce", None)
+                            if ce_loss is None or int(ce_loss.numel()) <= 0:
+                                return PolicyStepResult(
+                                    skipped=True,
+                                    reason="empty_ce_loss",
+                                    reward=scaled_reward,
+                                    baseline=scaled_baseline,
+                                    advantage=advantage,
+                                    loss=0.0,
+                                    ce_loss=0.0,
+                                    grad_norm=0.0,
+                                    optimizer_step_applied=False,
+                                    token_count=token_count,
+                                ).to_dict()
+                            ce_mean = ce_loss.mean()
+                            loss = ce_mean * float(advantage)
+
+                        if not bool(torch.isfinite(loss.detach()).all().item()):
+                            return PolicyStepResult(
+                                skipped=True,
+                                reason="non_finite_loss",
+                                reward=scaled_reward,
+                                baseline=scaled_baseline,
+                                advantage=advantage,
+                                loss=float(loss.detach().item()),
+                                ce_loss=float(ce_mean.detach().item()),
+                                grad_norm=0.0,
+                                optimizer_step_applied=False,
+                                token_count=token_count,
+                            ).to_dict()
+
+                        ce_value = float(ce_mean.detach().item())
+                        loss_value = float(loss.detach().item())
+                        scaled_loss = loss / float(self.grad_accum_steps)
+                        scaled_loss.backward()
+                        self._accum_count += 1
+                        self._has_grad_window = True
+
+                        if self._accum_count >= self.grad_accum_steps:
+                            grad_norm = float(
+                                torch.nn.utils.clip_grad_norm_(
+                                    self.params,
+                                    max_norm=float(self.cfg.policy_max_grad_norm),
+                                ).item()
+                            )
+                            self.optimizer.step()
+                            opt_step = True
+                            self._reset_grad_window()
+
+                    return PolicyStepResult(
+                        skipped=False,
+                        reason="ok",
                         reward=scaled_reward,
                         baseline=scaled_baseline,
                         advantage=advantage,
-                        loss=float(loss.detach().item()),
-                        ce_loss=float(ce_mean.detach().item()),
+                        loss=loss_value,
+                        ce_loss=ce_value,
+                        grad_norm=float(grad_norm),
+                        optimizer_step_applied=bool(opt_step),
+                        token_count=token_count,
+                    ).to_dict()
+                except RuntimeError as exc:
+                    msg = str(exc).lower()
+                    oom_like = ("out of memory" in msg) or ("cuda out of memory" in msg) or ("hip out of memory" in msg)
+                    if not oom_like:
+                        raise
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    self._reset_grad_window()
+                    if attempt_idx < len(policy_edges):
+                        next_edge = policy_edges[attempt_idx]
+                        print(
+                            f"[policy_updater][role={self.role}] OOM at max_vit_edge={policy_edge}; "
+                            f"retrying with max_vit_edge={next_edge}."
+                        )
+                        continue
+                    return PolicyStepResult(
+                        skipped=True,
+                        reason="cuda_oom",
+                        reward=scaled_reward,
+                        baseline=scaled_baseline,
+                        advantage=advantage,
+                        loss=loss_value,
+                        ce_loss=ce_value,
                         grad_norm=0.0,
                         optimizer_step_applied=False,
                         token_count=token_count,
                     ).to_dict()
-
-                ce_value = float(ce_mean.detach().item())
-                loss_value = float(loss.detach().item())
-                scaled_loss = loss / float(self.grad_accum_steps)
-                scaled_loss.backward()
-                self._accum_count += 1
-                self._has_grad_window = True
-
-                if self._accum_count >= self.grad_accum_steps:
-                    grad_norm = float(
-                        torch.nn.utils.clip_grad_norm_(self.params, max_norm=float(self.cfg.policy_max_grad_norm)).item()
-                    )
-                    self.optimizer.step()
-                    opt_step = True
-                    self._reset_grad_window()
-        except RuntimeError as exc:
-            msg = str(exc).lower()
-            oom_like = ("out of memory" in msg) or ("cuda out of memory" in msg) or ("hip out of memory" in msg)
-            if not oom_like:
-                raise
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            self._reset_grad_window()
-            return PolicyStepResult(
-                skipped=True,
-                reason="cuda_oom",
-                reward=scaled_reward,
-                baseline=scaled_baseline,
-                advantage=advantage,
-                loss=loss_value,
-                ce_loss=ce_value,
-                grad_norm=0.0,
-                optimizer_step_applied=False,
-                token_count=token_count,
-            ).to_dict()
         finally:
             model.config.visual_gen = prev_visual_gen
             model.train(was_training)
 
         return PolicyStepResult(
-            skipped=False,
-            reason="ok",
+            skipped=True,
+            reason="unknown_retry_exit",
             reward=scaled_reward,
             baseline=scaled_baseline,
             advantage=advantage,
-            loss=loss_value,
-            ce_loss=ce_value,
-            grad_norm=float(grad_norm),
-            optimizer_step_applied=bool(opt_step),
+            loss=0.0,
+            ce_loss=0.0,
+            grad_norm=0.0,
+            optimizer_step_applied=False,
             token_count=token_count,
         ).to_dict()

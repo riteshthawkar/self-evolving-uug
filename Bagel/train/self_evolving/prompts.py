@@ -13,10 +13,15 @@ _QUESTION_TAG_RE = re.compile(
 )
 _ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", flags=re.IGNORECASE | re.DOTALL)
 _PROMPT_TAG_RE = re.compile(r"<prompt>\s*(.*?)\s*</prompt>", flags=re.IGNORECASE | re.DOTALL)
+_PROMPT_RELAXED_RE = re.compile(
+    r"<prompt[^>]*>\s*(.*?)\s*(?:</prompt>|<qa_pairs>|$)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 _QA_PAIR_RE = re.compile(
     r"<qa>\s*<question>\s*(.*?)\s*</question>\s*<answer>\s*(.*?)\s*</answer>\s*</qa>",
     flags=re.IGNORECASE | re.DOTALL,
 )
+_QA_TEXT_RE = re.compile(r"<qa>\s*(.*?)\s*</qa>", flags=re.IGNORECASE | re.DOTALL)
 _NON_OBJECTIVE_RE = re.compile(
     r"\b(why|might|could|likely|opinion|feel|emotion|think|believe|suggest|imply|purpose|reason)\b",
     flags=re.IGNORECASE,
@@ -166,13 +171,53 @@ def is_objective_question(question: str) -> bool:
 def parse_generation_spec(text: str, min_qa_pairs: int = 2) -> Optional[GenerationSpec]:
     raw = text or ""
     prompt_match = _PROMPT_TAG_RE.search(raw)
-    prompt = " ".join(prompt_match.group(1).strip().split()) if prompt_match else ""
+    if prompt_match:
+        prompt = " ".join(prompt_match.group(1).strip().split())
+    else:
+        # Fallback for malformed prompt tags (e.g. "<promptA ...", missing close tags).
+        prompt = ""
+        relaxed = _PROMPT_RELAXED_RE.search(raw)
+        if relaxed:
+            prompt = " ".join(relaxed.group(1).strip().split())
+        if not prompt:
+            first_prompt_line = re.search(r"^\s*<prompt[^\n]*", raw, flags=re.IGNORECASE | re.MULTILINE)
+            if first_prompt_line:
+                line = first_prompt_line.group(0).strip()
+                tail = line[len("<prompt") :].lstrip(" >:\t")
+                prompt = " ".join(tail.split())
+
     qa_pairs: List[GenerationQAPair] = []
-    for q_raw, a_raw in _QA_PAIR_RE.findall(raw):
+    seen_questions = set()
+
+    def _append_pair(q_raw: str, a_raw: str) -> None:
         q = " ".join(str(q_raw).strip().split())
         a = " ".join(str(a_raw).strip().split())
-        if q and a:
-            qa_pairs.append(GenerationQAPair(question=q, answer=a))
+        if not q or not a:
+            return
+        q_key = q.lower()
+        if q_key in seen_questions:
+            return
+        seen_questions.add(q_key)
+        qa_pairs.append(GenerationQAPair(question=q, answer=a))
+
+    for q_raw, a_raw in _QA_PAIR_RE.findall(raw):
+        _append_pair(q_raw, a_raw)
+
+    # Fallback-1: pair standalone <question> and <answer> tags by order.
+    if len(qa_pairs) < max(1, int(min_qa_pairs)):
+        q_tags = _QUESTION_TAG_RE.findall(raw)
+        a_tags = _ANSWER_TAG_RE.findall(raw)
+        for q_raw, a_raw in zip(q_tags, a_tags):
+            _append_pair(q_raw, a_raw)
+
+    # Fallback-2: allow "<qa>question text</qa><answer>answer text</answer>" form.
+    if len(qa_pairs) < max(1, int(min_qa_pairs)):
+        qa_questions = _QA_TEXT_RE.findall(raw)
+        a_tags = _ANSWER_TAG_RE.findall(raw)
+        for q_raw, a_raw in zip(qa_questions, a_tags):
+            q_candidate = maybe_strip_tagged(str(q_raw), "question")
+            _append_pair(q_candidate if q_candidate else q_raw, a_raw)
+
     if not prompt:
         return None
     if len(qa_pairs) < max(1, int(min_qa_pairs)):
