@@ -24,6 +24,8 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{natbib}
+\usepackage{amsmath}
+\usepackage{amssymb}
 
 % The "axessiblity" package can be found at: https://ctan.org/pkg/axessibility?lang=en
 \usepackage[accsupp]{axessibility}  % Improves PDF readability for those with disabilities.
@@ -54,7 +56,7 @@
 
 % ---------------------------------------------------------------
 % TODO REVIEW: Replace with your title
-\title{Self-Evolving Unified Understanding and Generation Models via Internal Disagreement-Driven Curriculum} 
+\title{Self-Evolving Unified Understanding and Generation Models through Unsupervised Self-Consistency} 
 
 % TODO REVIEW: If the paper title is too long for the running head, you can set
 % an abbreviated paper title here. If not, comment out.
@@ -89,10 +91,14 @@ ABC Institute, Rupert-Karls-University Heidelberg, Heidelberg, Germany\\
 
 \input{sections/2_related_work}
 
-\input{tables/main_table}
-
+\input{tables/qualitative_comparison}
 
 \input{sections/3_method}
+
+\input{sections/4_experiments}
+
+\input{sections/5_conclusion}
+
 % ---- Bibliography ----
 %
 % BibTeX users should specify bibliography style 'splncs04'.
