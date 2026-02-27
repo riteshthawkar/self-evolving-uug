@@ -1,9 +1,11 @@
 % =====================================================================
-% Table 2: Cross-Paper Quantitative Comparison (Relative Gains)
+% Table 2: Primary Comparison — Self-Supervised Methods (Fair Comparison)
+% Only methods that require NO curated SFT data, NO external reward
+% models, and NO supervised initialization are included here.
 % =====================================================================
 \begin{table}[tb]
-  \caption{Cross-paper comparison using \emph{relative gains over each method's own base model}. This avoids unfair raw-score comparison across different backbones and training data. Understanding benchmarks are separated from generation benchmarks by a vertical rule.}
-  \label{tab:crosspaper_relative_gain}
+  \caption{Comparison with self-supervised post-training methods using \emph{relative gains over each method's own base model}. All methods listed here operate without curated labels, supervised fine-tuning data, or external reward models, ensuring a fair comparison under equivalent supervision constraints. Understanding and generation benchmarks are separated by a vertical rule.}
+  \label{tab:selfsup_comparison}
   \centering
   \small
   \resizebox{\linewidth}{!}{%
@@ -13,11 +15,11 @@
     \cmidrule(lr){3-10} \cmidrule(l){11-13}
     Method & Backbone & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval & DPG-Bench & WISE \\
     \midrule
-    UniRL \cite{mao2025unirl} & Janus & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    SUDER \cite{hong2025dualselfrewards} & Janus-Pro-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    UniCorn \cite{han2026unicorn} & UMM & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
     UniGame \cite{su2025unigame} & UMM & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    CoRL \cite{jiang2025coreinforcement} & Janus-Pro-1B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SUDER \cite{hong2025dualselfrewards} & Janus-Pro-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    EvoLMM \cite{thawakar2025evolmm} & Janus-Pro-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SILMM \cite{qu2024silmm} & SEED-X & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    ILLUME \cite{wang2024illume} & SEED-X & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
     \textbf{Ours} & BLIP3o-8B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
     \bottomrule
   \end{tabular}%
@@ -26,7 +28,37 @@
 
 
 % =====================================================================
-% Table 3: Model-Agnostic Understanding Benchmarks
+% Table 3: Extended Reference — Supervised Methods (NOT directly comparable)
+% These methods use curated SFT data, external reward models, or
+% supervised initialization. Shown as reference upper bounds.
+% =====================================================================
+\begin{table}[tb]
+  \caption{Reference comparison with methods that use additional supervision. These approaches employ curated fine-tuning data, external reward models, or supervised initialization stages, and are therefore not directly comparable to our fully unsupervised framework. Results are shown as reference points to contextualize the performance gap between supervised and self-supervised post-training.}
+  \label{tab:supervised_reference}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}p{2.4cm}p{2.0cm}p{3.0cm}cccccccc|ccc@{}}
+    \toprule
+    & & & \multicolumn{8}{c|}{Understanding} & \multicolumn{3}{c}{Generation} \\
+    \cmidrule(lr){4-11} \cmidrule(l){12-14}
+    Method & Backbone & Ext. Supervision & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval & DPG-Bench & WISE \\
+    \midrule
+    UniRL \cite{mao2025unirl} & Janus & SFT data & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    UniCorn \cite{han2026unicorn} & UMM & Judge training & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    CoRL \cite{jiang2025coreinforcement} & Janus-Pro-1B & Task-specific rewards & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    UAE \cite{yan2025understandinggeneration} & Janus-Pro-7B & Supervised init. & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    Internal Gap \cite{han2025internalgap} & UMM & SFT + DPO data & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \midrule
+    \textbf{Ours} & BLIP3o-8B & \textbf{None} & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+
+% =====================================================================
+% Table 4: Model-Agnostic Understanding Benchmarks
 % =====================================================================
 \begin{table}[tb]
   \caption{Understanding benchmarks across three architecturally distinct unified models. Each model is evaluated in its base configuration and after applying our self-evolving framework, with the difference ($\Delta$) reported.}
@@ -56,7 +88,7 @@
 
 
 % =====================================================================
-% Table 4: Model-Agnostic Generation Benchmarks
+% Table 5: Model-Agnostic Generation Benchmarks
 % =====================================================================
 \begin{table}[tb]
   \caption{Generation benchmarks across three architecturally distinct unified models. Each model is evaluated in its base configuration and after applying our self-evolving framework, with the difference ($\Delta$) reported.}
@@ -85,7 +117,7 @@
 
 
 % =====================================================================
-% Table 5: Ablation Study
+% Table 6: Ablation Study
 % =====================================================================
 \begin{table}[tb]
   \caption{Ablation study on BLIP3o-8B measuring the contribution of individual framework components. Each row removes or replaces one component while keeping all others at their default configuration. Understanding is measured by the average across MMMU, MMBench, SEED, and MMVet. Generation is measured by GenEval.}

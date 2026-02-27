@@ -12,8 +12,8 @@ cd "$REPO_ROOT"
 
 # ── Configuration ────────────────────────────────────────────────────────────
 CONFIG="examples/train_self_evolving/vargpt_se_joint.yaml"
-NPROC_PER_NODE=8
-MASTER_PORT=39600
+NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+MASTER_PORT="${MASTER_PORT:-39600}"
 
 resolve_launcher() {
     if command -v llamafactory-cli >/dev/null 2>&1; then
@@ -45,6 +45,12 @@ export PYTHONPATH="$REPO_ROOT:$REPO_ROOT/src:${PYTHONPATH:-}"
 export MASTER_PORT
 export TOKENIZERS_PARALLELISM="false"
 export WANDB_MODE="${WANDB_MODE:-disabled}"
+if [[ -z "${HIP_VISIBLE_DEVICES:-}" && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    export HIP_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
+fi
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" && -n "${HIP_VISIBLE_DEVICES:-}" ]]; then
+    export CUDA_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
+fi
 
 # ── Auto-create missing __init__.py in visionllm + symlink vargpt ───────────
 find "$REPO_ROOT/visionllm" -type d ! -name '__pycache__' \
@@ -112,6 +118,29 @@ if [[ ! -d "$IMAGE_FOLDER" ]]; then
     exit 1
 fi
 
+TORCH_ACCEL_COUNT="$(
+python - <<'PY' 2>/dev/null || true
+import torch
+try:
+    print(torch.cuda.device_count() if torch.cuda.is_available() else 0)
+except Exception:
+    print(0)
+PY
+)"
+TORCH_ACCEL_COUNT="$(echo "${TORCH_ACCEL_COUNT}" | tr -d '[:space:]')"
+if ! [[ "${TORCH_ACCEL_COUNT}" =~ ^[0-9]+$ ]]; then
+    TORCH_ACCEL_COUNT=0
+fi
+if [[ "${TORCH_ACCEL_COUNT}" -lt 1 ]]; then
+    echo "[ERROR] PyTorch cannot see any GPU accelerator in this environment." >&2
+    echo "[ERROR] rocm-smi may list devices, but torch/deepspeed is currently on CPU." >&2
+    exit 1
+fi
+if [[ "${NPROC_PER_NODE}" -gt "${TORCH_ACCEL_COUNT}" ]]; then
+    echo "[WARN] Requested NPROC_PER_NODE=${NPROC_PER_NODE}, but torch sees ${TORCH_ACCEL_COUNT}. Capping."
+    NPROC_PER_NODE="${TORCH_ACCEL_COUNT}"
+fi
+
 # ── Print experiment info ────────────────────────────────────────────────────
 echo "═══════════════════════════════════════════════════════════"
 echo "  VARGPT Self-Evolving: Joint (3U+2G) Combined Experiment"
@@ -124,6 +153,7 @@ echo "  Spot-check K : $SE_PROPOSER_SPOT_CHECK_SAMPLES"
 echo "  Temp range   : [$SE_SOLVER_TEMP_MIN, $SE_SOLVER_TEMP_MAX]"
 echo "  Dataset dir  : $DATASET_DIR"
 echo "  Launcher     : $LAUNCHER_CMD"
+echo "  Torch accel  : $TORCH_ACCEL_COUNT"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 

@@ -25,9 +25,10 @@ detect_num_gpus() {
         return 0
     fi
 
-    # 2) derive from CUDA_VISIBLE_DEVICES if present
-    if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
-        local cleaned="${CUDA_VISIBLE_DEVICES// /}"
+    # 2) derive from visible-device envs if present
+    local visible="${CUDA_VISIBLE_DEVICES:-${HIP_VISIBLE_DEVICES:-}}"
+    if [ -n "${visible}" ]; then
+        local cleaned="${visible// /}"
         if [ -n "${cleaned}" ]; then
             # Count comma-separated entries.
             awk -F',' '{print NF}' <<< "${cleaned}"
@@ -35,7 +36,24 @@ detect_num_gpus() {
         fi
     fi
 
-    # 3) derive from nvidia-smi if available
+    # 3) derive from torch runtime if available
+    local tcount
+    tcount="$(
+        python - <<'PY' 2>/dev/null || true
+import torch
+try:
+    print(torch.cuda.device_count() if torch.cuda.is_available() else 0)
+except Exception:
+    print(0)
+PY
+    )"
+    tcount="$(echo "${tcount}" | tr -d '[:space:]')"
+    if [[ "${tcount}" =~ ^[0-9]+$ ]] && [ "${tcount}" -gt 0 ]; then
+        echo "${tcount}"
+        return 0
+    fi
+
+    # 4) derive from nvidia-smi if available
     if command -v nvidia-smi >/dev/null 2>&1; then
         local n
         n="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d '[:space:]')"
@@ -45,7 +63,21 @@ detect_num_gpus() {
         fi
     fi
 
-    # 4) safe fallback
+    # 5) derive from rocm-smi if available
+    if command -v rocm-smi >/dev/null 2>&1; then
+        local r
+        r="$(
+            rocm-smi 2>/dev/null \
+              | awk '/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+0x/ {c++} END {print c+0}'
+        )"
+        r="$(echo "${r}" | tr -d '[:space:]')"
+        if [[ "${r}" =~ ^[0-9]+$ ]] && [ "${r}" -gt 0 ]; then
+            echo "${r}"
+            return 0
+        fi
+    fi
+
+    # 6) safe fallback
     echo 1
 }
 
@@ -98,11 +130,44 @@ export WANDB_PROJECT=${WANDB_PROJECT:-vargpt-self-evolving}
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
 
+# Keep CUDA/HIP visibility aligned for mixed launcher stacks.
+if [ -z "${HIP_VISIBLE_DEVICES:-}" ] && [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    export HIP_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
+fi
+if [ -z "${CUDA_VISIBLE_DEVICES:-}" ] && [ -n "${HIP_VISIBLE_DEVICES:-}" ]; then
+    export CUDA_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
+fi
+
 if ! LAUNCHER_CMD="$(resolve_launcher)"; then
     echo "[ERROR] Could not find LlamaFactory launcher." >&2
     echo "Install with: pip install -e ${REPO_ROOT}" >&2
     echo "Or ensure 'python -m llamafactory.cli' imports in current environment." >&2
     exit 1
+fi
+
+# Fail fast when torch cannot see an accelerator.
+TORCH_ACCEL_COUNT="$(
+    python - <<'PY' 2>/dev/null || true
+import torch
+try:
+    print(torch.cuda.device_count() if torch.cuda.is_available() else 0)
+except Exception:
+    print(0)
+PY
+)"
+TORCH_ACCEL_COUNT="$(echo "${TORCH_ACCEL_COUNT}" | tr -d '[:space:]')"
+if ! [[ "${TORCH_ACCEL_COUNT}" =~ ^[0-9]+$ ]]; then
+    TORCH_ACCEL_COUNT=0
+fi
+if [ "${TORCH_ACCEL_COUNT}" -lt 1 ]; then
+    echo "[ERROR] PyTorch cannot see any GPU accelerator in this environment." >&2
+    echo "[ERROR] rocm-smi can list devices, but torch/deepspeed is falling back to CPU." >&2
+    echo "[ERROR] Check ROCm-enabled torch install and container device passthrough (/dev/kfd, /dev/dri)." >&2
+    exit 1
+fi
+if [ "${NUM_GPUS}" -gt "${TORCH_ACCEL_COUNT}" ]; then
+    echo "[WARN] Requested NUM_GPUS=${NUM_GPUS}, but torch sees ${TORCH_ACCEL_COUNT}. Capping to ${TORCH_ACCEL_COUNT}."
+    NUM_GPUS="${TORCH_ACCEL_COUNT}"
 fi
 
 # Optional: HuggingFace mirror (uncomment if needed)
