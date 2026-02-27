@@ -130,6 +130,7 @@ export MASTER_PORT=${MASTER_PORT:-39600}
 export WANDB_PROJECT=${WANDB_PROJECT:-vargpt-self-evolving}
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
+IMAGE_FOLDER="${IMAGE_FOLDER:-}"
 
 # Keep CUDA/HIP visibility aligned for mixed launcher stacks.
 if [ -z "${HIP_VISIBLE_DEVICES:-}" ] && [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
@@ -199,6 +200,32 @@ if [ "${NUM_GPUS}" -gt "${TORCH_ACCEL_COUNT}" ]; then
     NUM_GPUS="${TORCH_ACCEL_COUNT}"
 fi
 
+# Require explicit image-folder mode for this launcher.
+if [ -z "${IMAGE_FOLDER}" ]; then
+    echo "[ERROR] IMAGE_FOLDER is not set." >&2
+    echo "[ERROR] This launcher expects image-folder mode for self-evolving training." >&2
+    echo "[ERROR] Example: IMAGE_FOLDER=/workspace/self-evolving-uug/data/joint_pool_10k/images \\" >&2
+    echo "[ERROR]          bash examples/train_self_evolving/run_self_evolving.sh joint 8" >&2
+    exit 1
+fi
+if [ ! -d "${IMAGE_FOLDER}" ]; then
+    echo "[ERROR] IMAGE_FOLDER does not exist: ${IMAGE_FOLDER}" >&2
+    exit 1
+fi
+IMAGE_COUNT="$(
+    find "${IMAGE_FOLDER}" -type f \
+      \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.bmp' -o -iname '*.tiff' \) \
+      | wc -l | tr -d '[:space:]'
+)"
+if ! [[ "${IMAGE_COUNT}" =~ ^[0-9]+$ ]]; then
+    IMAGE_COUNT=0
+fi
+if [ "${IMAGE_COUNT}" -lt 1 ]; then
+    echo "[ERROR] IMAGE_FOLDER has no supported images: ${IMAGE_FOLDER}" >&2
+    echo "[ERROR] Supported extensions: jpg, jpeg, png, webp, bmp, tiff" >&2
+    exit 1
+fi
+
 # Optional: HuggingFace mirror (uncomment if needed)
 # export HF_ENDPOINT=https://hf-mirror.com
 
@@ -212,6 +239,8 @@ echo "  Master Port: $MASTER_PORT"
 echo "  W&B Project: $WANDB_PROJECT"
 echo "  Launcher   : ${LAUNCHER[*]}"
 echo "  Dataset dir: ${DATASET_DIR:-data_temp}"
+echo "  Image folder: ${IMAGE_FOLDER}"
+echo "  Image count : ${IMAGE_COUNT}"
 echo "=============================================="
 
 # ── Build temporary YAML with overrides ──────────────────────────────────────
@@ -234,9 +263,7 @@ yaml_quote() {
         echo "resume_from_checkpoint: \"$(yaml_quote "${RESUME_FROM}")\""
     fi
 
-    if [ -n "${IMAGE_FOLDER:-}" ]; then
-        echo "se_image_folder: \"$(yaml_quote "${IMAGE_FOLDER}")\""
-    fi
+    echo "se_image_folder: \"$(yaml_quote "${IMAGE_FOLDER}")\""
 
     echo "se_num_solver_samples: ${SE_NUM_SOLVER_SAMPLES:-7}"
     echo "se_proposer_spot_check_samples: ${SE_PROPOSER_SPOT_CHECK_SAMPLES:-3}"
