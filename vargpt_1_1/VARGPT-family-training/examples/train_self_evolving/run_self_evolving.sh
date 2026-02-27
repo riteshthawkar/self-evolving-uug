@@ -155,12 +155,22 @@ PY
 )"
 LLAMAFACTORY_MODULE_DIR="$(echo "${LLAMAFACTORY_MODULE_DIR}" | tr -d '[:space:]')"
 EXPECTED_MODULE_DIR="${REPO_ROOT}/src/llamafactory"
-if [ "${LLAMAFACTORY_MODULE_DIR}" != "${EXPECTED_MODULE_DIR}" ]; then
+if [ -z "${LLAMAFACTORY_MODULE_DIR}" ]; then
+    echo "[ERROR] Could not resolve llamafactory module path." >&2
+    exit 1
+fi
+if [[ "${LLAMAFACTORY_MODULE_DIR}" == *"/site-packages/llamafactory" ]]; then
     echo "[ERROR] Wrong llamafactory package resolved." >&2
     echo "[ERROR] Current:  ${LLAMAFACTORY_MODULE_DIR}" >&2
     echo "[ERROR] Expected: ${EXPECTED_MODULE_DIR}" >&2
     echo "[ERROR] Fix in this env: pip uninstall -y llamafactory && pip install -e ${REPO_ROOT}" >&2
     exit 1
+fi
+if [ "${LLAMAFACTORY_MODULE_DIR}" != "${EXPECTED_MODULE_DIR}" ]; then
+    echo "[WARN] llamafactory path differs from script repo root." >&2
+    echo "[WARN] Current:  ${LLAMAFACTORY_MODULE_DIR}" >&2
+    echo "[WARN] Expected: ${EXPECTED_MODULE_DIR}" >&2
+    echo "[WARN] Continuing because module is not from site-packages." >&2
 fi
 
 # Fail fast when torch cannot see an accelerator.
