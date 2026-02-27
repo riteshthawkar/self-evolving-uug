@@ -2584,6 +2584,8 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             flushed_optim_steps += int(self.proposer_updater.finalize())
         if self.solver_updater is not None:
             flushed_optim_steps += int(self.solver_updater.finalize())
+        if self.generator_updater is not None:
+            flushed_optim_steps += int(self.generator_updater.finalize())
 
         if self.policy_updates_enabled:
             final_ckpt = self._save_checkpoint(int(self.cfg.steps))
