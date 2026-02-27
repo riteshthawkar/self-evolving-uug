@@ -146,8 +146,18 @@ if [ -z "${REPO_ROOT}" ]; then
     REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 fi
 CONFIG="${REPO_ROOT}/${CONFIG}"
+cd "${REPO_ROOT}"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
 IMAGE_FOLDER="${IMAGE_FOLDER:-}"
+
+# Ensure visionllm packages are importable and legacy alias exists.
+if [ -d "${REPO_ROOT}/visionllm" ]; then
+    find "${REPO_ROOT}/visionllm" -type d ! -name '__pycache__' \
+        -exec sh -c 'test -f "$1/__init__.py" || touch "$1/__init__.py"' _ {} \;
+    if [ ! -e "${REPO_ROOT}/visionllm/vargpt" ] && [ -d "${REPO_ROOT}/visionllm/vargpt_llava" ]; then
+        ln -sfn vargpt_llava "${REPO_ROOT}/visionllm/vargpt"
+    fi
+fi
 
 # Keep CUDA/HIP visibility aligned for mixed launcher stacks.
 if [ -z "${HIP_VISIBLE_DEVICES:-}" ] && [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
