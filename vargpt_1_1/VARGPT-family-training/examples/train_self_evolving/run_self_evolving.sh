@@ -157,6 +157,12 @@ PY
 )"
 LLAMAFACTORY_MODULE_DIR="$(echo "${LLAMAFACTORY_MODULE_DIR}" | tr -d '[:space:]')"
 EXPECTED_MODULE_DIR="${REPO_ROOT}/src/llamafactory"
+if [ ! -d "${EXPECTED_MODULE_DIR}" ]; then
+    echo "[ERROR] Expected llamafactory source dir does not exist: ${EXPECTED_MODULE_DIR}" >&2
+    echo "[ERROR] This usually means you are running the wrong launcher copy/path." >&2
+    echo "[ERROR] Use: /workspace/self-evolving-uug/self-evolving-uug/vargpt_1_1/VARGPT-family-training/examples/train_self_evolving/run_self_evolving.sh" >&2
+    exit 1
+fi
 if [ -z "${LLAMAFACTORY_MODULE_DIR}" ]; then
     echo "[ERROR] Could not resolve llamafactory module path." >&2
     exit 1
@@ -294,6 +300,48 @@ yaml_quote() {
 if [ -n "${SE_EXTRA_ARGS:-}" ]; then
     echo "[WARN] SE_EXTRA_ARGS is ignored in YAML launch mode: ${SE_EXTRA_ARGS}"
 fi
+
+# Sanity-check effective YAML before launch.
+effective_value() {
+    local key="$1"
+    awk -F':' -v k="$key" '
+        $0 ~ "^[[:space:]]*" k "[[:space:]]*:" {
+            v=$0
+            sub(/^[^:]*:[[:space:]]*/, "", v)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+            gsub(/^"|"$/, "", v)
+            print v
+            exit
+        }
+    ' "${RUN_CONFIG}"
+}
+
+EFFECTIVE_STAGE="$(effective_value stage)"
+EFFECTIVE_DO_TRAIN="$(echo "$(effective_value do_train)" | tr '[:upper:]' '[:lower:]')"
+EFFECTIVE_TOTAL_STEPS="$(effective_value se_total_steps)"
+EFFECTIVE_IMAGE_FOLDER="$(effective_value se_image_folder)"
+
+if [ "${EFFECTIVE_STAGE}" != "self_evolving" ]; then
+    echo "[ERROR] Effective config stage is '${EFFECTIVE_STAGE}', expected 'self_evolving'." >&2
+    exit 1
+fi
+if [ "${EFFECTIVE_DO_TRAIN}" != "true" ]; then
+    echo "[ERROR] Effective config do_train is '${EFFECTIVE_DO_TRAIN}', expected 'true'." >&2
+    exit 1
+fi
+if ! [[ "${EFFECTIVE_TOTAL_STEPS}" =~ ^[0-9]+$ ]] || [ "${EFFECTIVE_TOTAL_STEPS}" -lt 1 ]; then
+    echo "[ERROR] Effective se_total_steps is invalid: '${EFFECTIVE_TOTAL_STEPS}'." >&2
+    exit 1
+fi
+if [ -z "${EFFECTIVE_IMAGE_FOLDER}" ]; then
+    echo "[ERROR] Effective se_image_folder is empty in run config: ${RUN_CONFIG}" >&2
+    exit 1
+fi
+
+echo "  Effective stage       : ${EFFECTIVE_STAGE}"
+echo "  Effective do_train    : ${EFFECTIVE_DO_TRAIN}"
+echo "  Effective total_steps : ${EFFECTIVE_TOTAL_STEPS}"
+echo "  Effective se_image_folder: ${EFFECTIVE_IMAGE_FOLDER}"
 echo "  Run config : ${RUN_CONFIG}"
 
 # ── Launch ───────────────────────────────────────────────────────────────────
