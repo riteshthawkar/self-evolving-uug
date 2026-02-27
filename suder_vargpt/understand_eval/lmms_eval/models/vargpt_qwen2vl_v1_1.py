@@ -19,6 +19,10 @@ from lmms_eval.models.model_utils.load_video import load_video_decord
 
 from lmms_eval.models.visionllm.vargpt_qwen_v1_1.prepare_vargpt_v1_1 import prepare_vargpt_qwen2vl_v1_1
 from lmms_eval.models.visionllm.vargpt_qwen_v1_1.modeling_vargpt_qwen2_vl import VARGPTQwen2VLForConditionalGeneration
+try:
+    from peft import PeftModel
+except ImportError:
+    PeftModel = None
 
 try:
     from qwen_vl_utils import process_vision_info
@@ -44,12 +48,14 @@ class VARGPT_Qwen2_VL_v1_1(lmms):
         max_pixels: int = 3211264, #1605632, # 12845056,
         min_pixels: int = 3136,
         max_num_frames: int = 32,
+        peft: Optional[str] = None,
+        peft_adapter_name: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__()
-        # Do not use kwargs for now
         print("max_pixels", max_pixels)
-        assert kwargs == {}, f"Unexpected kwargs: {kwargs}"
+        if kwargs:
+            eval_logger.warning(f"[VARGPT_Qwen2_VL_v1_1] Ignoring extra kwargs: {kwargs}")
         prepare_vargpt_qwen2vl_v1_1()
 
         accelerator = Accelerator()
@@ -64,22 +70,41 @@ class VARGPT_Qwen2_VL_v1_1(lmms):
             self.device_map = f"cuda:{accelerator.local_process_index}"
 
         if use_flash_attention_2:
-            self._model = VARGPTQwen2VLForConditionalGeneration.from_pretrained(
+            base_model = VARGPTQwen2VLForConditionalGeneration.from_pretrained(
                 pretrained,
                 torch_dtype="auto",
                 device_map=self.device_map,
                 attn_implementation="flash_attention_2",
             ).eval()
         else:
-            self._model = VARGPTQwen2VLForConditionalGeneration.from_pretrained(pretrained, torch_dtype="auto", device_map=self.device_map).eval()
-        if hasattr(self._model, 'vargpt_gen'):
+            base_model = VARGPTQwen2VLForConditionalGeneration.from_pretrained(pretrained, torch_dtype="auto", device_map=self.device_map).eval()
+
+        if hasattr(base_model, 'vargpt_gen'):
             # 方法1：直接删除整个vargpt_gen模块
-            delattr(self._model, 'vargpt_gen')
-            delattr(self._model, 'vae_local')
+            delattr(base_model, 'vargpt_gen')
+            delattr(base_model, 'vae_local')
 
             # 清理缓存
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+        if peft:
+            if PeftModel is None:
+                raise ImportError("peft is required to load adapter via `peft=...` model arg.")
+            eval_logger.info(f"[VARGPT_Qwen2_VL_v1_1] Loading PEFT adapter: {peft}")
+            self._model = PeftModel.from_pretrained(base_model, peft, is_trainable=False)
+            if peft_adapter_name:
+                try:
+                    self._model.set_adapter(peft_adapter_name)
+                    eval_logger.info(f"[VARGPT_Qwen2_VL_v1_1] Activated PEFT adapter: {peft_adapter_name}")
+                except Exception as e:
+                    eval_logger.warning(
+                        f"[VARGPT_Qwen2_VL_v1_1] Failed to activate adapter '{peft_adapter_name}': {e}"
+                    )
+            self._model = self._model.eval()
+        else:
+            self._model = base_model
+
         self.processor = AutoProcessor.from_pretrained(pretrained, max_pixels=max_pixels, min_pixels=min_pixels)
         self.max_pixels = max_pixels
         self.min_pixels = min_pixels
