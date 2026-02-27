@@ -404,12 +404,21 @@ if [ "$NUM_GPUS" -gt 1 ]; then
     FORCE_TORCHRUN=1 \
     NNODES=1 \
     NODE_RANK=0 \
+    NPROC_PER_NODE="${NUM_GPUS}" \
     MASTER_ADDR=127.0.0.1 \
     MASTER_PORT=$MASTER_PORT \
         "${LAUNCHER[@]}" train "${RUN_CONFIG}"
 else
     echo "  Launching single-GPU..."
     "${LAUNCHER[@]}" train "${RUN_CONFIG}"
+fi
+
+# Post-launch sanity: successful training should materialize output_dir.
+if [ ! -d "${EFFECTIVE_OUTPUT_DIR}" ]; then
+    echo "[ERROR] Training launcher returned success, but output_dir was not created:" >&2
+    echo "[ERROR]   ${EFFECTIVE_OUTPUT_DIR}" >&2
+    echo "[ERROR] Likely distributed launch did not spawn workers (check NPROC_PER_NODE/torchrun environment)." >&2
+    exit 1
 fi
 
 echo ""
