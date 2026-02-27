@@ -7,7 +7,21 @@ set -euo pipefail
 
 # ── Project root ─────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+find_repo_root() {
+    local d="$1"
+    while [[ -n "${d}" && "${d}" != "/" ]]; do
+        if [[ -d "${d}/src/llamafactory" && -f "${d}/examples/train_self_evolving/vargpt_se_joint.yaml" ]]; then
+            echo "${d}"
+            return 0
+        fi
+        d="$(dirname "${d}")"
+    done
+    return 1
+}
+REPO_ROOT="$(find_repo_root "${SCRIPT_DIR}" || true)"
+if [[ -z "${REPO_ROOT}" ]]; then
+    REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 cd "$REPO_ROOT"
 
 # ── Configuration ────────────────────────────────────────────────────────────
