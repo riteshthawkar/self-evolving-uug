@@ -145,6 +145,7 @@ if [ -z "${REPO_ROOT}" ]; then
     # Fallback to historical layout assumption.
     REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 fi
+CONFIG="${REPO_ROOT}/${CONFIG}"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
 IMAGE_FOLDER="${IMAGE_FOLDER:-}"
 
@@ -348,10 +349,6 @@ yaml_delete_key "se_image_folder"
     echo "se_proposer_early_failfast_stop: ${SE_PROPOSER_EARLY_FAILFAST_STOP:-false}"
     echo "se_proposer_early_failfast_recover: ${SE_PROPOSER_EARLY_FAILFAST_RECOVER:-true}"
 } >> "${RUN_CONFIG}"
-
-if [ -n "${SE_EXTRA_ARGS:-}" ]; then
-    echo "[WARN] SE_EXTRA_ARGS is ignored in YAML launch mode: ${SE_EXTRA_ARGS}"
-fi
 
 # Sanity-check effective YAML before launch.
 effective_value() {

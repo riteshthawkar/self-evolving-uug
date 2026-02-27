@@ -26,6 +26,7 @@ cd "$REPO_ROOT"
 
 # ── Configuration ────────────────────────────────────────────────────────────
 CONFIG="examples/train_self_evolving/vargpt_se_joint.yaml"
+CONFIG="${REPO_ROOT}/${CONFIG}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 MASTER_PORT="${MASTER_PORT:-39600}"
 
@@ -286,9 +287,6 @@ yaml_delete_key "se_image_folder"
     echo "se_proposer_early_failfast_recover: ${SE_PROPOSER_EARLY_FAILFAST_RECOVER}"
 } >> "${RUN_CONFIG}"
 
-if [[ -n "${SE_EXTRA_ARGS:-}" ]]; then
-    echo "[WARN] SE_EXTRA_ARGS is ignored in YAML launch mode: ${SE_EXTRA_ARGS}"
-fi
 effective_value() {
     local key="$1"
     awk -F':' -v k="$key" '
