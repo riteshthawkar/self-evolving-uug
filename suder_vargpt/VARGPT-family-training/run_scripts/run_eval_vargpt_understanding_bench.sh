@@ -15,10 +15,16 @@ set -euo pipefail
 #   EVAL_SETS            default: pure,trained_lora
 #                        allowed tokens: pure,trained_lora
 #   PURE_MODEL_PATH      base model path for pure evaluation set
+#   PURE_BASE_MODEL_PATH explicit base model if PURE_MODEL_PATH is adapter-only
+#   PURE_SE_RUN_DIR      self-evolving run output dir for pure set (optional)
+#   PURE_SE_STEP         specific se checkpoint step for pure set (optional)
 #   PURE_MODEL_ARGS_EXTRA additional lmms model args for pure set
 #   TRAINED_MODEL_PATH   base model path for trained set
 #   TRAINED_LORA_PATH    optional LoRA adapter path for trained set
 #   TRAINED_LORA_ADAPTER_NAME  adapter name to activate (default: solver)
+#   TRAINED_SE_RUN_DIR   self-evolving run output dir for trained set
+#   TRAINED_SE_STEP      specific se checkpoint step for trained set
+#   TRAINED_BASE_MODEL_PATH explicit base model if adapter config is missing/incomplete
 #   TRAINED_MODEL_ARGS_EXTRA additional lmms model args for trained set
 #   NUM_PROCESSES        default: 8
 #   MAIN_PROCESS_PORT    default: 39535
@@ -47,10 +53,16 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-${TRAIN_ROOT}/logs/understanding_eval/$(date +%Y%m%d
 
 EVAL_SETS="${EVAL_SETS:-pure,trained_lora}"
 PURE_MODEL_PATH="${PURE_MODEL_PATH:-}"
+PURE_BASE_MODEL_PATH="${PURE_BASE_MODEL_PATH:-}"
+PURE_SE_RUN_DIR="${PURE_SE_RUN_DIR:-}"
+PURE_SE_STEP="${PURE_SE_STEP:-}"
 PURE_MODEL_ARGS_EXTRA="${PURE_MODEL_ARGS_EXTRA:-}"
 TRAINED_MODEL_PATH="${TRAINED_MODEL_PATH:-}"
 TRAINED_LORA_PATH="${TRAINED_LORA_PATH:-}"
 TRAINED_LORA_ADAPTER_NAME="${TRAINED_LORA_ADAPTER_NAME:-solver}"
+TRAINED_SE_RUN_DIR="${TRAINED_SE_RUN_DIR:-}"
+TRAINED_SE_STEP="${TRAINED_SE_STEP:-}"
+TRAINED_BASE_MODEL_PATH="${TRAINED_BASE_MODEL_PATH:-}"
 TRAINED_MODEL_ARGS_EXTRA="${TRAINED_MODEL_ARGS_EXTRA:-}"
 
 MODEL_PATH="${MODEL_PATH:-}"
@@ -65,6 +77,131 @@ if [[ -n "${MODEL_PATH}" && -z "${PURE_MODEL_PATH}" && -z "${TRAINED_MODEL_PATH}
   EVAL_SETS="pure"
   PURE_MODEL_PATH="${MODEL_PATH}"
   PURE_MODEL_ARGS_EXTRA="${MODEL_ARGS_EXTRA}"
+fi
+
+_latest_se_checkpoint_dir() {
+  local run_dir="$1"
+  if [[ ! -d "${run_dir}" ]]; then
+    return 1
+  fi
+  local latest
+  latest="$(
+    find "${run_dir}" -maxdepth 1 -type d -name 'se_checkpoint_*' -print 2>/dev/null \
+      | awk -F'_' '{print $NF "|" $0}' \
+      | awk -F'|' '$1 ~ /^[0-9]+$/' \
+      | sort -t'|' -k1,1n \
+      | tail -n 1 \
+      | cut -d'|' -f2-
+  )"
+  [[ -n "${latest}" ]] && echo "${latest}"
+}
+
+_resolve_se_artifact_dir() {
+  local run_dir="$1"
+  local step="$2"
+  local resolved=""
+
+  if [[ -z "${run_dir}" ]]; then
+    return 0
+  fi
+  if [[ ! -d "${run_dir}" ]]; then
+    echo "[ERROR] SE run dir not found: ${run_dir}" >&2
+    exit 1
+  fi
+
+  if [[ -n "${step}" ]]; then
+    local explicit="${run_dir}/se_checkpoint_${step}"
+    if [[ ! -d "${explicit}" ]]; then
+      echo "[ERROR] Requested checkpoint not found: ${explicit}" >&2
+      exit 1
+    fi
+    resolved="${explicit}"
+  else
+    resolved="$(_latest_se_checkpoint_dir "${run_dir}")"
+    if [[ -z "${resolved}" ]]; then
+      resolved="${run_dir}"
+    fi
+  fi
+
+  if [[ -d "${resolved}/model" ]]; then
+    echo "${resolved}/model"
+  else
+    echo "${resolved}"
+  fi
+}
+
+_json_base_model_from_adapter() {
+  local adapter_dir="$1"
+  python3 - <<'PY' "${adapter_dir}"
+import json, os, sys
+adapter_dir = sys.argv[1]
+cfg_path = os.path.join(adapter_dir, "adapter_config.json")
+if not os.path.isfile(cfg_path):
+    print("")
+    raise SystemExit(0)
+try:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    print(cfg.get("base_model_name_or_path", "") or "")
+except Exception:
+    print("")
+PY
+}
+
+_resolve_model_and_adapter() {
+  local path_hint="$1"
+  local adapter_name="$2"
+  local base_override="${3:-}"
+
+  local resolved_model=""
+  local resolved_adapter=""
+
+  if [[ -z "${path_hint}" ]]; then
+    echo ";;"
+    return 0
+  fi
+  if [[ ! -d "${path_hint}" ]]; then
+    echo "[ERROR] Path does not exist: ${path_hint}" >&2
+    exit 1
+  fi
+
+  if [[ -f "${path_hint}/config.json" ]]; then
+    resolved_model="${path_hint}"
+    resolved_adapter=""
+    echo "${resolved_model};${resolved_adapter}"
+    return 0
+  fi
+
+  if [[ -f "${path_hint}/${adapter_name}/adapter_config.json" ]]; then
+    resolved_adapter="${path_hint}/${adapter_name}"
+  elif [[ -f "${path_hint}/adapter_config.json" ]]; then
+    resolved_adapter="${path_hint}"
+  elif [[ -f "${path_hint}/default/adapter_config.json" ]]; then
+    resolved_adapter="${path_hint}/default"
+  else
+    echo "[ERROR] Could not find a full model (config.json) or adapter_config.json under: ${path_hint}" >&2
+    exit 1
+  fi
+
+  local inferred_base="${base_override}"
+  if [[ -z "${inferred_base}" ]]; then
+    inferred_base="$(_json_base_model_from_adapter "${resolved_adapter}")"
+  fi
+  if [[ -z "${inferred_base}" ]]; then
+    echo "[ERROR] Could not infer base model for adapter: ${resolved_adapter}" >&2
+    echo "Set TRAINED_BASE_MODEL_PATH (or PURE_MODEL_PATH for pure adapter eval)." >&2
+    exit 1
+  fi
+  resolved_model="${inferred_base}"
+  echo "${resolved_model};${resolved_adapter}"
+}
+
+if [[ -z "${PURE_MODEL_PATH}" && -n "${PURE_SE_RUN_DIR}" ]]; then
+  PURE_MODEL_PATH="$(_resolve_se_artifact_dir "${PURE_SE_RUN_DIR}" "${PURE_SE_STEP}")"
+fi
+
+if [[ -z "${TRAINED_MODEL_PATH}" && -z "${TRAINED_LORA_PATH}" && -n "${TRAINED_SE_RUN_DIR}" ]]; then
+  TRAINED_MODEL_PATH="$(_resolve_se_artifact_dir "${TRAINED_SE_RUN_DIR}" "${TRAINED_SE_STEP}")"
 fi
 
 build_model_args() {
@@ -93,6 +230,21 @@ run_eval_set() {
   local set_extra_args="$3"
   local set_peft_path="${4:-}"
   local set_adapter_name="${5:-}"
+  local set_base_override="${6:-}"
+
+  if [[ -n "${set_model_path}" ]]; then
+    local resolved_pair
+    resolved_pair="$(_resolve_model_and_adapter "${set_model_path}" "${set_adapter_name}" "${set_base_override}")"
+    set_model_path="${resolved_pair%%;*}"
+    local discovered_adapter="${resolved_pair#*;}"
+    if [[ -z "${set_peft_path}" ]]; then
+      set_peft_path="${discovered_adapter}"
+    fi
+  elif [[ -n "${set_peft_path}" ]]; then
+    local resolved_pair
+    resolved_pair="$(_resolve_model_and_adapter "${set_peft_path}" "${set_adapter_name}" "${set_base_override}")"
+    set_model_path="${resolved_pair%%;*}"
+  fi
 
   if [[ -z "${set_model_path}" ]]; then
     echo "[ERROR] Missing model path for set '${set_name}'." >&2
@@ -149,10 +301,14 @@ for raw_set in "${_eval_sets[@]}"; do
 
   case "${set_name}" in
     pure)
-      run_eval_set "pure" "${PURE_MODEL_PATH}" "${PURE_MODEL_ARGS_EXTRA}"
+      run_eval_set "pure" "${PURE_MODEL_PATH}" "${PURE_MODEL_ARGS_EXTRA}" "" "" "${PURE_BASE_MODEL_PATH}"
       ;;
     trained_lora)
-      run_eval_set "trained_lora" "${TRAINED_MODEL_PATH}" "${TRAINED_MODEL_ARGS_EXTRA}" "${TRAINED_LORA_PATH}" "${TRAINED_LORA_ADAPTER_NAME}"
+      if [[ -n "${TRAINED_LORA_PATH}" ]]; then
+        run_eval_set "trained_lora" "${TRAINED_MODEL_PATH}" "${TRAINED_MODEL_ARGS_EXTRA}" "${TRAINED_LORA_PATH}" "${TRAINED_LORA_ADAPTER_NAME}" "${TRAINED_BASE_MODEL_PATH}"
+      else
+        run_eval_set "trained_lora" "${TRAINED_MODEL_PATH}" "${TRAINED_MODEL_ARGS_EXTRA}" "" "${TRAINED_LORA_ADAPTER_NAME}" "${TRAINED_BASE_MODEL_PATH}"
+      fi
       ;;
     *)
       echo "[ERROR] Unsupported EVAL_SETS token: '${set_name}'. Use pure,trained_lora." >&2
