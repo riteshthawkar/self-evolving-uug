@@ -1485,7 +1485,27 @@ class SelfEvolvingTrainer(Trainer):
                     elif isinstance(gen_result, (list, tuple)):
                         img_tensor = gen_result[0] if gen_result else None
                     else:
-                        img_tensor = gen_result
+                        img_tensor = None
+                        # Handle ModelOutput-style returns from VARGPT forward.
+                        for key in ("generated_image", "image", "images", "img", "output_image"):
+                            if hasattr(gen_result, key):
+                                value = getattr(gen_result, key)
+                                if isinstance(value, (list, tuple)):
+                                    img_tensor = value[0] if value else None
+                                else:
+                                    img_tensor = value
+                                if img_tensor is not None:
+                                    break
+                        # Dict-like fallback.
+                        if img_tensor is None and isinstance(gen_result, dict):
+                            for key in ("generated_image", "image", "images", "img", "output_image"):
+                                if key in gen_result:
+                                    value = gen_result[key]
+                                    if isinstance(value, (list, tuple)):
+                                        img_tensor = value[0] if value else None
+                                    else:
+                                        img_tensor = value
+                                    break
 
                     if img_tensor is not None:
                         pil_image = _ensure_pil_image(img_tensor)

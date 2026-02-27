@@ -134,6 +134,7 @@ class Qwen2VLCausalLMOutputWithPast(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     rope_deltas: Optional[torch.LongTensor] = None
+    generated_image: Optional[torch.Tensor] = None
 
 
 class Qwen2VLRotaryEmbedding(nn.Module):
@@ -2369,6 +2370,7 @@ class VARGPTQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMi
         else:
             gen_image_config = None
 
+        generated_image = None
         if inference_image_gen:
             B = input_ids.shape[0]
             assert B==1, "batch size must be 1 for inference"
@@ -2534,6 +2536,7 @@ class VARGPTQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMi
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
             rope_deltas=rope_deltas,
+            generated_image=generated_image,
         )
     def get_gen_loss(self, labels, other_logits, other_labels, image_gen_logits, image_gen_labels, image_gen_mask_list=None ):
 
