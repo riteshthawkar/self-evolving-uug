@@ -30,10 +30,11 @@ set -euo pipefail
 #   RESUME_FROM=/path/to/step_N TRAIN_STAGE=warmup bash E2_understanding_only.sh
 # ══════════════════════════════════════════════════════════════════════════════
 
-REPO_ROOT="/workspace/self-evolving-uug/self-evolving-uug"
-PYTHON_BIN="python3"
-DATA_DIR="/workspace/self-evolving-uug/data/data_3k/images"
-OUTPUT_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/final/E2_understanding_only"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/data_3k/images}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/final/E2_understanding_only}"
 RUN_NAME="E2_understanding_only_s42_updated"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
@@ -41,6 +42,7 @@ RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
+TRAIN_ENTRY="${TRAIN_ENTRY:-$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py}"
 
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
@@ -145,7 +147,7 @@ fi
 cd "$REPO_ROOT"
 mkdir -p "$OUTPUT_DIR"
 
-CACHE_ROOT="/workspace/self-evolving-uug/self-evolving-uug/cache"
+CACHE_ROOT="${CACHE_ROOT:-$REPO_ROOT/cache}"
 CACHE_TMP_DIR="$CACHE_ROOT/tmp"
 CACHE_TORCH_EXT_DIR="$CACHE_ROOT/torch_extensions"
 CACHE_WANDB_DIR="$CACHE_ROOT/wandb"
@@ -161,7 +163,7 @@ mkdir -p \
   "$CACHE_ROOT/assets"
 
 # ── Environment ──────────────────────────────────────────────────────────────
-export PYTHONPATH="/workspace/self-evolving-uug/self-evolving-uug/BLIP3o"
+export PYTHONPATH="$REPO_ROOT/BLIP3o"
 export HF_HOME="$CACHE_ROOT"
 export HUGGINGFACE_HUB_CACHE="$CACHE_ROOT"
 export HF_HUB_CACHE="$CACHE_ROOT"
@@ -225,7 +227,7 @@ fi
   --standalone \
   --nproc_per_node "$NPROC_PER_NODE" \
   --master_port 29524 \
-  "/workspace/self-evolving-uug/self-evolving-uug/BLIP3o/blip3o/train/train_self_evolving.py" \
+  "$TRAIN_ENTRY" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
   --data_split all \
@@ -381,5 +383,5 @@ fi
   \
   `# ── Stage-specific args (difficulty curriculum) ────────────────────────` \
   "${STAGE_ARGS[@]}" \
-  "${RESUME_ARGS[@]}" \
+  ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} \
   --seed 42

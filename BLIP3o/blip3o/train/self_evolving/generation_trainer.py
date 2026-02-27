@@ -116,6 +116,30 @@ from .model_api import (
 )
 
 
+# Strict-imageless fallback when no external image pool is available.
+class _SyntheticImagePool:
+    def __init__(self, seed: int = 42):
+        self.indices = [0]
+        self._seed = int(seed)
+
+    def __len__(self) -> int:
+        return 1
+
+    def get_image(self, idx: int) -> Tuple[Image.Image, Dict]:
+        rng = random.Random(self._seed + int(idx))
+        color = (rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 255))
+        image = Image.new("RGB", (224, 224), color=color)
+        meta = {
+            "path": None,
+            "dataset": "synthetic",
+            "split": "train",
+            "subfolder": "synthetic",
+            "filename": f"synthetic_{int(idx)}.png",
+            "source": "synthetic_pool",
+        }
+        return image, meta
+
+
 # ---------------------------------------------------------------------------
 # GenerationSelfEvolvingTrainer
 # ---------------------------------------------------------------------------
@@ -481,7 +505,18 @@ class GenerationSelfEvolvingTrainer:
             max_images=config.max_images,
             seed=config.seed,
         )
-        self.pool = ImagePool(pool_cfg)
+        try:
+            self.pool = ImagePool(pool_cfg)
+        except Exception as exc:
+            if bool(getattr(config, "strict_imageless_mode", False)):
+                if self.is_main_process:
+                    print(
+                        "[Generation] strict_imageless_mode=True and image pool unavailable; "
+                        f"using synthetic fallback pool ({type(exc).__name__}: {exc})."
+                    )
+                self.pool = _SyntheticImagePool(seed=config.seed)
+            else:
+                raise
 
         reference_model = None
         if not config.use_lora and self.is_main_process:
@@ -4583,8 +4618,7 @@ class GenerationSelfEvolvingTrainer:
             #   Mode B (ref logp):   in (-inf,0] → sigmoid(logp+2) → [0,0.88]
             #   Mode C (self-clip):  already in [0,1]
             _raw_gen_reward = float(best.get("total_reward", 0.0))
-            _use_ref_scoring_gen = bool(getattr(self.cfg, "use_ref_answer_scoring", False))
-            if _use_ref_scoring_gen:
+            if _use_ref_scoring:
                 _quality_component = 1.0 / (1.0 + math.exp(-(_raw_gen_reward + 2.0)))
             else:
                 _quality_component = max(0.0, min(1.0, _raw_gen_reward))
@@ -4843,7 +4877,6 @@ class GenerationSelfEvolvingTrainer:
                     #   Mode C (self-clip cosine):  already in [0, 1] → identity
                     # Without normalization, Mode B values like -6.76 produce
                     # scale = 1 + 0.5*(-6.76) = -2.38 → clamped to 0 → no gradient.
-                    _use_ref_scoring = bool(getattr(self.cfg, "use_ref_answer_scoring", False))
                     if _use_ref_scoring:
                         _dit_reward = 1.0 / (1.0 + math.exp(-(_raw_dit_reward + 2.0)))
                     else:

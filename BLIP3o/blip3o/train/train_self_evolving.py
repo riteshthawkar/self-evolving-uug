@@ -444,6 +444,18 @@ def _build_parser() -> argparse.ArgumentParser:
     # Unified scheduler
     p.add_argument("--understanding_steps_per_cycle", type=int, default=3)
     p.add_argument("--generation_steps_per_cycle", type=int, default=2)
+    p.add_argument(
+        "--cycle_starts_with_generation",
+        action="store_true",
+        default=False,
+        help="When set, each U/G cycle starts with generation steps before understanding steps.",
+    )
+    p.add_argument(
+        "--bootstrap_generated_pool_steps",
+        type=int,
+        default=0,
+        help="Number of initial generation-only steps before the regular U/G cycle begins.",
+    )
     p.add_argument("--synthetic_solver_update_freq", type=int, default=1)
     p.add_argument("--synthetic_solver_hard_only", action="store_true", default=False)
     p.add_argument("--solver_hardness_min_entropy", type=float, default=0.2)
@@ -486,6 +498,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--disable_understanding_generated_only",
         dest="understanding_generated_only",
         action="store_false",
+    )
+    p.add_argument(
+        "--strict_imageless_mode",
+        action="store_true",
+        default=False,
+        help=(
+            "Enforce imageless E5 constraints: imageless proposer + generated-only understanding + "
+            "ref-answer scoring disabled."
+        ),
     )
     p.add_argument("--gen_mix_ratio_start", type=float, default=0.02)
     p.add_argument("--gen_mix_ratio_max", type=float, default=0.25)
@@ -907,6 +928,36 @@ def _build_unified_config(args):
     from blip3o.train.self_evolving.config import UnifiedSelfEvolvingConfig
 
     lora_targets = tuple(x.strip() for x in args.lora_targets.split(",") if x.strip())
+    strict_imageless_mode = bool(args.strict_imageless_mode)
+    imageless_proposer_mode = bool(args.imageless_proposer_mode) or strict_imageless_mode
+    understanding_generated_only = bool(args.understanding_generated_only) or strict_imageless_mode
+    cycle_starts_with_generation = bool(args.cycle_starts_with_generation)
+    if strict_imageless_mode and not cycle_starts_with_generation:
+        print(
+            "[Config] strict_imageless_mode enabled: forcing cycle_starts_with_generation=True "
+            "to warm generated pool before understanding steps."
+        )
+        cycle_starts_with_generation = True
+    use_ref_answer_scoring = bool(args.use_ref_answer_scoring)
+    if imageless_proposer_mode and use_ref_answer_scoring:
+        print(
+            "[Config] imageless proposer mode is enabled; disabling ref-answer scoring "
+            "because it requires a real reference image."
+        )
+        use_ref_answer_scoring = False
+    bootstrap_generated_pool_steps = max(0, int(args.bootstrap_generated_pool_steps))
+    if bootstrap_generated_pool_steps > 0 and int(args.generation_steps_per_cycle) <= 0:
+        print(
+            "[Config] bootstrap_generated_pool_steps > 0 but generation_steps_per_cycle <= 0; "
+            "forcing bootstrap_generated_pool_steps=0."
+        )
+        bootstrap_generated_pool_steps = 0
+    if strict_imageless_mode and bootstrap_generated_pool_steps <= 0:
+        print(
+            "[Config] strict_imageless_mode is enabled without bootstrap steps. "
+            "Early understanding steps may skip until generated pool warms up."
+        )
+
     solver_freq = (
         max(1, args.solver_update_freq) if args.solver_update_freq > 0
         else args.synthetic_solver_update_freq
@@ -1136,11 +1187,13 @@ def _build_unified_config(args):
         wandb_log_images_every=args.wandb_log_images_every,
         understanding_steps_per_cycle=args.understanding_steps_per_cycle,
         generation_steps_per_cycle=args.generation_steps_per_cycle,
+        cycle_starts_with_generation=cycle_starts_with_generation,
+        bootstrap_generated_pool_steps=bootstrap_generated_pool_steps,
         synthetic_solver_update_freq=args.synthetic_solver_update_freq,
         synthetic_solver_hard_only=args.synthetic_solver_hard_only,
         solver_hardness_min_entropy=args.solver_hardness_min_entropy,
         # Self-evolving feedback loop
-        use_ref_answer_scoring=args.use_ref_answer_scoring,
+        use_ref_answer_scoring=use_ref_answer_scoring,
         replay_buffer_size=args.replay_buffer_size,
         replay_min_reward=args.replay_min_reward,
         replay_max_staleness=args.replay_max_staleness,
@@ -1149,7 +1202,8 @@ def _build_unified_config(args):
         generated_mix_min_reward=args.generated_mix_min_reward,
         generated_mix_max_files=args.generated_mix_max_files,
         generated_mix_refresh_every=args.generated_mix_refresh_every,
-        understanding_generated_only=args.understanding_generated_only,
+        understanding_generated_only=understanding_generated_only,
+        strict_imageless_mode=strict_imageless_mode,
         gen_mix_ratio_start=args.gen_mix_ratio_start,
         gen_mix_ratio_max=args.gen_mix_ratio_max,
         gen_mix_ratio_warmup_steps=args.gen_mix_ratio_warmup_steps,
@@ -1158,7 +1212,7 @@ def _build_unified_config(args):
         enable_frozen_judge=args.enable_frozen_judge,
         judge_ema_decay=args.judge_ema_decay,
         judge_gpu_id=args.judge_gpu_id,
-        imageless_proposer_mode=args.imageless_proposer_mode,
+        imageless_proposer_mode=imageless_proposer_mode,
     )
 
 

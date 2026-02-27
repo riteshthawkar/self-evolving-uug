@@ -263,6 +263,15 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
     def __init__(self, config: UnifiedSelfEvolvingConfig):
         if config.enable_solver_updates and config.solver_update_freq <= 0:
             config.solver_update_freq = max(1, config.synthetic_solver_update_freq)
+        if bool(getattr(config, "strict_imageless_mode", False)):
+            config.imageless_proposer_mode = True
+            config.understanding_generated_only = True
+            if bool(getattr(config, "use_ref_answer_scoring", False)):
+                config.use_ref_answer_scoring = False
+                print(
+                    "[Unified] strict_imageless_mode=True: disabling ref-answer scoring "
+                    "(requires a real reference image)."
+                )
         # GenerationSelfEvolvingTrainer.__init__ invokes self._maybe_resume_state().
         # Initialize adaptive windows early so resume can safely restore them.
         self.cfg = config
@@ -308,20 +317,43 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             getattr(self, "_gen_reward_ema_initialized", False)
         )
 
+    def _phase_for_step(self, step: int) -> Tuple[str, int]:
+        """Return (phase, phase_local_index) for the given global step."""
+        cfg = self.cfg
+        u_steps = max(0, int(getattr(cfg, "understanding_steps_per_cycle", 0)))
+        g_steps = max(0, int(getattr(cfg, "generation_steps_per_cycle", 0)))
+        if u_steps == 0 and g_steps == 0:
+            raise ValueError("Both understanding_steps_per_cycle and generation_steps_per_cycle are 0.")
+
+        bootstrap = max(0, int(getattr(cfg, "bootstrap_generated_pool_steps", 0)))
+        if step <= bootstrap:
+            # Bootstrap phase is generation-only, regardless of cycle order.
+            return "generation", int(step)
+
+        rel_step = step - bootstrap
+        cycle = max(1, u_steps + g_steps)
+        cycle_idx = (rel_step - 1) // cycle
+        phase_idx = (rel_step - 1) % cycle
+        starts_with_generation = bool(getattr(cfg, "cycle_starts_with_generation", False))
+
+        if starts_with_generation:
+            if phase_idx < g_steps:
+                local = bootstrap + cycle_idx * g_steps + phase_idx + 1
+                return "generation", local
+            u_pos = phase_idx - g_steps
+            local = cycle_idx * u_steps + u_pos + 1
+            return "understanding", local
+
+        if phase_idx < u_steps:
+            local = cycle_idx * u_steps + phase_idx + 1
+            return "understanding", local
+        g_pos = phase_idx - u_steps
+        local = bootstrap + cycle_idx * g_steps + g_pos + 1
+        return "generation", local
+
     def _phase_local_step_index(self, step: int, phase: str) -> int:
-        cycle = max(1, self.cfg.understanding_steps_per_cycle + self.cfg.generation_steps_per_cycle)
-        cycle_idx = (step - 1) // cycle
-        phase_idx = (step - 1) % cycle
-        if phase == "understanding":
-            if phase_idx >= self.cfg.understanding_steps_per_cycle:
-                return 0
-            return cycle_idx * self.cfg.understanding_steps_per_cycle + phase_idx + 1
-        if phase == "generation":
-            if phase_idx < self.cfg.understanding_steps_per_cycle:
-                return 0
-            gen_pos = phase_idx - self.cfg.understanding_steps_per_cycle
-            return cycle_idx * self.cfg.generation_steps_per_cycle + gen_pos + 1
-        raise ValueError(f"Unknown phase: {phase!r}")
+        phase_name, phase_local = self._phase_for_step(step)
+        return phase_local if phase_name == phase else 0
 
     def _is_proposer_update_due(self, step: int, phase: str) -> bool:
         freq = int(getattr(self.cfg, "proposer_update_freq", 0) or 0)
@@ -5392,6 +5424,10 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"total_steps ({cfg.total_steps}) must be greater than start_step ({self.start_step})."
             )
         cycle = max(1, cfg.understanding_steps_per_cycle + cfg.generation_steps_per_cycle)
+        bootstrap_steps = max(0, int(getattr(cfg, "bootstrap_generated_pool_steps", 0)))
+        cycle_order = (
+            "G->U" if bool(getattr(cfg, "cycle_starts_with_generation", False)) else "U->G"
+        )
 
         if self.is_main_process:
             print(f"[Unified] Starting run at: {self.run_dir}")
@@ -5401,6 +5437,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             print(f"[Unified] Step range: {self.start_step + 1}..{cfg.total_steps}")
             print(
                 f"[Unified] Schedule: Ux{cfg.understanding_steps_per_cycle} + Gx{cfg.generation_steps_per_cycle} (cycle={cycle})"
+            )
+            print(
+                f"[Unified] Cycle order: {cycle_order}, bootstrap_generated_pool_steps={bootstrap_steps}"
             )
             print(
                 f"[Unified] Ref-answer scoring: {getattr(cfg, 'use_ref_answer_scoring', False)}, "
@@ -5419,13 +5458,16 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             for step in range(self.start_step + 1, cfg.total_steps + 1):
                 step_t0 = time.perf_counter()
                 last_attempted_step = step
-                image, meta = self._sample_image_for_step(step)
-                phase_tag = "U"
-                _data_source = "real"  # default; overwritten if replay buffer used
+                phase_name, _phase_local_idx = self._phase_for_step(step)
+                phase_tag = "U" if phase_name == "understanding" else "G"
+                _data_source = "real"
+                image: Optional[Image.Image]
+                meta: Dict[str, Any]
 
-                phase_idx = (step - 1) % cycle
-                if phase_idx < cfg.understanding_steps_per_cycle:
+                if phase_name == "understanding":
                     # ---- Understanding phase: optional generated-image mix ---- #
+                    image = None
+                    meta = {"path": None, "source": "generated_pool"}
                     _gen_mix = self._current_gen_mix_ratio(step)
                     _step_rng = random.Random(cfg.seed + step)
                     _want_generated = bool(self._understanding_generated_only)
@@ -5476,11 +5518,19 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         )
                     else:
                         if not _used_generated:
+                            image, meta = self._sample_image_for_step(step)
                             meta["source"] = "real"
                             _data_source = "real"
                         self._understanding_step(step=step, image=image, meta=meta)
                 else:
                     phase_tag = "G"
+                    if bool(getattr(cfg, "imageless_proposer_mode", False)):
+                        image = None
+                        meta = {"path": None, "source": "imageless_topic"}
+                        _data_source = "imageless"
+                    else:
+                        image, meta = self._sample_image_for_step(step)
+                        _data_source = "real"
                     # Sample the curriculum difficulty target for this generation
                     # step using the same sampler as the understanding phase.
                     # This closes the curriculum loop: the difficulty sampler

@@ -31,7 +31,7 @@
 | E6 | `E6_single_step.sh` | 0U + 5G† | Solver + Generator + DiT + Proposer | Unified step: all components update simultaneously |
 | *E7* | *(X09 step 650)* | 3U + 2G | Same as E1, easy data | Data difficulty matters |
 
-\* E5 runs 3U+2G like E1, but U-steps use 100% generated images from replay buffer (first cycle falls back to real images until buffer fills — ~0.2% leakage)
+\* E5 runs 3U+2G like E1, but in strict imageless mode it starts with generation bootstrap and uses generated-only understanding (no real-image fallback)
 † E6 runs only G-steps, but solver + proposer also train every step via `gen_step_solver_update_enabled` + `proposer_gen_reward_enabled` — all 4 components update per step
 ‡ Solver in E5 trains primarily on self-generated images via replay buffer + gen_step_solver_update. Uses `--imageless_proposer_mode` + `gen_mix_ratio=1.0`
 
@@ -50,7 +50,8 @@
 
 ## The E5 Story (Key Differentiator — Fully Imageless)
 
-E5 is the most novel experiment. **ZERO external images** are used at any point.
+E5 is the most novel experiment. In strict imageless mode, **ZERO external images**
+are used by the training loop.
 The proposer imagines scenes from text topics, the generator creates them, and
 the solver learns to understand them — a fully autonomous learning loop:
 
@@ -99,8 +100,9 @@ Key implementation details:
 - `--gen_mix_ratio_start 1.0 --gen_mix_ratio_max 1.0` forces 100% generated in U-steps
 - 75 diverse topics cover counting, spatial relations, text, charts, color, objects, etc.
 - Proposer creates QA pairs based on *expectations* of what the image should contain
-- `use_ref_answer_scoring` auto-disabled (no real image to generate reference answers)
-- Startup: Cycle 1 U-steps use real images (buffer empty), G-steps fill buffer, Cycle 2+ → 100% generated
+- `--no_ref_answer_scoring` is enforced for imageless mode
+- `--strict_imageless_mode` + `--understanding_generated_only` disallow real-image fallback
+- `--cycle_starts_with_generation` + `--bootstrap_generated_pool_steps` prefill generated pool before U-steps
 
 ## Priority Order (Given 10-Day Constraint)
 
@@ -142,14 +144,14 @@ RESUME_FROM=/path/to/step_N RESET_PROPOSER_BASELINE=1 bash E1_main_joint.sh
 ### Resuming Terminated Experiments
 
 Checkpoints are saved every **50 steps** (`--save_every 50`) under the experiment's
-`OUTPUT_DIR` (e.g. `/workspace/.../runs/final/E1_main_joint/`).  Each checkpoint
+`OUTPUT_DIR` (e.g. `$REPO_ROOT/runs/final/E1_main_joint/`).  Each checkpoint
 is a directory named `step_NNNNN/` containing LoRA adapters, optimizer states,
 baselines, and RNG states.
 
 **Step 1 — Find the latest valid checkpoint:**
 ```bash
 # List checkpoints (look for SAVE_OK marker = completed save)
-ls -d /workspace/.../runs/final/E1_main_joint/step_* | while read d; do
+ls -d "$REPO_ROOT"/runs/final/E1_main_joint/step_* | while read d; do
   [[ -f "$d/SAVE_OK" ]] && echo "OK: $d" || echo "INCOMPLETE: $d"
 done
 ```
@@ -157,10 +159,10 @@ done
 **Step 2 — Resume:**
 ```bash
 # Point RESUME_FROM to the latest complete checkpoint
-RESUME_FROM=/workspace/.../runs/final/E1_main_joint/step_00250 bash E1_main_joint.sh
+RESUME_FROM="$REPO_ROOT"/runs/final/E1_main_joint/step_00250 bash E1_main_joint.sh
 
 # Or just point to the parent dir — the trainer auto-picks the newest valid checkpoint
-RESUME_FROM=/workspace/.../runs/final/E1_main_joint bash E1_main_joint.sh
+RESUME_FROM="$REPO_ROOT"/runs/final/E1_main_joint bash E1_main_joint.sh
 ```
 
 **What gets restored:** LoRA adapter weights (solver/proposer/generator), DiT
