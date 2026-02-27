@@ -88,10 +88,8 @@ import sys
 
 
 _CONFIG_FOR_DOC = "VARGPTQwen2VLConfig"
-try:
-    _OUTPUT_IMAGE_PATH = os.environ["_OUTPUT_IMAGE_PATH"]
-except KeyError:
-    _OUTPUT_IMAGE_PATH = "./"
+_OUTPUT_IMAGE_PATH = os.environ.get("_OUTPUT_IMAGE_PATH", "")
+_SAVE_DEBUG_IMAGES = os.environ.get("VARGPT_SAVE_DEBUG_IMAGES", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 
@@ -1562,8 +1560,79 @@ class VARGPTQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMi
         
         return gt_BL, x_BLCv_wo_first_l
 
+    def _coerce_pixel_gen_values(self, inp_B3HW):
+        """Normalize pixel_gen_values to float tensor [B, 3, H, W] in [-1, 1]."""
+        def _flatten(items):
+            for it in items:
+                if isinstance(it, (list, tuple)):
+                    yield from _flatten(it)
+                else:
+                    yield it
+
+        tensors = []
+        if torch.is_tensor(inp_B3HW):
+            tensors = [inp_B3HW]
+        elif isinstance(inp_B3HW, (list, tuple)):
+            tensors = [x for x in _flatten(inp_B3HW) if x is not None]
+        else:
+            raise TypeError(f"pixel_gen_values must be Tensor/list/tuple, got {type(inp_B3HW)}")
+
+        if len(tensors) == 0:
+            raise ValueError("pixel_gen_values is empty after flattening.")
+
+        batch_tensors = []
+        for t in tensors:
+            if not torch.is_tensor(t):
+                raise TypeError(f"pixel_gen_values contains non-tensor item: {type(t)}")
+            tt = t.detach()
+
+            if tt.ndim == 5 and tt.shape[1] == 1:
+                tt = tt.squeeze(1)
+
+            if tt.ndim == 4:
+                if tt.shape[1] in (1, 3, 4):
+                    pass
+                elif tt.shape[-1] in (1, 3, 4):
+                    tt = tt.permute(0, 3, 1, 2).contiguous()
+                else:
+                    raise ValueError(f"Unsupported 4D pixel_gen_values shape: {tuple(tt.shape)}")
+            elif tt.ndim == 3:
+                if tt.shape[0] in (1, 3, 4):
+                    tt = tt.unsqueeze(0)
+                elif tt.shape[-1] in (1, 3, 4):
+                    tt = tt.permute(2, 0, 1).unsqueeze(0).contiguous()
+                else:
+                    raise ValueError(f"Unsupported 3D pixel_gen_values shape: {tuple(tt.shape)}")
+            else:
+                raise ValueError(f"Unsupported pixel_gen_values rank: {tt.ndim} shape={tuple(tt.shape)}")
+
+            if tt.shape[1] == 1:
+                tt = tt.repeat(1, 3, 1, 1)
+            elif tt.shape[1] == 4:
+                tt = tt[:, :3, :, :]
+
+            batch_tensors.append(tt)
+
+        inp = torch.cat(batch_tensors, dim=0) if len(batch_tensors) > 1 else batch_tensors[0]
+        inp = inp.to(dtype=torch.float32)
+
+        min_v = float(inp.min().item())
+        max_v = float(inp.max().item())
+        if max_v > 1.5 or min_v < -1.5:
+            inp = inp.clamp(0.0, 255.0) / 255.0
+
+        min_v = float(inp.min().item())
+        max_v = float(inp.max().item())
+        if min_v >= -1e-3 and max_v <= 1.0 + 1e-3:
+            inp = inp * 2.0 - 1.0
+        else:
+            inp = inp.clamp(-1.0, 1.0)
+
+        return inp.contiguous()
+
     def get_vae_gt_xin_v1_1(self, inp_B3HW, args):
-        B = inp_B3HW.shape[0]  # if isinstance(inp_B3HW, torch.Tensor) else inp_B3HW[0].shape[0] torch.Size([2, 3, 256, 256])
+        inp_B3HW = self._coerce_pixel_gen_values(inp_B3HW)
+        B = inp_B3HW.shape[0]
         T = 1 if inp_B3HW.dim() == 4 else inp_B3HW.shape[2]
         V = self.vae_local.vocab_size
         device = inp_B3HW.device
@@ -2425,7 +2494,15 @@ class VARGPTQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMi
                 inference_image_gen = inference_image_gen,
             )
             generated_image = img_list[0]
-            cv2.imwrite(f'{_OUTPUT_IMAGE_PATH}/{(self._OUTPUT_IMAGE_INDEX-1)//2}.png', generated_image.cpu().numpy())
+            if _SAVE_DEBUG_IMAGES and _OUTPUT_IMAGE_PATH:
+                try:
+                    os.makedirs(_OUTPUT_IMAGE_PATH, exist_ok=True)
+                    cv2.imwrite(
+                        f'{_OUTPUT_IMAGE_PATH}/{(self._OUTPUT_IMAGE_INDEX-1)//2}.png',
+                        generated_image.cpu().numpy(),
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to write debug generated image: {e}")
             
             
         else:    
