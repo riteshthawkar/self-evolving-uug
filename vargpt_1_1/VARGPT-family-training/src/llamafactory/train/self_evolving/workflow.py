@@ -56,7 +56,7 @@ def run_self_evolving(
         from visionllm.vargpt_qwen_v1_1.prepare_vargpt_v1_1 import (
             prepare_vargpt_qwen2vl_v1_1,
         )
-        prepare_vargpt_qwen2vl_v1_1()
+        prepare_vargpt_qwen2vl_v1_1(base_model_id=model_args.model_name_or_path)
     else:
         logger.warning(
             f"Unknown vargpt_version: {finetuning_args.vargpt_version}. "

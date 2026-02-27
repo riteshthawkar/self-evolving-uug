@@ -41,7 +41,7 @@ def run_suder(
         prepare_vargpt_llava()
     elif finetuning_args.vargpt_version == "qwen2vl-v1.1":
         from visionllm.vargpt_qwen_v1_1.prepare_vargpt_v1_1 import prepare_vargpt_qwen2vl_v1_1
-        prepare_vargpt_qwen2vl_v1_1()
+        prepare_vargpt_qwen2vl_v1_1(base_model_id=model_args.model_name_or_path)
 
     tokenizer_module = load_tokenizer(model_args)
     tokenizer = tokenizer_module["tokenizer"]

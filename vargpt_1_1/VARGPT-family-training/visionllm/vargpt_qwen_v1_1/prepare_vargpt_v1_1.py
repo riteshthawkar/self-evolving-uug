@@ -7,6 +7,7 @@ from transformers import AutoProcessor, Qwen2TokenizerFast, LlavaProcessor, Gene
 import torch
 from transformers import AutoProcessor
 from transformers.processing_utils import ProcessorMixin
+import os
 
 cfg= {
   "attention_dropout": 0.0,
@@ -57,7 +58,7 @@ cfg= {
   },
   "vocab_size": 152064
 }
-qwen2vl_model_id = "Qwen2-VL-tokenizer" 
+qwen2vl_model_id = os.environ.get("VARGPT_QWEN2VL_MODEL_ID", "VARGPT-family/VARGPT-v1.1")
 vargpt_save_path = "VARGPT-v1.1" 
 
 
@@ -67,7 +68,12 @@ def check_file_exists(directory, filename):
     return os.path.isfile(file_path)
 
 
-def prepare_vargpt_qwen2vl_v1_1(save_path=vargpt_save_path, prepared_modules=["model", "tokenizer", "processor", "image_processor"], device=None):
+def prepare_vargpt_qwen2vl_v1_1(
+    save_path=vargpt_save_path,
+    prepared_modules=["model", "tokenizer", "processor", "image_processor"],
+    device=None,
+    base_model_id=None,
+):
 
 
     from llamafactory.data.template import _register_template, StringFormatter, EmptyFormatter, get_mm_plugin
@@ -76,23 +82,38 @@ def prepare_vargpt_qwen2vl_v1_1(save_path=vargpt_save_path, prepared_modules=["m
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
 
-    existsed = False
-    if check_file_exists(save_path, "config.json"):
-        existsed = True
+    existsed = check_file_exists(save_path, "config.json")
+    source_model_id = base_model_id or os.environ.get("VARGPT_QWEN2VL_MODEL_ID", qwen2vl_model_id)
 
     if existsed:
         vargpt_qwen2vl_config = VARGPTQwen2VLConfig.from_pretrained(save_path)
+        source_for_assets = save_path
     else:
-        vargpt_qwen2vl_config = VARGPTQwen2VLConfig(**cfg)
+        source_for_assets = source_model_id
+        try:
+            vargpt_qwen2vl_config = VARGPTQwen2VLConfig.from_pretrained(source_for_assets)
+        except Exception:
+            vargpt_qwen2vl_config = VARGPTQwen2VLConfig(**cfg)
 
 
-    tokenizer = AutoTokenizer.from_pretrained(qwen2vl_model_id)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(source_for_assets)
+    except Exception:
+        if source_for_assets == save_path:
+            source_for_assets = source_model_id
+            existsed = False
+            tokenizer = AutoTokenizer.from_pretrained(source_for_assets)
+        else:
+            raise
     special_tokens_dict = {
         'additional_special_tokens': tokenizer.additional_special_tokens + ['<|image_gen_start|>', '<|image_gen_end|>', '<|image_gen_pad|>']  # 你想添加的特殊 token
     }
     num_added_tokens = tokenizer.add_special_tokens(special_tokens_dict)
     
-    generation_config = GenerationConfig.from_pretrained(qwen2vl_model_id)
+    try:
+        generation_config = GenerationConfig.from_pretrained(source_for_assets)
+    except Exception:
+        generation_config = GenerationConfig()
     generation_config.special_tokens = {
         "image_gen_start": "<|image_gen_start|>",
         "image_gen_start_token_id": tokenizer.convert_tokens_to_ids('<|image_gen_start|>'),
@@ -103,11 +124,21 @@ def prepare_vargpt_qwen2vl_v1_1(save_path=vargpt_save_path, prepared_modules=["m
     }
     generation_config.allowed_special_tokens = ['<|image_gen_start|>', '<|image_gen_end|>', '<|image_gen_pad|>']
     
-    image_process = VARGPTQwen2VLImageProcessor.from_pretrained(qwen2vl_model_id)
+    try:
+        image_process = VARGPTQwen2VLImageProcessor.from_pretrained(source_for_assets)
+    except Exception:
+        if source_for_assets == save_path:
+            source_for_assets = source_model_id
+            existsed = False
+            image_process = VARGPTQwen2VLImageProcessor.from_pretrained(source_for_assets)
+        else:
+            raise
 
     process = VARGPTQwen2VLProcessor(image_processor=image_process, tokenizer=tokenizer)
 
-    if not existsed:
+    model = None
+    prepare_from_scratch = os.environ.get("VARGPT_PREPARE_FROM_SCRATCH", "0").lower() in ("1", "true", "yes")
+    if not existsed and prepare_from_scratch:
         vargpt_qwen2vl_config.train_from_scratch = False
         vargpt_qwen2vl_config.torch_dtype = torch.bfloat16  # 明确设置 dtype
         vargpt_qwen2vl_config.special_tokens = {
@@ -124,9 +155,9 @@ def prepare_vargpt_qwen2vl_v1_1(save_path=vargpt_save_path, prepared_modules=["m
             dtype=torch.bfloat16)
         print(f"New model embedding size before resize: {model.get_input_embeddings().weight.shape[0]}")
 
-        print(f"Original tokenizer size before adding tokens: {len(AutoTokenizer.from_pretrained(qwen2vl_model_id))}")
+        print(f"Original tokenizer size before adding tokens: {len(AutoTokenizer.from_pretrained(source_for_assets))}")
         original_model = AutoModelForVision2Seq.from_pretrained(
-            qwen2vl_model_id,
+            source_for_assets,
             torch_dtype=torch.bfloat16,
             device_map=device
         )
@@ -171,7 +202,8 @@ def prepare_vargpt_qwen2vl_v1_1(save_path=vargpt_save_path, prepared_modules=["m
         generation_config.save_pretrained(save_path)
         image_process.save_pretrained(save_path)
         process.save_pretrained(save_path)
-        model.save_pretrained(save_path, torch_dtype=torch.bfloat16)
+        if model is not None:
+            model.save_pretrained(save_path, torch_dtype=torch.bfloat16)
 
     # register into hugginface
     AutoConfig.register(vargpt_qwen2vl_config.model_type, VARGPTQwen2VLConfig)
