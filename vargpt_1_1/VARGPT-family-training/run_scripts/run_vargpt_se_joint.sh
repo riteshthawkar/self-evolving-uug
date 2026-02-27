@@ -17,12 +17,12 @@ MASTER_PORT="${MASTER_PORT:-39600}"
 
 resolve_launcher() {
     LAUNCHER=()
-    if command -v llamafactory-cli >/dev/null 2>&1; then
-        LAUNCHER=("llamafactory-cli")
-        return 0
-    fi
     if python -c "import llamafactory.cli" >/dev/null 2>&1; then
         LAUNCHER=("python" "-m" "llamafactory.cli")
+        return 0
+    fi
+    if command -v llamafactory-cli >/dev/null 2>&1; then
+        LAUNCHER=("llamafactory-cli")
         return 0
     fi
     return 1
@@ -108,7 +108,8 @@ fi
 
 if ! resolve_launcher; then
     echo "[ERROR] Could not find LlamaFactory launcher." >&2
-    echo "[ERROR] Run: pip install -e ." >&2
+    echo "[ERROR] Run: pip install -e . --no-deps" >&2
+    echo "[ERROR] NOTE: this repo pins torch==2.1.0 in requirements; avoid reinstalling torch on ROCm." >&2
     echo "[ERROR] Or ensure 'python -m llamafactory.cli' imports in current env." >&2
     exit 1
 fi
@@ -130,7 +131,7 @@ if [[ "${LLAMAFACTORY_MODULE_DIR}" == *"/site-packages/llamafactory" ]]; then
     echo "[ERROR] Wrong llamafactory package resolved." >&2
     echo "[ERROR] Current:  ${LLAMAFACTORY_MODULE_DIR}" >&2
     echo "[ERROR] Expected: ${EXPECTED_MODULE_DIR}" >&2
-    echo "[ERROR] Fix in this env: pip uninstall -y llamafactory && pip install -e ${REPO_ROOT}" >&2
+    echo "[ERROR] Fix in this env: pip uninstall -y llamafactory && pip install -e ${REPO_ROOT} --no-deps" >&2
     exit 1
 fi
 if [[ "${LLAMAFACTORY_MODULE_DIR}" != "${EXPECTED_MODULE_DIR}" ]]; then
