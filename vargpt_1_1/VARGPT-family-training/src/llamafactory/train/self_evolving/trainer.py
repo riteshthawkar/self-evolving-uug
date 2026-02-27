@@ -1520,6 +1520,13 @@ class SelfEvolvingTrainer(Trainer):
                                     break
 
                     if img_tensor is not None:
+                        # VARGPT inference path returns uint8 HWC in BGR order.
+                        # Convert to RGB for PIL conversion and downstream training.
+                        if torch.is_tensor(img_tensor) and img_tensor.dtype == torch.uint8:
+                            if img_tensor.ndim == 3 and img_tensor.shape[-1] == 3:
+                                img_tensor = img_tensor[..., [2, 1, 0]].contiguous()
+                            elif img_tensor.ndim == 4 and img_tensor.shape[-1] == 3:
+                                img_tensor = img_tensor[..., [2, 1, 0]].contiguous()
                         pil_image = _ensure_pil_image(img_tensor)
                         peft_model.train()
                         return pil_image, img_tensor
