@@ -9,6 +9,7 @@ stage: self_evolving
 do_train: true
 finetuning_type: lora
 vargpt_version: "qwen2vl-v1.1"
+flash_attn: disabled
 
 ### lora
 lora_rank: 16
