@@ -113,6 +113,7 @@ SE_PROPOSER_EARLY_FAILFAST_ENABLED="${SE_PROPOSER_EARLY_FAILFAST_ENABLED:-true}"
 SE_PROPOSER_EARLY_FAILFAST_STOP="${SE_PROPOSER_EARLY_FAILFAST_STOP:-false}"
 SE_PROPOSER_EARLY_FAILFAST_RECOVER="${SE_PROPOSER_EARLY_FAILFAST_RECOVER:-true}"
 DATASET_DIR="${DATASET_DIR:-data_temp}"
+OUTPUT_DIR="${OUTPUT_DIR:-}"
 
 # ── Pre-flight checks ────────────────────────────────────────────────────────
 if [[ ! -f "$CONFIG" ]]; then
@@ -210,7 +211,16 @@ echo ""
 TMP_CONFIG="$(mktemp "/tmp/vargpt_se_joint_XXXX.yaml")"
 RUN_CONFIG="${TMP_CONFIG}"
 cp "${CONFIG}" "${RUN_CONFIG}"
-trap '[[ -n "${TMP_CONFIG:-}" && -f "${TMP_CONFIG}" ]] && rm -f "${TMP_CONFIG}"' EXIT
+if [[ "${KEEP_TMP_CONFIG:-0}" == "1" ]]; then
+    trap ':' EXIT
+else
+    trap '[[ -n "${TMP_CONFIG:-}" && -f "${TMP_CONFIG}" ]] && rm -f "${TMP_CONFIG}"' EXIT
+fi
+if [[ -n "${RESUME_FROM:-}" ]]; then
+    OVERWRITE_OUTPUT_DIR="${OVERWRITE_OUTPUT_DIR:-false}"
+else
+    OVERWRITE_OUTPUT_DIR="${OVERWRITE_OUTPUT_DIR:-true}"
+fi
 
 yaml_quote() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -219,6 +229,13 @@ yaml_quote() {
 {
     echo ""
     echo "# --- auto overrides from run_vargpt_se_joint.sh ---"
+    if [[ -n "${RESUME_FROM:-}" ]]; then
+        echo "resume_from_checkpoint: \"$(yaml_quote "${RESUME_FROM}")\""
+    fi
+    if [[ -n "${OUTPUT_DIR}" ]]; then
+        echo "output_dir: \"$(yaml_quote "${OUTPUT_DIR}")\""
+    fi
+    echo "overwrite_output_dir: ${OVERWRITE_OUTPUT_DIR}"
     echo "dataset_dir: \"$(yaml_quote "${DATASET_DIR}")\""
     echo "se_image_folder: \"$(yaml_quote "${IMAGE_FOLDER}")\""
     echo "se_num_solver_samples: ${SE_NUM_SOLVER_SAMPLES}"
@@ -268,6 +285,8 @@ EFFECTIVE_STAGE="$(effective_value stage)"
 EFFECTIVE_DO_TRAIN="$(echo "$(effective_value do_train)" | tr '[:upper:]' '[:lower:]')"
 EFFECTIVE_TOTAL_STEPS="$(effective_value se_total_steps)"
 EFFECTIVE_IMAGE_FOLDER="$(effective_value se_image_folder)"
+EFFECTIVE_OVERWRITE_OUTPUT_DIR="$(echo "$(effective_value overwrite_output_dir)" | tr '[:upper:]' '[:lower:]')"
+EFFECTIVE_OUTPUT_DIR="$(effective_value output_dir)"
 if [[ "${EFFECTIVE_STAGE}" != "self_evolving" ]]; then
     echo "[ERROR] Effective config stage is '${EFFECTIVE_STAGE}', expected 'self_evolving'." >&2
     exit 1
@@ -284,10 +303,16 @@ if [[ -z "${EFFECTIVE_IMAGE_FOLDER}" ]]; then
     echo "[ERROR] Effective se_image_folder is empty in run config: ${RUN_CONFIG}" >&2
     exit 1
 fi
+if [[ -z "${EFFECTIVE_OUTPUT_DIR}" ]]; then
+    echo "[ERROR] Effective output_dir is empty in run config: ${RUN_CONFIG}" >&2
+    exit 1
+fi
 echo "  Effective stage       : ${EFFECTIVE_STAGE}"
 echo "  Effective do_train    : ${EFFECTIVE_DO_TRAIN}"
 echo "  Effective total_steps : ${EFFECTIVE_TOTAL_STEPS}"
 echo "  Effective se_image_folder: ${EFFECTIVE_IMAGE_FOLDER}"
+echo "  Effective output_dir  : ${EFFECTIVE_OUTPUT_DIR}"
+echo "  Effective overwrite_output_dir: ${EFFECTIVE_OVERWRITE_OUTPUT_DIR}"
 echo "  Run config   : ${RUN_CONFIG}"
 
 FORCE_TORCHRUN=1 \
