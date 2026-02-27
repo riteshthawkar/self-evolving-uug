@@ -17,6 +17,7 @@ import math
 import os
 import pathlib
 import random
+import re
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -150,6 +151,31 @@ class SelfEvolvingTrainer(Trainer):
             maxlen=se_config.difficulty_sampler_window_size,
         )
 
+        # ── Proposer controller / failfast state ────────────────────────
+        failfast_window = 128
+        self._candidate_non_easy_window: collections.deque = collections.deque(maxlen=failfast_window)
+        self._all_easy_group_window: collections.deque = collections.deque(maxlen=failfast_window)
+        self._proposer_reward_clipped_window: collections.deque = collections.deque(maxlen=failfast_window)
+        self._selected_non_easy_window: collections.deque = collections.deque(maxlen=failfast_window)
+        self._solver_update_applied_window: collections.deque = collections.deque(maxlen=failfast_window)
+        self._entropy_easy_window: collections.deque = collections.deque(
+            maxlen=max(32, int(getattr(se_config, "entropy_iqr_window_size", 256)))
+        )
+
+        self._all_easy_streak: int = 0
+        self._forced_explore_steps_left: int = 0
+        self._proposer_collapse_streak: int = 0
+        self._u_step_counter: int = 0
+
+        # Warm-start and hardness-debt state
+        ws_window = max(1, int(getattr(se_config, "proposer_warm_start_exit_window", 5)))
+        self._warm_start_entropy_window: collections.deque = collections.deque(maxlen=ws_window)
+        self._warm_start_exit_streak: int = 0
+        self._warm_start_completed: bool = False
+        self._hardness_debt: float = 0.0
+        self._hardness_debt_cap_streak: int = 0
+        self._hardness_debt_escape_steps_left: int = 0
+
         # ── DDP detection ────────────────────────────────────────────────
         self._is_ddp = dist.is_available() and dist.is_initialized()
 
@@ -261,6 +287,8 @@ class SelfEvolvingTrainer(Trainer):
         """
         cfg = self.se_config
         stats = {}
+        self._u_step_counter += 1
+        u_step = int(self._u_step_counter)
         max_retries = 3 if cfg.acceptance_require_non_easy else 1
 
         # ── 1. Sample image ─────────────────────────────────────────────
@@ -273,51 +301,224 @@ class SelfEvolvingTrainer(Trainer):
         proposer_completion = None
         answers = []
         solver_completions = []
+        candidate_records: List[Dict[str, object]] = []
+        selected_candidate: Optional[Dict[str, object]] = None
+        selected_candidate_idx: int = -1
+        selected_meta: Dict[str, str] = {}
+        controller_state = self._choose_difficulty_target()
+        desired_difficulty_bucket = str(controller_state.get("desired_bucket", "medium"))
+        warm_start_active = bool(self._is_proposer_warm_start_active(u_step))
+        controller_mode = str(controller_state.get("mode", "target"))
+        debt_ratio = float(controller_state.get("hardness_debt_ratio", 0.0))
+        controller_penalty_boost = 1.0 + debt_ratio * max(
+            0.0, float(getattr(cfg, "hardness_debt_penalty_boost_max", 0.30))
+        )
+        proposer_temp = float(cfg.temp) + debt_ratio * max(
+            0.0, float(getattr(cfg, "hardness_debt_temp_boost_max", 0.30))
+        )
+        proposer_top_p = float(cfg.top_p)
+        proposer_num_candidates = max(1, int(cfg.proposer_num_candidates))
+        if "forced_explore" in controller_mode:
+            proposer_num_candidates = max(
+                proposer_num_candidates,
+                int(getattr(cfg, "all_easy_explore_num_candidates", proposer_num_candidates)),
+            )
+            proposer_temp += max(0.0, float(getattr(cfg, "all_easy_explore_temp_boost", 1.20)))
+            proposer_top_p = min(
+                1.0,
+                proposer_top_p + max(0.0, float(getattr(cfg, "all_easy_explore_top_p_boost", 0.20))),
+            )
+            controller_penalty_boost += max(
+                0.0,
+                float(getattr(cfg, "all_easy_explore_penalty_boost", 0.70)),
+            )
+        proposer_temp = max(0.05, min(3.5, proposer_temp))
+        proposer_top_p = max(0.05, min(1.0, proposer_top_p))
         attempt = 0
 
         for attempt in range(max_retries):
-            # ── 2. Proposer generates question(s) ───────────────────────
+            # ── 2. Proposer generates question candidates ───────────────
             with use_role(self.model, ROLE_PROPOSER):
-                q, pc = self._generate_proposer_question(image, step)
-            if not q:
-                continue
-
-            # ── 3. Solver answers with K samples ────────────────────────
-            with use_role(self.model, ROLE_SOLVER):
-                ans, sc = self._generate_solver_answers(
-                    image, q, num_samples=cfg.num_solver_samples,
+                candidates, proposer_raw = self._generate_proposer_candidates(
+                    image,
+                    step,
+                    target_difficulty=desired_difficulty_bucket,
+                    num_candidates=proposer_num_candidates,
+                    temperature=proposer_temp,
+                    top_p=proposer_top_p,
                 )
-            if not ans:
+            if not candidates:
                 continue
 
-            question_text = q
-            proposer_completion = pc
-            answers = ans
-            solver_completions = sc
+            spot_n = max(1, min(int(cfg.proposer_spot_check_samples), int(cfg.num_solver_samples)))
+            current_candidates: List[Dict[str, object]] = []
+            entropy_mu_for_spot = (
+                float(self.proposer_entropy_mu_ema)
+                if bool(cfg.adaptive_prop_entropy_target)
+                else float(cfg.prop_entropy_mu)
+            )
 
-            # Check if this question is non-trivial
-            norm = [normalize_answer(a) for a in answers]
-            _, mc = majority_vote(norm)
-            mf = mc / len(norm)
-            counts_check = {}
-            for a in norm:
-                counts_check[a] = counts_check.get(a, 0) + 1
-            probs_check = [c / len(norm) for c in counts_check.values()]
-            ent_check = shannon_entropy_nats(probs_check)
+            # ── 3. Spot-check each candidate with reduced solver budget ─
+            for cand_idx, cand in enumerate(candidates):
+                q = str(cand.get("question", "")).strip()
+                if not q:
+                    continue
+                with use_role(self.model, ROLE_SOLVER):
+                    ans_spot, sc_spot = self._generate_solver_answers(
+                        image, q, num_samples=spot_n,
+                    )
+                if not ans_spot:
+                    continue
 
-            if ent_check >= cfg.sc_entropy_min or mf < cfg.easy_update_majority_frac_threshold:
-                # Non-trivial question found — use it
+                norm = [normalize_answer(a) for a in ans_spot]
+                norm = [n for n in norm if n]
+                if not norm:
+                    continue
+
+                _, mc = majority_vote(norm)
+                mf = mc / len(norm)
+                counts_spot: Dict[str, int] = {}
+                for a in norm:
+                    counts_spot[a] = counts_spot.get(a, 0) + 1
+                probs_spot = [c / len(norm) for c in counts_spot.values()]
+                ent_spot = shannon_entropy_nats(probs_spot)
+                margin_spot = mf - self._second_highest_frac(norm)
+                easy_spot = (ent_spot < cfg.sc_entropy_min) and (margin_spot > cfg.sc_margin_max)
+
+                # Spot reward used only for candidate ranking/group update seed.
+                spot_reward = gaussian_reward(
+                    ent_spot, entropy_mu_for_spot, cfg.prop_entropy_sigma,
+                )
+                if ent_spot < 0.01:
+                    spot_reward = -cfg.zero_entropy_reward_cap
+                elif easy_spot:
+                    spot_reward = min(spot_reward, -cfg.zero_entropy_reward_cap * 0.5)
+                if cfg.acceptance_require_non_easy and easy_spot:
+                    spot_reward -= controller_penalty_boost * float(cfg.rejected_question_penalty)
+
+                meta = dict(cand.get("meta", {}))
+                objective_ok = bool(self._is_objective_question(q))
+                if cfg.proposer_require_objective and not objective_ok:
+                    spot_reward -= controller_penalty_boost * float(cfg.proposer_non_objective_penalty)
+
+                cert = self._proposer_certificate_score(q, meta)
+                cert_score = float(cert.get("score", 0.0))
+                cert_valid = float(cert.get("valid", 0.0))
+                cert_bonus = 0.0
+                if bool(getattr(cfg, "proposer_certificate_enabled", True)):
+                    cert_weight_cfg = float(
+                        getattr(
+                            cfg,
+                            "proposer_warm_start_certificate_weight"
+                            if warm_start_active
+                            else "proposer_certificate_weight",
+                            0.50 if warm_start_active else 0.75,
+                        )
+                    )
+                    cert_weight = max(0.0, cert_weight_cfg)
+                    cert_min = max(
+                        0.0,
+                        min(
+                            1.0,
+                            min(
+                                float(getattr(cfg, "proposer_certificate_min_score", 0.55)),
+                                0.50 if warm_start_active else 1.0,
+                            ),
+                        ),
+                    )
+                    cert_bonus = cert_weight * (cert_score - cert_min)
+                    spot_reward += cert_bonus
+
+                current_candidates.append(
+                    {
+                        "candidate_index": int(cand_idx),
+                        "question": q,
+                        "completion": str(cand.get("completion", "")),
+                        "meta": meta,
+                        "spot_answers_raw": list(ans_spot),
+                        "spot_solver_completions": list(sc_spot),
+                        "spot_entropy": float(ent_spot),
+                        "spot_margin": float(margin_spot),
+                        "spot_majority_frac": float(mf),
+                        "easy_spot": bool(easy_spot),
+                        "objective_ok": bool(objective_ok),
+                        "certificate_score": float(cert_score),
+                        "certificate_valid": float(cert_valid),
+                        "certificate_bonus": float(cert_bonus),
+                        "spot_reward": float(spot_reward),
+                    }
+                )
+
+            if not current_candidates:
+                continue
+
+            # Select best candidate: prefer non-easy, then stronger spot reward, then entropy.
+            selected_now = max(
+                current_candidates,
+                key=lambda c: (
+                    1.0 if not bool(c.get("easy_spot", True)) else 0.0,
+                    float(c.get("certificate_valid", 0.0)),
+                    float(c.get("certificate_score", 0.0)),
+                    float(c.get("spot_reward", -1e9)),
+                    float(c.get("spot_entropy", 0.0)),
+                ),
+            )
+
+            candidate_records = current_candidates
+            selected_candidate = selected_now
+            selected_candidate_idx = int(selected_now.get("candidate_index", -1))
+            selected_meta = dict(selected_now.get("meta", {}))
+            question_text = str(selected_now.get("question", "")).strip()
+            proposer_completion = str(selected_now.get("completion", ""))
+            if not proposer_completion:
+                proposer_completion = f"<question>{question_text}</question>"
+
+            if (
+                question_text
+                and (
+                    (not cfg.acceptance_require_non_easy)
+                    or (not bool(selected_now.get("easy_spot", True)))
+                )
+            ):
                 break
-            # Otherwise retry with a new question
+            # Otherwise retry with a new proposer pass
 
         if not question_text:
             return {"u_skipped": True, "reason": "no_question"}
 
+        # ── 4. Full solver rollout on selected candidate ────────────────
+        with use_role(self.model, ROLE_SOLVER):
+            answers, solver_completions = self._generate_solver_answers(
+                image, question_text, num_samples=cfg.num_solver_samples,
+            )
+        if not answers:
+            return {"u_skipped": True, "reason": "no_answers"}
+
         stats["question"] = question_text[:100]
         stats["num_answers"] = len(answers)
         stats["proposer_retries"] = attempt
+        stats["u_step"] = u_step
+        stats["difficulty_target_bucket"] = desired_difficulty_bucket
+        stats["difficulty_sampler_enabled"] = 1.0 if bool(controller_state.get("enabled", False)) else 0.0
+        stats["difficulty_sampler_mode"] = str(controller_state.get("mode", "target"))
+        stats["difficulty_target_weights"] = dict(controller_state.get("target_weights", {}))
+        stats["difficulty_observed_weights"] = dict(controller_state.get("observed_weights", {}))
+        stats["difficulty_sampling_weights"] = dict(controller_state.get("sampling_weights", {}))
+        stats["proposer_controller_temp"] = float(proposer_temp)
+        stats["proposer_controller_top_p"] = float(proposer_top_p)
+        stats["proposer_controller_penalty_boost"] = float(controller_penalty_boost)
+        stats["proposer_warm_start_active"] = bool(warm_start_active)
+        stats["proposer_candidate_count"] = len(candidate_records)
+        stats["proposer_selected_candidate_index"] = selected_candidate_idx
+        if candidate_records:
+            stats["proposer_candidate_non_easy_rate"] = (
+                sum(1 for c in candidate_records if not bool(c.get("easy_spot", True)))
+                / float(len(candidate_records))
+            )
+        else:
+            stats["proposer_candidate_non_easy_rate"] = 0.0
 
-        # ── 4. Compute rewards ──────────────────────────────────────────
+        # ── 5. Compute rewards ──────────────────────────────────────────
         # Normalize answers for voting
         norm_answers = [normalize_answer(a) for a in answers]
         if not norm_answers:
@@ -346,18 +547,100 @@ class SelfEvolvingTrainer(Trainer):
         # ── Adaptive entropy target ──────────────────────────────
         prop_entropy_mu_used = self._update_proposer_entropy_target(entropy)
 
-        # Proposer reward: based on question difficulty (entropy)
+        # Proposer reward: entropy reward in steady state; text/certificate bootstrap in warm-start.
         proposer_reward = gaussian_reward(
-            entropy, prop_entropy_mu_used, cfg.prop_entropy_sigma,
+            entropy,
+            prop_entropy_mu_used,
+            cfg.prop_entropy_sigma,
         )
-        # Penalty for zero-entropy / trivially easy questions:
-        # Apply a HARD NEGATIVE — the proposer must be penalized for
-        # producing questions the solver unanimously agrees on.
-        if entropy < 0.01:
-            proposer_reward = -cfg.zero_entropy_reward_cap
-        elif easy_question:
-            # Even non-zero but very low entropy gets penalized
-            proposer_reward = min(proposer_reward, -cfg.zero_entropy_reward_cap * 0.5)
+        proposer_reward_raw = float(proposer_reward)
+        non_objective_question = not self._is_objective_question(question_text)
+
+        cert_final = self._proposer_certificate_score(question_text, selected_meta)
+        cert_score_final = float(cert_final.get("score", 0.0))
+        cert_valid_final = float(cert_final.get("valid", 0.0))
+        cert_bonus_final = 0.0
+        if bool(getattr(cfg, "proposer_certificate_enabled", True)):
+            cert_weight_cfg = float(
+                getattr(
+                    cfg,
+                    "proposer_warm_start_certificate_weight"
+                    if warm_start_active
+                    else "proposer_certificate_weight",
+                    0.50 if warm_start_active else 0.75,
+                )
+            )
+            cert_weight = max(0.0, cert_weight_cfg)
+            cert_min = max(
+                0.0,
+                min(
+                    1.0,
+                    min(
+                        float(getattr(cfg, "proposer_certificate_min_score", 0.55)),
+                        0.50 if warm_start_active else 1.0,
+                    ),
+                ),
+            )
+            cert_bonus_final = cert_weight * (cert_score_final - cert_min)
+        if warm_start_active:
+            qn = normalize_answer(question_text)
+            lexical_bonus = 0.0
+            if qn:
+                if len(question_text.split()) >= 8:
+                    lexical_bonus += 0.05
+                if any(
+                    key in qn
+                    for key in (
+                        "how many",
+                        "partially",
+                        "behind",
+                        "between",
+                        "compared",
+                        "left of",
+                        "right of",
+                        "second",
+                        "third",
+                        "closest",
+                        "farthest",
+                    )
+                ):
+                    lexical_bonus += 0.08
+                if (" or " in qn) and not qn.startswith(
+                    ("is ", "are ", "was ", "were ", "do ", "does ", "can ", "could ")
+                ):
+                    lexical_bonus += 0.04
+            strategy_used = str(selected_meta.get("strategy_used", "") or "").strip().upper()
+            strategy_bonus = 0.0
+            if strategy_used.startswith("H"):
+                strategy_bonus = 0.10
+            elif strategy_used.startswith("M"):
+                strategy_bonus = 0.05
+            domains = str(selected_meta.get("reasoning_domains", "") or "")
+            domain_count = len([d for d in domains.split(",") if d.strip()])
+            structure_bonus = 0.02 if domain_count >= 2 else 0.0
+            proposer_reward = cert_bonus_final + lexical_bonus + strategy_bonus + structure_bonus
+        else:
+            # Hard negative penalties once warm-start is over.
+            if entropy < 0.01:
+                proposer_reward = -cfg.zero_entropy_reward_cap
+            elif easy_question:
+                proposer_reward = min(proposer_reward, -cfg.zero_entropy_reward_cap * 0.5)
+            proposer_reward += cert_bonus_final
+
+        if cfg.proposer_require_objective and non_objective_question:
+            proposer_reward -= controller_penalty_boost * float(cfg.proposer_non_objective_penalty)
+        if cfg.acceptance_require_non_easy and easy_question:
+            easy_pen_scale = (
+                float(getattr(cfg, "proposer_warm_start_easy_reject_penalty_scale", 0.0))
+                if warm_start_active
+                else 1.0
+            )
+            proposer_reward -= (
+                controller_penalty_boost * easy_pen_scale * float(cfg.rejected_question_penalty)
+            )
+        proposer_reward_pre_clip = float(proposer_reward)
+        proposer_reward = max(-1.0, min(1.0, float(proposer_reward)))
+        proposer_reward_clipped = bool(abs(proposer_reward_pre_clip - proposer_reward) > 1e-8)
 
         # Solver reward: penalize easy questions to avoid reinforcing
         # overconfident unanimous answers on trivial questions.
@@ -378,6 +661,13 @@ class SelfEvolvingTrainer(Trainer):
             "majority_frac": majority_frac,
             "majority_answer": majority_answer[:50],
             "proposer_reward": proposer_reward,
+            "proposer_reward_raw": proposer_reward_raw,
+            "proposer_reward_pre_clip": proposer_reward_pre_clip,
+            "proposer_reward_clipped": bool(proposer_reward_clipped),
+            "proposer_non_objective_question": bool(non_objective_question),
+            "proposer_certificate_score": float(cert_score_final),
+            "proposer_certificate_valid": float(cert_valid_final),
+            "proposer_certificate_bonus": float(cert_bonus_final),
             "solver_reward": solver_reward,
             "easy_question": easy_question,
             "margin": margin,
@@ -385,28 +675,82 @@ class SelfEvolvingTrainer(Trainer):
             "difficulty_bucket": diff_bucket,
         })
 
-        # ── 5. Update proposer ──────────────────────────────────────────
-        # Always update the proposer — it needs the negative signal
-        # from easy questions to learn to generate harder ones.
-        proposer_prompt = build_proposer_prompt(
-            target_difficulty=self._current_difficulty(step)
-        )
-        prop_stats = self.proposer_updater.step(
-            image=image,
-            prompt=proposer_prompt,
-            completion=proposer_completion,
-            reward=proposer_reward,
-            baseline=self.proposer_baseline,
-            device=self.device,
-            ddp_no_sync=self._is_ddp,
-        )
+        # ── 6. Update proposer ──────────────────────────────────────────
+        proposer_prompt = build_proposer_prompt(target_difficulty=desired_difficulty_bucket)
+        update_rule = str(getattr(cfg, "proposer_update_rule", "reinforce")).strip().lower()
+        if update_rule == "grpo" and len(candidate_records) > 1:
+            group_rewards: List[float] = []
+            for c in candidate_records:
+                r = float(c.get("spot_reward", 0.0))
+                if int(c.get("candidate_index", -1)) == int(selected_candidate_idx):
+                    r = float(proposer_reward)
+                group_rewards.append(r)
+            if group_rewards:
+                mean_r = sum(group_rewards) / float(len(group_rewards))
+                std_r = math.sqrt(
+                    sum((r - mean_r) ** 2 for r in group_rewards) / float(max(1, len(group_rewards)))
+                )
+            else:
+                mean_r, std_r = 0.0, 0.0
+
+            if std_r > 1e-8:
+                group_advantages = [(r - mean_r) / (std_r + 1e-8) for r in group_rewards]
+            else:
+                n = len(group_rewards)
+                if n > 1:
+                    order = sorted(range(n), key=lambda i: group_rewards[i])
+                    group_advantages = [0.0] * n
+                    for rank, idx in enumerate(order):
+                        group_advantages[idx] = ((rank / float(n - 1)) - 0.5) * 0.10
+                else:
+                    group_advantages = [0.0]
+
+            group_stats: List[Dict[str, float]] = []
+            for cand, adv in zip(candidate_records, group_advantages):
+                comp = str(cand.get("completion", "")).strip()
+                if not comp:
+                    comp = f"<question>{str(cand.get('question', ''))}</question>"
+                st = self.proposer_updater.step(
+                    image=image,
+                    prompt=proposer_prompt,
+                    completion=comp,
+                    reward=float(adv),
+                    baseline=0.0,
+                    device=self.device,
+                    ddp_no_sync=self._is_ddp,
+                )
+                group_stats.append(st)
+
+            applied = [s for s in group_stats if not bool(s.get("skipped_reason"))]
+            stats["prop_update_rule"] = "grpo"
+            stats["prop_group_size"] = len(group_rewards)
+            stats["prop_group_reward_mean"] = float(mean_r)
+            stats["prop_group_reward_std"] = float(std_r)
+            stats["prop_applied_updates"] = len(applied)
+            if group_stats:
+                stats["prop_ce_loss_mean"] = float(
+                    sum(float(s.get("ce_loss", 0.0)) for s in group_stats if not math.isnan(float(s.get("ce_loss", 0.0))))
+                    / max(1, len([s for s in group_stats if not math.isnan(float(s.get("ce_loss", 0.0)))]))
+                )
+        else:
+            prop_stats = self.proposer_updater.step(
+                image=image,
+                prompt=proposer_prompt,
+                completion=proposer_completion,
+                reward=proposer_reward,
+                baseline=self.proposer_baseline,
+                device=self.device,
+                ddp_no_sync=self._is_ddp,
+            )
+            stats.update({f"prop_{k}": v for k, v in prop_stats.items()})
+            stats["prop_update_rule"] = "reinforce"
+
         self.proposer_baseline = (
             cfg.baseline_momentum * self.proposer_baseline
             + (1 - cfg.baseline_momentum) * proposer_reward
         )
-        stats.update({f"prop_{k}": v for k, v in prop_stats.items()})
 
-        # ── 6. Update solver ────────────────────────────────────────────
+        # ── 7. Update solver ────────────────────────────────────────────
         # Skip solver update on easy questions to avoid wasting gradient
         # budget on trivial cases (the solver already knows the answer).
         skip_solver = (
@@ -415,6 +759,7 @@ class SelfEvolvingTrainer(Trainer):
             and majority_frac >= cfg.easy_update_majority_frac_threshold
         )
         stats["solver_update_skipped"] = skip_solver
+        solver_update_applied = False
 
         if not skip_solver:
             solver_prompt = build_solver_prompt(question_text)
@@ -433,6 +778,80 @@ class SelfEvolvingTrainer(Trainer):
                 + (1 - cfg.baseline_momentum) * solver_reward
             )
             stats.update({f"sol_{k}": v for k, v in sol_stats.items()})
+            solver_update_applied = not bool(sol_stats.get("skipped_reason"))
+        stats["solver_update_applied"] = bool(solver_update_applied)
+
+        # ── 8. Update controller state & fail-fast diagnostics ─────────
+        candidate_non_easy_rate = float(stats.get("proposer_candidate_non_easy_rate", 0.0))
+        all_easy_group = 1.0 if candidate_non_easy_rate <= 0.0 else 0.0
+        selected_non_easy = 0.0 if easy_question else 1.0
+        self._candidate_non_easy_window.append(candidate_non_easy_rate)
+        self._all_easy_group_window.append(all_easy_group)
+        self._proposer_reward_clipped_window.append(1.0 if proposer_reward_clipped else 0.0)
+        self._selected_non_easy_window.append(selected_non_easy)
+        self._solver_update_applied_window.append(1.0 if solver_update_applied else 0.0)
+        self._entropy_easy_window.append(1.0 if easy_question else 0.0)
+
+        if all_easy_group > 0.5:
+            self._all_easy_streak += 1
+        else:
+            self._all_easy_streak = 0
+        if easy_question:
+            self._proposer_collapse_streak += 1
+        else:
+            self._proposer_collapse_streak = 0
+
+        if self._all_easy_streak >= max(1, int(getattr(cfg, "all_easy_explore_trigger", 2))):
+            self._forced_explore_steps_left = max(
+                int(self._forced_explore_steps_left),
+                max(1, int(getattr(cfg, "all_easy_explore_steps", 16))),
+            )
+
+        debt_state = self._update_hardness_debt(diff_bucket)
+        warm_state = self._update_proposer_warm_start_state(entropy, u_step)
+        early_state = self._early_failfast_state(u_step=u_step)
+
+        stats.update({
+            "proposer_all_easy_streak": float(self._all_easy_streak),
+            "proposer_forced_explore_steps_left": float(max(0, int(self._forced_explore_steps_left))),
+            "proposer_collapse_streak": float(self._proposer_collapse_streak),
+            "proposer_hardness_debt": float(debt_state.get("debt", 0.0)),
+            "proposer_hardness_debt_cap_streak": float(debt_state.get("cap_streak", 0.0)),
+            "proposer_hardness_debt_escape_steps_left": float(
+                debt_state.get("escape_steps_left", 0.0)
+            ),
+            "proposer_hardness_debt_escape_triggered": bool(
+                debt_state.get("escape_triggered", 0.0) > 0.5
+            ),
+            "proposer_warm_start_entropy_mean": float(warm_state.get("entropy_mean", 0.0)),
+            "proposer_warm_start_exit_streak": float(warm_state.get("exit_streak", 0.0)),
+            "proposer_warm_start_exit_pass": bool(warm_state.get("exit_pass", 0.0) > 0.5),
+            "proposer_warm_start_completed": bool(warm_state.get("completed", 0.0) > 0.5),
+            "proposer_early_failfast_enabled": bool(early_state.get("enabled", 0.0) > 0.5),
+            "proposer_early_u_step": int(early_state.get("u_step", float(u_step))),
+            "proposer_early_stage1_active": bool(early_state.get("stage1_active", 0.0) > 0.5),
+            "proposer_early_stage1_pass": bool(early_state.get("stage1_pass", 1.0) > 0.5),
+            "proposer_early_stage2_active": bool(early_state.get("stage2_active", 0.0) > 0.5),
+            "proposer_early_stage2_pass": bool(early_state.get("stage2_pass", 1.0) > 0.5),
+            "proposer_early_triggered": bool(early_state.get("triggered", 0.0) > 0.5),
+        })
+
+        if (
+            bool(early_state.get("triggered", 0.0) > 0.5)
+            and bool(getattr(cfg, "proposer_early_failfast_stop", False))
+            and u_step >= int(getattr(cfg, "proposer_early_hard_stop_min_u_step", 80))
+        ):
+            msg = (
+                "[EarlyFailFast] unhealthy run detected: "
+                f"u_step={u_step} "
+                f"cand_non_easy_rate={float(early_state.get('candidate_non_easy_rate', 0.0)):.3f} "
+                f"all_easy_rate={float(early_state.get('all_easy_group_rate', 0.0)):.3f} "
+                f"reward_clipped_rate={float(early_state.get('reward_clipped_rate', 0.0)):.3f} "
+                f"selected_non_easy_rate={float(early_state.get('selected_non_easy_rate', 0.0)):.3f} "
+                f"solver_updates={float(early_state.get('solver_update_applied_count', 0.0)):.1f} "
+                f"collapse_streak={int(self._proposer_collapse_streak)}"
+            )
+            raise RuntimeError(msg)
 
         return stats
 
@@ -677,16 +1096,46 @@ class SelfEvolvingTrainer(Trainer):
         return None, "none"
 
     def _generate_proposer_question(
-        self, image: Image.Image, step: int
+        self, image: Image.Image, step: int, target_difficulty: str = ""
     ) -> Tuple[str, str]:
         """Generate a question from the proposer."""
-        cfg = self.se_config
-        difficulty = self._current_difficulty(step)
+        candidates, completion = self._generate_proposer_candidates(
+            image=image, step=step, target_difficulty=target_difficulty
+        )
+        if not candidates:
+            return "", completion
+        first = candidates[0]
+        return str(first.get("question", "")), str(first.get("completion", completion))
 
-        if cfg.proposer_num_candidates > 1:
+    def _generate_proposer_candidates(
+        self,
+        image: Image.Image,
+        step: int,
+        target_difficulty: str = "",
+        num_candidates: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+    ) -> Tuple[List[Dict[str, object]], str]:
+        """Generate and parse proposer candidates from a single proposer call.
+
+        Returns a list of candidate dicts:
+          - question: parsed question text
+          - completion: candidate-local completion text (raw block when available)
+          - meta: parsed auxiliary tags (best effort)
+        """
+        cfg = self.se_config
+        difficulty = str(target_difficulty or self._current_difficulty(step))
+        n_candidates = int(num_candidates) if num_candidates is not None else int(cfg.proposer_num_candidates)
+        dec_temp = float(temperature) if temperature is not None else float(cfg.temp)
+        dec_top_p = float(top_p) if top_p is not None else float(cfg.top_p)
+        n_candidates = max(1, n_candidates)
+        dec_temp = max(0.05, dec_temp)
+        dec_top_p = max(0.05, min(1.0, dec_top_p))
+
+        if n_candidates > 1:
             prompt = build_proposer_multi_prompt(
                 target_difficulty=difficulty,
-                num_questions=cfg.proposer_num_candidates,
+                num_questions=n_candidates,
             )
         else:
             prompt = build_proposer_prompt(target_difficulty=difficulty)
@@ -702,8 +1151,8 @@ class SelfEvolvingTrainer(Trainer):
                 **mm_inputs,
                 max_new_tokens=cfg.max_new_tokens_proposer,
                 do_sample=True,
-                temperature=cfg.temp,
-                top_p=cfg.top_p,
+                temperature=dec_temp,
+                top_p=dec_top_p,
             )
 
         input_len = mm_inputs["input_ids"].shape[1]
@@ -711,14 +1160,70 @@ class SelfEvolvingTrainer(Trainer):
         tokenizer = getattr(self.processor, "tokenizer", self.processor)
         completion = _decode_tokens(tokenizer, new_ids)
 
-        # Parse question(s)
-        questions = _parse_all_questions(completion)
-        if not questions:
-            question = _parse_first_question(completion)
-        else:
-            question = questions[0]  # Use first/hardest
+        return self._parse_proposer_candidates(completion), completion
 
-        return question, completion
+    def _parse_proposer_candidates(self, completion: str) -> List[Dict[str, object]]:
+        """Parse candidate question blocks with best-effort metadata."""
+        text = str(completion or "")
+        candidates: List[Dict[str, object]] = []
+
+        blocks = list(re.finditer(r"<question[^>]*>.*?</question>", text, flags=re.IGNORECASE | re.DOTALL))
+        for idx, match in enumerate(blocks):
+            block = match.group(0)
+            inner = re.sub(r"^<question[^>]*>|</question>$", "", block, flags=re.IGNORECASE | re.DOTALL).strip()
+
+            def _tag_value(tag: str) -> str:
+                m = re.search(rf"<{tag}>(.*?)</{tag}>", inner, flags=re.IGNORECASE | re.DOTALL)
+                return (m.group(1).strip() if m else "")
+
+            q_text = _tag_value("text")
+            if not q_text:
+                q_text = _parse_first_question(inner)
+            q_text = str(q_text).strip()
+            if not q_text:
+                continue
+            candidates.append(
+                {
+                    "candidate_index": int(idx),
+                    "question": q_text,
+                    "completion": block.strip(),
+                    "meta": {
+                        "task_card": _tag_value("task_card"),
+                        "reasoning_domains": _tag_value("reasoning_domains"),
+                        "reasoning_chain": _tag_value("reasoning_chain"),
+                        "strategy_used": _tag_value("strategy_used"),
+                        "visual_target": _tag_value("visual_target"),
+                        "two_answer_test": _tag_value("two_answer_test"),
+                        "rationale": _tag_value("rationale"),
+                    },
+                }
+            )
+
+        if not candidates:
+            qs = _parse_all_questions(text)
+            for idx, q in enumerate(qs):
+                q_text = str(q).strip()
+                if not q_text:
+                    continue
+                candidates.append(
+                    {
+                        "candidate_index": int(idx),
+                        "question": q_text,
+                        "completion": f"<question>{q_text}</question>",
+                        "meta": {},
+                    }
+                )
+
+        # De-duplicate by normalized question text while preserving order.
+        seen = set()
+        deduped: List[Dict[str, object]] = []
+        for cand in candidates:
+            key = normalize_answer(str(cand.get("question", "")))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(cand)
+        return deduped
 
     def _generate_solver_answers(
         self,
@@ -988,6 +1493,62 @@ class SelfEvolvingTrainer(Trainer):
 
         return None, None
 
+    def _is_objective_question(self, question: str) -> bool:
+        """Best-effort objective question validator."""
+        q = str(question or "").strip()
+        if not q:
+            return False
+        if "?" not in q:
+            return False
+        qn = normalize_answer(q)
+        if not qn:
+            return False
+        if re.search(r"\b(why|might|could|likely|opinion|feel|believe|think)\b", qn):
+            return False
+        if re.search(r"\b(something|anything|stuff|thing)\b", qn):
+            return False
+        if "<" in q or ">" in q:
+            return False
+        return True
+
+    def _proposer_certificate_score(self, question: str, meta: Dict[str, str]) -> Dict[str, float]:
+        """Compute lightweight structural validity score for proposer output."""
+        if not bool(getattr(self.se_config, "proposer_certificate_enabled", True)):
+            return {"score": 0.0, "valid": 1.0}
+
+        objective = 1.0 if self._is_objective_question(question) else 0.0
+        visual_target = str(meta.get("visual_target", "") or "").strip()
+        strategy_used = str(meta.get("strategy_used", "") or "").strip()
+        reasoning_chain = str(meta.get("reasoning_chain", "") or "").strip()
+        reasoning_domains = str(meta.get("reasoning_domains", "") or "").strip()
+        rationale = str(meta.get("rationale", "") or "").strip()
+        two_answer_test = str(meta.get("two_answer_test", "") or "").strip()
+
+        strategy_ok = 1.0 if strategy_used else 0.0
+        target_ok = 1.0 if visual_target else 0.0
+        chain_ok = 1.0 if reasoning_chain and ("->" in reasoning_chain or len(reasoning_chain.split()) >= 4) else 0.0
+        rationale_ok = 1.0 if len(rationale.split()) >= 6 else 0.0
+
+        domains = [d.strip().lower() for d in reasoning_domains.split(",") if d.strip()]
+        domains_ok = 1.0 if len(domains) >= 2 else 0.0
+
+        has_split = (" vs " in two_answer_test.lower()) or ("/" in two_answer_test)
+        two_ok = 1.0 if has_split and len(two_answer_test.split()) >= 3 else 0.0
+
+        # Use fields present in both old and new prompt templates.
+        structural_mid = max(target_ok, strategy_ok)
+        context_mid = max(chain_ok, rationale_ok)
+        score = float(objective + structural_mid + context_mid + domains_ok + two_ok) / 5.0
+        min_score = max(
+            0.0,
+            min(1.0, float(getattr(self.se_config, "proposer_certificate_min_score", 0.55))),
+        )
+        strict_struct = bool(getattr(self.se_config, "proposer_certificate_strict_struct", True))
+        valid = 1.0 if score >= min_score else 0.0
+        if strict_struct and (objective < 0.5 or two_ok < 0.5 or structural_mid < 0.5):
+            valid = 0.0
+        return {"score": float(score), "valid": float(valid)}
+
     def _update_proposer_entropy_target(self, entropy_nats: float) -> float:
         """Adaptively shift the Gaussian reward center based on observed entropy.
 
@@ -1044,26 +1605,362 @@ class SelfEvolvingTrainer(Trainer):
         sorted_counts = sorted(counts.values(), reverse=True)
         return sorted_counts[1] / len(norm_answers)
 
-    def _current_difficulty(self, step: int) -> str:
-        """Determine current difficulty level.
-
-        Always returns "hard" or "medium" — never "easy" — because the
-        proposer already has a strong tendency toward easy questions.
-        The difficulty label is embedded in the proposer prompt to
-        encourage harder question generation.
-        """
-        cfg = self.se_config
-        if not cfg.difficulty_sampler_enabled:
-            # Even when disabled, bias toward "hard" to counteract
-            # the proposer's natural easy-question tendency
-            return "hard"
-
-        # After step 0, always ask for medium or hard
-        frac = step / max(cfg.total_steps, 1)
-        if frac < 0.5:
+    @staticmethod
+    def _sample_bucket(weights: Dict[str, float]) -> str:
+        keys = ["easy", "medium", "hard"]
+        probs = [max(0.0, float(weights.get(k, 0.0))) for k in keys]
+        total = sum(probs)
+        if total <= 0.0:
             return "medium"
+        probs = [p / total for p in probs]
+        return random.choices(keys, weights=probs, k=1)[0]
+
+    @staticmethod
+    def _normalize_bucket_weights(weights: Dict[str, float]) -> Dict[str, float]:
+        w_easy = max(0.0, float(weights.get("easy", 0.0)))
+        w_medium = max(0.0, float(weights.get("medium", 0.0)))
+        w_hard = max(0.0, float(weights.get("hard", 0.0)))
+        total = w_easy + w_medium + w_hard
+        if total <= 1e-8:
+            return {"easy": 0.2, "medium": 0.6, "hard": 0.2}
+        return {
+            "easy": w_easy / total,
+            "medium": w_medium / total,
+            "hard": w_hard / total,
+        }
+
+    def _difficulty_target_weights(self) -> Dict[str, float]:
+        return self._normalize_bucket_weights(
+            {
+                "easy": float(getattr(self.se_config, "difficulty_target_easy", 0.0)),
+                "medium": float(getattr(self.se_config, "difficulty_target_medium", 0.7)),
+                "hard": float(getattr(self.se_config, "difficulty_target_hard", 0.3)),
+            }
+        )
+
+    def _is_proposer_warm_start_active(self, u_step: int) -> bool:
+        cfg = self.se_config
+        if not bool(getattr(cfg, "proposer_warm_start_enabled", True)):
+            return False
+        if bool(getattr(self, "_warm_start_completed", False)):
+            return False
+        max_steps = max(1, int(getattr(cfg, "proposer_warm_start_max_steps", 30)))
+        return int(u_step) <= max_steps
+
+    def _update_proposer_warm_start_state(self, entropy_nats: float, u_step: int) -> Dict[str, float]:
+        cfg = self.se_config
+        if not bool(getattr(cfg, "proposer_warm_start_enabled", True)):
+            return {
+                "enabled": 0.0,
+                "active_next": 0.0,
+                "completed": 1.0,
+                "entropy_mean": 0.0,
+                "exit_streak": 0.0,
+                "exit_pass": 0.0,
+            }
+        exit_window = max(1, int(getattr(cfg, "proposer_warm_start_exit_window", 5)))
+        if int(getattr(self._warm_start_entropy_window, "maxlen", 0) or 0) != exit_window:
+            self._warm_start_entropy_window = collections.deque(
+                list(self._warm_start_entropy_window)[-exit_window:],
+                maxlen=exit_window,
+            )
+        self._warm_start_entropy_window.append(float(entropy_nats))
+        entropy_mean = float(sum(float(x) for x in self._warm_start_entropy_window)) / float(
+            max(1, len(self._warm_start_entropy_window))
+        )
+        exit_thr = max(
+            0.0,
+            float(getattr(cfg, "proposer_warm_start_entropy_exit_threshold", 0.10)),
+        )
+        exit_pass = bool(
+            len(self._warm_start_entropy_window) >= exit_window and entropy_mean >= exit_thr
+        )
+        if exit_pass:
+            self._warm_start_exit_streak += 1
         else:
-            return "hard"
+            self._warm_start_exit_streak = 0
+        max_steps = max(1, int(getattr(cfg, "proposer_warm_start_max_steps", 30)))
+        exit_consecutive = max(
+            1, int(getattr(cfg, "proposer_warm_start_exit_consecutive", 2))
+        )
+        if int(u_step) >= max_steps or int(self._warm_start_exit_streak) >= exit_consecutive:
+            self._warm_start_completed = True
+        return {
+            "enabled": 1.0,
+            "active_next": 1.0 if self._is_proposer_warm_start_active(int(u_step) + 1) else 0.0,
+            "completed": 1.0 if bool(self._warm_start_completed) else 0.0,
+            "entropy_mean": float(entropy_mean),
+            "exit_streak": float(self._warm_start_exit_streak),
+            "exit_pass": 1.0 if exit_pass else 0.0,
+        }
+
+    def _update_hardness_debt(self, difficulty_bucket_observed: str) -> Dict[str, float]:
+        cfg = self.se_config
+        if not bool(getattr(cfg, "hardness_debt_enabled", True)):
+            return {
+                "enabled": 0.0,
+                "debt": 0.0,
+                "cap_streak": 0.0,
+                "escape_steps_left": 0.0,
+                "escape_triggered": 0.0,
+            }
+
+        debt = float(self._hardness_debt)
+        debt_max = max(1e-6, float(getattr(cfg, "hardness_debt_max", 6.0)))
+        inc_easy = max(0.0, float(getattr(cfg, "hardness_debt_inc_easy", 1.5)))
+        dec_non_easy = max(0.0, float(getattr(cfg, "hardness_debt_dec_non_easy", 1.0)))
+        if str(difficulty_bucket_observed).lower() == "easy":
+            debt += inc_easy
+        else:
+            debt -= dec_non_easy
+        debt = max(0.0, min(debt_max, debt))
+
+        cap_streak = int(self._hardness_debt_cap_streak)
+        if str(difficulty_bucket_observed).lower() == "easy" and debt >= (debt_max - 1e-8):
+            cap_streak += 1
+        else:
+            cap_streak = 0
+
+        escape_triggered = False
+        stale_steps = max(1, int(getattr(cfg, "hardness_debt_stale_steps", 8)))
+        if cap_streak >= stale_steps:
+            reset_to = float(getattr(cfg, "hardness_debt_stale_reset_to", 3.0))
+            debt = max(0.0, min(debt_max, reset_to))
+            escape_steps = max(
+                1, int(getattr(cfg, "hardness_debt_stale_escape_steps", stale_steps))
+            )
+            self._hardness_debt_escape_steps_left = max(
+                int(self._hardness_debt_escape_steps_left),
+                escape_steps,
+            )
+            cap_streak = 0
+            escape_triggered = True
+
+        self._hardness_debt = float(debt)
+        self._hardness_debt_cap_streak = int(cap_streak)
+        return {
+            "enabled": 1.0,
+            "debt": float(self._hardness_debt),
+            "cap_streak": float(self._hardness_debt_cap_streak),
+            "escape_steps_left": float(max(0, int(self._hardness_debt_escape_steps_left))),
+            "escape_triggered": 1.0 if escape_triggered else 0.0,
+        }
+
+    def _choose_difficulty_target(self) -> Dict[str, object]:
+        cfg = self.se_config
+        enabled = bool(getattr(cfg, "difficulty_sampler_enabled", True))
+        min_samples = max(4, int(getattr(cfg, "difficulty_sampler_min_samples", 8)))
+        target = self._difficulty_target_weights()
+        history = list(self._difficulty_window)
+        observed = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
+        mode = "target"
+        weights_for_sampling = dict(target)
+
+        if enabled and len(history) >= min_samples:
+            for b in history:
+                if b in observed:
+                    observed[b] += 1.0
+            for k in observed:
+                observed[k] /= float(max(1, len(history)))
+            deficits = {
+                k: max(0.0, target[k] - observed[k]) for k in ("easy", "medium", "hard")
+            }
+            deficit_total = deficits["easy"] + deficits["medium"] + deficits["hard"]
+            if deficit_total > 1e-8:
+                weights_for_sampling = {
+                    k: deficits[k] / deficit_total for k in ("easy", "medium", "hard")
+                }
+                mode = "deficit"
+        elif not enabled:
+            mode = "disabled"
+
+        debt = float(self._hardness_debt)
+        debt_ratio = 0.0
+        debt_escape_active = False
+        if bool(getattr(cfg, "hardness_debt_enabled", True)):
+            weights_for_sampling = self._normalize_bucket_weights(weights_for_sampling)
+            if int(self._hardness_debt_escape_steps_left) > 0:
+                debt_escape_active = True
+                weights_for_sampling = self._normalize_bucket_weights(
+                    {
+                        "easy": float(getattr(cfg, "hardness_debt_stale_easy_weight", 0.05)),
+                        "medium": float(getattr(cfg, "hardness_debt_stale_medium_weight", 0.55)),
+                        "hard": float(getattr(cfg, "hardness_debt_stale_hard_weight", 0.40)),
+                    }
+                )
+                self._hardness_debt_escape_steps_left = max(
+                    0,
+                    int(self._hardness_debt_escape_steps_left) - 1,
+                )
+                mode = f"{mode}+debt_escape"
+            else:
+                debt_max = max(1e-6, float(getattr(cfg, "hardness_debt_max", 6.0)))
+                debt_thr = max(
+                    0.0,
+                    min(
+                        debt_max,
+                        float(getattr(cfg, "hardness_debt_hard_recovery_threshold", 3.0)),
+                    ),
+                )
+                if debt > debt_thr:
+                    debt_ratio = min(1.0, (debt - debt_thr) / max(1e-6, debt_max - debt_thr))
+                    recovery_weights = self._normalize_bucket_weights(
+                        {
+                            "easy": float(getattr(cfg, "hardness_debt_recovery_easy_weight", 0.0)),
+                            "medium": float(getattr(cfg, "hardness_debt_recovery_medium_weight", 0.30)),
+                            "hard": float(getattr(cfg, "hardness_debt_recovery_hard_weight", 0.70)),
+                        }
+                    )
+                    mixed = {
+                        k: ((1.0 - debt_ratio) * float(weights_for_sampling.get(k, 0.0)))
+                        + (debt_ratio * float(recovery_weights.get(k, 0.0)))
+                        for k in ("easy", "medium", "hard")
+                    }
+                    weights_for_sampling = self._normalize_bucket_weights(mixed)
+                    mode = f"{mode}+debt_recovery"
+
+        if int(self._forced_explore_steps_left) > 0:
+            forced_hard = self._normalize_bucket_weights(
+                {
+                    "easy": 0.0,
+                    "medium": float(getattr(cfg, "hardness_debt_recovery_medium_weight", 0.30)),
+                    "hard": float(getattr(cfg, "hardness_debt_recovery_hard_weight", 0.70)),
+                }
+            )
+            weights_for_sampling = forced_hard
+            mode = f"{mode}+forced_explore"
+            self._forced_explore_steps_left = max(0, int(self._forced_explore_steps_left) - 1)
+
+        desired_bucket = self._sample_bucket(weights_for_sampling) if enabled else "medium"
+        return {
+            "enabled": enabled,
+            "desired_bucket": desired_bucket,
+            "mode": mode,
+            "history_size": int(len(history)),
+            "target_weights": target,
+            "observed_weights": observed,
+            "sampling_weights": weights_for_sampling,
+            "hardness_debt": float(debt),
+            "hardness_debt_ratio": float(debt_ratio),
+            "hardness_debt_escape_active": bool(debt_escape_active),
+        }
+
+    @staticmethod
+    def _mean_recent(values: collections.deque) -> float:
+        if not values:
+            return 0.0
+        vals = [float(v) for v in values]
+        return float(sum(vals) / float(max(1, len(vals))))
+
+    def _early_failfast_state(self, *, u_step: int) -> Dict[str, float]:
+        cfg = self.se_config
+        state: Dict[str, float] = {
+            "enabled": 1.0 if bool(getattr(cfg, "proposer_early_failfast_enabled", True)) else 0.0,
+            "u_step": float(max(0, int(u_step))),
+            "stage1_active": 0.0,
+            "stage2_active": 0.0,
+            "stage1_pass": 1.0,
+            "stage2_pass": 1.0,
+            "candidate_non_easy_rate": 0.0,
+            "all_easy_group_rate": 0.0,
+            "reward_clipped_rate": 0.0,
+            "selected_non_easy_rate": 0.0,
+            "solver_update_applied_count": 0.0,
+            "collapse_streak": float(int(getattr(self, "_proposer_collapse_streak", 0))),
+            "max_collapse_streak": float(
+                max(0, int(getattr(cfg, "proposer_early_max_collapse_streak", 3)))
+            ),
+            "recovery_armed": 0.0,
+            "triggered": 0.0,
+            "hard_stop_min_u_step": float(
+                max(1, int(getattr(cfg, "proposer_early_hard_stop_min_u_step", 80)))
+            ),
+        }
+        if state["enabled"] <= 0.5 or int(u_step) <= 0:
+            return state
+
+        state["candidate_non_easy_rate"] = self._mean_recent(self._candidate_non_easy_window)
+        state["all_easy_group_rate"] = self._mean_recent(self._all_easy_group_window)
+        state["reward_clipped_rate"] = self._mean_recent(self._proposer_reward_clipped_window)
+        state["selected_non_easy_rate"] = self._mean_recent(self._selected_non_easy_window)
+        state["solver_update_applied_count"] = float(sum(float(v) for v in self._solver_update_applied_window))
+
+        step1 = max(1, int(getattr(cfg, "proposer_early_stage1_u_step", 12)))
+        step2 = max(step1, int(getattr(cfg, "proposer_early_stage2_u_step", 24)))
+        if int(u_step) >= step1:
+            state["stage1_active"] = 1.0
+            stage1_pass = (
+                state["candidate_non_easy_rate"]
+                >= float(getattr(cfg, "proposer_early_candidate_non_easy_rate_min", 0.08))
+                and state["all_easy_group_rate"]
+                <= float(getattr(cfg, "proposer_early_all_easy_rate_max", 0.93))
+                and state["reward_clipped_rate"]
+                <= float(getattr(cfg, "proposer_early_reward_clipped_rate_max", 0.85))
+            )
+            state["stage1_pass"] = 1.0 if stage1_pass else 0.0
+            if not stage1_pass:
+                state["triggered"] = 1.0
+        if int(u_step) >= step2:
+            state["stage2_active"] = 1.0
+            stage2_pass = (
+                state["selected_non_easy_rate"]
+                >= float(getattr(cfg, "proposer_early_selected_non_easy_rate_min", 0.10))
+                and state["solver_update_applied_count"]
+                >= float(getattr(cfg, "proposer_early_solver_updates_min", 1))
+            )
+            state["stage2_pass"] = 1.0 if stage2_pass else 0.0
+            if not stage2_pass:
+                state["triggered"] = 1.0
+
+        max_collapse = max(0, int(getattr(cfg, "proposer_early_max_collapse_streak", 3)))
+        if state["stage1_active"] > 0.5 and int(state["collapse_streak"]) > max_collapse:
+            state["triggered"] = 1.0
+
+        if state["triggered"] > 0.5 and bool(getattr(cfg, "proposer_early_failfast_recover", True)):
+            recover_steps = max(
+                1,
+                int(getattr(cfg, "proposer_early_failfast_recover_steps", 20)),
+            )
+            self._forced_explore_steps_left = max(int(self._forced_explore_steps_left), recover_steps)
+            state["recovery_armed"] = 1.0
+        return state
+
+    def _current_difficulty(self, step: int) -> str:
+        """Choose target difficulty using deficit-based sampling."""
+        cfg = self.se_config
+        target = {
+            "easy": max(0.0, float(cfg.difficulty_target_easy)),
+            "medium": max(0.0, float(cfg.difficulty_target_medium)),
+            "hard": max(0.0, float(cfg.difficulty_target_hard)),
+        }
+        t_sum = sum(target.values())
+        if t_sum <= 0.0:
+            target = {"easy": 0.0, "medium": 0.7, "hard": 0.3}
+            t_sum = 1.0
+        target = {k: v / t_sum for k, v in target.items()}
+
+        if not bool(cfg.difficulty_sampler_enabled):
+            if target.get("hard", 0.0) >= target.get("medium", 0.0):
+                return "hard"
+            return "medium"
+
+        min_samples = max(1, int(cfg.difficulty_sampler_min_samples))
+        hist = list(self._difficulty_window)
+        if len(hist) < min_samples:
+            return self._sample_bucket(target)
+
+        observed = {"easy": 0.0, "medium": 0.0, "hard": 0.0}
+        for b in hist:
+            if b in observed:
+                observed[b] += 1.0
+        h_sum = max(1.0, float(len(hist)))
+        observed = {k: observed[k] / h_sum for k in observed}
+
+        deficits = {k: max(0.0, target[k] - observed.get(k, 0.0)) for k in target}
+        d_sum = sum(deficits.values())
+        if d_sum <= 1e-8:
+            return self._sample_bucket(target)
+        return self._sample_bucket(deficits)
 
     # ── Checkpoint Management ───────────────────────────────────────────
 
@@ -1079,6 +1976,25 @@ class SelfEvolvingTrainer(Trainer):
             "generator_baseline": self.generator_baseline,
             "proposer_gen_baseline": self.proposer_gen_baseline,
             "reward_ema": self.reward_ema,
+            "proposer_entropy_mu_ema": float(self.proposer_entropy_mu_ema),
+            "u_step_counter": int(self._u_step_counter),
+            "all_easy_streak": int(self._all_easy_streak),
+            "forced_explore_steps_left": int(self._forced_explore_steps_left),
+            "proposer_collapse_streak": int(self._proposer_collapse_streak),
+            "warm_start_exit_streak": int(self._warm_start_exit_streak),
+            "warm_start_completed": bool(self._warm_start_completed),
+            "hardness_debt": float(self._hardness_debt),
+            "hardness_debt_cap_streak": int(self._hardness_debt_cap_streak),
+            "hardness_debt_escape_steps_left": int(self._hardness_debt_escape_steps_left),
+            "entropy_window": list(self._entropy_window),
+            "difficulty_window": list(self._difficulty_window),
+            "candidate_non_easy_window": list(self._candidate_non_easy_window),
+            "all_easy_group_window": list(self._all_easy_group_window),
+            "proposer_reward_clipped_window": list(self._proposer_reward_clipped_window),
+            "selected_non_easy_window": list(self._selected_non_easy_window),
+            "solver_update_applied_window": list(self._solver_update_applied_window),
+            "entropy_easy_window": list(self._entropy_easy_window),
+            "warm_start_entropy_window": list(self._warm_start_entropy_window),
             "proposer_updater": self.proposer_updater.state_dict(),
             "solver_updater": self.solver_updater.state_dict(),
             "generator_updater": self.generator_updater.state_dict(),
@@ -1114,6 +2030,57 @@ class SelfEvolvingTrainer(Trainer):
             self.generator_baseline = state.get("generator_baseline", 0.0)
             self.proposer_gen_baseline = state.get("proposer_gen_baseline", 0.0)
             self.reward_ema = state.get("reward_ema", 0.0)
+            self.proposer_entropy_mu_ema = float(
+                state.get("proposer_entropy_mu_ema", self.se_config.prop_entropy_mu)
+            )
+            self._u_step_counter = int(state.get("u_step_counter", 0))
+            self._all_easy_streak = int(state.get("all_easy_streak", 0))
+            self._forced_explore_steps_left = int(state.get("forced_explore_steps_left", 0))
+            self._proposer_collapse_streak = int(state.get("proposer_collapse_streak", 0))
+            self._warm_start_exit_streak = int(state.get("warm_start_exit_streak", 0))
+            self._warm_start_completed = bool(state.get("warm_start_completed", False))
+            self._hardness_debt = float(state.get("hardness_debt", 0.0))
+            self._hardness_debt_cap_streak = int(state.get("hardness_debt_cap_streak", 0))
+            self._hardness_debt_escape_steps_left = int(
+                state.get("hardness_debt_escape_steps_left", 0)
+            )
+
+            self._entropy_window = collections.deque(
+                list(state.get("entropy_window", [])),
+                maxlen=self.se_config.entropy_iqr_window_size,
+            )
+            self._difficulty_window = collections.deque(
+                list(state.get("difficulty_window", [])),
+                maxlen=self.se_config.difficulty_sampler_window_size,
+            )
+            self._candidate_non_easy_window = collections.deque(
+                list(state.get("candidate_non_easy_window", [])),
+                maxlen=self._candidate_non_easy_window.maxlen,
+            )
+            self._all_easy_group_window = collections.deque(
+                list(state.get("all_easy_group_window", [])),
+                maxlen=self._all_easy_group_window.maxlen,
+            )
+            self._proposer_reward_clipped_window = collections.deque(
+                list(state.get("proposer_reward_clipped_window", [])),
+                maxlen=self._proposer_reward_clipped_window.maxlen,
+            )
+            self._selected_non_easy_window = collections.deque(
+                list(state.get("selected_non_easy_window", [])),
+                maxlen=self._selected_non_easy_window.maxlen,
+            )
+            self._solver_update_applied_window = collections.deque(
+                list(state.get("solver_update_applied_window", [])),
+                maxlen=self._solver_update_applied_window.maxlen,
+            )
+            self._entropy_easy_window = collections.deque(
+                list(state.get("entropy_easy_window", [])),
+                maxlen=self._entropy_easy_window.maxlen,
+            )
+            self._warm_start_entropy_window = collections.deque(
+                list(state.get("warm_start_entropy_window", [])),
+                maxlen=self._warm_start_entropy_window.maxlen,
+            )
 
             if "proposer_updater" in state:
                 self.proposer_updater.load_state_dict(state["proposer_updater"])
@@ -1161,6 +2128,20 @@ class SelfEvolvingTrainer(Trainer):
             msg_parts.append(f"sol_r={stats.get('solver_reward', 0.0):.3f}")
             msg_parts.append(f"easy={stats.get('easy_question', '?')}")
             msg_parts.append(f"margin={stats.get('margin', 0.0):.2f}")
+            if "proposer_candidate_non_easy_rate" in stats:
+                msg_parts.append(
+                    f"cand_non_easy={float(stats.get('proposer_candidate_non_easy_rate', 0.0)):.2f}"
+                )
+            if "proposer_hardness_debt" in stats:
+                msg_parts.append(
+                    f"debt={float(stats.get('proposer_hardness_debt', 0.0)):.2f}"
+                )
+            if "proposer_warm_start_active" in stats:
+                msg_parts.append(
+                    f"warm={1 if bool(stats.get('proposer_warm_start_active')) else 0}"
+                )
+            if bool(stats.get("proposer_early_triggered", False)):
+                msg_parts.append("early=triggered")
             retries = stats.get("proposer_retries", 0)
             if retries > 0:
                 msg_parts.append(f"retries={retries}")

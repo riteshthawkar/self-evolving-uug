@@ -130,3 +130,49 @@
 (1) Use the same evaluation scripts and decoding settings for base and +ours within each backbone.
 (2) Report absolute scores and $\Delta$ (same checkpoint budget) for fair attribution.
 (3) Keep cross-method claims in Table~\ref{tab:crosspaper_relative_gain} relative (not raw), unless all methods are rerun under a unified protocol.
+
+\subsection{Ablation Study Plan}
+
+\begin{table}[tb]
+  \caption{Primary ablations required to support the core claims.}
+  \label{tab:ablation_primary}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}p{0.7cm}p{2.2cm}p{2.3cm}p{2.8cm}p{1.3cm}@{}}
+    \toprule
+    ID & Ablation & Comparison setup & Claim validated & Priority \\
+    \midrule
+    A1 & Joint vs single-task training & E1 vs E2 vs E3 & Joint U$\leftrightarrow$G training improves both sides beyond isolated optimization. & Must \\
+    A2 & DiT update contribution & E1 vs E4 & Diffusion-side optimization (RWR/DiT updates) is necessary for generation gains. & Must \\
+    A3 & Alternating cycle design & E1 vs E6 + U:G ratios (1:1, 2:1, 1:2) & The chosen alternating schedule is better than single-step or imbalanced schedules. & Must \\
+    A4 & Self-generated loop validity & E1 vs E5 & Closed-loop self-evolution can train without dependence on paired external supervision. & Must \\
+    A5 & Strict imageless variant & E5 (with startup fallback) vs E5-strict (no real-image fallback) & Main gains are not an artifact of startup real-image leakage. & Must \\
+    A6 & Reward component ablation & Full reward vs remove one term at a time (solver/proposer/gen/DiT-RWR) & Each reward component contributes meaningfully to final performance/stability. & Must \\
+    A7 & Proposer learning ablation & Learned proposer vs frozen proposer vs random proposer & Adaptive proposer/curriculum is necessary, not prompt randomness. & Must \\
+    A8 & Synthetic-data mixing ratio & gen\_mix\_ratio $\in \{0.0,0.5,1.0\}$ & Performance depends on controlled real/synthetic mixing rather than one extreme. & Must \\
+    A9 & Model-agnostic transfer & Base vs +Ours on BLIP3o, BAGEL, VARGPT & Framework gains transfer across heterogeneous unified backbones. & Must \\
+    A10 & Multi-backbone delta consistency & Compare per-backbone $\Delta$U and $\Delta$G & Improvements are consistent, not driven by a single architecture. & Must \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+\begin{table}[tb]
+  \caption{Secondary ablations (recommended if compute permits).}
+  \label{tab:ablation_secondary}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}p{0.7cm}p{2.4cm}p{2.8cm}p{2.9cm}p{1.2cm}@{}}
+    \toprule
+    ID & Ablation & Comparison setup & Why it matters & Priority \\
+    \midrule
+    B1 & Replay-buffer design & Buffer size sweep + quality-gate on/off & Tests whether gains come from better synthetic sample curation and memory horizon. & Strong \\
+    B2 & Seed robustness & 3 seeds on E1/A2/A4/A9 & Quantifies variance and collapse risk; needed for statistically reliable claims. & Strong \\
+    B3 & Training-budget sensitivity & Short/medium/long budget for E1 & Shows method is not only effective at one fixed compute budget. & Nice \\
+    B4 & Reward-hacking guardrail & Internal reward vs external benchmark correlation across checkpoints & Verifies internal rewards track real improvements and do not drift. & Strong \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}

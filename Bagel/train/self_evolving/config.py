@@ -140,6 +140,7 @@ class RolloutConfig:
     proposer_grpo_gen_group_size: int = 3
     score_grpo_extras: bool = True
     grpo_extra_temp_multiplier: float = 1.5
+    grpo_extra_sc_samples: int = 3
     solver_token_entropy_enabled: bool = True
     solver_token_entropy_tokens: int = 5
     solver_token_entropy_window_size: int = 128
@@ -148,6 +149,97 @@ class RolloutConfig:
     ste_spot_easy_quantile: float = 0.30
     proposer_ste_primary_weight: float = 0.70
     proposer_sample_entropy_weight: float = 0.30
+
+    # Proposer certification and warm-start.
+    proposer_certificate_enabled: bool = True
+    proposer_certificate_min_score: float = 0.55
+    proposer_certificate_weight: float = 0.75
+    proposer_certificate_strict_struct: bool = True
+    proposer_warm_start_enabled: bool = True
+    proposer_warm_start_max_steps: int = 30
+    proposer_warm_start_exit_window: int = 5
+    proposer_warm_start_exit_consecutive: int = 2
+    proposer_warm_start_entropy_exit_threshold: float = 0.10
+    proposer_warm_start_easy_reject_penalty_scale: float = 0.0
+    proposer_warm_start_certificate_weight: float = 0.50
+
+    # Hardness debt controller.
+    hardness_debt_enabled: bool = True
+    hardness_debt_inc_easy: float = 1.50
+    hardness_debt_dec_non_easy: float = 1.00
+    hardness_debt_max: float = 6.0
+    hardness_debt_hard_recovery_threshold: float = 3.0
+    hardness_debt_recovery_easy_weight: float = 0.0
+    hardness_debt_recovery_medium_weight: float = 0.30
+    hardness_debt_recovery_hard_weight: float = 0.70
+    hardness_debt_stale_steps: int = 8
+    hardness_debt_stale_reset_to: float = 3.0
+    hardness_debt_stale_escape_steps: int = 8
+    hardness_debt_stale_easy_weight: float = 0.05
+    hardness_debt_stale_medium_weight: float = 0.55
+    hardness_debt_stale_hard_weight: float = 0.40
+    hardness_debt_temp_boost_max: float = 0.30
+    hardness_debt_penalty_boost_max: float = 0.30
+
+    # Difficulty sampler and entropy-IQR adaptive easy thresholding.
+    difficulty_sampler_enabled: bool = True
+    difficulty_sampler_window_size: int = 256
+    difficulty_sampler_min_samples: int = 32
+    difficulty_target_easy: float = 0.10
+    difficulty_target_medium: float = 0.50
+    difficulty_target_hard: float = 0.40
+    difficulty_hard_min_entropy: float = 0.90
+    difficulty_hard_max_margin: float = 0.35
+    entropy_iqr_filter_enabled: bool = True
+    entropy_iqr_window_size: int = 256
+    entropy_iqr_min_samples: int = 32
+    entropy_iqr_easy_quantile: float = 0.25
+    entropy_iqr_easy_iqr_coef: float = 0.25
+    entropy_iqr_min_threshold: float = 0.02
+    entropy_iqr_max_threshold: float = 1.2
+    entropy_iqr_filter_min_majority_frac: float = 0.80
+
+    # All-easy recovery exploration.
+    all_easy_explore_trigger: int = 2
+    all_easy_explore_steps: int = 10
+    all_easy_explore_num_candidates: int = 6
+    all_easy_explore_temp_boost: float = 1.20
+    all_easy_explore_top_p_boost: float = 0.15
+    all_easy_explore_penalty_boost: float = 0.50
+
+    # Contrastive replay shaping for proposer.
+    proposer_contrastive_replay_enabled: bool = True
+    proposer_contrastive_replay_size: int = 256
+    proposer_contrastive_pos_bonus: float = 0.08
+    proposer_contrastive_neg_penalty: float = 0.08
+
+    # Early failfast / recover (health checks for collapse).
+    proposer_early_failfast_enabled: bool = True
+    proposer_early_failfast_stop: bool = False
+    proposer_early_failfast_recover: bool = True
+    proposer_early_failfast_recover_steps: int = 20
+    proposer_early_stage1_u_step: int = 12
+    proposer_early_stage2_u_step: int = 20
+    proposer_early_hard_stop_min_u_step: int = 80
+    proposer_early_candidate_non_easy_rate_min: float = 0.08
+    proposer_early_all_easy_rate_max: float = 0.93
+    proposer_early_reward_clipped_rate_max: float = 0.85
+    proposer_early_selected_non_easy_rate_min: float = 0.10
+    proposer_early_solver_updates_min: int = 1
+    proposer_early_max_collapse_streak: int = 3
+
+    # GRPO stabilizers.
+    grpo_degenerate_noise_enabled: bool = True
+    grpo_degenerate_noise_sigma: float = 0.03
+    grpo_degenerate_noise_std_threshold: float = 1e-6
+    grpo_pairwise_ranking_enabled: bool = True
+    grpo_pairwise_ranking_weight: float = 0.15
+    grpo_pairwise_margin: float = 0.10
+    grpo_pairwise_easy_penalty: float = 0.12
+    proposer_all_easy_rank_spread: float = 0.08
+
+    # Generation-side joint understanding parity.
+    gen_step_solver_update_enabled: bool = False
 
     def solver_temperatures(self) -> List[float]:
         n = max(1, int(self.num_solver_samples))

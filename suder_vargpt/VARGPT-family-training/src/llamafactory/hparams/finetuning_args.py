@@ -415,6 +415,122 @@ class FinetuningArguments(FreezeArguments, LoraArguments, RLHFArguments, GaloreA
             )
         },
     )
+    se_num_solver_samples: int = field(
+        default=7,
+        metadata={"help": "Number of solver samples per understanding step."},
+    )
+    se_proposer_spot_check_samples: int = field(
+        default=3,
+        metadata={"help": "Solver samples used to spot-check proposer candidates."},
+    )
+    se_solver_use_temperature_mix: bool = field(
+        default=True,
+        metadata={"help": "Use solver temperature/top-p schedules across samples."},
+    )
+    se_solver_temp_min: float = field(
+        default=0.5,
+        metadata={"help": "Minimum solver temperature in mixed decoding."},
+    )
+    se_solver_temp_max: float = field(
+        default=2.5,
+        metadata={"help": "Maximum solver temperature in mixed decoding."},
+    )
+    se_solver_top_p_min: float = field(
+        default=0.3,
+        metadata={"help": "Minimum solver top-p in mixed decoding."},
+    )
+    se_solver_top_p_max: float = field(
+        default=1.0,
+        metadata={"help": "Maximum solver top-p in mixed decoding."},
+    )
+    se_solver_skip_update_on_easy: bool = field(
+        default=True,
+        metadata={"help": "Skip solver updates on unanimous easy cases."},
+    )
+    se_easy_update_majority_frac_threshold: float = field(
+        default=1.0,
+        metadata={"help": "Majority fraction threshold for easy-case solver skip."},
+    )
+    se_difficulty_sampler_enabled: bool = field(
+        default=True,
+        metadata={"help": "Enable difficulty target sampling for proposer prompts."},
+    )
+    se_difficulty_sampler_min_samples: int = field(
+        default=8,
+        metadata={"help": "Minimum observed samples before deficit-based targeting."},
+    )
+    se_difficulty_target_easy: float = field(
+        default=0.0,
+        metadata={"help": "Target fraction for easy bucket."},
+    )
+    se_difficulty_target_medium: float = field(
+        default=0.7,
+        metadata={"help": "Target fraction for medium bucket."},
+    )
+    se_difficulty_target_hard: float = field(
+        default=0.3,
+        metadata={"help": "Target fraction for hard bucket."},
+    )
+    se_proposer_warm_start_enabled: bool = field(
+        default=True,
+        metadata={"help": "Enable entropy-free proposer warm-start."},
+    )
+    se_proposer_warm_start_max_steps: int = field(
+        default=30,
+        metadata={"help": "Max understanding steps for warm-start."},
+    )
+    se_proposer_warm_start_exit_window: int = field(
+        default=5,
+        metadata={"help": "Window size for warm-start exit entropy mean."},
+    )
+    se_proposer_warm_start_exit_consecutive: int = field(
+        default=2,
+        metadata={"help": "Consecutive exit-window passes required to finish warm-start."},
+    )
+    se_proposer_warm_start_entropy_exit_threshold: float = field(
+        default=0.10,
+        metadata={"help": "Entropy threshold to exit warm-start."},
+    )
+    se_hardness_debt_enabled: bool = field(
+        default=True,
+        metadata={"help": "Enable hardness debt controller."},
+    )
+    se_hardness_debt_inc_easy: float = field(
+        default=1.5,
+        metadata={"help": "Debt increase on easy observed bucket."},
+    )
+    se_hardness_debt_dec_non_easy: float = field(
+        default=1.0,
+        metadata={"help": "Debt decrease on medium/hard observed bucket."},
+    )
+    se_hardness_debt_hard_recovery_threshold: float = field(
+        default=3.0,
+        metadata={"help": "Debt threshold to enter hard-recovery targeting."},
+    )
+    se_all_easy_explore_trigger: int = field(
+        default=2,
+        metadata={"help": "Consecutive all-easy groups required to trigger forced exploration."},
+    )
+    se_all_easy_explore_steps: int = field(
+        default=16,
+        metadata={"help": "Number of forced-exploration understanding steps once triggered."},
+    )
+    se_all_easy_explore_num_candidates: int = field(
+        default=6,
+        metadata={"help": "Candidate count during forced exploration."},
+    )
+    se_proposer_early_failfast_enabled: bool = field(
+        default=True,
+        metadata={"help": "Enable proposer early failfast health checks."},
+    )
+    se_proposer_early_failfast_stop: bool = field(
+        default=False,
+        metadata={"help": "Hard-stop when early failfast unhealthy condition triggers."},
+    )
+    se_proposer_early_failfast_recover: bool = field(
+        default=True,
+        metadata={"help": "Arm forced exploration instead of stopping on early failfast trigger."},
+    )
 
     def __post_init__(self):
         def split_arg(arg):

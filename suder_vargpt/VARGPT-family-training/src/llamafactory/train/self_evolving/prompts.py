@@ -49,6 +49,8 @@ def build_solver_prompt(question_text: str) -> str:
         "Rules:\n"
         "- Your answer MUST be 1-5 words only. No full sentences.\n"
         "- Give only the core answer, not an explanation.\n"
+        "- For count questions, return a concrete integer.\n"
+        "- Never answer with vague terms like 'too many', 'several', 'unclear', or 'cannot tell'.\n"
         "- Examples of good answers: 'primary producer', '42%', 'increases then decreases', 'red circle'\n"
         "- Return only the final answer inside XML:\n"
         "<answer>...</answer>\n"
@@ -417,7 +419,11 @@ def build_proposer_multi_prompt(
     n = max(1, int(num_questions))
     qa_template = "\n".join(
         f'  <question id="{i}">\n'
+        f'    <task_card>...C1/C2/C3/C4/C5/C6/C7/C8/C9...</task_card>\n'
+        f'    <reasoning_domains>...comma-separated D-codes, minimum 2...</reasoning_domains>\n'
+        f'    <reasoning_chain>...3-step chain using "->"...</reasoning_chain>\n'
         f'    <strategy_used>...which strategy from the library above (e.g. H2, M3)...</strategy_used>\n'
+        f'    <visual_target>...specific visual anchor/region in the image...</visual_target>\n'
         f'    <two_answer_test>...two plausible but DIFFERENT answers the solver might give and why...</two_answer_test>\n'
         f'    <text>...the question text ending with "?"...</text>\n'
         f'    <rationale>...why this is objective, image-grounded, and NOT an anti-pattern...</rationale>\n'
@@ -431,12 +437,16 @@ def build_proposer_multi_prompt(
         f"{diff_hint}\n"
         f"{dataset_hint}"
         f"{strategy_block}"
-        f"Generate exactly {n} questions, HARDEST first. For each:\n"
-        "  1. <strategy_used>: which strategy (e.g. H2).\n"
-        "  2. <two_answer_test>: two different plausible solver answers. If you can't — it's easy, pick another strategy.\n"
-        "  3. <text>: the question (ends with '?', uses concrete image objects, 1-5 word answer).\n"
-        "  4. <rationale>: why it is objective, image-grounded, NOT an anti-pattern.\n"
-        "Rules: verifiable short answer, no subjective wording, no XML tags inside question text.\n"
+        f"Generate exactly {n} questions, HARDEST first.\n"
+        "For each candidate, follow this order strictly:\n"
+        "task_card -> reasoning_domains -> reasoning_chain -> strategy_used -> visual_target -> two_answer_test -> text -> rationale.\n"
+        "Rules:\n"
+        "- Objective, image-grounded, and verifiable only.\n"
+        "- No subjective/speculative wording.\n"
+        "- Avoid explicit binary forced-choice questions.\n"
+        "- If two_answer_test has no real disagreement, rewrite the question.\n"
+        "- Keep answer short and concretely checkable in the image.\n"
+        "- No XML tags inside <text>.\n"
         "Output XML only:\n"
         "<questions>\n"
         f"{qa_template}\n"

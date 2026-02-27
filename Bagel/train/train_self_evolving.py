@@ -179,6 +179,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--proposer_spot_check_samples", type=int, default=3)
     p.add_argument("--proposer_spot_entropy_min_gate", type=float, default=0.05)
     p.add_argument("--proposer_grpo_gen_group_size", type=int, default=3)
+    p.add_argument("--grpo_extra_sc_samples", type=int, default=3)
     p.add_argument("--score_grpo_extras", action="store_true", default=True)
     p.add_argument(
         "--disable_score_grpo_extras",
@@ -199,6 +200,146 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ste_spot_easy_quantile", type=float, default=0.30)
     p.add_argument("--proposer_ste_primary_weight", type=float, default=0.70)
     p.add_argument("--proposer_sample_entropy_weight", type=float, default=0.30)
+    p.add_argument("--proposer_certificate_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_certificate",
+        dest="proposer_certificate_enabled",
+        action="store_false",
+    )
+    p.add_argument("--proposer_certificate_min_score", type=float, default=0.55)
+    p.add_argument("--proposer_certificate_weight", type=float, default=0.75)
+    p.add_argument("--proposer_certificate_strict_struct", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_certificate_strict_struct",
+        dest="proposer_certificate_strict_struct",
+        action="store_false",
+    )
+    p.add_argument("--proposer_warm_start_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_warm_start",
+        dest="proposer_warm_start_enabled",
+        action="store_false",
+    )
+    p.add_argument("--proposer_warm_start_max_steps", type=int, default=30)
+    p.add_argument("--proposer_warm_start_exit_window", type=int, default=5)
+    p.add_argument("--proposer_warm_start_exit_consecutive", type=int, default=2)
+    p.add_argument("--proposer_warm_start_entropy_exit_threshold", type=float, default=0.10)
+    p.add_argument("--proposer_warm_start_easy_reject_penalty_scale", type=float, default=0.0)
+    p.add_argument("--proposer_warm_start_certificate_weight", type=float, default=0.50)
+    p.add_argument("--hardness_debt_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_hardness_debt",
+        dest="hardness_debt_enabled",
+        action="store_false",
+    )
+    p.add_argument("--hardness_debt_inc_easy", type=float, default=1.50)
+    p.add_argument("--hardness_debt_dec_non_easy", type=float, default=1.00)
+    p.add_argument("--hardness_debt_max", type=float, default=6.0)
+    p.add_argument("--hardness_debt_hard_recovery_threshold", type=float, default=3.0)
+    p.add_argument("--hardness_debt_recovery_easy_weight", type=float, default=0.0)
+    p.add_argument("--hardness_debt_recovery_medium_weight", type=float, default=0.30)
+    p.add_argument("--hardness_debt_recovery_hard_weight", type=float, default=0.70)
+    p.add_argument("--hardness_debt_stale_steps", type=int, default=8)
+    p.add_argument("--hardness_debt_stale_reset_to", type=float, default=3.0)
+    p.add_argument("--hardness_debt_stale_escape_steps", type=int, default=8)
+    p.add_argument("--hardness_debt_stale_easy_weight", type=float, default=0.05)
+    p.add_argument("--hardness_debt_stale_medium_weight", type=float, default=0.55)
+    p.add_argument("--hardness_debt_stale_hard_weight", type=float, default=0.40)
+    p.add_argument("--hardness_debt_temp_boost_max", type=float, default=0.30)
+    p.add_argument("--hardness_debt_penalty_boost_max", type=float, default=0.30)
+    p.add_argument("--difficulty_sampler_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_difficulty_sampler",
+        dest="difficulty_sampler_enabled",
+        action="store_false",
+    )
+    p.add_argument("--difficulty_sampler_window_size", type=int, default=256)
+    p.add_argument("--difficulty_sampler_min_samples", type=int, default=32)
+    p.add_argument("--difficulty_target_easy", type=float, default=0.10)
+    p.add_argument("--difficulty_target_medium", type=float, default=0.50)
+    p.add_argument("--difficulty_target_hard", type=float, default=0.40)
+    p.add_argument("--difficulty_hard_min_entropy", type=float, default=0.90)
+    p.add_argument("--difficulty_hard_max_margin", type=float, default=0.35)
+    p.add_argument("--entropy_iqr_filter_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_entropy_iqr_filter",
+        dest="entropy_iqr_filter_enabled",
+        action="store_false",
+    )
+    p.add_argument("--entropy_iqr_window_size", type=int, default=256)
+    p.add_argument("--entropy_iqr_min_samples", type=int, default=32)
+    p.add_argument("--entropy_iqr_easy_quantile", type=float, default=0.25)
+    p.add_argument("--entropy_iqr_easy_iqr_coef", type=float, default=0.25)
+    p.add_argument("--entropy_iqr_min_threshold", type=float, default=0.02)
+    p.add_argument("--entropy_iqr_max_threshold", type=float, default=1.2)
+    p.add_argument("--entropy_iqr_filter_min_majority_frac", type=float, default=0.80)
+    p.add_argument("--all_easy_explore_trigger", type=int, default=2)
+    p.add_argument("--all_easy_explore_steps", type=int, default=10)
+    p.add_argument("--all_easy_explore_num_candidates", type=int, default=6)
+    p.add_argument("--all_easy_explore_temp_boost", type=float, default=1.20)
+    p.add_argument("--all_easy_explore_top_p_boost", type=float, default=0.15)
+    p.add_argument("--all_easy_explore_penalty_boost", type=float, default=0.50)
+    p.add_argument("--proposer_contrastive_replay_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_contrastive_replay",
+        dest="proposer_contrastive_replay_enabled",
+        action="store_false",
+    )
+    p.add_argument("--proposer_contrastive_replay_size", type=int, default=256)
+    p.add_argument("--proposer_contrastive_pos_bonus", type=float, default=0.08)
+    p.add_argument("--proposer_contrastive_neg_penalty", type=float, default=0.08)
+    p.add_argument("--proposer_early_failfast_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_early_failfast",
+        dest="proposer_early_failfast_enabled",
+        action="store_false",
+    )
+    p.add_argument("--proposer_early_failfast_stop", action="store_true", default=False)
+    p.add_argument(
+        "--disable_proposer_early_failfast_stop",
+        dest="proposer_early_failfast_stop",
+        action="store_false",
+    )
+    p.add_argument("--proposer_early_failfast_recover", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_early_failfast_recover",
+        dest="proposer_early_failfast_recover",
+        action="store_false",
+    )
+    p.add_argument("--proposer_early_failfast_recover_steps", type=int, default=20)
+    p.add_argument("--proposer_early_stage1_u_step", type=int, default=12)
+    p.add_argument("--proposer_early_stage2_u_step", type=int, default=20)
+    p.add_argument("--proposer_early_hard_stop_min_u_step", type=int, default=80)
+    p.add_argument("--proposer_early_candidate_non_easy_rate_min", type=float, default=0.08)
+    p.add_argument("--proposer_early_all_easy_rate_max", type=float, default=0.93)
+    p.add_argument("--proposer_early_reward_clipped_rate_max", type=float, default=0.85)
+    p.add_argument("--proposer_early_selected_non_easy_rate_min", type=float, default=0.10)
+    p.add_argument("--proposer_early_solver_updates_min", type=int, default=1)
+    p.add_argument("--proposer_early_max_collapse_streak", type=int, default=3)
+    p.add_argument("--grpo_degenerate_noise_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_grpo_degenerate_noise",
+        dest="grpo_degenerate_noise_enabled",
+        action="store_false",
+    )
+    p.add_argument("--grpo_degenerate_noise_sigma", type=float, default=0.03)
+    p.add_argument("--grpo_degenerate_noise_std_threshold", type=float, default=1e-6)
+    p.add_argument("--grpo_pairwise_ranking_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_grpo_pairwise_ranking",
+        dest="grpo_pairwise_ranking_enabled",
+        action="store_false",
+    )
+    p.add_argument("--grpo_pairwise_ranking_weight", type=float, default=0.15)
+    p.add_argument("--grpo_pairwise_margin", type=float, default=0.10)
+    p.add_argument("--grpo_pairwise_easy_penalty", type=float, default=0.12)
+    p.add_argument("--proposer_all_easy_rank_spread", type=float, default=0.08)
+    p.add_argument("--gen_step_solver_update_enabled", action="store_true", default=False)
+    p.add_argument(
+        "--disable_gen_step_solver_update",
+        dest="gen_step_solver_update_enabled",
+        action="store_false",
+    )
     p.add_argument("--train_understanding_proposer", action="store_true", default=True)
     p.add_argument(
         "--disable_train_understanding_proposer",
@@ -312,6 +453,7 @@ def main() -> None:
         proposer_spot_check_samples=int(args.proposer_spot_check_samples),
         proposer_spot_entropy_min_gate=float(args.proposer_spot_entropy_min_gate),
         proposer_grpo_gen_group_size=max(1, int(args.proposer_grpo_gen_group_size)),
+        grpo_extra_sc_samples=max(1, int(args.grpo_extra_sc_samples)),
         score_grpo_extras=bool(args.score_grpo_extras),
         grpo_extra_temp_multiplier=float(args.grpo_extra_temp_multiplier),
         solver_token_entropy_enabled=bool(args.solver_token_entropy_enabled),
@@ -322,6 +464,81 @@ def main() -> None:
         ste_spot_easy_quantile=float(args.ste_spot_easy_quantile),
         proposer_ste_primary_weight=float(args.proposer_ste_primary_weight),
         proposer_sample_entropy_weight=float(args.proposer_sample_entropy_weight),
+        proposer_certificate_enabled=bool(args.proposer_certificate_enabled),
+        proposer_certificate_min_score=float(args.proposer_certificate_min_score),
+        proposer_certificate_weight=float(args.proposer_certificate_weight),
+        proposer_certificate_strict_struct=bool(args.proposer_certificate_strict_struct),
+        proposer_warm_start_enabled=bool(args.proposer_warm_start_enabled),
+        proposer_warm_start_max_steps=max(1, int(args.proposer_warm_start_max_steps)),
+        proposer_warm_start_exit_window=max(1, int(args.proposer_warm_start_exit_window)),
+        proposer_warm_start_exit_consecutive=max(1, int(args.proposer_warm_start_exit_consecutive)),
+        proposer_warm_start_entropy_exit_threshold=float(args.proposer_warm_start_entropy_exit_threshold),
+        proposer_warm_start_easy_reject_penalty_scale=float(args.proposer_warm_start_easy_reject_penalty_scale),
+        proposer_warm_start_certificate_weight=float(args.proposer_warm_start_certificate_weight),
+        hardness_debt_enabled=bool(args.hardness_debt_enabled),
+        hardness_debt_inc_easy=float(args.hardness_debt_inc_easy),
+        hardness_debt_dec_non_easy=float(args.hardness_debt_dec_non_easy),
+        hardness_debt_max=float(args.hardness_debt_max),
+        hardness_debt_hard_recovery_threshold=float(args.hardness_debt_hard_recovery_threshold),
+        hardness_debt_recovery_easy_weight=float(args.hardness_debt_recovery_easy_weight),
+        hardness_debt_recovery_medium_weight=float(args.hardness_debt_recovery_medium_weight),
+        hardness_debt_recovery_hard_weight=float(args.hardness_debt_recovery_hard_weight),
+        hardness_debt_stale_steps=max(1, int(args.hardness_debt_stale_steps)),
+        hardness_debt_stale_reset_to=float(args.hardness_debt_stale_reset_to),
+        hardness_debt_stale_escape_steps=max(1, int(args.hardness_debt_stale_escape_steps)),
+        hardness_debt_stale_easy_weight=float(args.hardness_debt_stale_easy_weight),
+        hardness_debt_stale_medium_weight=float(args.hardness_debt_stale_medium_weight),
+        hardness_debt_stale_hard_weight=float(args.hardness_debt_stale_hard_weight),
+        hardness_debt_temp_boost_max=float(args.hardness_debt_temp_boost_max),
+        hardness_debt_penalty_boost_max=float(args.hardness_debt_penalty_boost_max),
+        difficulty_sampler_enabled=bool(args.difficulty_sampler_enabled),
+        difficulty_sampler_window_size=max(8, int(args.difficulty_sampler_window_size)),
+        difficulty_sampler_min_samples=max(1, int(args.difficulty_sampler_min_samples)),
+        difficulty_target_easy=float(args.difficulty_target_easy),
+        difficulty_target_medium=float(args.difficulty_target_medium),
+        difficulty_target_hard=float(args.difficulty_target_hard),
+        difficulty_hard_min_entropy=float(args.difficulty_hard_min_entropy),
+        difficulty_hard_max_margin=float(args.difficulty_hard_max_margin),
+        entropy_iqr_filter_enabled=bool(args.entropy_iqr_filter_enabled),
+        entropy_iqr_window_size=max(8, int(args.entropy_iqr_window_size)),
+        entropy_iqr_min_samples=max(1, int(args.entropy_iqr_min_samples)),
+        entropy_iqr_easy_quantile=float(args.entropy_iqr_easy_quantile),
+        entropy_iqr_easy_iqr_coef=float(args.entropy_iqr_easy_iqr_coef),
+        entropy_iqr_min_threshold=float(args.entropy_iqr_min_threshold),
+        entropy_iqr_max_threshold=float(args.entropy_iqr_max_threshold),
+        entropy_iqr_filter_min_majority_frac=float(args.entropy_iqr_filter_min_majority_frac),
+        all_easy_explore_trigger=max(1, int(args.all_easy_explore_trigger)),
+        all_easy_explore_steps=max(1, int(args.all_easy_explore_steps)),
+        all_easy_explore_num_candidates=max(1, int(args.all_easy_explore_num_candidates)),
+        all_easy_explore_temp_boost=float(args.all_easy_explore_temp_boost),
+        all_easy_explore_top_p_boost=float(args.all_easy_explore_top_p_boost),
+        all_easy_explore_penalty_boost=float(args.all_easy_explore_penalty_boost),
+        proposer_contrastive_replay_enabled=bool(args.proposer_contrastive_replay_enabled),
+        proposer_contrastive_replay_size=max(8, int(args.proposer_contrastive_replay_size)),
+        proposer_contrastive_pos_bonus=float(args.proposer_contrastive_pos_bonus),
+        proposer_contrastive_neg_penalty=float(args.proposer_contrastive_neg_penalty),
+        proposer_early_failfast_enabled=bool(args.proposer_early_failfast_enabled),
+        proposer_early_failfast_stop=bool(args.proposer_early_failfast_stop),
+        proposer_early_failfast_recover=bool(args.proposer_early_failfast_recover),
+        proposer_early_failfast_recover_steps=max(1, int(args.proposer_early_failfast_recover_steps)),
+        proposer_early_stage1_u_step=max(1, int(args.proposer_early_stage1_u_step)),
+        proposer_early_stage2_u_step=max(1, int(args.proposer_early_stage2_u_step)),
+        proposer_early_hard_stop_min_u_step=max(1, int(args.proposer_early_hard_stop_min_u_step)),
+        proposer_early_candidate_non_easy_rate_min=float(args.proposer_early_candidate_non_easy_rate_min),
+        proposer_early_all_easy_rate_max=float(args.proposer_early_all_easy_rate_max),
+        proposer_early_reward_clipped_rate_max=float(args.proposer_early_reward_clipped_rate_max),
+        proposer_early_selected_non_easy_rate_min=float(args.proposer_early_selected_non_easy_rate_min),
+        proposer_early_solver_updates_min=max(0, int(args.proposer_early_solver_updates_min)),
+        proposer_early_max_collapse_streak=max(0, int(args.proposer_early_max_collapse_streak)),
+        grpo_degenerate_noise_enabled=bool(args.grpo_degenerate_noise_enabled),
+        grpo_degenerate_noise_sigma=float(args.grpo_degenerate_noise_sigma),
+        grpo_degenerate_noise_std_threshold=float(args.grpo_degenerate_noise_std_threshold),
+        grpo_pairwise_ranking_enabled=bool(args.grpo_pairwise_ranking_enabled),
+        grpo_pairwise_ranking_weight=float(args.grpo_pairwise_ranking_weight),
+        grpo_pairwise_margin=float(args.grpo_pairwise_margin),
+        grpo_pairwise_easy_penalty=float(args.grpo_pairwise_easy_penalty),
+        proposer_all_easy_rank_spread=float(args.proposer_all_easy_rank_spread),
+        gen_step_solver_update_enabled=bool(args.gen_step_solver_update_enabled),
         train_understanding_proposer=bool(args.train_understanding_proposer),
         train_solver=bool(args.train_solver),
         train_generation_proposer=bool(args.train_generation_proposer),

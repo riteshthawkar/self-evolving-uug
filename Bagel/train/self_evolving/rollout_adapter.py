@@ -18,6 +18,7 @@ from .prompts import (
     build_proposer_multi_prompt,
     build_proposer_prompt,
     build_solver_prompt,
+    build_solver_prompt_pps,
 )
 
 
@@ -114,8 +115,9 @@ class BagelRolloutAdapter:
         image: Image.Image,
         max_new_tokens: int,
         temperature: float,
+        target_difficulty: str = "medium",
     ) -> GenerationResult:
-        proposer_prompt = build_proposer_prompt()
+        proposer_prompt = build_proposer_prompt(target_difficulty=target_difficulty)
         with use_adapter(self.runtime.model.language_model, self._adapter_for_role(ROLE_PROPOSER)):
             return self._generate_understanding_text(
                 image=image,
@@ -132,6 +134,7 @@ class BagelRolloutAdapter:
         max_new_tokens: int,
         temperature: float,
         num_questions: int,
+        target_difficulty: str = "medium",
     ) -> GenerationResult:
         n = max(1, int(num_questions))
         if n <= 1:
@@ -139,8 +142,12 @@ class BagelRolloutAdapter:
                 image=image,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
+                target_difficulty=target_difficulty,
             )
-        proposer_prompt = build_proposer_multi_prompt(num_questions=n)
+        proposer_prompt = build_proposer_multi_prompt(
+            num_questions=n,
+            target_difficulty=target_difficulty,
+        )
         with use_adapter(self.runtime.model.language_model, self._adapter_for_role(ROLE_PROPOSER)):
             return self._generate_understanding_text(
                 image=image,
@@ -158,8 +165,18 @@ class BagelRolloutAdapter:
         max_new_tokens: int,
         temperature: float,
         do_sample: bool,
+        template_index: int = 0,
+        focus_hint: str = "",
+        use_pps: bool = False,
     ) -> GenerationResult:
-        solver_prompt = build_solver_prompt(question)
+        if bool(use_pps):
+            solver_prompt = build_solver_prompt_pps(
+                question_text=question,
+                template_index=int(template_index),
+                focus_hint=focus_hint,
+            )
+        else:
+            solver_prompt = build_solver_prompt(question_text=question, focus_hint=focus_hint)
         with use_adapter(self.runtime.model.language_model, self._adapter_for_role(ROLE_SOLVER)):
             return self._generate_understanding_text(
                 image=image,

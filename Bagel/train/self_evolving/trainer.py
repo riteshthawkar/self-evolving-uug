@@ -244,6 +244,12 @@ class SelfEvolvingUnderstandingTrainer:
                 filtered[key] = value.detach().cpu()
         return filtered
 
+    def _checkpoint_extra_state(self) -> Dict[str, object]:
+        return {}
+
+    def _load_checkpoint_extra_state(self, state: Dict[str, object]) -> None:
+        _ = state
+
     def _save_checkpoint(self, step: int) -> str:
         if not self.policy_updates_enabled:
             return ""
@@ -260,6 +266,9 @@ class SelfEvolvingUnderstandingTrainer:
             payload["proposer_updater"] = self.proposer_updater.state_dict()
         if self.solver_updater is not None:
             payload["solver_updater"] = self.solver_updater.state_dict()
+        extra_state = self._checkpoint_extra_state()
+        if isinstance(extra_state, dict) and extra_state:
+            payload["extra_state"] = extra_state
 
         path = os.path.join(self.checkpoint_dir, f"step_{int(step):06d}.pt")
         torch.save(payload, path)
@@ -290,6 +299,7 @@ class SelfEvolvingUnderstandingTrainer:
             self.proposer_updater.load_state_dict(state["proposer_updater"])
         if self.solver_updater is not None and isinstance(state.get("solver_updater"), dict):
             self.solver_updater.load_state_dict(state["solver_updater"])
+        self._load_checkpoint_extra_state(state.get("extra_state", {}))
 
         loaded_step = int(state.get("step", 0))
         self.last_checkpoint_path = ckpt_path
@@ -401,9 +411,30 @@ class SelfEvolvingUnderstandingTrainer:
         qa_logs: List[Dict] = []
         entropy_vals: List[float] = []
         match_vals: List[float] = []
+        gen_solver_update_enabled = bool(
+            getattr(self.cfg, "gen_step_solver_update_enabled", False)
+            and self.policy_updates_enabled
+            and self.cfg.train_solver
+            and self.solver_updater is not None
+        )
+        max_gen_solver_updates = max(
+            0,
+            int(
+                os.environ.get(
+                    "BAGEL_GEN_SOLVER_POLICY_MAX_SAMPLES",
+                    os.environ.get("BAGEL_SOLVER_POLICY_MAX_SAMPLES", "0"),
+                )
+                or "0"
+            ),
+        )
+        gen_solver_update_attempted = 0
+        gen_solver_update_applied = 0
+        gen_solver_update_stats: List[Dict] = []
+        gen_solver_reward_values: List[float] = []
         for qa_idx, qa in enumerate(spec.qa_pairs):
             solver_outputs_raw: List[str] = []
             solver_answers_norm: List[str] = []
+            solver_samples: List[Tuple[str, str]] = []
             for temp in solver_temps:
                 out = self.adapter.solve_question(
                     image=generated,
@@ -416,6 +447,7 @@ class SelfEvolvingUnderstandingTrainer:
                 ans = normalize_answer(parse_answer(out.text))
                 if ans:
                     solver_answers_norm.append(ans)
+                    solver_samples.append((out.text, ans))
             if not solver_answers_norm:
                 qa_logs.append(
                     {
@@ -436,6 +468,34 @@ class SelfEvolvingUnderstandingTrainer:
             match_score = answer_match_score(majority_answer, expected_answer)
             entropy_vals.append(float(entropy_nats))
             match_vals.append(float(match_score))
+
+            if gen_solver_update_enabled and solver_samples:
+                solver_prompt = build_solver_prompt(qa.question)
+                group_rewards = [
+                    float(answer_match_score(sample_ans, expected_answer))
+                    for _, sample_ans in solver_samples
+                ]
+                for idx, (sample_raw, _) in enumerate(solver_samples):
+                    if (
+                        max_gen_solver_updates > 0
+                        and int(gen_solver_update_attempted) >= int(max_gen_solver_updates)
+                    ):
+                        break
+                    sample_reward = float(group_rewards[idx]) if idx < len(group_rewards) else 0.0
+                    stats = self.solver_updater.step(
+                        image=generated,
+                        prompt=solver_prompt,
+                        completion=sample_raw,
+                        reward=sample_reward,
+                        baseline=self.solver_baseline,
+                        group_rewards=group_rewards,
+                    )
+                    gen_solver_update_stats.append(stats)
+                    gen_solver_update_attempted += 1
+                    if not bool(stats.get("skipped", True)):
+                        gen_solver_update_applied += 1
+                    gen_solver_reward_values.append(sample_reward)
+
             qa_logs.append(
                 {
                     "qa_index": int(qa_idx),
@@ -451,6 +511,14 @@ class SelfEvolvingUnderstandingTrainer:
                 }
             )
 
+        if gen_solver_update_enabled and gen_solver_reward_values:
+            momentum_solver = _clamp01(float(self.cfg.baseline_momentum))
+            mean_solver_reward = float(sum(gen_solver_reward_values) / float(len(gen_solver_reward_values)))
+            self.solver_baseline = (
+                momentum_solver * float(self.solver_baseline)
+                + (1.0 - momentum_solver) * mean_solver_reward
+            )
+
         if not entropy_vals:
             return {
                 "step": int(step),
@@ -464,6 +532,10 @@ class SelfEvolvingUnderstandingTrainer:
                 "policy_update_attempted": False,
                 "policy_update_applied": False,
                 "policy_update_reason": "empty_generation_qa_entropy",
+                "gen_solver_policy_update_enabled": bool(gen_solver_update_enabled),
+                "gen_solver_policy_update_budget": int(max_gen_solver_updates),
+                "gen_solver_policy_update_attempts": int(gen_solver_update_attempted),
+                "gen_solver_policy_update_applied": int(gen_solver_update_applied),
             }
 
         mean_entropy = float(sum(entropy_vals) / float(len(entropy_vals)))
@@ -529,6 +601,17 @@ class SelfEvolvingUnderstandingTrainer:
             "policy_update_applied": bool(policy_update_applied),
             "policy_update_reason": policy_update_reason,
             "policy_update_stats": policy_update_stats,
+            "gen_solver_policy_update_enabled": bool(gen_solver_update_enabled),
+            "gen_solver_policy_update_budget": int(max_gen_solver_updates),
+            "gen_solver_policy_update_attempts": int(gen_solver_update_attempted),
+            "gen_solver_policy_update_applied": int(gen_solver_update_applied),
+            "gen_solver_policy_update_ce_mean": _mean(
+                [
+                    float(s.get("ce_loss", 0.0))
+                    for s in gen_solver_update_stats
+                    if not bool(s.get("skipped", True))
+                ]
+            ),
             "solver_temperatures": solver_temps,
             "spec_retry_attempted": bool(spec_retry_attempted),
             "spec_retry_temperature": float(spec_retry_temperature),
