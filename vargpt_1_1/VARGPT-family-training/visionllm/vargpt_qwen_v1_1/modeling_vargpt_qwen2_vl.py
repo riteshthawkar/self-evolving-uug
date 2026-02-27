@@ -1827,6 +1827,11 @@ class VARGPTQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMi
         assert self.past_hidden_states is not None, "past_hidden_states is None"
         assert self.past_hidden_states.shape[0] ==1, "past_hidden_states.shape[0] !=1"
         kv_compact = self.past_hidden_states[0][:-1] # 移除start token
+        proj_out_dtype = next(
+            (p.dtype for p in self.image_gen_projector_out.parameters() if p.is_floating_point()),
+            kv_compact.dtype,
+        )
+        kv_compact = kv_compact.to(dtype=proj_out_dtype)
         kv_compact = self.image_gen_projector_out(kv_compact)
         max_seqlen_k = kv_compact.shape[0]
         cu_seqlens_k = torch.tensor([0, max_seqlen_k], dtype=torch.int32, device=kv_compact.device)
@@ -2003,9 +2008,22 @@ class VARGPTQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMi
         else:
             bs = B
 
-        kv_compact = self.vargpt_gen.text_norm(kv_compact)
-        sos = cond_BD = self.vargpt_gen.text_proj_for_sos((kv_compact, cu_seqlens_k, max_seqlen_k)) # sos shape: [2, 4096]
-        kv_compact = self.vargpt_gen.text_proj_for_ca(kv_compact) # kv_compact shape: [304, 4096]
+        def _module_fp_dtype(module, default_dtype):
+            for p in module.parameters():
+                if p.is_floating_point():
+                    return p.dtype
+            return default_dtype
+
+        norm_dtype = _module_fp_dtype(self.vargpt_gen.text_norm, kv_compact.dtype)
+        kv_compact = self.vargpt_gen.text_norm(kv_compact.to(dtype=norm_dtype))
+
+        sos_dtype = _module_fp_dtype(self.vargpt_gen.text_proj_for_sos, kv_compact.dtype)
+        sos = cond_BD = self.vargpt_gen.text_proj_for_sos(
+            (kv_compact.to(dtype=sos_dtype), cu_seqlens_k, max_seqlen_k)
+        ) # sos shape: [2, 4096]
+
+        ca_dtype = _module_fp_dtype(self.vargpt_gen.text_proj_for_ca, kv_compact.dtype)
+        kv_compact = self.vargpt_gen.text_proj_for_ca(kv_compact.to(dtype=ca_dtype)) # kv_compact shape: [304, 4096]
         ca_kv = kv_compact, cu_seqlens_k, max_seqlen_k
         last_stage = sos.unsqueeze(1).expand(bs, 1, -1) + self.vargpt_gen.pos_start.expand(bs, 1, -1) # input llm decoder
         last_stage = self.image_gen_projector(last_stage).view(-1, last_stage.shape[1], self.config.hidden_size)
