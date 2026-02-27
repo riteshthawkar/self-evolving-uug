@@ -899,6 +899,18 @@ class SelfEvolvingTrainer(Trainer):
             return {"g_skipped": True, "reason": "no_candidates"}
         stats["num_candidates"] = len(candidates)
 
+        # Save generated images for early-step sanity checks.
+        # Only rank-0 writes files to avoid DDP duplication.
+        if step < 50 and self.is_world_process_zero():
+            preview_dir = pathlib.Path(self.args.output_dir) / "checkpoints" / "generated_first50"
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            for cand_idx, (gen_image, _) in enumerate(candidates):
+                out_path = preview_dir / f"step_{step:05d}_cand_{cand_idx:02d}.png"
+                try:
+                    gen_image.save(out_path)
+                except Exception as e:
+                    logger.warning(f"[SelfEvolvingTrainer] Failed to save preview image {out_path}: {e}")
+
         # ── 3. Score candidates ─────────────────────────────────────────
         questions = [qa.question for qa in spec.qa_pairs]
         expected_answers = [qa.expected for qa in spec.qa_pairs]

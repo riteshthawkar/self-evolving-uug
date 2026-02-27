@@ -45,7 +45,12 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 MODEL_PATH="${MODEL_PATH:-$REPO_ROOT/models/BAGEL-7B-MoT}"
 DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_3k/images}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/BAGEL/B1_unified_training}"
+# Keep BAGEL artifacts under BAGEL folder by default.
+OUTPUT_DIR="${OUTPUT_DIR:-$BAGEL_ROOT/scripts/runs/B1_unified_training}"
+# Output layout:
+#   direct    -> write logs/checkpoints directly under OUTPUT_DIR
+#   timestamp -> create OUTPUT_DIR/unified_rollout_<ts> (legacy behavior)
+OUTPUT_LAYOUT="${OUTPUT_LAYOUT:-direct}"   # direct|timestamp
 
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RUN_MODE="${RUN_MODE:-train}"
@@ -713,6 +718,7 @@ echo "[B1]   Exp:        $EXPERIMENT"
 echo "[B1]   Model:      $MODEL_PATH"
 echo "[B1]   Data:       $DATA_DIR"
 echo "[B1]   Output:     $OUTPUT_DIR"
+echo "[B1]   OutLayout:  $OUTPUT_LAYOUT"
 echo "[B1]   Steps:      $STEPS"
 echo "[B1]   Device:     $DEVICE"
 echo "[B1]   GPUs:       count=$GPU_COUNT split=$MULTI_GPU_SPLIT"
@@ -771,6 +777,7 @@ export BAGEL_POLICY_MAX_PROMPT_TOKENS="$POLICY_MAX_PROMPT_TOKENS"
 export BAGEL_SOLVER_POLICY_MAX_SAMPLES="$SOLVER_POLICY_MAX_SAMPLES"
 export BAGEL_GEN_SOLVER_POLICY_MAX_SAMPLES="$GEN_SOLVER_POLICY_MAX_SAMPLES"
 export BAGEL_PROPOSER_POLICY_MAX_CANDIDATES="$PROPOSER_POLICY_MAX_CANDIDATES"
+export BAGEL_OUTPUT_DIR_MODE="$OUTPUT_LAYOUT"
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 
@@ -792,11 +799,17 @@ set +e
 PY_EXIT_CODE="${PIPESTATUS[0]}"
 set -e
 
-LATEST_RUN_DIR="$(ls -td "$OUTPUT_DIR"/unified_rollout_* 2>/dev/null | head -1 || true)"
+LATEST_RUN_DIR=""
+if [[ "$OUTPUT_LAYOUT" == "direct" ]]; then
+  LATEST_RUN_DIR="$OUTPUT_DIR"
+else
+  LATEST_RUN_DIR="$(ls -td "$OUTPUT_DIR"/unified_rollout_* 2>/dev/null | head -1 || true)"
+fi
 if [[ -n "$LATEST_RUN_DIR" ]]; then
   echo "[B1]   LatestRun:  $LATEST_RUN_DIR"
   echo "[B1]   Status:     $LATEST_RUN_DIR/status.json"
   echo "[B1]   Metrics:    $LATEST_RUN_DIR/metrics.jsonl"
+  echo "[B1]   Checkpoints:$LATEST_RUN_DIR/checkpoints"
 fi
 
 if [[ "$PY_EXIT_CODE" -ne 0 ]]; then
