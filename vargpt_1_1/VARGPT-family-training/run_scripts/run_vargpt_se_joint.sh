@@ -16,12 +16,13 @@ NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 MASTER_PORT="${MASTER_PORT:-39600}"
 
 resolve_launcher() {
+    LAUNCHER=()
     if command -v llamafactory-cli >/dev/null 2>&1; then
-        echo "llamafactory-cli"
+        LAUNCHER=("llamafactory-cli")
         return 0
     fi
     if python -c "import llamafactory.cli" >/dev/null 2>&1; then
-        echo "python -m llamafactory.cli"
+        LAUNCHER=("python" "-m" "llamafactory.cli")
         return 0
     fi
     return 1
@@ -105,10 +106,27 @@ if [[ ! -f "$CONFIG" ]]; then
     exit 1
 fi
 
-if ! LAUNCHER_CMD="$(resolve_launcher)"; then
+if ! resolve_launcher; then
     echo "[ERROR] Could not find LlamaFactory launcher." >&2
     echo "[ERROR] Run: pip install -e ." >&2
     echo "[ERROR] Or ensure 'python -m llamafactory.cli' imports in current env." >&2
+    exit 1
+fi
+
+LLAMAFACTORY_MODULE_DIR="$(
+python - <<'PY' 2>/dev/null || true
+import os
+import llamafactory
+print(os.path.abspath(os.path.dirname(llamafactory.__file__)))
+PY
+)"
+LLAMAFACTORY_MODULE_DIR="$(echo "${LLAMAFACTORY_MODULE_DIR}" | tr -d '[:space:]')"
+EXPECTED_MODULE_DIR="${REPO_ROOT}/src/llamafactory"
+if [[ "${LLAMAFACTORY_MODULE_DIR}" != "${EXPECTED_MODULE_DIR}" ]]; then
+    echo "[ERROR] Wrong llamafactory package resolved." >&2
+    echo "[ERROR] Current:  ${LLAMAFACTORY_MODULE_DIR}" >&2
+    echo "[ERROR] Expected: ${EXPECTED_MODULE_DIR}" >&2
+    echo "[ERROR] Fix in this env: pip uninstall -y llamafactory && pip install -e ${REPO_ROOT}" >&2
     exit 1
 fi
 
@@ -152,46 +170,64 @@ echo "  Solver K     : $SE_NUM_SOLVER_SAMPLES"
 echo "  Spot-check K : $SE_PROPOSER_SPOT_CHECK_SAMPLES"
 echo "  Temp range   : [$SE_SOLVER_TEMP_MIN, $SE_SOLVER_TEMP_MAX]"
 echo "  Dataset dir  : $DATASET_DIR"
-echo "  Launcher     : $LAUNCHER_CMD"
+echo "  Launcher     : ${LAUNCHER[*]}"
 echo "  Torch accel  : $TORCH_ACCEL_COUNT"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 
-# ── Launch training ──────────────────────────────────────────────────────────
+# ── Build temporary YAML with overrides ──────────────────────────────────────
+TMP_CONFIG="$(mktemp "/tmp/vargpt_se_joint_XXXX.yaml")"
+RUN_CONFIG="${TMP_CONFIG}"
+cp "${CONFIG}" "${RUN_CONFIG}"
+trap '[[ -n "${TMP_CONFIG:-}" && -f "${TMP_CONFIG}" ]] && rm -f "${TMP_CONFIG}"' EXIT
+
+yaml_quote() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+{
+    echo ""
+    echo "# --- auto overrides from run_vargpt_se_joint.sh ---"
+    echo "dataset_dir: \"$(yaml_quote "${DATASET_DIR}")\""
+    echo "se_image_folder: \"$(yaml_quote "${IMAGE_FOLDER}")\""
+    echo "se_num_solver_samples: ${SE_NUM_SOLVER_SAMPLES}"
+    echo "se_proposer_spot_check_samples: ${SE_PROPOSER_SPOT_CHECK_SAMPLES}"
+    echo "se_solver_temp_min: ${SE_SOLVER_TEMP_MIN}"
+    echo "se_solver_temp_max: ${SE_SOLVER_TEMP_MAX}"
+    echo "se_solver_top_p_min: ${SE_SOLVER_TOP_P_MIN}"
+    echo "se_solver_top_p_max: ${SE_SOLVER_TOP_P_MAX}"
+    echo "se_solver_skip_update_on_easy: ${SE_SOLVER_SKIP_UPDATE_ON_EASY}"
+    echo "se_easy_update_majority_frac_threshold: ${SE_EASY_UPDATE_MAJORITY_FRAC_THRESHOLD}"
+    echo "se_difficulty_sampler_enabled: ${SE_DIFFICULTY_SAMPLER_ENABLED}"
+    echo "se_difficulty_target_easy: ${SE_DIFFICULTY_TARGET_EASY}"
+    echo "se_difficulty_target_medium: ${SE_DIFFICULTY_TARGET_MEDIUM}"
+    echo "se_difficulty_target_hard: ${SE_DIFFICULTY_TARGET_HARD}"
+    echo "se_proposer_warm_start_enabled: ${SE_PROPOSER_WARM_START_ENABLED}"
+    echo "se_proposer_warm_start_max_steps: ${SE_PROPOSER_WARM_START_MAX_STEPS}"
+    echo "se_hardness_debt_enabled: ${SE_HARDNESS_DEBT_ENABLED}"
+    echo "se_hardness_debt_inc_easy: ${SE_HARDNESS_DEBT_INC_EASY}"
+    echo "se_hardness_debt_dec_non_easy: ${SE_HARDNESS_DEBT_DEC_NON_EASY}"
+    echo "se_hardness_debt_hard_recovery_threshold: ${SE_HARDNESS_DEBT_HARD_RECOVERY_THRESHOLD}"
+    echo "se_all_easy_explore_trigger: ${SE_ALL_EASY_EXPLORE_TRIGGER}"
+    echo "se_all_easy_explore_steps: ${SE_ALL_EASY_EXPLORE_STEPS}"
+    echo "se_all_easy_explore_num_candidates: ${SE_ALL_EASY_EXPLORE_NUM_CANDIDATES}"
+    echo "se_proposer_early_failfast_enabled: ${SE_PROPOSER_EARLY_FAILFAST_ENABLED}"
+    echo "se_proposer_early_failfast_stop: ${SE_PROPOSER_EARLY_FAILFAST_STOP}"
+    echo "se_proposer_early_failfast_recover: ${SE_PROPOSER_EARLY_FAILFAST_RECOVER}"
+} >> "${RUN_CONFIG}"
+
+if [[ -n "${SE_EXTRA_ARGS:-}" ]]; then
+    echo "[WARN] SE_EXTRA_ARGS is ignored in YAML launch mode: ${SE_EXTRA_ARGS}"
+fi
+echo "  Run config   : ${RUN_CONFIG}"
+
 FORCE_TORCHRUN=1 \
 NNODES=1 \
 NODE_RANK=0 \
 NPROC_PER_NODE="$NPROC_PER_NODE" \
 MASTER_ADDR=127.0.0.1 \
 MASTER_PORT="$MASTER_PORT" \
-    bash -lc "$LAUNCHER_CMD train \"$CONFIG\" \
-        --se_image_folder "$IMAGE_FOLDER" \
-        --dataset_dir "$DATASET_DIR" \
-        --se_num_solver_samples "$SE_NUM_SOLVER_SAMPLES" \
-        --se_proposer_spot_check_samples "$SE_PROPOSER_SPOT_CHECK_SAMPLES" \
-        --se_solver_temp_min "$SE_SOLVER_TEMP_MIN" \
-        --se_solver_temp_max "$SE_SOLVER_TEMP_MAX" \
-        --se_solver_top_p_min "$SE_SOLVER_TOP_P_MIN" \
-        --se_solver_top_p_max "$SE_SOLVER_TOP_P_MAX" \
-        --se_solver_skip_update_on_easy "$SE_SOLVER_SKIP_UPDATE_ON_EASY" \
-        --se_easy_update_majority_frac_threshold "$SE_EASY_UPDATE_MAJORITY_FRAC_THRESHOLD" \
-        --se_difficulty_sampler_enabled "$SE_DIFFICULTY_SAMPLER_ENABLED" \
-        --se_difficulty_target_easy "$SE_DIFFICULTY_TARGET_EASY" \
-        --se_difficulty_target_medium "$SE_DIFFICULTY_TARGET_MEDIUM" \
-        --se_difficulty_target_hard "$SE_DIFFICULTY_TARGET_HARD" \
-        --se_proposer_warm_start_enabled "$SE_PROPOSER_WARM_START_ENABLED" \
-        --se_proposer_warm_start_max_steps "$SE_PROPOSER_WARM_START_MAX_STEPS" \
-        --se_hardness_debt_enabled "$SE_HARDNESS_DEBT_ENABLED" \
-        --se_hardness_debt_inc_easy "$SE_HARDNESS_DEBT_INC_EASY" \
-        --se_hardness_debt_dec_non_easy "$SE_HARDNESS_DEBT_DEC_NON_EASY" \
-        --se_hardness_debt_hard_recovery_threshold "$SE_HARDNESS_DEBT_HARD_RECOVERY_THRESHOLD" \
-        --se_all_easy_explore_trigger "$SE_ALL_EASY_EXPLORE_TRIGGER" \
-        --se_all_easy_explore_steps "$SE_ALL_EASY_EXPLORE_STEPS" \
-        --se_all_easy_explore_num_candidates "$SE_ALL_EASY_EXPLORE_NUM_CANDIDATES" \
-        --se_proposer_early_failfast_enabled "$SE_PROPOSER_EARLY_FAILFAST_ENABLED" \
-        --se_proposer_early_failfast_stop "$SE_PROPOSER_EARLY_FAILFAST_STOP" \
-        --se_proposer_early_failfast_recover "$SE_PROPOSER_EARLY_FAILFAST_RECOVER" \
-        ${SE_EXTRA_ARGS:-}"
+    "${LAUNCHER[@]}" train "${RUN_CONFIG}"
 
 echo ""
 echo "═══════════════════════════════════════════════════════════"
