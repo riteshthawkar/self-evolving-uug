@@ -1,0 +1,40 @@
+### model
+model_name_or_path: vargpt_llava-7b/full/pt-5e-5-stage2
+
+### method
+stage: sft
+do_train: true
+finetuning_type: full
+deepspeed: examples/deepspeed/ds_z3_config.json
+vargpt_version: "llava-v1.0"
+vargpt_train_stage: 3
+
+### dataset
+dataset:  vargpt_pt_gen_instruct_130k, vargpt_pt_gen_instruct_1270k 
+
+
+template: vargpt_llava
+cutoff_len: 2048
+max_samples: 10000000
+overwrite_cache: true
+preprocessing_num_workers: 128 # 8
+
+
+### output
+output_dir: saves/vargpt_llava-7b/full/pt-5e-5-stage3
+logging_steps: 10
+save_steps: 1000
+plot_loss: true
+overwrite_output_dir: true
+
+### train
+per_device_train_batch_size: 8 # 32 
+gradient_accumulation_steps: 2
+learning_rate: 5.0e-5
+num_train_epochs: 3.0 # 3  
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+fp16: false
+ddp_timeout: 180000000
+

@@ -1,0 +1,33 @@
+[
+    {
+        "messages": [
+            {
+                "content": "I need a designed image of an old building with two windows and some plants.",
+                "role": "user"
+            },
+            {
+                "content": "I have designed a drawing of an old building with two windows and some plants.<image_gen>",
+                "role": "assistant"
+            }
+        ],
+        "images": [
+            "data/vargpt_demo/1.jpg"
+        ]
+    },
+    {
+        "messages": [
+            {
+                "content": "Can you depict a scene of sunflowers in the field with a blue sky and clouds.",
+                "role": "user"
+            },
+            {
+                "content": "Here's a rendered painting of sunflowers in the field with a blue sky and clouds.<image_gen>",
+                "role": "assistant"
+            }
+        ],
+        "images": [
+            "data/vargpt_demo/2.jpg"
+        ]
+    }
+
+]
