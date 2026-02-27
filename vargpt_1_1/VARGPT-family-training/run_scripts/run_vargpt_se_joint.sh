@@ -161,6 +161,11 @@ if [[ "${LLAMAFACTORY_MODULE_DIR}" != "${EXPECTED_MODULE_DIR}" ]]; then
     echo "[WARN] Expected: ${EXPECTED_MODULE_DIR}" >&2
     echo "[WARN] Continuing because module is not from site-packages." >&2
 fi
+LLAMAFACTORY_LAUNCHER_PY="${LLAMAFACTORY_MODULE_DIR}/launcher.py"
+if [[ ! -f "${LLAMAFACTORY_LAUNCHER_PY}" ]]; then
+    echo "[ERROR] Could not resolve launcher.py at: ${LLAMAFACTORY_LAUNCHER_PY}" >&2
+    exit 1
+fi
 
 if [[ ! -d "$IMAGE_FOLDER" ]]; then
     echo "[ERROR] IMAGE_FOLDER not found: $IMAGE_FOLDER" >&2
@@ -332,12 +337,14 @@ echo "  Effective overwrite_output_dir: ${EFFECTIVE_OVERWRITE_OUTPUT_DIR}"
 echo "  Run config   : ${RUN_CONFIG}"
 
 FORCE_TORCHRUN=1 \
-NNODES=1 \
-NODE_RANK=0 \
-NPROC_PER_NODE="$NPROC_PER_NODE" \
-MASTER_ADDR=127.0.0.1 \
-MASTER_PORT="$MASTER_PORT" \
-    "${LAUNCHER[@]}" train "${RUN_CONFIG}"
+torchrun \
+  --nnodes 1 \
+  --node_rank 0 \
+  --nproc_per_node "${NPROC_PER_NODE}" \
+  --master_addr 127.0.0.1 \
+  --master_port "${MASTER_PORT}" \
+  "${LLAMAFACTORY_LAUNCHER_PY}" \
+  "${RUN_CONFIG}"
 
 echo ""
 echo "═══════════════════════════════════════════════════════════"
