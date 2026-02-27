@@ -1,0 +1,122 @@
+% =====================================================================
+% Table 2: Cross-Paper Quantitative Comparison (Relative Gains)
+% =====================================================================
+\begin{table}[tb]
+  \caption{Cross-paper comparison using \emph{relative gains over each method's own base model}. This avoids unfair raw-score comparison across different backbones and training data. Understanding benchmarks are separated from generation benchmarks by a vertical rule.}
+  \label{tab:crosspaper_relative_gain}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}p{2.4cm}p{2.0cm}cccccccc|ccc@{}}
+    \toprule
+    & & \multicolumn{8}{c|}{Understanding} & \multicolumn{3}{c}{Generation} \\
+    \cmidrule(lr){3-10} \cmidrule(l){11-13}
+    Method & Backbone & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval & DPG-Bench & WISE \\
+    \midrule
+    UniRL \cite{mao2025unirl} & Janus & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SUDER \cite{hong2025dualselfrewards} & Janus-Pro-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    UniCorn \cite{han2026unicorn} & UMM & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    UniGame \cite{su2025unigame} & UMM & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    CoRL \cite{jiang2025coreinforcement} & Janus-Pro-1B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \textbf{Ours} & BLIP3o-8B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+
+% =====================================================================
+% Table 3: Model-Agnostic Understanding Benchmarks
+% =====================================================================
+\begin{table}[tb]
+  \caption{Understanding benchmarks across three architecturally distinct unified models. Each model is evaluated in its base configuration and after applying our self-evolving framework, with the difference ($\Delta$) reported.}
+  \label{tab:model_agnostic_understanding}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}p{2.8cm}cccccccc@{}}
+    \toprule
+    Model & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C \\
+    \midrule
+    BLIP3o-8B (Base) & -- & -- & -- & -- & -- & -- & -- & -- \\
+    BLIP3o-8B (Ours) & -- & -- & -- & -- & -- & -- & -- & -- \\
+    $\Delta$  & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \midrule
+    BAGEL (Base) & -- & -- & -- & -- & -- & -- & -- & -- \\
+    BAGEL (Ours) & -- & -- & -- & -- & -- & -- & -- & -- \\
+    $\Delta$ & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \midrule
+    VARGPT (Base) & -- & -- & -- & -- & -- & -- & -- & -- \\
+    VARGPT (Ours) & -- & -- & -- & -- & -- & -- & -- & -- \\
+    $\Delta$ & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+
+% =====================================================================
+% Table 4: Model-Agnostic Generation Benchmarks
+% =====================================================================
+\begin{table}[tb]
+  \caption{Generation benchmarks across three architecturally distinct unified models. Each model is evaluated in its base configuration and after applying our self-evolving framework, with the difference ($\Delta$) reported.}
+  \label{tab:model_agnostic_generation}
+  \centering
+  \small{%
+  \begin{tabular}{lcccc}
+    \toprule
+    Model & GenEval & DPG-Bench & WISE & Avg \\
+    \midrule
+    BLIP3o (Base) & -- & -- & -- & -- \\
+    BLIP3o (Ours) & -- & -- & -- & -- \\
+    $\Delta$ & -- & -- & -- & -- \\
+    \midrule
+    BAGEL (Base) & -- & -- & -- & -- \\
+    BAGEL (Ours) & -- & -- & -- & -- \\
+    $\Delta$ & -- & -- & -- & -- \\
+    \midrule
+    VARGPT (Base) & -- & -- & -- & -- \\
+    VARGPT (Ours) & -- & -- & -- & -- \\
+    $\Delta$ & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+
+% =====================================================================
+% Table 5: Ablation Study
+% =====================================================================
+\begin{table}[tb]
+  \caption{Ablation study on BLIP3o-8B measuring the contribution of individual framework components. Each row removes or replaces one component while keeping all others at their default configuration. Understanding is measured by the average across MMMU, MMBench, SEED, and MMVet. Generation is measured by GenEval.}
+  \label{tab:ablation}
+  \centering
+  \small
+  \begin{tabular}{lcc}
+    \toprule
+    Configuration & Und. Avg & GenEval \\
+    \midrule
+    Full framework & -- & -- \\
+    \midrule
+    \multicolumn{3}{l}{\emph{Understanding signal ablations}} \\
+    \quad w/o STE (self-consistency only) & -- & -- \\
+    \quad w/o self-consistency (STE only) & -- & -- \\
+    \quad w/o prompt perturbation (temperature sampling) & -- & -- \\
+    \quad w/o adaptive entropy target & -- & -- \\
+    \midrule
+    \multicolumn{3}{l}{\emph{Generation signal ablations}} \\
+    \quad w/o QA fidelity scoring & -- & -- \\
+    \quad w/o cycle-consistent captioning & -- & -- \\
+    \quad w/o diversity reward & -- & -- \\
+    \midrule
+    \multicolumn{3}{l}{\emph{Optimization ablations}} \\
+    \quad Proposer: REINFORCE instead of GRPO & -- & -- \\
+    \quad w/o bucket-stratified baselines & -- & -- \\
+    \quad w/o quality certificate filter & -- & -- \\
+    \midrule
+    \multicolumn{3}{l}{\emph{Architecture ablations}} \\
+    \quad w/o generation loop (understanding only) & -- & -- \\
+    \quad w/o understanding loop (generation only) & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
