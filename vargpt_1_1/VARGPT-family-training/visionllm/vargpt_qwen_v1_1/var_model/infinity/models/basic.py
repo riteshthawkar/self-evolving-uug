@@ -14,9 +14,14 @@ import numpy as np
 from timm.models.layers import DropPath, drop_path
 from torch.utils.checkpoint import checkpoint
 
-# # Import flash_attn's attention
-# from flash_attn import flash_attn_func                  # q, k, or v: BLHc, ret: BLHc
-from flash_attn import flash_attn_varlen_kvpacked_func  # qkv: N3Hc, ret: NHc
+# Import flash_attn attention kernels when available.
+flash_attn_func = None
+flash_attn_varlen_kvpacked_func = None
+try:
+    from flash_attn import flash_attn_func  # q, k, or v: BLHc, ret: BLHc
+    from flash_attn import flash_attn_varlen_kvpacked_func  # qkv: N3Hc, ret: NHc
+except ImportError:
+    pass
 
 from torch.nn.functional import scaled_dot_product_attention as slow_attn    # q, k, v: BHLc
 
@@ -208,7 +213,7 @@ class SelfAttention(nn.Module):
         """
         super().__init__()
         assert embed_dim % num_heads == 0
-        self.using_flash = customized_flash_attn
+        self.using_flash = bool(customized_flash_attn and flash_attn_func is not None)
         
         self.num_heads, self.head_dim = num_heads, embed_dim // num_heads
         self.tau, self.cos_attn = tau, cos_attn
@@ -392,11 +397,53 @@ class CrossAttention(nn.Module):
         kv_compact = kv_compact.contiguous()
         
         cu_seqlens_q = torch.arange(0, Lq * (B+1), Lq, dtype=torch.int32, device=q_compact.device)
-        if q_compact.dtype == torch.float32:    # todo: fp16 or bf16?
-            oup = flash_attn_varlen_kvpacked_func(q=q_compact.to(dtype=torch.bfloat16), kv=kv_compact.to(dtype=torch.bfloat16), cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k, max_seqlen_q=Lq, max_seqlen_k=max_seqlen_k, dropout_p=0, softmax_scale=self.scale).reshape(B, Lq, -1)
-            oup = oup
+        if flash_attn_varlen_kvpacked_func is not None:
+            if q_compact.dtype == torch.float32:    # todo: fp16 or bf16?
+                oup = flash_attn_varlen_kvpacked_func(
+                    q=q_compact.to(dtype=torch.bfloat16),
+                    kv=kv_compact.to(dtype=torch.bfloat16),
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=Lq,
+                    max_seqlen_k=max_seqlen_k,
+                    dropout_p=0,
+                    softmax_scale=self.scale,
+                ).reshape(B, Lq, -1)
+            else:
+                oup = flash_attn_varlen_kvpacked_func(
+                    q=q_compact,
+                    kv=kv_compact,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=Lq,
+                    max_seqlen_k=max_seqlen_k,
+                    dropout_p=0,
+                    softmax_scale=self.scale,
+                ).reshape(B, Lq, -1)
         else:
-            oup = flash_attn_varlen_kvpacked_func(q=q_compact, kv=kv_compact, cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k, max_seqlen_q=Lq, max_seqlen_k=max_seqlen_k, dropout_p=0, softmax_scale=self.scale).reshape(B, Lq, -1)
+            # Fallback for environments without flash-attn (e.g., ROCm-only installs).
+            outs = []
+            for b in range(B):
+                q_start = b * Lq
+                q_end = q_start + Lq
+                k_start = int(cu_seqlens_k[b].item())
+                k_end = int(cu_seqlens_k[b + 1].item())
+
+                q_b = q_compact[q_start:q_end].transpose(0, 1).unsqueeze(0).contiguous()  # 1,H,Lq,c
+                k_b, v_b = kv_compact[k_start:k_end].unbind(dim=1)  # K,H,c
+                k_b = k_b.transpose(0, 1).unsqueeze(0).contiguous()  # 1,H,K,c
+                v_b = v_b.transpose(0, 1).unsqueeze(0).contiguous()  # 1,H,K,c
+
+                out_b = slow_attn(
+                    query=q_b,
+                    key=k_b,
+                    value=v_b,
+                    scale=self.scale,
+                    attn_mask=None,
+                    dropout_p=0.0,
+                )
+                outs.append(out_b.squeeze(0).transpose(0, 1).contiguous())  # Lq,H,c
+            oup = torch.cat(outs, dim=0).reshape(B, Lq, -1)
         oup = oup.to(dtype=kv_compact.dtype)
         return self.proj_drop(self.proj(oup))
     
