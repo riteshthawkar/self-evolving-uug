@@ -16,10 +16,10 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from PIL import Image
 
-from .adapter_manager import ROLE_PROPOSER, ROLE_SOLVER
+from .adapter_manager import ROLE_GENERATOR, ROLE_PROPOSER, ROLE_SOLVER
 from .config import RolloutConfig
 from .model_loader import BagelRuntime
-from .policy_updater import BagelRolePolicyUpdater
+from .policy_updater import BagelGeneratorPolicyUpdater, BagelRolePolicyUpdater
 from .prompts import (
     build_generation_spec_prompt,
     build_proposer_prompt,
@@ -85,7 +85,7 @@ class SelfEvolvingUnderstandingTrainer:
 
     Supports both:
     - rollout-only diagnostics (phase-1)
-    - LoRA policy updates (phase-2; proposer/solver REINFORCE/GRPO-style)
+    - LoRA policy updates (phase-2; proposer/solver/generator REINFORCE/GRPO-style)
     """
 
     def __init__(self, runtime: BagelRuntime, cfg: RolloutConfig) -> None:
@@ -103,6 +103,7 @@ class SelfEvolvingUnderstandingTrainer:
         self.generated_images_dir = os.path.join(self.output_dir, "generated_images")
         self.checkpoint_dir = os.path.join(self.output_dir, "checkpoints")
         self.proposer_gen_baseline = 0.0
+        self.generator_baseline = 0.0
         self.proposer_baseline = 0.0
         self.solver_baseline = 0.0
         self.start_step = 1
@@ -111,6 +112,7 @@ class SelfEvolvingUnderstandingTrainer:
         self.policy_updates_enabled = bool(cfg.policy_updates_enabled)
         self.proposer_updater: Optional[BagelRolePolicyUpdater] = None
         self.solver_updater: Optional[BagelRolePolicyUpdater] = None
+        self.generator_updater: Optional[BagelGeneratorPolicyUpdater] = None
 
         if self.cfg.save_generated_images:
             os.makedirs(self.generated_images_dir, exist_ok=True)
@@ -217,6 +219,7 @@ class SelfEvolvingUnderstandingTrainer:
 
         proposer_adapter = self.runtime.adapter_for_role(ROLE_PROPOSER)
         solver_adapter = self.runtime.adapter_for_role(ROLE_SOLVER)
+        generator_adapter = self.runtime.adapter_for_role(ROLE_GENERATOR)
 
         self.proposer_updater = BagelRolePolicyUpdater(
             runtime=self.runtime,
@@ -229,6 +232,12 @@ class SelfEvolvingUnderstandingTrainer:
             cfg=self.cfg,
             role=ROLE_SOLVER,
             adapter_name=solver_adapter,
+        )
+        self.generator_updater = BagelGeneratorPolicyUpdater(
+            runtime=self.runtime,
+            cfg=self.cfg,
+            role=ROLE_GENERATOR,
+            adapter_name=generator_adapter,
         )
 
     def _resolve_checkpoint_path(self, path: str) -> str:
@@ -267,6 +276,7 @@ class SelfEvolvingUnderstandingTrainer:
             "proposer_baseline": float(self.proposer_baseline),
             "solver_baseline": float(self.solver_baseline),
             "proposer_gen_baseline": float(self.proposer_gen_baseline),
+            "generator_baseline": float(self.generator_baseline),
             "policy_update_method": self.cfg.normalized_update_method(),
             "model_state": self._collect_model_state_for_checkpoint(),
         }
@@ -274,6 +284,8 @@ class SelfEvolvingUnderstandingTrainer:
             payload["proposer_updater"] = self.proposer_updater.state_dict()
         if self.solver_updater is not None:
             payload["solver_updater"] = self.solver_updater.state_dict()
+        if self.generator_updater is not None:
+            payload["generator_updater"] = self.generator_updater.state_dict()
         extra_state = self._checkpoint_extra_state()
         if isinstance(extra_state, dict) and extra_state:
             payload["extra_state"] = extra_state
@@ -302,11 +314,14 @@ class SelfEvolvingUnderstandingTrainer:
         self.proposer_baseline = float(state.get("proposer_baseline", self.proposer_baseline))
         self.solver_baseline = float(state.get("solver_baseline", self.solver_baseline))
         self.proposer_gen_baseline = float(state.get("proposer_gen_baseline", self.proposer_gen_baseline))
+        self.generator_baseline = float(state.get("generator_baseline", self.generator_baseline))
 
         if self.proposer_updater is not None and isinstance(state.get("proposer_updater"), dict):
             self.proposer_updater.load_state_dict(state["proposer_updater"])
         if self.solver_updater is not None and isinstance(state.get("solver_updater"), dict):
             self.solver_updater.load_state_dict(state["solver_updater"])
+        if self.generator_updater is not None and isinstance(state.get("generator_updater"), dict):
+            self.generator_updater.load_state_dict(state["generator_updater"])
         self._load_checkpoint_extra_state(state.get("extra_state", {}))
 
         loaded_step = int(state.get("step", 0))
@@ -558,32 +573,77 @@ class SelfEvolvingUnderstandingTrainer:
             zero_entropy_reward_cap=self.cfg.zero_entropy_reward_cap,
         )
 
-        baseline_before = float(self.proposer_gen_baseline)
+        proposer_baseline_before = float(self.proposer_gen_baseline)
+        generator_baseline_before = float(self.generator_baseline)
         momentum = max(0.0, min(1.0, float(self.cfg.proposer_gen_baseline_momentum)))
         self.proposer_gen_baseline = (
             momentum * self.proposer_gen_baseline
             + (1.0 - momentum) * float(joint.reward)
         )
+        self.generator_baseline = (
+            momentum * self.generator_baseline
+            + (1.0 - momentum) * float(joint.reward)
+        )
 
-        policy_update_attempted = False
-        policy_update_applied = False
-        policy_update_reason = "disabled"
-        policy_update_stats: Dict = {}
+        proposer_policy_update_attempted = False
+        proposer_policy_update_applied = False
+        proposer_policy_update_reason = "disabled"
+        proposer_policy_update_stats: Dict = {}
         if (
             self.policy_updates_enabled
             and self.cfg.train_generation_proposer
             and self.proposer_updater is not None
         ):
-            policy_update_attempted = True
-            policy_update_stats = self.proposer_updater.step(
+            proposer_policy_update_attempted = True
+            proposer_policy_update_stats = self.proposer_updater.step(
                 image=image,
                 prompt=build_generation_spec_prompt(min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs)),
                 completion=spec_out.text,
                 reward=float(joint.reward),
-                baseline=baseline_before,
+                baseline=proposer_baseline_before,
             )
-            policy_update_applied = bool(not policy_update_stats.get("skipped", True))
-            policy_update_reason = str(policy_update_stats.get("reason", "unknown"))
+            proposer_policy_update_applied = bool(not proposer_policy_update_stats.get("skipped", True))
+            proposer_policy_update_reason = str(proposer_policy_update_stats.get("reason", "unknown"))
+
+        generator_policy_update_attempted = False
+        generator_policy_update_applied = False
+        generator_policy_update_reason = "disabled"
+        generator_policy_update_stats: Dict = {}
+        if (
+            self.policy_updates_enabled
+            and self.cfg.train_generator
+            and self.generator_updater is not None
+        ):
+            generator_policy_update_attempted = True
+            generator_policy_update_stats = self.generator_updater.step(
+                image=generated,
+                prompt=gen_spec_prompt,
+                reward=float(joint.reward),
+                baseline=generator_baseline_before,
+            )
+            generator_policy_update_applied = bool(not generator_policy_update_stats.get("skipped", True))
+            generator_policy_update_reason = str(generator_policy_update_stats.get("reason", "unknown"))
+
+        policy_update_attempted = bool(
+            proposer_policy_update_attempted or generator_policy_update_attempted
+        )
+        policy_update_applied = bool(
+            proposer_policy_update_applied or generator_policy_update_applied
+        )
+        policy_update_reasons: List[str] = []
+        if proposer_policy_update_attempted:
+            policy_update_reasons.append(f"proposer:{proposer_policy_update_reason}")
+        if generator_policy_update_attempted:
+            policy_update_reasons.append(f"generator:{generator_policy_update_reason}")
+        policy_update_reason = "ok" if policy_update_applied else (
+            ";".join(policy_update_reasons) if policy_update_reasons else "disabled"
+        )
+        policy_update_stats: Dict = {
+            "proposer": proposer_policy_update_stats,
+            "generator": generator_policy_update_stats,
+        }
+        policy_updates_attempted_count = int(proposer_policy_update_attempted) + int(generator_policy_update_attempted)
+        policy_updates_applied_count = int(proposer_policy_update_applied) + int(generator_policy_update_applied)
 
         return {
             "step": int(step),
@@ -602,13 +662,26 @@ class SelfEvolvingUnderstandingTrainer:
             "quality_component": float(joint.quality_component),
             "proposer_gen_reward": float(joint.reward),
             "entropy_weight_alpha": float(joint.entropy_weight_alpha),
-            "proposer_gen_baseline_before": float(baseline_before),
+            "proposer_gen_baseline_before": float(proposer_baseline_before),
             "proposer_gen_baseline_after": float(self.proposer_gen_baseline),
-            "proposer_gen_advantage": float(joint.reward - self.proposer_gen_baseline),
+            "proposer_gen_advantage": float(joint.reward - proposer_baseline_before),
+            "generator_baseline_before": float(generator_baseline_before),
+            "generator_baseline_after": float(self.generator_baseline),
+            "generator_advantage": float(joint.reward - generator_baseline_before),
             "policy_update_attempted": bool(policy_update_attempted),
             "policy_update_applied": bool(policy_update_applied),
             "policy_update_reason": policy_update_reason,
             "policy_update_stats": policy_update_stats,
+            "policy_updates_attempted_count": int(policy_updates_attempted_count),
+            "policy_updates_applied_count": int(policy_updates_applied_count),
+            "proposer_policy_update_attempted": bool(proposer_policy_update_attempted),
+            "proposer_policy_update_applied": bool(proposer_policy_update_applied),
+            "proposer_policy_update_reason": str(proposer_policy_update_reason),
+            "proposer_policy_update_stats": proposer_policy_update_stats,
+            "generator_policy_update_attempted": bool(generator_policy_update_attempted),
+            "generator_policy_update_applied": bool(generator_policy_update_applied),
+            "generator_policy_update_reason": str(generator_policy_update_reason),
+            "generator_policy_update_stats": generator_policy_update_stats,
             "gen_solver_policy_update_enabled": bool(gen_solver_update_enabled),
             "gen_solver_policy_update_budget": int(max_gen_solver_updates),
             "gen_solver_policy_update_attempts": int(gen_solver_update_attempted),
@@ -664,6 +737,7 @@ class SelfEvolvingUnderstandingTrainer:
                 "proposer_baseline": float(self.proposer_baseline),
                 "solver_baseline": float(self.solver_baseline),
                 "proposer_gen_baseline": float(self.proposer_gen_baseline),
+                "generator_baseline": float(self.generator_baseline),
             }
 
         def _emit_training_logs(step_id: int, *, phase: str, step_time_sec: float) -> None:
@@ -712,9 +786,21 @@ class SelfEvolvingUnderstandingTrainer:
             else:
                 suder_skipped_steps += 1
 
-            if bool(suder_record.get("policy_update_attempted", False)):
-                policy_updates_attempted += 1
-                policy_updates_applied += int(bool(suder_record.get("policy_update_applied", False)))
+            attempted_count = int(
+                suder_record.get(
+                    "policy_updates_attempted_count",
+                    int(bool(suder_record.get("policy_update_attempted", False))),
+                )
+            )
+            applied_count = int(
+                suder_record.get(
+                    "policy_updates_applied_count",
+                    int(bool(suder_record.get("policy_update_applied", False))),
+                )
+            )
+            if attempted_count > 0:
+                policy_updates_attempted += int(attempted_count)
+                policy_updates_applied += int(max(0, applied_count))
 
         for step in range(int(self.start_step), int(self.cfg.steps) + 1):
             step_t0 = float(time.time())
@@ -966,6 +1052,8 @@ class SelfEvolvingUnderstandingTrainer:
             flushed_optim_steps += int(self.proposer_updater.finalize())
         if self.solver_updater is not None:
             flushed_optim_steps += int(self.solver_updater.finalize())
+        if self.generator_updater is not None:
+            flushed_optim_steps += int(self.generator_updater.finalize())
 
         if self.policy_updates_enabled:
             final_ckpt = self._save_checkpoint(int(self.cfg.steps))
@@ -995,6 +1083,7 @@ class SelfEvolvingUnderstandingTrainer:
             "proposer_baseline_final": float(self.proposer_baseline),
             "solver_baseline_final": float(self.solver_baseline),
             "proposer_gen_baseline_final": float(self.proposer_gen_baseline),
+            "generator_baseline_final": float(self.generator_baseline),
             "optimizer_flush_steps": int(flushed_optim_steps),
             "last_checkpoint_path": str(self.last_checkpoint_path),
         }

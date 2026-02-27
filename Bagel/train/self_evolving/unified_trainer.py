@@ -954,6 +954,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         prev_policy_enabled = bool(self.policy_updates_enabled)
         prev_temp = float(self.cfg.gen_spec_temperature)
         prev_baseline = float(self.proposer_gen_baseline)
+        prev_generator_baseline = float(self.generator_baseline)
         try:
             self.policy_updates_enabled = False
             self.cfg.gen_spec_temperature = float(spec_temperature)
@@ -967,6 +968,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             self.policy_updates_enabled = prev_policy_enabled
             self.cfg.gen_spec_temperature = prev_temp
             self.proposer_gen_baseline = prev_baseline
+            self.generator_baseline = prev_generator_baseline
 
         rec["policy_update_attempted"] = False
         rec["policy_update_applied"] = False
@@ -1833,14 +1835,19 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                 "policy_attempted": 0,
                 "policy_applied": 0,
             }
-        policy_train_ready = bool(
+        proposer_policy_train_ready = bool(
             self.policy_updates_enabled
             and self.cfg.train_generation_proposer
             and self.proposer_updater is not None
         )
+        generator_policy_train_ready = bool(
+            self.policy_updates_enabled
+            and self.cfg.train_generator
+            and self.generator_updater is not None
+        )
         update_method = self.cfg.normalized_update_method()
         group_size = 1
-        if policy_train_ready and update_method == "grpo":
+        if (proposer_policy_train_ready or generator_policy_train_ready) and update_method == "grpo":
             group_size = max(1, int(getattr(self.cfg, "proposer_grpo_gen_group_size", 3)))
             if not bool(getattr(self.cfg, "score_grpo_extras", True)):
                 group_size = 1
@@ -1905,19 +1912,20 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         )
         selected_idx = int(selected.get("candidate_index", 0))
         selected_reward = float(selected.get("proposer_gen_reward", 0.0))
-        baseline_before = float(self.proposer_gen_baseline)
+        proposer_baseline_before = float(self.proposer_gen_baseline)
+        generator_baseline_before = float(self.generator_baseline)
         baseline_momentum = _clamp01(float(self.cfg.proposer_gen_baseline_momentum))
 
-        policy_attempted = 0
-        policy_applied = 0
-        policy_update_attempted = False
-        policy_update_applied = False
-        policy_update_reason = "disabled"
-        policy_update_stats: Dict[str, Any] = {}
-        prompt = build_generation_spec_prompt(min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs))
+        proposer_policy_attempted = 0
+        proposer_policy_applied = 0
+        proposer_policy_update_attempted = False
+        proposer_policy_update_applied = False
+        proposer_policy_update_reason = "disabled"
+        proposer_policy_update_stats: Dict[str, Any] = {}
+        proposer_prompt = build_generation_spec_prompt(min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs))
 
-        if policy_train_ready:
-            policy_update_attempted = True
+        if proposer_policy_train_ready:
+            proposer_policy_update_attempted = True
             if update_method == "grpo" and len(valid_candidates) > 1:
                 group_rewards = [float(c.get("proposer_gen_reward", 0.0)) for c in valid_candidates]
                 per_candidate_stats: List[Dict[str, Any]] = []
@@ -1927,27 +1935,27 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                         continue
                     stats = self.proposer_updater.step(
                         image=image,
-                        prompt=prompt,
+                        prompt=proposer_prompt,
                         completion=completion,
                         reward=float(cand_reward),
-                        baseline=baseline_before,
+                        baseline=proposer_baseline_before,
                         group_rewards=group_rewards,
                     )
                     per_candidate_stats.append(stats)
-                    policy_attempted += 1
+                    proposer_policy_attempted += 1
                     if not bool(stats.get("skipped", True)):
-                        policy_applied += 1
-                policy_update_applied = bool(policy_applied > 0)
-                policy_update_reason = "ok" if policy_update_applied else "all_skipped"
-                policy_update_stats = {
-                    "skipped": not policy_update_applied,
-                    "reason": policy_update_reason,
+                        proposer_policy_applied += 1
+                proposer_policy_update_applied = bool(proposer_policy_applied > 0)
+                proposer_policy_update_reason = "ok" if proposer_policy_update_applied else "all_skipped"
+                proposer_policy_update_stats = {
+                    "skipped": not proposer_policy_update_applied,
+                    "reason": proposer_policy_update_reason,
                     "update_method": "grpo",
                     "group_size": int(len(group_rewards)),
                     "group_reward_mean": float(_mean(group_rewards)),
                     "group_reward_max": float(max(group_rewards)),
                     "group_reward_min": float(min(group_rewards)),
-                    "applied_updates": int(policy_applied),
+                    "applied_updates": int(proposer_policy_applied),
                     "selected_candidate_index": int(selected_idx),
                     "ce_loss_mean": float(
                         _mean(
@@ -1964,20 +1972,124 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                 if completion:
                     stats = self.proposer_updater.step(
                         image=image,
-                        prompt=prompt,
+                        prompt=proposer_prompt,
                         completion=completion,
                         reward=float(selected_reward),
-                        baseline=baseline_before,
+                        baseline=proposer_baseline_before,
                     )
-                    policy_attempted = 1
-                    policy_applied = int(not bool(stats.get("skipped", True)))
-                    policy_update_applied = bool(policy_applied > 0)
-                    policy_update_reason = str(stats.get("reason", "unknown"))
-                    policy_update_stats = stats
+                    proposer_policy_attempted = 1
+                    proposer_policy_applied = int(not bool(stats.get("skipped", True)))
+                    proposer_policy_update_applied = bool(proposer_policy_applied > 0)
+                    proposer_policy_update_reason = str(stats.get("reason", "unknown"))
+                    proposer_policy_update_stats = stats
                 else:
-                    policy_update_applied = False
-                    policy_update_reason = "empty_completion"
-                    policy_update_stats = {"skipped": True, "reason": "empty_completion"}
+                    proposer_policy_update_applied = False
+                    proposer_policy_update_reason = "empty_completion"
+                    proposer_policy_update_stats = {"skipped": True, "reason": "empty_completion"}
+
+        def _load_generated_candidate_image(candidate: Dict[str, Any]) -> Optional[Image.Image]:
+            generated_image_path = str(candidate.get("generated_image_path", "")).strip()
+            if not generated_image_path:
+                return None
+            p = Path(generated_image_path)
+            if not p.exists():
+                return None
+            try:
+                with Image.open(p) as _img:
+                    return _img.convert("RGB")
+            except Exception:
+                return None
+
+        generator_policy_attempted = 0
+        generator_policy_applied = 0
+        generator_policy_update_attempted = False
+        generator_policy_update_applied = False
+        generator_policy_update_reason = "disabled"
+        generator_policy_update_stats: Dict[str, Any] = {}
+
+        max_generator_candidates = max(
+            0,
+            int(
+                os.environ.get(
+                    "BAGEL_GENERATOR_POLICY_MAX_CANDIDATES",
+                    os.environ.get("BAGEL_PROPOSER_POLICY_MAX_CANDIDATES", "0"),
+                )
+                or "0"
+            ),
+        )
+        if generator_policy_train_ready:
+            generator_policy_update_attempted = True
+            if update_method == "grpo" and len(valid_candidates) > 1:
+                group_rewards = [float(c.get("proposer_gen_reward", 0.0)) for c in valid_candidates]
+                per_candidate_stats: List[Dict[str, Any]] = []
+                for cand, cand_reward in zip(valid_candidates, group_rewards):
+                    if max_generator_candidates > 0 and generator_policy_attempted >= max_generator_candidates:
+                        break
+                    generated_img = _load_generated_candidate_image(cand)
+                    if generated_img is None:
+                        continue
+                    gen_prompt = str(
+                        cand.get("spec_prompt_for_generation", cand.get("spec_prompt", ""))
+                    ).strip()
+                    if not gen_prompt:
+                        continue
+                    stats = self.generator_updater.step(
+                        image=generated_img,
+                        prompt=gen_prompt,
+                        reward=float(cand_reward),
+                        baseline=generator_baseline_before,
+                        group_rewards=group_rewards,
+                    )
+                    per_candidate_stats.append(stats)
+                    generator_policy_attempted += 1
+                    if not bool(stats.get("skipped", True)):
+                        generator_policy_applied += 1
+                generator_policy_update_applied = bool(generator_policy_applied > 0)
+                generator_policy_update_reason = "ok" if generator_policy_update_applied else "all_skipped"
+                generator_policy_update_stats = {
+                    "skipped": not generator_policy_update_applied,
+                    "reason": generator_policy_update_reason,
+                    "update_method": "grpo",
+                    "group_size": int(len(group_rewards)),
+                    "group_reward_mean": float(_mean(group_rewards)),
+                    "group_reward_max": float(max(group_rewards)),
+                    "group_reward_min": float(min(group_rewards)),
+                    "applied_updates": int(generator_policy_applied),
+                    "selected_candidate_index": int(selected_idx),
+                    "mse_loss_mean": float(
+                        _mean(
+                            [
+                                float(s.get("mse_loss", s.get("ce_loss", 0.0)))
+                                for s in per_candidate_stats
+                                if not bool(s.get("skipped", True))
+                            ]
+                        )
+                    ),
+                }
+            else:
+                generated_img = _load_generated_candidate_image(selected)
+                gen_prompt = str(
+                    selected.get("spec_prompt_for_generation", selected.get("spec_prompt", ""))
+                ).strip()
+                if generated_img is not None and gen_prompt:
+                    stats = self.generator_updater.step(
+                        image=generated_img,
+                        prompt=gen_prompt,
+                        reward=float(selected_reward),
+                        baseline=generator_baseline_before,
+                    )
+                    generator_policy_attempted = 1
+                    generator_policy_applied = int(not bool(stats.get("skipped", True)))
+                    generator_policy_update_applied = bool(generator_policy_applied > 0)
+                    generator_policy_update_reason = str(stats.get("reason", "unknown"))
+                    generator_policy_update_stats = stats
+                else:
+                    generator_policy_update_applied = False
+                    generator_policy_update_reason = "missing_generated_image_or_prompt"
+                    generator_policy_update_stats = {
+                        "skipped": True,
+                        "reason": "missing_generated_image_or_prompt",
+                    }
 
         gen_solver_update_attempted = 0
         gen_solver_update_applied = 0
@@ -2088,6 +2200,31 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             baseline_momentum * self.proposer_gen_baseline
             + (1.0 - baseline_momentum) * float(selected_reward)
         )
+        self.generator_baseline = (
+            baseline_momentum * self.generator_baseline
+            + (1.0 - baseline_momentum) * float(selected_reward)
+        )
+
+        policy_update_attempted = bool(
+            proposer_policy_update_attempted or generator_policy_update_attempted
+        )
+        policy_update_applied = bool(
+            proposer_policy_update_applied or generator_policy_update_applied
+        )
+        policy_update_reasons: List[str] = []
+        if proposer_policy_update_attempted:
+            policy_update_reasons.append(f"proposer:{proposer_policy_update_reason}")
+        if generator_policy_update_attempted:
+            policy_update_reasons.append(f"generator:{generator_policy_update_reason}")
+        policy_update_reason = "ok" if policy_update_applied else (
+            ";".join(policy_update_reasons) if policy_update_reasons else "disabled"
+        )
+        policy_update_stats: Dict[str, Any] = {
+            "proposer": proposer_policy_update_stats,
+            "generator": generator_policy_update_stats,
+        }
+        generation_policy_attempted_count = int(proposer_policy_attempted + generator_policy_attempted)
+        generation_policy_applied_count = int(proposer_policy_applied + generator_policy_applied)
 
         rec = dict(selected)
         rec["phase"] = "generation"
@@ -2102,13 +2239,28 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         rec["generation_candidate_statuses"] = [str(c.get("status", "skipped")) for c in candidates]
         rec["generation_candidate_temps"] = [float(c.get("spec_temperature_used", base_temp)) for c in candidates]
         rec["generation_selected_candidate_index"] = int(selected_idx)
-        rec["proposer_gen_baseline_before"] = float(baseline_before)
+        rec["proposer_gen_baseline_before"] = float(proposer_baseline_before)
         rec["proposer_gen_baseline_after"] = float(self.proposer_gen_baseline)
-        rec["proposer_gen_advantage"] = float(selected_reward - baseline_before)
+        rec["proposer_gen_advantage"] = float(selected_reward - proposer_baseline_before)
+        rec["generator_baseline_before"] = float(generator_baseline_before)
+        rec["generator_baseline_after"] = float(self.generator_baseline)
+        rec["generator_advantage"] = float(selected_reward - generator_baseline_before)
         rec["policy_update_attempted"] = bool(policy_update_attempted)
         rec["policy_update_applied"] = bool(policy_update_applied)
         rec["policy_update_reason"] = str(policy_update_reason)
         rec["policy_update_stats"] = policy_update_stats
+        rec["policy_updates_attempted_count"] = int(generation_policy_attempted_count)
+        rec["policy_updates_applied_count"] = int(generation_policy_applied_count)
+        rec["proposer_policy_update_attempted"] = bool(proposer_policy_update_attempted)
+        rec["proposer_policy_update_attempts"] = int(proposer_policy_attempted)
+        rec["proposer_policy_update_applied"] = int(proposer_policy_applied)
+        rec["proposer_policy_update_reason"] = str(proposer_policy_update_reason)
+        rec["proposer_policy_update_stats"] = proposer_policy_update_stats
+        rec["generator_policy_update_attempted"] = bool(generator_policy_update_attempted)
+        rec["generator_policy_update_attempts"] = int(generator_policy_attempted)
+        rec["generator_policy_update_applied"] = int(generator_policy_applied)
+        rec["generator_policy_update_reason"] = str(generator_policy_update_reason)
+        rec["generator_policy_update_stats"] = generator_policy_update_stats
         rec["gen_solver_policy_update_enabled"] = bool(gen_solver_enabled)
         rec["gen_solver_policy_update_budget"] = int(max_gen_solver_updates)
         rec["gen_solver_policy_update_attempts"] = int(gen_solver_update_attempted)
@@ -2130,8 +2282,8 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             "reward_sum": float(selected_reward),
             "entropy_sum": float(rec.get("mean_entropy_nats", 0.0)),
             "quality_sum": float(rec.get("quality_component", 0.0)),
-            "policy_attempted": int(policy_attempted + gen_solver_update_attempted),
-            "policy_applied": int(policy_applied + gen_solver_update_applied),
+            "policy_attempted": int(generation_policy_attempted_count + gen_solver_update_attempted),
+            "policy_applied": int(generation_policy_applied_count + gen_solver_update_applied),
         }
 
     def _checkpoint_extra_state(self) -> Dict[str, object]:
@@ -2312,6 +2464,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                 "proposer_baseline": float(self.proposer_baseline),
                 "solver_baseline": float(self.solver_baseline),
                 "proposer_gen_baseline": float(self.proposer_gen_baseline),
+                "generator_baseline": float(self.generator_baseline),
                 "generator_reward_ema": float(self._gen_reward_ema) if self._gen_reward_ema_initialized else 0.0,
                 "replay_buffer_size": int(replay_size),
             }
@@ -2468,6 +2621,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             "proposer_baseline_final": float(self.proposer_baseline),
             "solver_baseline_final": float(self.solver_baseline),
             "proposer_gen_baseline_final": float(self.proposer_gen_baseline),
+            "generator_baseline_final": float(self.generator_baseline),
             "generator_reward_ema": float(self._gen_reward_ema) if self._gen_reward_ema_initialized else 0.0,
             "gen_mix_source_mode": str(self._gen_mix_source_mode),
             "generated_mix_dir": str(self._generated_mix_dir),

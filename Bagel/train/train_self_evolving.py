@@ -358,6 +358,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="train_generation_proposer",
         action="store_false",
     )
+    p.add_argument("--train_generator", action="store_true", default=True)
+    p.add_argument(
+        "--disable_train_generator",
+        dest="train_generator",
+        action="store_false",
+    )
     p.add_argument("--checkpoint_every", type=int, default=100)
     p.add_argument("--resume_from", type=str, default="")
     p.add_argument("--save_lora_only", action="store_true", default=True)
@@ -542,6 +548,7 @@ def main() -> None:
         train_understanding_proposer=bool(args.train_understanding_proposer),
         train_solver=bool(args.train_solver),
         train_generation_proposer=bool(args.train_generation_proposer),
+        train_generator=bool(args.train_generator),
         checkpoint_every=int(args.checkpoint_every),
         resume_from=str(args.resume_from),
         save_lora_only=bool(args.save_lora_only),

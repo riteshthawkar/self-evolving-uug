@@ -110,6 +110,7 @@ class RolloutConfig:
     train_understanding_proposer: bool = True
     train_solver: bool = True
     train_generation_proposer: bool = True
+    train_generator: bool = True
     checkpoint_every: int = 100
     resume_from: str = ""
     save_lora_only: bool = True

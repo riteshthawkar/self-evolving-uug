@@ -16,7 +16,7 @@ set -euo pipefail
 #   - multi-sample solver self-consistency
 #   - greedy intuitive solver pass
 #   - dual-track proposer reward logging
-#   - generation-side proposer spec reward and updates
+#   - generation-side proposer + generator reward-weighted updates
 #
 # Usage:
 #   MODEL_PATH=/path/to/BAGEL-7B-MoT \
@@ -128,6 +128,7 @@ ROCM_SAFE_PROPOSER_POLICY_MAX_CANDIDATES="${ROCM_SAFE_PROPOSER_POLICY_MAX_CANDID
 TRAIN_UNDERSTANDING_PROPOSER="${TRAIN_UNDERSTANDING_PROPOSER:-1}"
 TRAIN_SOLVER="${TRAIN_SOLVER:-1}"
 TRAIN_GENERATION_PROPOSER="${TRAIN_GENERATION_PROPOSER:-1}"
+TRAIN_GENERATOR="${TRAIN_GENERATOR:-1}"
 UNDERSTANDING_STEPS_PER_CYCLE="${UNDERSTANDING_STEPS_PER_CYCLE:-3}"
 GENERATION_STEPS_PER_CYCLE="${GENERATION_STEPS_PER_CYCLE:-2}"
 GEN_MIX_SOURCE_MODE="${GEN_MIX_SOURCE_MODE:-buffer}"
@@ -279,6 +280,7 @@ if [[ "$RUN_MODE" == "train" ]]; then
   TRAIN_UNDERSTANDING_PROPOSER=1
   TRAIN_SOLVER=1
   TRAIN_GENERATION_PROPOSER=1
+  TRAIN_GENERATOR=1
 fi
 
 # ── Multi-GPU split config (supported path: model + VAE on different GPUs) ──
@@ -648,6 +650,9 @@ if [[ "$RUN_MODE" == "train" ]]; then
   if [[ "$TRAIN_GENERATION_PROPOSER" != "1" ]]; then
     TRAIN_ARGS+=(--disable_train_generation_proposer)
   fi
+  if [[ "$TRAIN_GENERATOR" != "1" ]]; then
+    TRAIN_ARGS+=(--disable_train_generator)
+  fi
   if [[ -n "$RESUME_FROM" ]]; then
     TRAIN_ARGS+=(--resume_from "$RESUME_FROM")
   fi
@@ -743,6 +748,7 @@ if [[ "$RUN_MODE" == "train" ]]; then
   echo "[B1]   PolicyTok:  max_completion_tokens=$POLICY_MAX_COMPLETION_TOKENS min_completion_tokens=$POLICY_MIN_COMPLETION_TOKENS max_prompt_tokens=$POLICY_MAX_PROMPT_TOKENS text_only=$POLICY_TEXT_ONLY_MAX_COMPLETION_TOKENS retries=$POLICY_TEXT_ONLY_MAX_RETRIES"
   echo "[B1]   PolicyFB:   text_only_fallback=$POLICY_TEXT_ONLY_FALLBACK text_only_mode=$POLICY_TEXT_ONLY_MODE rocm_force_text_only=$POLICY_ROCM_FORCE_TEXT_ONLY empty_cache_each_step=$POLICY_EMPTY_CACHE_EACH_STEP"
   echo "[B1]   PolicyUpd:  solver_max_samples=$SOLVER_POLICY_MAX_SAMPLES gen_solver_max_samples=$GEN_SOLVER_POLICY_MAX_SAMPLES proposer_max_candidates=$PROPOSER_POLICY_MAX_CANDIDATES"
+  echo "[B1]   TrainRoles: U-proposer=$TRAIN_UNDERSTANDING_PROPOSER solver=$TRAIN_SOLVER G-proposer=$TRAIN_GENERATION_PROPOSER generator=$TRAIN_GENERATOR"
   echo "[B1]   Gen-GRPO:   group=$PROPOSER_GRPO_GEN_GROUP_SIZE score_extras=$SCORE_GRPO_EXTRAS temp_mult=$GRPO_EXTRA_TEMP_MULTIPLIER"
   echo "[B1]   LoRA:       enabled (r=$LORA_RANK, alpha=$LORA_ALPHA, dropout=$LORA_DROPOUT)"
 fi

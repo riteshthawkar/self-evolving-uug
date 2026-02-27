@@ -8,7 +8,7 @@ BAGEL with role-specific LoRA adapters.
 - `rollout`:
   proposer/solver/self-consistency diagnostics + JSONL logs only.
 - `train`:
-  rollout plus optimizer-backed proposer/solver updates with
+  rollout plus optimizer-backed proposer/solver/generator updates with
   `reinforce` or `grpo`-style normalized advantages.
 - `unified_self_evolving`:
   alternating understanding/generation phases with generation→understanding
@@ -81,13 +81,14 @@ Key train-mode flags:
 
 ## SUDER generation phase
 
-Enable generation rollouts and proposer generation-side updates:
+Enable generation rollouts and generation-side proposer + generator updates:
 
 ```bash
 python3 train/train_self_evolving.py \
   ... \
   --suder_generation_enabled \
   --train_generation_proposer \
+  --train_generator \
   --proposer_gen_entropy_weight 0.7
 ```
 
