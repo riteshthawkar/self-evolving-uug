@@ -226,6 +226,23 @@ yaml_quote() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+yaml_delete_key() {
+    local key="$1"
+    local tmp_file="${RUN_CONFIG}.tmp"
+    awk -v k="${key}" '
+        $0 ~ "^[[:space:]]*" k "[[:space:]]*:" {next}
+        {print}
+    ' "${RUN_CONFIG}" > "${tmp_file}"
+    mv "${tmp_file}" "${RUN_CONFIG}"
+}
+
+# Remove keys we always override to avoid duplicate-key ambiguity.
+yaml_delete_key "dataset_dir"
+yaml_delete_key "resume_from_checkpoint"
+yaml_delete_key "overwrite_output_dir"
+yaml_delete_key "output_dir"
+yaml_delete_key "se_image_folder"
+
 {
     echo ""
     echo "# --- auto overrides from run_vargpt_se_joint.sh ---"
@@ -275,9 +292,8 @@ effective_value() {
             sub(/^[^:]*:[[:space:]]*/, "", v)
             gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
             gsub(/^"|"$/, "", v)
-            print v
-            exit
         }
+        END { print v }
     ' "${RUN_CONFIG}"
 }
 
