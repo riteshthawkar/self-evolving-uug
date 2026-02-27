@@ -1,0 +1,39 @@
+### model
+model_name_or_path: VARGPT-family/VARGPT-v1.1
+
+### method
+stage: sft
+do_train: true
+finetuning_type: full
+deepspeed: examples/deepspeed/ds_z3_config.json
+vargpt_version: "qwen2vl-v1.1"
+vargpt_train_stage: 3 # for check code logit
+
+### dataset
+dataset:  train_vargpt_v1_1_demo 
+
+
+template: vargpt_qwen2_vl
+cutoff_len: 8192
+max_samples: 1000000000
+overwrite_cache: true
+preprocessing_num_workers: 16 # 8
+
+
+### output
+output_dir: saves/vargpt_qwen2vl-7b-v1-1/full/stagex-pt-5e-5
+logging_steps: 10
+save_steps: 1000
+plot_loss: true
+overwrite_output_dir: true
+
+### train
+per_device_train_batch_size: 1 # 32 
+gradient_accumulation_steps: 2
+learning_rate: 5.0e-5
+num_train_epochs: 6.0 # 3  
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+fp16: false
+ddp_timeout: 180000000
