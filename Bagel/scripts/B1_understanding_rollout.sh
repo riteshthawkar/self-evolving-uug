@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Compatibility wrapper: this path was used earlier in runs.
-# It now delegates to the unified BAGEL experiment launcher.
+# Compatibility wrapper retained for older commands.
+# Unified BAGEL training is handled by B1_unified_training.sh.
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="$SCRIPT_DIR/B1_unified_training.sh"
 
 if [[ ! -f "$TARGET" ]]; then

@@ -92,6 +92,14 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
     """BAGEL unified self-evolving trainer with alternating U/G schedule."""
 
     def _prepare_output_dir(self, output_root: str) -> str:
+        # Output layout can be controlled from launcher scripts:
+        # - BAGEL_OUTPUT_DIR_MODE=direct: write logs/checkpoints directly in output_root
+        # - BAGEL_OUTPUT_DIR_MODE=timestamp (default): create per-run timestamp folder
+        mode = str(os.environ.get("BAGEL_OUTPUT_DIR_MODE", "timestamp")).strip().lower()
+        if mode in {"direct", "flat", "inplace"}:
+            os.makedirs(output_root, exist_ok=True)
+            return output_root
+
         ts = time.strftime("%Y%m%d_%H%M%S")
         run_dir = os.path.join(output_root, f"unified_rollout_{ts}")
         os.makedirs(run_dir, exist_ok=True)
