@@ -39,13 +39,12 @@ set -euo pipefail
 #   • gen_step_solver_update_enabled = True (ALSO trains solver during G-steps)
 #   • replay_buffer_size = 500           (stores best generated images)
 #   • gen_mix_ratio_start/max = 1.0      (U-steps use 100% generated images)
-#   • use_ref_answer_scoring = False (auto-disabled: no real image for ref answers)
+#   • no_ref_answer_scoring + strict_imageless_mode
 #
 # Startup behavior:
-#   Cycle 1: U-steps use real images (buffer empty, graceful fallback)
-#   Cycle 1: G-steps populate the replay buffer with generated images
-#   Cycle 2+: U-steps use 100% generated images from buffer → closed loop
-#   Net: 3 real images out of 1500 steps (~0.2% leakage, negligible)
+#   • Bootstrap runs generation-only steps first to prefill replay buffer
+#   • Cycle order starts with G-steps, then U-steps consume generated images
+#   • understanding_generated_only + strict_imageless_mode disable real-image fallback
 #
 # Why this matters for the paper (KEY DIFFERENTIATOR):
 #   This is UNIQUE to our framework. No competitor can do this:
@@ -70,11 +69,12 @@ set -euo pipefail
 #   RESUME_FROM=/path/to/step_N TRAIN_STAGE=warmup bash E5_synthetic_loop.sh
 # ══════════════════════════════════════════════════════════════════════════════
 
-REPO_ROOT="/workspace/self-evolving-uug/self-evolving-uug"
-PYTHON_BIN="python3"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 # DATA_DIR is needed for pool init; U-steps use 100% replay buffer (generated images)
-DATA_DIR="${DATA_DIR:-/workspace/self-evolving-uug/data/joint_3k/images}"
-OUTPUT_DIR="/workspace/self-evolving-uug/self-evolving-uug/runs/final/E5_synthetic_loop"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_3k/images}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/final/E5_synthetic_loop}"
 RUN_NAME="E5_synthetic_loop_s42"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
@@ -82,6 +82,7 @@ RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
+TRAIN_ENTRY="${TRAIN_ENTRY:-$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py}"
 
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
@@ -188,7 +189,7 @@ fi
 cd "$REPO_ROOT"
 mkdir -p "$OUTPUT_DIR"
 
-CACHE_ROOT="/workspace/self-evolving-uug/self-evolving-uug/cache"
+CACHE_ROOT="${CACHE_ROOT:-$REPO_ROOT/cache}"
 CACHE_TMP_DIR="$CACHE_ROOT/tmp"
 CACHE_TORCH_EXT_DIR="$CACHE_ROOT/torch_extensions"
 CACHE_WANDB_DIR="$CACHE_ROOT/wandb"
@@ -204,7 +205,7 @@ mkdir -p \
   "$CACHE_ROOT/assets"
 
 # ── Environment ──────────────────────────────────────────────────────────────
-export PYTHONPATH="/workspace/self-evolving-uug/self-evolving-uug/BLIP3o"
+export PYTHONPATH="$REPO_ROOT/BLIP3o"
 export HF_HOME="$CACHE_ROOT"
 export HUGGINGFACE_HUB_CACHE="$CACHE_ROOT"
 export HF_HUB_CACHE="$CACHE_ROOT"
@@ -240,27 +241,24 @@ export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 
 # ── Pre-flight checks ────────────────────────────────────────────────────────
 if [[ ! -d "$DATA_DIR" ]]; then
-  echo "[E5] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
-  echo "[E5] NOTE: DATA_DIR is needed for pool init but images are NOT sampled in imageless mode." >&2
-  exit 1
-fi
-if ! find "$DATA_DIR" -type f \
+  echo "[E5] WARNING: DATA_DIR does not exist: $DATA_DIR" >&2
+  echo "[E5] WARNING: strict imageless mode will use a synthetic fallback pool." >&2
+elif ! find "$DATA_DIR" -type f \
     \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) \
     -print -quit | grep -q .; then
-  echo "[E5] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
-  echo "[E5] NOTE: Pool init requires >=1 image even in imageless mode." >&2
-  exit 1
+  echo "[E5] WARNING: DATA_DIR has no image files: $DATA_DIR" >&2
+  echo "[E5] WARNING: strict imageless mode will use a synthetic fallback pool." >&2
 fi
 
 echo "[E5] Starting experiment E5 (Fully Imageless Self-Evolving Loop)"
 echo "[E5]   Stage:       $TRAIN_STAGE"
 echo "[E5]   Run name:    $RUN_NAME"
 echo "[E5]   Output dir:  $OUTPUT_DIR"
-echo "[E5]   Data dir:    $DATA_DIR  (pool init only — U-steps use replay buffer)"
+echo "[E5]   Data dir:    $DATA_DIR  (optional in strict mode; synthetic fallback allowed)"
 echo "[E5]   GPUs:        $NPROC_PER_NODE"
 echo "[E5]   Attn impl:   $ATTN_IMPL"
 echo "[E5]   MODE: ZERO external images — proposer from TEXT, U-steps from replay buffer"
-echo "[E5]   CYCLE: 3U (generated images from buffer) + 2G (imageless proposer)"
+echo "[E5]   CYCLE: 2G bootstrap, then 2G + 3U (generated-only U-steps)"
 if [[ -n "${RESUME_FROM:-}" ]]; then
   echo "[E5]   Resume from: $RESUME_FROM"
 fi
@@ -270,7 +268,7 @@ fi
   --standalone \
   --nproc_per_node "$NPROC_PER_NODE" \
   --master_port 29527 \
-  "/workspace/self-evolving-uug/self-evolving-uug/BLIP3o/blip3o/train/train_self_evolving.py" \
+  "$TRAIN_ENTRY" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
   --data_split all \
@@ -373,6 +371,10 @@ fi
   `# IMAGELESS PROPOSER MODE — KEY E5 FLAG                                ` \
   `# ══════════════════════════════════════════════════════════════════════` \
   --imageless_proposer_mode \
+  --strict_imageless_mode \
+  --cycle_starts_with_generation \
+  --bootstrap_generated_pool_steps 2 \
+  --understanding_generated_only \
   --understanding_steps_per_cycle 3 \
   --generation_steps_per_cycle 2 \
   --synthetic_solver_update_freq 0 \
@@ -394,7 +396,7 @@ fi
   \
   `# ── Misc ───────────────────────────────────────────────────────────────` \
   --clear_cache_every 10 \
-  --use_ref_answer_scoring \
+  --no_ref_answer_scoring \
   \
   `# ── Unicorn reconstruction (disabled) ──────────────────────────────────` \
   --disable_unicorn_reconstruction_sft \
@@ -440,5 +442,5 @@ fi
   \
   `# ── Stage-specific args (difficulty curriculum) ────────────────────────` \
   "${STAGE_ARGS[@]}" \
-  "${RESUME_ARGS[@]}" \
+  ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} \
   --seed 42

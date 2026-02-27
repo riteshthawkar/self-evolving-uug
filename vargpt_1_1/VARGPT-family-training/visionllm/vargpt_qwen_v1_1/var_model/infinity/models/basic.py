@@ -374,13 +374,18 @@ class CrossAttention(nn.Module):
         """
         kv_compact, cu_seqlens_k, max_seqlen_k = ca_kv
         N = kv_compact.shape[0]
-        
-        kv_compact = F.linear(kv_compact, weight=self.mat_kv.weight, bias=torch.cat((self.zero_k_bias, self.v_bias))).view(N, 2, self.num_heads, self.head_dim) # NC => N2Hc
+
+        # Keep input dtype aligned with module weights to avoid bf16/fp32 matmul mismatch.
+        kv_in_dtype = self.mat_kv.weight.dtype
+        kv_compact = kv_compact.to(dtype=kv_in_dtype)
+        kv_bias = torch.cat((self.zero_k_bias, self.v_bias)).to(dtype=kv_in_dtype)
+        kv_compact = F.linear(kv_compact, weight=self.mat_kv.weight, bias=kv_bias).view(N, 2, self.num_heads, self.head_dim) # NC => N2Hc
         # attn_bias = xformers.ops.fmha.BlockDiagonalMask.from_seqlens
         
         if not self.for_attn_pool:
             B, Lq = q.shape[:2]
-            q_compact = self.mat_q(q).view(-1, self.num_heads, self.head_dim)
+            q_in_dtype = self.mat_q.weight.dtype if hasattr(self.mat_q, "weight") else kv_compact.dtype
+            q_compact = self.mat_q(q.to(dtype=q_in_dtype)).view(-1, self.num_heads, self.head_dim)
         else:
             B = cu_seqlens_k.shape[0] - 1
             Lq = 1

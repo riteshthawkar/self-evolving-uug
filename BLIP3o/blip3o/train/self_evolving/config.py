@@ -735,6 +735,8 @@ class UnifiedSelfEvolvingConfig(GenerationSelfEvolvingConfig):
     experiment_name: str = "unified_self_evolving"
     understanding_steps_per_cycle: int = 3
     generation_steps_per_cycle: int = 2
+    cycle_starts_with_generation: bool = False
+    bootstrap_generated_pool_steps: int = 0
     synthetic_solver_update_freq: int = 1
     synthetic_solver_hard_only: bool = False
     solver_hardness_min_entropy: float = 0.2
@@ -760,6 +762,7 @@ class UnifiedSelfEvolvingConfig(GenerationSelfEvolvingConfig):
     generated_mix_max_files: int = 5000
     generated_mix_refresh_every: int = 10
     understanding_generated_only: bool = False
+    strict_imageless_mode: bool = False
 
     # Generated-image mixing ratio for understanding step.
     # Linearly ramps from start → max over warmup_steps.
