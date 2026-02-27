@@ -1,46 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ─── Understanding evaluation for self-evolving trained VARGPT (LoRA) ──────
+# ─── Generation benchmark eval for self-evolving VARGPT (LoRA/merged) ──────
 #
-# Usage:
-#   CHECKPOINT_DIR=/path/to/se_checkpoint_2000 bash understanding_eval_our.sh
-#   CHECKPOINT_DIR=/path/to/se_checkpoint_2000 ADAPTER=solver bash understanding_eval_our.sh
-#   CHECKPOINT_DIR=/path/to/se_checkpoint_2000 NUM_GPUS=8 TASKS="realworldqa,textvqa,gqa" bash understanding_eval_our.sh
-#
+# Runs GenEval + WISE + DISE through the unified generation bench launcher.
 # CHECKPOINT_DIR can be:
 #   - .../se_checkpoint_<n>
 #   - .../se_checkpoint_<n>/model
 #   - adapter folder directly
+#
+# Examples:
+#   CHECKPOINT_DIR=/path/to/se_checkpoint_2000 bash run_scripts/run_eval_vargpt_generation_our.sh
+#   CHECKPOINT_DIR=/path/to/se_checkpoint_2000 ADAPTER=generator RUN_DISE=0 bash run_scripts/run_eval_vargpt_generation_our.sh
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-SUDER_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-TRAIN_ROOT="${SUDER_ROOT}/VARGPT-family-training"
-EVAL_SCRIPT="${TRAIN_ROOT}/run_scripts/run_eval_vargpt_understanding_bench.sh"
+TRAIN_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+BENCH_SCRIPT="${SCRIPT_DIR}/run_eval_vargpt_generation_bench.sh"
 
-if [[ ! -f "${EVAL_SCRIPT}" ]]; then
-  echo "[ERROR] Eval script not found: ${EVAL_SCRIPT}" >&2
+if [[ ! -f "${BENCH_SCRIPT}" ]]; then
+  echo "[ERROR] Bench script not found: ${BENCH_SCRIPT}" >&2
   exit 1
 fi
 
-# ─── Configuration (override via env) ───────────────────────────────────────
 BASE_MODEL="${BASE_MODEL:-VARGPT-family/VARGPT-v1.1}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:?Please set CHECKPOINT_DIR to your self-evolving checkpoint path}"
-ADAPTER="${ADAPTER:-solver}"
-TASKS="${TASKS:-realworldqa,textvqa}"
-NUM_GPUS="${NUM_GPUS:-8}"
-BATCH_SIZE="${BATCH_SIZE:-1}"
-MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-39535}"
-OUTPUT_DIR="${OUTPUT_DIR:-${TRAIN_ROOT}/logs/understanding_eval_our}"
-LOG_SAMPLES="${LOG_SAMPLES:-1}"
-MODEL="${MODEL:-vargpt_qwen2vl_v1_1}"
-
-if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-  CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((NUM_GPUS - 1)))"
-fi
-export CUDA_VISIBLE_DEVICES
-export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES}}"
-export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+ADAPTER="${ADAPTER:-generator}"
+TRAINED_RUNTIME="${TRAINED_RUNTIME:-auto}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${TRAIN_ROOT}/logs/generation_eval_our}"
+RUN_GENEVAL="${RUN_GENEVAL:-1}"
+RUN_WISE="${RUN_WISE:-1}"
+RUN_DISE="${RUN_DISE:-1}"
 
 if [[ ! -e "${CHECKPOINT_DIR}" ]]; then
   echo "[ERROR] CHECKPOINT_DIR does not exist: ${CHECKPOINT_DIR}" >&2
@@ -71,10 +60,12 @@ if [[ -z "${TRAINED_MODEL_PATH}" && -z "${TRAINED_LORA_PATH}" ]]; then
 fi
 
 CKPT_NAME="$(basename "${CHECKPOINT_DIR}")"
-LOG_SAMPLES_SUFFIX="${LOG_SAMPLES_SUFFIX:-vargpt_our_${ADAPTER}_${CKPT_NAME}}"
+if [[ "${OUTPUT_ROOT}" == "${TRAIN_ROOT}/logs/generation_eval_our" ]]; then
+  OUTPUT_ROOT="${OUTPUT_ROOT}/${CKPT_NAME}"
+fi
 
 echo "============================================"
-echo "Understanding Evaluation (Self-Evolving VARGPT)"
+echo "Generation Evaluation (Self-Evolving VARGPT)"
 echo "  Base model:      ${BASE_MODEL}"
 echo "  Checkpoint dir:  ${CHECKPOINT_DIR}"
 echo "  Artifact dir:    ${ARTIFACT_DIR}"
@@ -85,24 +76,22 @@ if [[ -n "${TRAINED_LORA_PATH}" ]]; then
   echo "  LoRA path:       ${TRAINED_LORA_PATH}"
   echo "  Adapter:         ${ADAPTER}"
 fi
-echo "  Tasks:           ${TASKS}"
-echo "  Output:          ${OUTPUT_DIR}"
-echo "  Num GPUs:        ${NUM_GPUS}"
-echo "  Log suffix:      ${LOG_SAMPLES_SUFFIX}"
+echo "  Runtime:         ${TRAINED_RUNTIME}"
+echo "  Run GenEval:     ${RUN_GENEVAL}"
+echo "  Run WISE:        ${RUN_WISE}"
+echo "  Run DISE:        ${RUN_DISE}"
+echo "  Output root:     ${OUTPUT_ROOT}"
 echo "============================================"
 
 EVAL_SETS="trained_lora" \
+TRAINED_RUNTIME="${TRAINED_RUNTIME}" \
 TRAINED_MODEL_PATH="${TRAINED_MODEL_PATH}" \
 TRAINED_LORA_PATH="${TRAINED_LORA_PATH}" \
 TRAINED_LORA_ADAPTER_NAME="${ADAPTER}" \
 TRAINED_BASE_MODEL_PATH="${BASE_MODEL}" \
-MODEL="${MODEL}" \
-TASKS="${TASKS}" \
-NUM_PROCESSES="${NUM_GPUS}" \
-BATCH_SIZE="${BATCH_SIZE}" \
-MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT}" \
-OUTPUT_ROOT="${OUTPUT_DIR}" \
-LOG_SAMPLES="${LOG_SAMPLES}" \
-LOG_SAMPLES_SUFFIX="${LOG_SAMPLES_SUFFIX}" \
-bash "${EVAL_SCRIPT}"
+OUTPUT_ROOT="${OUTPUT_ROOT}" \
+RUN_GENEVAL="${RUN_GENEVAL}" \
+RUN_WISE="${RUN_WISE}" \
+RUN_DISE="${RUN_DISE}" \
+bash "${BENCH_SCRIPT}"
 

@@ -3,7 +3,6 @@ set -euo pipefail
 
 # ─── Understanding evaluation for base VARGPT model ─────────────────────────
 #
-# Usage:
 #   bash understanding_eval.sh
 #   BASE_MODEL=VARGPT-family/VARGPT-v1.1 TASKS="realworldqa,textvqa,gqa" bash understanding_eval.sh
 #   NUM_GPUS=8 bash understanding_eval.sh
@@ -55,4 +54,3 @@ OUTPUT_ROOT="${OUTPUT_DIR}" \
 LOG_SAMPLES="${LOG_SAMPLES}" \
 LOG_SAMPLES_SUFFIX="${LOG_SAMPLES_SUFFIX}" \
 bash "${EVAL_SCRIPT}"
-
