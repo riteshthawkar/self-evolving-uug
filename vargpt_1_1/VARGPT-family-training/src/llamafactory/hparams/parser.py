@@ -56,11 +56,16 @@ def _parse_args(parser: "HfArgumentParser", args: Optional[Dict[str, Any]] = Non
     if args is not None:
         return parser.parse_dict(args)
 
-    if len(sys.argv) == 2 and (sys.argv[1].endswith(".yaml") or sys.argv[1].endswith(".yml")):
-        return parser.parse_yaml_file(os.path.abspath(sys.argv[1]))
+    # In distributed launchers (e.g., torchrun), extra arguments such as
+    # --local-rank can be appended, so the config path is not guaranteed to be
+    # the sole argv item. Prefer explicit config-file detection anywhere in argv.
+    yaml_args = [a for a in sys.argv[1:] if a.endswith(".yaml") or a.endswith(".yml")]
+    if yaml_args:
+        return parser.parse_yaml_file(os.path.abspath(yaml_args[-1]))
 
-    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        return parser.parse_json_file(os.path.abspath(sys.argv[1]))
+    json_args = [a for a in sys.argv[1:] if a.endswith(".json")]
+    if json_args:
+        return parser.parse_json_file(os.path.abspath(json_args[-1]))
 
     (*parsed_args, unknown_args) = parser.parse_args_into_dataclasses(return_remaining_strings=True)
 
