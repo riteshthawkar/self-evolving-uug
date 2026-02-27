@@ -82,12 +82,13 @@ PY
 }
 
 resolve_launcher() {
+    LAUNCHER=()
     if command -v llamafactory-cli >/dev/null 2>&1; then
-        echo "llamafactory-cli"
+        LAUNCHER=("llamafactory-cli")
         return 0
     fi
     if python -c "import llamafactory.cli" >/dev/null 2>&1; then
-        echo "python -m llamafactory.cli"
+        LAUNCHER=("python" "-m" "llamafactory.cli")
         return 0
     fi
     return 1
@@ -138,10 +139,27 @@ if [ -z "${CUDA_VISIBLE_DEVICES:-}" ] && [ -n "${HIP_VISIBLE_DEVICES:-}" ]; then
     export CUDA_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
 fi
 
-if ! LAUNCHER_CMD="$(resolve_launcher)"; then
+if ! resolve_launcher; then
     echo "[ERROR] Could not find LlamaFactory launcher." >&2
     echo "Install with: pip install -e ${REPO_ROOT}" >&2
     echo "Or ensure 'python -m llamafactory.cli' imports in current environment." >&2
+    exit 1
+fi
+
+LLAMAFACTORY_MODULE_DIR="$(
+    python - <<'PY' 2>/dev/null || true
+import os
+import llamafactory
+print(os.path.abspath(os.path.dirname(llamafactory.__file__)))
+PY
+)"
+LLAMAFACTORY_MODULE_DIR="$(echo "${LLAMAFACTORY_MODULE_DIR}" | tr -d '[:space:]')"
+EXPECTED_MODULE_DIR="${REPO_ROOT}/src/llamafactory"
+if [ "${LLAMAFACTORY_MODULE_DIR}" != "${EXPECTED_MODULE_DIR}" ]; then
+    echo "[ERROR] Wrong llamafactory package resolved." >&2
+    echo "[ERROR] Current:  ${LLAMAFACTORY_MODULE_DIR}" >&2
+    echo "[ERROR] Expected: ${EXPECTED_MODULE_DIR}" >&2
+    echo "[ERROR] Fix in this env: pip uninstall -y llamafactory && pip install -e ${REPO_ROOT}" >&2
     exit 1
 fi
 
@@ -181,59 +199,64 @@ echo "  Config     : $CONFIG"
 echo "  GPUs       : $NUM_GPUS"
 echo "  Master Port: $MASTER_PORT"
 echo "  W&B Project: $WANDB_PROJECT"
-echo "  Launcher   : $LAUNCHER_CMD"
+echo "  Launcher   : ${LAUNCHER[*]}"
 echo "  Dataset dir: ${DATASET_DIR:-data_temp}"
 echo "=============================================="
 
-# ── Build command ────────────────────────────────────────────────────────────
-CMD_ARGS=""
+# ── Build temporary YAML with overrides ──────────────────────────────────────
 DATASET_DIR="${DATASET_DIR:-data_temp}"
+TMP_CONFIG="$(mktemp "/tmp/vargpt_se_${EXPERIMENT}_XXXX.yaml")"
+RUN_CONFIG="${TMP_CONFIG}"
+cp "${CONFIG}" "${RUN_CONFIG}"
+trap '[[ -n "${TMP_CONFIG:-}" && -f "${TMP_CONFIG}" ]] && rm -f "${TMP_CONFIG}"' EXIT
 
-# Resume from checkpoint
-if [ -n "${RESUME_FROM:-}" ]; then
-    echo "  Resuming from: $RESUME_FROM"
-    CMD_ARGS="$CMD_ARGS --resume_from_checkpoint $RESUME_FROM"
-fi
+yaml_quote() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
 
-# Optional direct image-folder mode
-if [ -n "${IMAGE_FOLDER:-}" ]; then
-    echo "  Image folder: $IMAGE_FOLDER"
-    CMD_ARGS="$CMD_ARGS --se_image_folder $IMAGE_FOLDER"
-fi
+{
+    echo ""
+    echo "# --- auto overrides from run_self_evolving.sh ---"
+    echo "dataset_dir: \"$(yaml_quote "${DATASET_DIR}")\""
 
-# Dataset location (defaults to data_temp in this repo)
-CMD_ARGS="$CMD_ARGS --dataset_dir ${DATASET_DIR}"
+    if [ -n "${RESUME_FROM:-}" ]; then
+        echo "resume_from_checkpoint: \"$(yaml_quote "${RESUME_FROM}")\""
+    fi
 
-# Self-evolving controller overrides (env-overridable)
-CMD_ARGS="$CMD_ARGS --se_num_solver_samples ${SE_NUM_SOLVER_SAMPLES:-7}"
-CMD_ARGS="$CMD_ARGS --se_proposer_spot_check_samples ${SE_PROPOSER_SPOT_CHECK_SAMPLES:-3}"
-CMD_ARGS="$CMD_ARGS --se_solver_temp_min ${SE_SOLVER_TEMP_MIN:-0.5}"
-CMD_ARGS="$CMD_ARGS --se_solver_temp_max ${SE_SOLVER_TEMP_MAX:-2.5}"
-CMD_ARGS="$CMD_ARGS --se_solver_top_p_min ${SE_SOLVER_TOP_P_MIN:-0.3}"
-CMD_ARGS="$CMD_ARGS --se_solver_top_p_max ${SE_SOLVER_TOP_P_MAX:-1.0}"
-CMD_ARGS="$CMD_ARGS --se_solver_skip_update_on_easy ${SE_SOLVER_SKIP_UPDATE_ON_EASY:-true}"
-CMD_ARGS="$CMD_ARGS --se_easy_update_majority_frac_threshold ${SE_EASY_UPDATE_MAJORITY_FRAC_THRESHOLD:-1.0}"
-CMD_ARGS="$CMD_ARGS --se_difficulty_sampler_enabled ${SE_DIFFICULTY_SAMPLER_ENABLED:-true}"
-CMD_ARGS="$CMD_ARGS --se_difficulty_target_easy ${SE_DIFFICULTY_TARGET_EASY:-0.0}"
-CMD_ARGS="$CMD_ARGS --se_difficulty_target_medium ${SE_DIFFICULTY_TARGET_MEDIUM:-0.7}"
-CMD_ARGS="$CMD_ARGS --se_difficulty_target_hard ${SE_DIFFICULTY_TARGET_HARD:-0.3}"
-CMD_ARGS="$CMD_ARGS --se_proposer_warm_start_enabled ${SE_PROPOSER_WARM_START_ENABLED:-true}"
-CMD_ARGS="$CMD_ARGS --se_proposer_warm_start_max_steps ${SE_PROPOSER_WARM_START_MAX_STEPS:-30}"
-CMD_ARGS="$CMD_ARGS --se_hardness_debt_enabled ${SE_HARDNESS_DEBT_ENABLED:-true}"
-CMD_ARGS="$CMD_ARGS --se_hardness_debt_inc_easy ${SE_HARDNESS_DEBT_INC_EASY:-1.5}"
-CMD_ARGS="$CMD_ARGS --se_hardness_debt_dec_non_easy ${SE_HARDNESS_DEBT_DEC_NON_EASY:-1.0}"
-CMD_ARGS="$CMD_ARGS --se_hardness_debt_hard_recovery_threshold ${SE_HARDNESS_DEBT_HARD_RECOVERY_THRESHOLD:-3.0}"
-CMD_ARGS="$CMD_ARGS --se_all_easy_explore_trigger ${SE_ALL_EASY_EXPLORE_TRIGGER:-2}"
-CMD_ARGS="$CMD_ARGS --se_all_easy_explore_steps ${SE_ALL_EASY_EXPLORE_STEPS:-16}"
-CMD_ARGS="$CMD_ARGS --se_all_easy_explore_num_candidates ${SE_ALL_EASY_EXPLORE_NUM_CANDIDATES:-6}"
-CMD_ARGS="$CMD_ARGS --se_proposer_early_failfast_enabled ${SE_PROPOSER_EARLY_FAILFAST_ENABLED:-true}"
-CMD_ARGS="$CMD_ARGS --se_proposer_early_failfast_stop ${SE_PROPOSER_EARLY_FAILFAST_STOP:-false}"
-CMD_ARGS="$CMD_ARGS --se_proposer_early_failfast_recover ${SE_PROPOSER_EARLY_FAILFAST_RECOVER:-true}"
+    if [ -n "${IMAGE_FOLDER:-}" ]; then
+        echo "se_image_folder: \"$(yaml_quote "${IMAGE_FOLDER}")\""
+    fi
 
-# Optional free-form extra args
+    echo "se_num_solver_samples: ${SE_NUM_SOLVER_SAMPLES:-7}"
+    echo "se_proposer_spot_check_samples: ${SE_PROPOSER_SPOT_CHECK_SAMPLES:-3}"
+    echo "se_solver_temp_min: ${SE_SOLVER_TEMP_MIN:-0.5}"
+    echo "se_solver_temp_max: ${SE_SOLVER_TEMP_MAX:-2.5}"
+    echo "se_solver_top_p_min: ${SE_SOLVER_TOP_P_MIN:-0.3}"
+    echo "se_solver_top_p_max: ${SE_SOLVER_TOP_P_MAX:-1.0}"
+    echo "se_solver_skip_update_on_easy: ${SE_SOLVER_SKIP_UPDATE_ON_EASY:-true}"
+    echo "se_easy_update_majority_frac_threshold: ${SE_EASY_UPDATE_MAJORITY_FRAC_THRESHOLD:-1.0}"
+    echo "se_difficulty_sampler_enabled: ${SE_DIFFICULTY_SAMPLER_ENABLED:-true}"
+    echo "se_difficulty_target_easy: ${SE_DIFFICULTY_TARGET_EASY:-0.0}"
+    echo "se_difficulty_target_medium: ${SE_DIFFICULTY_TARGET_MEDIUM:-0.7}"
+    echo "se_difficulty_target_hard: ${SE_DIFFICULTY_TARGET_HARD:-0.3}"
+    echo "se_proposer_warm_start_enabled: ${SE_PROPOSER_WARM_START_ENABLED:-true}"
+    echo "se_proposer_warm_start_max_steps: ${SE_PROPOSER_WARM_START_MAX_STEPS:-30}"
+    echo "se_hardness_debt_enabled: ${SE_HARDNESS_DEBT_ENABLED:-true}"
+    echo "se_hardness_debt_inc_easy: ${SE_HARDNESS_DEBT_INC_EASY:-1.5}"
+    echo "se_hardness_debt_dec_non_easy: ${SE_HARDNESS_DEBT_DEC_NON_EASY:-1.0}"
+    echo "se_hardness_debt_hard_recovery_threshold: ${SE_HARDNESS_DEBT_HARD_RECOVERY_THRESHOLD:-3.0}"
+    echo "se_all_easy_explore_trigger: ${SE_ALL_EASY_EXPLORE_TRIGGER:-2}"
+    echo "se_all_easy_explore_steps: ${SE_ALL_EASY_EXPLORE_STEPS:-16}"
+    echo "se_all_easy_explore_num_candidates: ${SE_ALL_EASY_EXPLORE_NUM_CANDIDATES:-6}"
+    echo "se_proposer_early_failfast_enabled: ${SE_PROPOSER_EARLY_FAILFAST_ENABLED:-true}"
+    echo "se_proposer_early_failfast_stop: ${SE_PROPOSER_EARLY_FAILFAST_STOP:-false}"
+    echo "se_proposer_early_failfast_recover: ${SE_PROPOSER_EARLY_FAILFAST_RECOVER:-true}"
+} >> "${RUN_CONFIG}"
+
 if [ -n "${SE_EXTRA_ARGS:-}" ]; then
-    CMD_ARGS="$CMD_ARGS ${SE_EXTRA_ARGS}"
+    echo "[WARN] SE_EXTRA_ARGS is ignored in YAML launch mode: ${SE_EXTRA_ARGS}"
 fi
+echo "  Run config : ${RUN_CONFIG}"
 
 # ── Launch ───────────────────────────────────────────────────────────────────
 if [ "$NUM_GPUS" -gt 1 ]; then
@@ -243,10 +266,10 @@ if [ "$NUM_GPUS" -gt 1 ]; then
     NODE_RANK=0 \
     MASTER_ADDR=127.0.0.1 \
     MASTER_PORT=$MASTER_PORT \
-        bash -lc "$LAUNCHER_CMD train \"$CONFIG\" $CMD_ARGS"
+        "${LAUNCHER[@]}" train "${RUN_CONFIG}"
 else
     echo "  Launching single-GPU..."
-    bash -lc "$LAUNCHER_CMD train \"$CONFIG\" $CMD_ARGS"
+    "${LAUNCHER[@]}" train "${RUN_CONFIG}"
 fi
 
 echo ""
