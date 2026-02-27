@@ -7,7 +7,7 @@ import gc
 import os
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from PIL import Image
@@ -300,6 +300,157 @@ def _build_understanding_train_batch(
         out["packed_vit_position_ids"] = image_inputs["packed_vit_position_ids"]
         out["vit_token_seqlens"] = image_inputs["vit_token_seqlens"]
     return out
+
+
+def _module_device_dtype(module) -> Tuple[torch.device, torch.dtype]:
+    for p in module.parameters():
+        return p.device, p.dtype
+    for b in module.buffers():
+        return b.device, b.dtype
+    return torch.device("cpu"), torch.float32
+
+
+def _build_generation_train_batch(
+    runtime: BagelRuntime,
+    *,
+    image: Image.Image,
+    prompt: str,
+    policy_max_edge: Optional[int] = None,
+    max_prompt_tokens: Optional[int] = None,
+) -> Optional[Dict]:
+    """Build one-sample visual-generation batch for reward-weighted MSE training."""
+    model = runtime.model
+    tokenizer = runtime.tokenizer
+    new_token_ids = runtime.new_token_ids
+
+    curr_lens = [0]
+    curr_rope = [0]
+
+    prompt_text = str(prompt or "")
+    if max_prompt_tokens is None:
+        max_prompt_tokens = int(
+            os.environ.get(
+                "BAGEL_GENERATOR_POLICY_MAX_PROMPT_TOKENS",
+                os.environ.get("BAGEL_POLICY_MAX_PROMPT_TOKENS", "96"),
+            )
+            or "96"
+        )
+    max_prompt_tokens = max(8, int(max_prompt_tokens))
+    try:
+        prompt_ids = tokenizer.encode(prompt_text)
+        if len(prompt_ids) > max_prompt_tokens:
+            prompt_text = tokenizer.decode(prompt_ids[:max_prompt_tokens])
+    except Exception:
+        max_prompt_chars = max(32, int(os.environ.get("BAGEL_GENERATOR_POLICY_MAX_PROMPT_CHARS", "384") or "384"))
+        if len(prompt_text) > max_prompt_chars:
+            prompt_text = prompt_text[:max_prompt_chars]
+
+    prompt_inputs, curr_lens, curr_rope = model.prepare_prompts(
+        curr_kvlens=curr_lens,
+        curr_rope=curr_rope,
+        prompts=[prompt_text],
+        tokenizer=tokenizer,
+        new_token_ids=new_token_ids,
+    )
+    prompt_split_len = int(prompt_inputs["text_token_lens"][0].item())
+
+    if policy_max_edge is None:
+        policy_max_edge = int(os.environ.get("BAGEL_GENERATOR_POLICY_MAX_VAE_EDGE", "512") or "512")
+    if int(policy_max_edge) > 0:
+        w, h = image.size
+        max_edge = max(int(w), int(h))
+        if max_edge > int(policy_max_edge):
+            scale = float(policy_max_edge) / float(max_edge)
+            new_w = max(1, int(round(float(w) * scale)))
+            new_h = max(1, int(round(float(h) * scale)))
+            image = image.resize((new_w, new_h), resample=Image.BICUBIC)
+
+    timestep = float(torch.randn((), device="cpu").item())
+    vae_inputs, _, _ = model.prepare_vae_images(
+        curr_kvlens=curr_lens,
+        curr_rope=curr_rope,
+        images=[image],
+        transforms=runtime.vae_transform,
+        new_token_ids=new_token_ids,
+        timestep=timestep,
+    )
+
+    num_latent_tokens = int(vae_inputs["packed_vae_token_indexes"].numel())
+    if num_latent_tokens <= 0:
+        return None
+
+    image_split_len = int(vae_inputs["packed_seqlens"][0].item())
+    image_offset = int(prompt_split_len)
+
+    vae_device, vae_dtype = _module_device_dtype(runtime.vae_model)
+    with torch.no_grad():
+        padded_images = vae_inputs["padded_images"]
+        if padded_images.device != vae_device or padded_images.dtype != vae_dtype:
+            padded_images = padded_images.to(device=vae_device, dtype=vae_dtype)
+        padded_latent = runtime.vae_model.encode(padded_images)
+    if padded_latent.device != runtime.device:
+        padded_latent = padded_latent.to(runtime.device)
+
+    vae_text_indexes_global = vae_inputs["packed_text_indexes"] + int(image_offset)
+    packed_vae_token_indexes = vae_inputs["packed_vae_token_indexes"] + int(image_offset)
+
+    packed_text_ids = torch.cat(
+        [
+            prompt_inputs["packed_text_ids"],
+            vae_inputs["packed_text_ids"],
+        ],
+        dim=0,
+    )
+    packed_text_indexes = torch.cat(
+        [
+            prompt_inputs["packed_text_indexes"],
+            vae_text_indexes_global,
+        ],
+        dim=0,
+    )
+    packed_position_ids = torch.cat(
+        [
+            prompt_inputs["packed_text_position_ids"],
+            vae_inputs["packed_position_ids"],
+        ],
+        dim=0,
+    )
+
+    sequence_length = int(prompt_split_len + image_split_len)
+    split_lens = [int(prompt_split_len), int(image_split_len)]
+    attn_modes = ["causal", "noise"]
+    mask_device = packed_text_ids.device
+    nested_attention_mask = _build_single_sample_attention_mask(
+        split_lens=split_lens,
+        attn_modes=attn_modes,
+        device=mask_device,
+    )
+
+    timestep_value = float(vae_inputs["packed_timesteps"][0].item())
+    packed_timesteps = torch.full(
+        (num_latent_tokens,),
+        fill_value=timestep_value,
+        dtype=torch.float32,
+        device=mask_device,
+    )
+    mse_loss_indexes = packed_vae_token_indexes.clone()
+
+    return {
+        "sequence_length": sequence_length,
+        "sample_lens": [sequence_length],
+        "nested_attention_masks": [nested_attention_mask],
+        "split_lens": split_lens,
+        "attn_modes": attn_modes,
+        "packed_text_ids": packed_text_ids,
+        "packed_text_indexes": packed_text_indexes,
+        "packed_position_ids": packed_position_ids,
+        "padded_latent": padded_latent,
+        "patchified_vae_latent_shapes": vae_inputs["patchified_vae_latent_shapes"],
+        "packed_latent_position_ids": vae_inputs["packed_vae_position_ids"],
+        "packed_vae_token_indexes": packed_vae_token_indexes,
+        "packed_timesteps": packed_timesteps,
+        "mse_loss_indexes": mse_loss_indexes,
+    }
 
 
 @dataclass
@@ -753,3 +904,280 @@ class BagelRolePolicyUpdater:
             optimizer_step_applied=False,
             token_count=token_count,
         ).to_dict()
+
+
+class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
+    """Reward-weighted generator updater on BAGEL visual-generation (MSE) path."""
+
+    def step(
+        self,
+        *,
+        image: Image.Image,
+        prompt: str,
+        reward: float,
+        baseline: float,
+        group_rewards: Optional[List[float]] = None,
+    ) -> Dict:
+        self.step_id += 1
+
+        prompt_text = str(prompt or "").strip()
+        if not prompt_text:
+            return PolicyStepResult(
+                skipped=True,
+                reason="empty_prompt",
+                reward=float(reward),
+                baseline=float(baseline),
+                advantage=0.0,
+                loss=0.0,
+                ce_loss=0.0,
+                grad_norm=0.0,
+                optimizer_step_applied=False,
+                token_count=0,
+            ).to_dict()
+
+        scaled_reward = float(reward) * float(self.cfg.policy_reward_scale)
+        scaled_baseline = float(baseline) * float(self.cfg.policy_reward_scale)
+        advantage = _compute_advantage(
+            reward=scaled_reward,
+            baseline=scaled_baseline,
+            method=self.update_method,
+            group_rewards=group_rewards,
+            eps=float(self.cfg.grpo_eps),
+        )
+
+        if self.step_id <= self._pause_until_step:
+            return PolicyStepResult(
+                skipped=True,
+                reason="oom_pause_cooldown",
+                reward=scaled_reward,
+                baseline=scaled_baseline,
+                advantage=advantage,
+                loss=0.0,
+                ce_loss=0.0,
+                grad_norm=0.0,
+                optimizer_step_applied=False,
+                token_count=0,
+            ).to_dict()
+
+        if self._empty_cache_each_step and torch.cuda.is_available():
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        base_policy_edge = max(
+            96,
+            int(os.environ.get("BAGEL_GENERATOR_POLICY_MAX_VAE_EDGE", "512") or "512"),
+        )
+        min_policy_edge = max(
+            64,
+            int(os.environ.get("BAGEL_GENERATOR_POLICY_MIN_VAE_EDGE", "160") or "160"),
+        )
+        if min_policy_edge > base_policy_edge:
+            min_policy_edge = base_policy_edge
+        oom_max_retries = max(
+            1,
+            int(os.environ.get("BAGEL_GENERATOR_POLICY_OOM_MAX_RETRIES", "3") or "3"),
+        )
+        edge_decay = float(os.environ.get("BAGEL_GENERATOR_POLICY_OOM_EDGE_DECAY", "0.8") or "0.8")
+        if edge_decay <= 0.1 or edge_decay >= 1.0:
+            edge_decay = 0.8
+        max_prompt_tokens = max(
+            8,
+            int(
+                os.environ.get(
+                    "BAGEL_GENERATOR_POLICY_MAX_PROMPT_TOKENS",
+                    os.environ.get("BAGEL_POLICY_MAX_PROMPT_TOKENS", "96"),
+                )
+                or "96"
+            ),
+        )
+
+        attempt_specs = [int(base_policy_edge)]
+        while len(attempt_specs) < oom_max_retries:
+            prev_edge = int(attempt_specs[-1])
+            next_edge = max(min_policy_edge, int(round(float(prev_edge) * edge_decay)))
+            if next_edge >= prev_edge:
+                next_edge = max(min_policy_edge, int(prev_edge) - 32)
+            if next_edge == prev_edge:
+                break
+            attempt_specs.append(int(next_edge))
+
+        model = self.runtime.model
+        was_training = bool(model.training)
+        prev_visual_gen = bool(model.config.visual_gen)
+        prev_visual_und = bool(model.config.visual_und)
+        model.config.visual_gen = True
+        model.config.visual_und = False
+        model.train(True)
+
+        autocast_enabled = bool(self.cfg.policy_use_bf16)
+        token_count = 0
+        mse_value = 0.0
+        loss_value = 0.0
+
+        try:
+            for attempt_idx, policy_edge in enumerate(attempt_specs, start=1):
+                batch = _build_generation_train_batch(
+                    self.runtime,
+                    image=image,
+                    prompt=prompt_text,
+                    policy_max_edge=int(policy_edge),
+                    max_prompt_tokens=int(max_prompt_tokens),
+                )
+                if batch is None:
+                    out = PolicyStepResult(
+                        skipped=True,
+                        reason="empty_generation_batch",
+                        reward=scaled_reward,
+                        baseline=scaled_baseline,
+                        advantage=advantage,
+                        loss=0.0,
+                        ce_loss=0.0,
+                        grad_norm=0.0,
+                        optimizer_step_applied=False,
+                        token_count=0,
+                    ).to_dict()
+                    out["mse_loss"] = 0.0
+                    out["objective"] = "mse"
+                    return out
+
+                batch = _to_device(batch, self.runtime.device)
+                token_count = int(batch["packed_vae_token_indexes"].numel())
+                grad_norm = 0.0
+                opt_step = False
+
+                try:
+                    with use_adapter(self.runtime.model.language_model, self.adapter_name):
+                        with autocast_context(self.runtime.device, enabled=autocast_enabled):
+                            outputs = model(**batch)
+                            mse = outputs.get("mse", None)
+                            if mse is None or int(mse.numel()) <= 0:
+                                out = PolicyStepResult(
+                                    skipped=True,
+                                    reason="empty_mse_loss",
+                                    reward=scaled_reward,
+                                    baseline=scaled_baseline,
+                                    advantage=advantage,
+                                    loss=0.0,
+                                    ce_loss=0.0,
+                                    grad_norm=0.0,
+                                    optimizer_step_applied=False,
+                                    token_count=token_count,
+                                ).to_dict()
+                                out["mse_loss"] = 0.0
+                                out["objective"] = "mse"
+                                return out
+                            mse_mean = mse.mean()
+                            loss = mse_mean * float(advantage)
+
+                        if not bool(torch.isfinite(loss.detach()).all().item()):
+                            out = PolicyStepResult(
+                                skipped=True,
+                                reason="non_finite_loss",
+                                reward=scaled_reward,
+                                baseline=scaled_baseline,
+                                advantage=advantage,
+                                loss=float(loss.detach().item()),
+                                ce_loss=float(mse_mean.detach().item()),
+                                grad_norm=0.0,
+                                optimizer_step_applied=False,
+                                token_count=token_count,
+                            ).to_dict()
+                            out["mse_loss"] = float(mse_mean.detach().item())
+                            out["objective"] = "mse"
+                            return out
+
+                        mse_value = float(mse_mean.detach().item())
+                        loss_value = float(loss.detach().item())
+                        scaled_loss = loss / float(self.grad_accum_steps)
+                        scaled_loss.backward()
+                        self._accum_count += 1
+                        self._has_grad_window = True
+
+                        if self._accum_count >= self.grad_accum_steps:
+                            grad_norm = float(
+                                torch.nn.utils.clip_grad_norm_(
+                                    self.params,
+                                    max_norm=float(self.cfg.policy_max_grad_norm),
+                                ).item()
+                            )
+                            self.optimizer.step()
+                            opt_step = True
+                            self._reset_grad_window()
+
+                    self._consecutive_oom = 0
+                    out = PolicyStepResult(
+                        skipped=False,
+                        reason="ok",
+                        reward=scaled_reward,
+                        baseline=scaled_baseline,
+                        advantage=advantage,
+                        loss=loss_value,
+                        ce_loss=mse_value,
+                        grad_norm=float(grad_norm),
+                        optimizer_step_applied=bool(opt_step),
+                        token_count=token_count,
+                    ).to_dict()
+                    out["mse_loss"] = float(mse_value)
+                    out["objective"] = "mse"
+                    return out
+                except RuntimeError as exc:
+                    msg = str(exc).lower()
+                    oom_like = ("out of memory" in msg) or ("cuda out of memory" in msg) or ("hip out of memory" in msg)
+                    if not oom_like:
+                        raise
+                    if torch.cuda.is_available():
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                    self._reset_grad_window()
+                    if attempt_idx < len(attempt_specs):
+                        next_edge = int(attempt_specs[attempt_idx])
+                        print(
+                            f"[policy_updater][role={self.role}] OOM at max_vae_edge={policy_edge}; "
+                            f"retrying with max_vae_edge={next_edge}."
+                        )
+                        continue
+                    self._consecutive_oom += 1
+                    reason = "cuda_oom"
+                    if self._consecutive_oom >= self._oom_pause_after:
+                        self._pause_until_step = int(self.step_id + self._oom_pause_steps)
+                        self._consecutive_oom = 0
+                        reason = "cuda_oom_pause"
+                        print(
+                            f"[policy_updater][role={self.role}] pausing policy updates for "
+                            f"{self._oom_pause_steps} steps after repeated OOM."
+                        )
+                    out = PolicyStepResult(
+                        skipped=True,
+                        reason=reason,
+                        reward=scaled_reward,
+                        baseline=scaled_baseline,
+                        advantage=advantage,
+                        loss=loss_value,
+                        ce_loss=mse_value,
+                        grad_norm=0.0,
+                        optimizer_step_applied=False,
+                        token_count=token_count,
+                    ).to_dict()
+                    out["mse_loss"] = float(mse_value)
+                    out["objective"] = "mse"
+                    return out
+        finally:
+            model.config.visual_gen = prev_visual_gen
+            model.config.visual_und = prev_visual_und
+            model.train(was_training)
+
+        out = PolicyStepResult(
+            skipped=True,
+            reason="unknown_retry_exit",
+            reward=scaled_reward,
+            baseline=scaled_baseline,
+            advantage=advantage,
+            loss=0.0,
+            ce_loss=0.0,
+            grad_norm=0.0,
+            optimizer_step_applied=False,
+            token_count=token_count,
+        ).to_dict()
+        out["mse_loss"] = 0.0
+        out["objective"] = "mse"
+        return out

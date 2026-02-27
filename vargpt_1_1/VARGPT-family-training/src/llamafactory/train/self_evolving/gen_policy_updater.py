@@ -23,6 +23,7 @@ import contextlib
 import gc
 import logging
 import math
+from collections.abc import Sequence
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -123,6 +124,157 @@ class VARImageGenPolicyUpdater:
         beta = max(self.config.kl_min, min(self.config.kl_max, beta))
         self.kl_coef = float(beta)
 
+    def _infer_required_gen_pad_tokens(
+        self,
+        base_model: torch.nn.Module,
+        pixel_gen_values,
+    ) -> Optional[int]:
+        """Infer required number of <|image_gen_pad|> tokens for current sample.
+
+        Mirrors VARGPT v1.1 sequence construction:
+          x_BLC = [sos] + word_embed(x_BLC_wo_prefix)
+          need_to_pad = ceil(len(x_BLC)/pad_to_multiplier)*pad_to_multiplier - len(x_BLC)
+          n_image_gen_features = B * (len(x_BLC) + need_to_pad)
+        """
+        try:
+            coerce = getattr(base_model, "_coerce_pixel_gen_values", None)
+            if callable(coerce):
+                pv = coerce(pixel_gen_values)
+            else:
+                if torch.is_tensor(pixel_gen_values):
+                    pv = pixel_gen_values
+                elif isinstance(pixel_gen_values, Sequence):
+                    flat = []
+                    for x in pixel_gen_values:
+                        if torch.is_tensor(x):
+                            flat.append(x)
+                        elif isinstance(x, Sequence):
+                            flat.extend([y for y in x if torch.is_tensor(y)])
+                    if not flat:
+                        return None
+                    pv = torch.cat(
+                        [t if t.ndim == 4 else t.unsqueeze(0) for t in flat],
+                        dim=0,
+                    )
+                else:
+                    return None
+
+            if pv.ndim == 4:
+                bsz = int(pv.shape[0])
+                t_frames = 1
+                h, w = int(pv.shape[-2]), int(pv.shape[-1])
+            elif pv.ndim == 5:
+                bsz = int(pv.shape[0])
+                t_frames = int(pv.shape[2])
+                h, w = int(pv.shape[-2]), int(pv.shape[-1])
+            else:
+                return None
+
+            from visionllm.vargpt_qwen_v1_1.var_model.infinity.utils.dynamic_resolution import dynamic_resolution_h_w
+
+            hw_ratio = float(h) / float(max(1, w))
+            ratio_keys = list(dynamic_resolution_h_w.keys())
+            if not ratio_keys:
+                return None
+            ratio_key = min(ratio_keys, key=lambda k: abs(float(k) - hw_ratio))
+
+            vargpt_args = getattr(base_model, "vargpt_gen_args", None)
+            pn = getattr(vargpt_args, "pn", "0.25M")
+            if pn not in dynamic_resolution_h_w[ratio_key]:
+                return None
+            scale_schedule = dynamic_resolution_h_w[ratio_key][pn]["scales"]
+            scale_schedule = [
+                (min(int(pt), int(t_frames // 4 + 1)), int(ph), int(pw))
+                for (pt, ph, pw) in scale_schedule
+            ]
+            if not scale_schedule:
+                return None
+
+            # Matches get_vae_gt_xin_v1_1(training_scales=100)
+            scale_schedule = scale_schedule[:100]
+            training_seq_len = sum(int(pt * ph * pw) for (pt, ph, pw) in scale_schedule)
+            first_scale_len = int(scale_schedule[0][0] * scale_schedule[0][1] * scale_schedule[0][2])
+            x_blc_wo_prefix_len = max(0, training_seq_len - first_scale_len)
+            l_end = int(x_blc_wo_prefix_len + 1)  # +sos
+
+            pad_mult = int(getattr(getattr(base_model, "vargpt_gen", None), "pad_to_multiplier", 1) or 1)
+            padded_len = ((l_end + pad_mult - 1) // pad_mult) * pad_mult
+            return int(bsz * padded_len)
+        except Exception:
+            return None
+
+    def _append_explicit_image_gen_tokens(
+        self,
+        base_model: torch.nn.Module,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: Optional[torch.Tensor],
+        required_pad_tokens: Optional[int],
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """Append explicit image-gen token segment to input sequence.
+
+        Segment format per sample: <|image_gen_start|> + N*<|image_gen_pad|> + <|image_gen_end|>
+        """
+        if required_pad_tokens is None or required_pad_tokens <= 0:
+            return input_ids, attention_mask, labels
+
+        special_tokens = getattr(getattr(base_model, "config", None), "special_tokens", None)
+        if not isinstance(special_tokens, dict):
+            return input_ids, attention_mask, labels
+
+        start_id = special_tokens.get("image_gen_start_token_id", None)
+        pad_id = special_tokens.get("image_gen_pad_token_id", None)
+        end_id = special_tokens.get("image_gen_end_token_id", None)
+        if pad_id is None:
+            return input_ids, attention_mask, labels
+
+        bsz = int(input_ids.shape[0])
+        if bsz != 1:
+            # Current self-evolving G-step uses batch=1.
+            # Keep conservative behavior for unexpected batching.
+            return input_ids, attention_mask, labels
+
+        cur_pad = int((input_ids == int(pad_id)).sum().item())
+        add_pad = max(0, int(required_pad_tokens - cur_pad))
+        if add_pad == 0:
+            return input_ids, attention_mask, labels
+
+        append_ids = []
+        has_start = (start_id is not None) and int((input_ids == int(start_id)).sum().item()) > 0
+        has_end = (end_id is not None) and int((input_ids == int(end_id)).sum().item()) > 0
+        if (start_id is not None) and (not has_start):
+            append_ids.append(int(start_id))
+        append_ids.extend([int(pad_id)] * add_pad)
+        if (end_id is not None) and (not has_end):
+            append_ids.append(int(end_id))
+
+        if not append_ids:
+            return input_ids, attention_mask, labels
+
+        append_tensor = torch.tensor(
+            append_ids, dtype=input_ids.dtype, device=input_ids.device
+        ).unsqueeze(0)
+        input_ids = torch.cat([input_ids, append_tensor], dim=1)
+
+        if attention_mask is not None:
+            append_mask = torch.ones(
+                (1, append_tensor.shape[1]),
+                dtype=attention_mask.dtype,
+                device=attention_mask.device,
+            )
+            attention_mask = torch.cat([attention_mask, append_mask], dim=1)
+
+        if labels is not None:
+            append_labels = torch.full(
+                (1, append_tensor.shape[1]),
+                fill_value=-100,
+                dtype=labels.dtype,
+                device=labels.device,
+            )
+            labels = torch.cat([labels, append_labels], dim=1)
+
+        return input_ids, attention_mask, labels
+
     def _compute_gen_log_probs(
         self,
         model: torch.nn.Module,
@@ -151,6 +303,15 @@ class VARImageGenPolicyUpdater:
             Statistics for logging.
         """
         base_model = _unwrap_model(model)
+
+        required_pad = self._infer_required_gen_pad_tokens(base_model, pixel_gen_values)
+        input_ids, attention_mask, labels = self._append_explicit_image_gen_tokens(
+            base_model=base_model,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            required_pad_tokens=required_pad,
+        )
 
         forward_kwargs = {
             "input_ids": input_ids,

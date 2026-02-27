@@ -2402,14 +2402,54 @@ class VARGPTQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMi
                 attention_mask = attention_mask.to(inputs_embeds.device)
 
             if pixel_gen_values is not None and (self.model.training or dpo_training ):
-                n_image_gen_tokens = (input_ids == self.config.special_tokens['image_gen_pad_token_id']).sum().item()
+                image_gen_pad_id = self.config.special_tokens['image_gen_pad_token_id']
+                n_image_gen_tokens = (input_ids == image_gen_pad_id).sum().item()
                 n_image_gen_features = x_SH.shape[0]
+                if n_image_gen_tokens < n_image_gen_features:
+                    # Some callers (e.g., self-evolving G-step GRPO) build text-only
+                    # prompts and may not include <|image_gen_pad|> placeholders.
+                    # For training with pixel_gen_values we need one pad token per
+                    # image-gen feature, so append the missing pad tokens here.
+                    pad_needed = int(n_image_gen_features - n_image_gen_tokens)
+                    bsz = int(input_ids.shape[0])
+
+                    pad_ids = torch.full(
+                        (bsz, pad_needed),
+                        fill_value=image_gen_pad_id,
+                        dtype=input_ids.dtype,
+                        device=input_ids.device,
+                    )
+                    input_ids = torch.cat([input_ids, pad_ids], dim=1)
+
+                    pad_embeds = self.model.embed_tokens(pad_ids).to(inputs_embeds.device, inputs_embeds.dtype)
+                    inputs_embeds = torch.cat([inputs_embeds, pad_embeds], dim=1)
+
+                    if attention_mask is not None:
+                        pad_attn = torch.ones(
+                            (bsz, pad_needed),
+                            dtype=attention_mask.dtype,
+                            device=attention_mask.device,
+                        )
+                        attention_mask = torch.cat([attention_mask, pad_attn], dim=1)
+
+                    if labels is not None:
+                        pad_labels = torch.full(
+                            (bsz, pad_needed),
+                            fill_value=-100,
+                            dtype=labels.dtype,
+                            device=labels.device,
+                        )
+                        labels = torch.cat([labels, pad_labels], dim=1)
+
+                    n_image_gen_tokens = (input_ids == image_gen_pad_id).sum().item()
+
                 if n_image_gen_tokens != n_image_gen_features:
                     raise ValueError(
-                        f"Gen Image features and image tokens do not match: tokens: {n_image_gen_tokens}, features {n_image_gen_features}"
+                        f"Gen Image features and image tokens do not match after auto-pad: "
+                        f"tokens: {n_image_gen_tokens}, features {n_image_gen_features}"
                     )
                 image_gen_mask = (
-                    (input_ids == self.config.special_tokens['image_gen_pad_token_id'])
+                    (input_ids == image_gen_pad_id)
                     .unsqueeze(-1)
                     .expand_as(inputs_embeds)
                     .to(inputs_embeds.device)
