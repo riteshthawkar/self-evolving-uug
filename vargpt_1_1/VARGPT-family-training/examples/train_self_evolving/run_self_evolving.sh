@@ -17,9 +17,63 @@
 # =============================================================================
 set -euo pipefail
 
+# ── Helpers ──────────────────────────────────────────────────────────────────
+detect_num_gpus() {
+    # 1) explicit arg/environment
+    if [ -n "${NUM_GPUS:-}" ]; then
+        echo "${NUM_GPUS}"
+        return 0
+    fi
+
+    # 2) derive from CUDA_VISIBLE_DEVICES if present
+    if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+        local cleaned="${CUDA_VISIBLE_DEVICES// /}"
+        if [ -n "${cleaned}" ]; then
+            # Count comma-separated entries.
+            awk -F',' '{print NF}' <<< "${cleaned}"
+            return 0
+        fi
+    fi
+
+    # 3) derive from nvidia-smi if available
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        local n
+        n="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d '[:space:]')"
+        if [[ "${n}" =~ ^[0-9]+$ ]] && [ "${n}" -gt 0 ]; then
+            echo "${n}"
+            return 0
+        fi
+    fi
+
+    # 4) safe fallback
+    echo 1
+}
+
+resolve_launcher() {
+    if command -v llamafactory-cli >/dev/null 2>&1; then
+        echo "llamafactory-cli"
+        return 0
+    fi
+    if python -c "import llamafactory.cli" >/dev/null 2>&1; then
+        echo "python -m llamafactory.cli"
+        return 0
+    fi
+    return 1
+}
+
 # ── Parse arguments ──────────────────────────────────────────────────────────
 EXPERIMENT=${1:-joint}
-NUM_GPUS=${2:-$(nvidia-smi -L 2>/dev/null | wc -l || echo 1)}
+NUM_GPUS="${2:-}"
+
+if [ -z "${NUM_GPUS}" ]; then
+    NUM_GPUS="$(detect_num_gpus)"
+fi
+NUM_GPUS="$(echo "${NUM_GPUS}" | tr -d '[:space:]')"
+
+if ! [[ "${NUM_GPUS}" =~ ^[0-9]+$ ]] || [ "${NUM_GPUS}" -lt 1 ]; then
+    echo "[ERROR] NUM_GPUS must be a positive integer, got: '${NUM_GPUS}'" >&2
+    exit 1
+fi
 
 case "$EXPERIMENT" in
     joint)
@@ -41,6 +95,15 @@ esac
 # ── Environment setup ────────────────────────────────────────────────────────
 export MASTER_PORT=${MASTER_PORT:-39600}
 export WANDB_PROJECT=${WANDB_PROJECT:-vargpt-self-evolving}
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
+
+if ! LAUNCHER_CMD="$(resolve_launcher)"; then
+    echo "[ERROR] Could not find LlamaFactory launcher." >&2
+    echo "Install with: pip install -e ${REPO_ROOT}" >&2
+    echo "Or ensure 'python -m llamafactory.cli' imports in current environment." >&2
+    exit 1
+fi
 
 # Optional: HuggingFace mirror (uncomment if needed)
 # export HF_ENDPOINT=https://hf-mirror.com
@@ -53,10 +116,13 @@ echo "  Config     : $CONFIG"
 echo "  GPUs       : $NUM_GPUS"
 echo "  Master Port: $MASTER_PORT"
 echo "  W&B Project: $WANDB_PROJECT"
+echo "  Launcher   : $LAUNCHER_CMD"
+echo "  Dataset dir: ${DATASET_DIR:-data_temp}"
 echo "=============================================="
 
 # ── Build command ────────────────────────────────────────────────────────────
 CMD_ARGS=""
+DATASET_DIR="${DATASET_DIR:-data_temp}"
 
 # Resume from checkpoint
 if [ -n "${RESUME_FROM:-}" ]; then
@@ -69,6 +135,9 @@ if [ -n "${IMAGE_FOLDER:-}" ]; then
     echo "  Image folder: $IMAGE_FOLDER"
     CMD_ARGS="$CMD_ARGS --se_image_folder $IMAGE_FOLDER"
 fi
+
+# Dataset location (defaults to data_temp in this repo)
+CMD_ARGS="$CMD_ARGS --dataset_dir ${DATASET_DIR}"
 
 # Self-evolving controller overrides (env-overridable)
 CMD_ARGS="$CMD_ARGS --se_num_solver_samples ${SE_NUM_SOLVER_SAMPLES:-7}"
@@ -109,10 +178,10 @@ if [ "$NUM_GPUS" -gt 1 ]; then
     NODE_RANK=0 \
     MASTER_ADDR=127.0.0.1 \
     MASTER_PORT=$MASTER_PORT \
-        llamafactory-cli train "$CONFIG" $CMD_ARGS
+        bash -lc "$LAUNCHER_CMD train \"$CONFIG\" $CMD_ARGS"
 else
     echo "  Launching single-GPU..."
-    llamafactory-cli train "$CONFIG" $CMD_ARGS
+    bash -lc "$LAUNCHER_CMD train \"$CONFIG\" $CMD_ARGS"
 fi
 
 echo ""

@@ -15,6 +15,18 @@ CONFIG="examples/train_self_evolving/vargpt_se_joint.yaml"
 NPROC_PER_NODE=8
 MASTER_PORT=39600
 
+resolve_launcher() {
+    if command -v llamafactory-cli >/dev/null 2>&1; then
+        echo "llamafactory-cli"
+        return 0
+    fi
+    if python -c "import llamafactory.cli" >/dev/null 2>&1; then
+        echo "python -m llamafactory.cli"
+        return 0
+    fi
+    return 1
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # DATA: Just set IMAGE_FOLDER to your folder of images.
 #       Subfolders are scanned recursively. No JSON needed.
@@ -79,6 +91,7 @@ SE_ALL_EASY_EXPLORE_NUM_CANDIDATES="${SE_ALL_EASY_EXPLORE_NUM_CANDIDATES:-6}"
 SE_PROPOSER_EARLY_FAILFAST_ENABLED="${SE_PROPOSER_EARLY_FAILFAST_ENABLED:-true}"
 SE_PROPOSER_EARLY_FAILFAST_STOP="${SE_PROPOSER_EARLY_FAILFAST_STOP:-false}"
 SE_PROPOSER_EARLY_FAILFAST_RECOVER="${SE_PROPOSER_EARLY_FAILFAST_RECOVER:-true}"
+DATASET_DIR="${DATASET_DIR:-data_temp}"
 
 # ── Pre-flight checks ────────────────────────────────────────────────────────
 if [[ ! -f "$CONFIG" ]]; then
@@ -86,8 +99,10 @@ if [[ ! -f "$CONFIG" ]]; then
     exit 1
 fi
 
-if ! command -v llamafactory-cli &>/dev/null; then
-    echo "[ERROR] llamafactory-cli not found. Run: pip install -e ." >&2
+if ! LAUNCHER_CMD="$(resolve_launcher)"; then
+    echo "[ERROR] Could not find LlamaFactory launcher." >&2
+    echo "[ERROR] Run: pip install -e ." >&2
+    echo "[ERROR] Or ensure 'python -m llamafactory.cli' imports in current env." >&2
     exit 1
 fi
 
@@ -107,6 +122,8 @@ echo "  Image folder : $IMAGE_FOLDER"
 echo "  Solver K     : $SE_NUM_SOLVER_SAMPLES"
 echo "  Spot-check K : $SE_PROPOSER_SPOT_CHECK_SAMPLES"
 echo "  Temp range   : [$SE_SOLVER_TEMP_MIN, $SE_SOLVER_TEMP_MAX]"
+echo "  Dataset dir  : $DATASET_DIR"
+echo "  Launcher     : $LAUNCHER_CMD"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 
@@ -117,8 +134,9 @@ NODE_RANK=0 \
 NPROC_PER_NODE="$NPROC_PER_NODE" \
 MASTER_ADDR=127.0.0.1 \
 MASTER_PORT="$MASTER_PORT" \
-    llamafactory-cli train "$CONFIG" \
+    bash -lc "$LAUNCHER_CMD train \"$CONFIG\" \
         --se_image_folder "$IMAGE_FOLDER" \
+        --dataset_dir "$DATASET_DIR" \
         --se_num_solver_samples "$SE_NUM_SOLVER_SAMPLES" \
         --se_proposer_spot_check_samples "$SE_PROPOSER_SPOT_CHECK_SAMPLES" \
         --se_solver_temp_min "$SE_SOLVER_TEMP_MIN" \
@@ -143,7 +161,7 @@ MASTER_PORT="$MASTER_PORT" \
         --se_proposer_early_failfast_enabled "$SE_PROPOSER_EARLY_FAILFAST_ENABLED" \
         --se_proposer_early_failfast_stop "$SE_PROPOSER_EARLY_FAILFAST_STOP" \
         --se_proposer_early_failfast_recover "$SE_PROPOSER_EARLY_FAILFAST_RECOVER" \
-        ${SE_EXTRA_ARGS:-}
+        ${SE_EXTRA_ARGS:-}"
 
 echo ""
 echo "═══════════════════════════════════════════════════════════"
