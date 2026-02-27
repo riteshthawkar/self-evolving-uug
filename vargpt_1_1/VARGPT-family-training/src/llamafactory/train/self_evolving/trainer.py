@@ -1396,6 +1396,18 @@ class SelfEvolvingTrainer(Trainer):
         cfg = self.se_config
         peft_model = _unwrap_model(self.model)       # PeftModel (DDP-unwrapped)
         actual_model = self._get_actual_model(self.model)  # VargptQwen2VLForConditionalGeneration
+        _gen_modules = []
+        _gen_module_orig_dtypes = {}
+        _past_hidden_states_orig_dtype = None
+
+        def _module_fp_dtype(module):
+            for p in module.parameters():
+                if p.is_floating_point():
+                    return p.dtype
+            for b in module.buffers():
+                if b.is_floating_point():
+                    return b.dtype
+            return None
 
         try:
             # Build generation prompt with special tokens
@@ -1446,18 +1458,19 @@ class SelfEvolvingTrainer(Trainer):
                 # designed for float32, but the whole model is loaded in bf16.
                 # autoregressive_infer_cfg does .float() on inputs before
                 # passing to these modules, causing dtype mismatches.
-                _gen_modules = []
                 for name in ("vargpt_gen", "image_gen_projector",
                              "image_gen_projector_out", "vae_local"):
                     mod = getattr(actual_model, name, None)
                     if mod is not None:
                         _gen_modules.append((name, mod))
+                        _gen_module_orig_dtypes[name] = _module_fp_dtype(mod)
                         mod.float()
 
                 # Also cast past_hidden_states to float32 — it was stored
                 # during step 1 in bf16, but now flows into the float32
                 # VAR modules via get_ca_kv_cross → image_gen_projector_out.
                 if actual_model.past_hidden_states is not None:
+                    _past_hidden_states_orig_dtype = actual_model.past_hidden_states.dtype
                     actual_model.past_hidden_states = actual_model.past_hidden_states.float()
 
                 gen_result = peft_model(
@@ -1465,10 +1478,6 @@ class SelfEvolvingTrainer(Trainer):
                     attention_mask=attention_mask,
                     inference_image_gen=True,
                 )
-
-                # Restore bf16 on the generation modules
-                for name, mod in _gen_modules:
-                    mod.to(torch.bfloat16)
 
                 if gen_result is not None:
                     if isinstance(gen_result, torch.Tensor):
@@ -1488,6 +1497,13 @@ class SelfEvolvingTrainer(Trainer):
             import traceback
             traceback.print_exc()
         finally:
+            # Restore original dtypes even if generation path throws.
+            for name, mod in _gen_modules:
+                target_dtype = _gen_module_orig_dtypes.get(name, None)
+                if target_dtype is not None:
+                    mod.to(dtype=target_dtype)
+            if actual_model.past_hidden_states is not None and _past_hidden_states_orig_dtype is not None:
+                actual_model.past_hidden_states = actual_model.past_hidden_states.to(dtype=_past_hidden_states_orig_dtype)
             # Always restore training mode
             peft_model.train()
 

@@ -2061,6 +2061,14 @@ class VARGPTQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMi
             else:
                 raise ValueError(f'cfg_insertion_layer: {item} is not valid')
         
+        if hasattr(self.model, "embed_tokens") and hasattr(self.model.embed_tokens, "weight"):
+            llm_dtype = self.model.embed_tokens.weight.dtype
+        elif hasattr(self, "lm_head") and hasattr(self.lm_head, "weight"):
+            llm_dtype = self.lm_head.weight.dtype
+        else:
+            llm_dtype = _module_fp_dtype(self.model, kv_compact.dtype)
+        img_proj_out_dtype = _module_fp_dtype(self.image_gen_projector_out, llm_dtype)
+
         num_stages_minus_1 = len(scale_schedule)-1
         summed_codes = 0
         for si, pn in enumerate(scale_schedule):   # si: i-th segment
@@ -2070,7 +2078,7 @@ class VARGPTQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMi
             cur_L += np.array(pn).prod()
 
             # trcunt
-            x = last_stage[:B]
+            x = last_stage[:B].to(dtype=llm_dtype)
             outputs = self.model(
                 input_ids=None,
                 position_ids=None,
@@ -2087,7 +2095,7 @@ class VARGPTQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMi
 
             hidden_outputs = outputs[0] 
             if cfg !=1:
-                noise_x = last_stage[B:]
+                noise_x = last_stage[B:].to(dtype=llm_dtype)
                 noise_outputs = self.model(
                     input_ids=None,
                     position_ids=None,
@@ -2104,6 +2112,7 @@ class VARGPTQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMi
                 # gaussian_noise = torch.randn(B, hidden_outputs.shape[1], hidden_outputs.shape[2], device=hidden_outputs.device)  # 保持设备一致
                 gaussian_noise = noise_outputs[0]
                 hidden_outputs = torch.cat([hidden_outputs,gaussian_noise], dim=0)  # [2*B, num, num2]
+            hidden_outputs = hidden_outputs.to(dtype=img_proj_out_dtype)
             last_stage = self.image_gen_projector_out(hidden_outputs).view(hidden_outputs.shape[0], hidden_outputs.shape[1], self.vargpt_gen.C)
 
 
