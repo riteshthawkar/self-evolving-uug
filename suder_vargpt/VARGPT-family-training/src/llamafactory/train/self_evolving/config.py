@@ -50,7 +50,7 @@ class SelfEvolvingConfig:
     max_new_tokens_solver: int = 128
     max_new_tokens_proposer: int = 256
     max_new_tokens_caption: int = 96
-    num_solver_samples: int = 5
+    num_solver_samples: int = 7
     num_solver_samples_spec: int = 3
 
     # ── VARGPT Image Generation (replaces DiT/diffusion params) ─────────
@@ -77,7 +77,11 @@ class SelfEvolvingConfig:
     proposer_update_rule: str = "grpo"             # reinforce|grpo
     proposer_grpo_gen_group_size: int = 3
     proposer_num_candidates: int = 3               # K candidate questions per proposer call
-    proposer_spot_check_samples: int = 2           # solver samples for spot-checking
+    proposer_spot_check_samples: int = 3           # solver samples for spot-checking
+    proposer_certificate_enabled: bool = True
+    proposer_certificate_min_score: float = 0.55
+    proposer_certificate_weight: float = 0.75
+    proposer_certificate_strict_struct: bool = True
     proposer_gen_reward_enabled: bool = True
     proposer_gen_entropy_weight: float = 0.7
     proposer_gen_baseline_momentum: float = 0.6
@@ -87,9 +91,9 @@ class SelfEvolvingConfig:
     # ── Reward Shaping ───────────────────────────────────────────────────
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
-    solver_temp_min: float = 0.7
-    solver_temp_max: float = 1.3
-    solver_top_p_min: float = 0.5
+    solver_temp_min: float = 0.5
+    solver_temp_max: float = 2.5
+    solver_top_p_min: float = 0.3
     solver_top_p_max: float = 1.0
     sc_entropy_min: float = 0.15
     sc_entropy_max: float = 1.2
@@ -114,7 +118,7 @@ class SelfEvolvingConfig:
     proposer_non_objective_penalty: float = 0.20
     proposer_require_objective: bool = True
     solver_skip_update_on_easy: bool = True
-    easy_update_majority_frac_threshold: float = 0.95
+    easy_update_majority_frac_threshold: float = 1.0
     acceptance_require_non_easy: bool = True
     rejected_question_penalty: float = 0.35
 
@@ -129,14 +133,64 @@ class SelfEvolvingConfig:
     entropy_iqr_filter_min_majority_frac: float = 0.80
 
     # ── Difficulty Curriculum ────────────────────────────────────────────
-    difficulty_sampler_enabled: bool = False
+    difficulty_sampler_enabled: bool = True
     difficulty_sampler_window_size: int = 256
-    difficulty_sampler_min_samples: int = 32
-    difficulty_target_easy: float = 0.20
-    difficulty_target_medium: float = 0.60
-    difficulty_target_hard: float = 0.20
+    difficulty_sampler_min_samples: int = 8
+    difficulty_target_easy: float = 0.00
+    difficulty_target_medium: float = 0.70
+    difficulty_target_hard: float = 0.30
     difficulty_hard_min_entropy: float = 0.90
     difficulty_hard_max_margin: float = 0.35
+
+    # ── Proposer Warm-Start (entropy-free bootstrap) ─────────────────────
+    proposer_warm_start_enabled: bool = True
+    proposer_warm_start_max_steps: int = 30
+    proposer_warm_start_exit_window: int = 5
+    proposer_warm_start_exit_consecutive: int = 2
+    proposer_warm_start_entropy_exit_threshold: float = 0.10
+    proposer_warm_start_easy_reject_penalty_scale: float = 0.0
+    proposer_warm_start_certificate_weight: float = 0.50
+
+    # ── Hardness Debt Controller ──────────────────────────────────────────
+    hardness_debt_enabled: bool = True
+    hardness_debt_inc_easy: float = 1.50
+    hardness_debt_dec_non_easy: float = 1.00
+    hardness_debt_max: float = 6.0
+    hardness_debt_hard_recovery_threshold: float = 3.0
+    hardness_debt_recovery_easy_weight: float = 0.0
+    hardness_debt_recovery_medium_weight: float = 0.30
+    hardness_debt_recovery_hard_weight: float = 0.70
+    hardness_debt_stale_steps: int = 8
+    hardness_debt_stale_reset_to: float = 3.0
+    hardness_debt_stale_escape_steps: int = 8
+    hardness_debt_stale_easy_weight: float = 0.05
+    hardness_debt_stale_medium_weight: float = 0.55
+    hardness_debt_stale_hard_weight: float = 0.40
+    hardness_debt_temp_boost_max: float = 0.30
+    hardness_debt_penalty_boost_max: float = 0.30
+
+    # ── All-Easy Exploration ──────────────────────────────────────────────
+    all_easy_explore_trigger: int = 2
+    all_easy_explore_steps: int = 16
+    all_easy_explore_num_candidates: int = 6
+    all_easy_explore_temp_boost: float = 1.20
+    all_easy_explore_top_p_boost: float = 0.20
+    all_easy_explore_penalty_boost: float = 0.70
+
+    # ── Early Fail-Fast / Recovery ───────────────────────────────────────
+    proposer_early_failfast_enabled: bool = True
+    proposer_early_failfast_stop: bool = False
+    proposer_early_failfast_recover: bool = True
+    proposer_early_failfast_recover_steps: int = 20
+    proposer_early_stage1_u_step: int = 12
+    proposer_early_stage2_u_step: int = 24
+    proposer_early_hard_stop_min_u_step: int = 80
+    proposer_early_candidate_non_easy_rate_min: float = 0.08
+    proposer_early_all_easy_rate_max: float = 0.93
+    proposer_early_reward_clipped_rate_max: float = 0.85
+    proposer_early_selected_non_easy_rate_min: float = 0.10
+    proposer_early_solver_updates_min: int = 1
+    proposer_early_max_collapse_streak: int = 3
 
     # ── Generation Reward Weights ────────────────────────────────────────
     reward_spec_weight: float = 0.65
