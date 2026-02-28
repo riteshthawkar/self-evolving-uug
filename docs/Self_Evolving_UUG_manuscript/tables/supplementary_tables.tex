@@ -1,0 +1,58 @@
+% =====================================================================
+% Supplementary Table S1: Reference Comparison with Supervised Methods
+% These methods use curated SFT data, external reward models, or
+% supervised initialization. NOT directly comparable to our framework.
+% Included as reference upper bounds to contextualize the performance
+% gap between supervised and self-supervised post-training.
+% =====================================================================
+\begin{table*}[tb]
+  \caption{Reference comparison with methods that use additional supervision. These approaches employ curated fine-tuning data, external reward models, or supervised initialization stages, and are therefore not directly comparable to our fully unsupervised framework. Results are shown as reference points to contextualize the performance gap between supervised and self-supervised post-training.}
+  \label{tab:supervised_reference}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}lllcccccccc|ccc@{}}
+    \toprule
+    & & & \multicolumn{8}{c|}{Understanding} & \multicolumn{3}{c}{Generation} \\
+    \cmidrule(lr){4-11} \cmidrule(l){12-14}
+    Method & Backbone & Ext. Supervision & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval & DPG-Bench & WISE \\
+    \midrule
+    UniRL \cite{mao2025unirl} & Janus & SFT data & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    UniCorn \cite{han2026unicorn} & UMM & Judge training & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    CoRL \cite{jiang2025coreinforcement} & Janus-Pro-1B & Task-specific rewards & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    UAE \cite{yan2025understandinggeneration} & Janus-Pro-7B & Supervised init. & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    Internal Gap \cite{han2025internalgap} & UMM & SFT + DPO data & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \midrule
+    \textbf{Ours} & BLIP3o-8B & \textbf{None} & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table*}
+
+
+% =====================================================================
+% Supplementary Table S2: Model-Agnostic Understanding (Expanded)
+% Full per-benchmark breakdown if space in supplementary allows.
+% =====================================================================
+\begin{table*}[tb]
+  \caption{Expanded understanding benchmarks across three architecturally distinct unified models, including additional specialist benchmarks to verify that training does not degrade performance on tasks outside the training distribution.}
+  \label{tab:expanded_understanding}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}llcccccccccc@{}}
+    \toprule
+    Model & Setting & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & OCRBench & MathVista \\
+    \midrule
+    \multirow{2}{*}{BLIP3o-8B} & Base & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    & Ours & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \midrule
+    \multirow{2}{*}{BAGEL} & Base & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    & Ours & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \midrule
+    \multirow{2}{*}{VARGPT} & Base & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    & Ours & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table*}

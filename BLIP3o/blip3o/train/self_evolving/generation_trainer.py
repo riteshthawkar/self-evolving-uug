@@ -4634,7 +4634,22 @@ class GenerationSelfEvolvingTrainer:
             _proposer_gen_prompt = str(getattr(spec, "proposer_prompt", spec.prompt) or "").strip()
             _grpo_completions: Optional[List[str]] = None  # set in GRPO branch for logging
 
-            if _proposer_gen_completion and spec_quality >= self.cfg.min_spec_quality_for_update:
+            _local_proposer_ready = False
+            _local_proposer_skip_reason: Optional[str] = None
+            if not _proposer_gen_completion:
+                _local_proposer_skip_reason = "empty_proposer_completion"
+            elif spec_quality < self.cfg.min_spec_quality_for_update:
+                _local_proposer_skip_reason = "low_spec_quality_for_proposer_gen"
+            else:
+                _local_proposer_ready = True
+
+            proposer_ready, proposer_skip_reason = _global_update_ready(
+                _local_proposer_ready,
+                _local_proposer_skip_reason,
+                peer_reason="distributed_peer_proposer_skip",
+            )
+
+            if proposer_ready:
                 try:
                     if self._proposer_uses_grpo:
                         # ── GRPO path ────────────────────────────────────────────────────
@@ -4780,12 +4795,6 @@ class GenerationSelfEvolvingTrainer:
                 except Exception as _prop_exc:
                     proposer_skip_reason = f"proposer_gen_update_error:{type(_prop_exc).__name__}"
                     proposer_update_due = False
-            else:
-                proposer_skip_reason = (
-                    "low_spec_quality_for_proposer_gen"
-                    if not _proposer_gen_completion
-                    else "empty_proposer_completion"
-                )
 
         unicorn_recon_enqueued = self._enqueue_unicorn_reconstruction_tasks(
             step=step,
