@@ -1,7 +1,84 @@
 \section{Experiments}
 \label{sec:experiments}
 
-% TODO: Write experimental setup, results, and analysis.
-% The following tables are included here and should be populated with results.
+We evaluate the self-evolving framework along three axes: whether it consistently improves both understanding and generation across architecturally distinct models (Sec.~\ref{sec:main_results}), how it compares to existing self-supervised post-training methods under equivalent supervision constraints (Sec.~\ref{sec:comparison}), and which components are essential to its effectiveness (Sec.~\ref{sec:ablation}).
+
+\subsection{Experimental Setup}
+\label{sec:setup}
+
+% TODO: Fill with actual experimental details once training is complete.
+
+\noindent\textbf{Models.}
+We apply the framework to three unified understanding and generation models that employ fundamentally different image synthesis mechanisms: BLIP3o-8B (diffusion-based denoising), BAGEL (flow-matching with a variational autoencoder), and VARGPT (autoregressive discrete token generation). For each model, we attach three LoRA adapters (proposer, solver, generator) to the frozen backbone with rank $r$ and train them using identical hyperparameters and training schedules.
+
+\noindent\textbf{Training data.}
+All training uses unlabeled images only. No captions, question-answer pairs, or human annotations are used at any stage. The image sources and quantities are reported per model.
+
+\noindent\textbf{Understanding benchmarks.}
+We evaluate visual understanding on MMMU, MMBench, TextVQA, SEED-Bench, RealWorldQA (RWQA), MM-Vet, and both perception (MME-P) and cognition (MME-C) splits of MME.
+
+\noindent\textbf{Generation benchmarks.}
+We evaluate image generation on GenEval (compositional attribute accuracy), DPG-Bench (dense prompt following), and WISE (open-ended generation quality).
+
+\noindent\textbf{Training details.}
+% TODO: Fill with learning rate, batch size, number of steps, LoRA rank,
+% number of prompt perturbations N, STE window size, U:G step ratio,
+% and other hyperparameters.
+
+
+\subsection{Main Results}
+\label{sec:main_results}
+
+Table~\ref{tab:main_results} presents understanding and generation results across all three backbone architectures. Each model is evaluated in its pretrained base configuration and after applying the self-evolving framework, with the absolute improvement ($\Delta$) reported for each benchmark.
+
+% TODO: Add discussion of results once numbers are available.
+% Key points to cover:
+% - Consistent improvement on both understanding AND generation across all 3 models
+% - Highlight that the same algorithm/hyperparameters work across diffusion, flow-matching, and autoregressive
+% - Note any benchmark where improvements are particularly large or small, and why
+% - Generation Avg column provides a single summary statistic
 
 \input{tables/quantitative_tables}
+
+
+\subsection{Comparison with Self-Supervised Methods}
+\label{sec:comparison}
+
+To ensure a fair evaluation, we compare exclusively against methods that operate under equivalent supervision constraints: no curated labels, no supervised fine-tuning data, and no external reward models. Table~\ref{tab:selfsup_comparison} reports this comparison. Methods that employ additional supervision (curated SFT data, external reward models, or supervised initialization stages) are reported separately in the supplementary material as reference upper bounds.
+
+% TODO: Add discussion once numbers are filled.
+% Key points to cover:
+% - How our method compares to each self-supervised baseline
+% - Highlight that we achieve competitive or superior results without ANY external signal
+% - Note backbone differences where relevant (our BLIP3o-8B vs their Janus-Pro-7B, etc.)
+% - Reference supplementary Table S1 for supervised comparison
+
+
+\subsection{Ablation Study}
+\label{sec:ablation}
+
+We ablate each framework component on BLIP3o-8B to isolate its contribution. Table~\ref{tab:ablation} reports understanding performance (averaged across MMMU, MMBench, SEED, and MMVet) and generation performance (GenEval) for each configuration.
+
+% TODO: Add discussion once numbers are filled.
+% Key points to cover:
+% - Understanding signal ablations: STE vs self-consistency, importance of prompt perturbation
+% - Generation signal ablations: QA fidelity vs cycle consistency complementarity
+% - Optimization ablations: GRPO vs REINFORCE, bucket-stratified baselines
+% - Architecture ablations: joint vs understanding-only vs generation-only
+%   (this directly tests whether the two loops benefit each other)
+
+
+% \subsection{Training Dynamics}
+% \label{sec:dynamics}
+% TODO: Add training dynamics figure and analysis.
+% Show: (a) STE difficulty over training steps, (b) self-consistency entropy,
+% (c) easy/medium/hard bucket proportions, (d) solver validation accuracy.
+% This is the "smoking gun" evidence that the self-evolving loop works.
+
+
+% \subsection{Qualitative Analysis}
+% \label{sec:qualitative}
+% TODO: Add qualitative examples figure.
+% Show: (a) Proposer question evolution (early vs late training),
+% (b) Generated image comparison (base vs ours),
+% (c) Failure cases.
