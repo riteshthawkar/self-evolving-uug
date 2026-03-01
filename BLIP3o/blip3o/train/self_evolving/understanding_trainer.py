@@ -1484,6 +1484,8 @@ class UnderstandingSelfEvolvingTrainer:
                     0.0, min(1.0, entropy_iqr_filter_min_majority_frac)
                 )
                 solver_entropy_iqr_blocked = bool(
+                    getattr(cfg, "solver_skip_update_on_easy", True)
+                    and
                     entropy_iqr_filter_active
                     and (entropy_nats <= entropy_easy_threshold)
                     and (maj_frac >= entropy_iqr_filter_min_majority_frac)

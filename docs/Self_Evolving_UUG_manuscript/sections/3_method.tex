@@ -20,7 +20,16 @@ Rather than fine-tuning the full model, we decompose it into three functional ro
     \item \textbf{Generator} ($\phi_g$): synthesizes images from textual descriptions using the model's generation capability.
 \end{itemize}
 
-Each adapter modifies only a small fraction of the model's parameters while keeping $\theta$ fixed, ensuring that all three roles share the same pretrained representations and that independent optimization of each role does not destabilize the base model. Training alternates between \emph{understanding steps}, which update the proposer and solver, and \emph{generation steps}, which update the generator. The solver plays a dual role throughout: it is both a learner within the understanding loop and an internal evaluator within the generation loop, which couples understanding improvement directly to generation quality without any external supervision signal. The following subsections detail each loop in turn, beginning with the understanding mechanism that produces the core training signal.
+Each adapter modifies only a small fraction of the model's parameters while keeping $\theta$ fixed, ensuring that all three roles share the same pretrained representations and that independent optimization of each role does not destabilize the base model. Training alternates between \emph{understanding steps}, which update the proposer and solver, and \emph{generation steps}, which update the generator. The solver plays a dual role throughout: it is both a learner within the understanding loop and an internal evaluator within the generation loop, which couples understanding improvement directly to generation quality without any external supervision signal. Figure~\ref{fig:framework} provides a visual overview of the complete framework. The following subsections detail each loop in turn, beginning with the understanding mechanism that produces the core training signal.
+
+\begin{figure*}[tb]
+  \centering
+  % TODO: Replace with actual framework figure file once created.
+  % \includegraphics[width=\linewidth]{figures/framework.pdf}
+  \fbox{\parbox{0.95\linewidth}{\centering\vspace{4cm}\textbf{[Framework Figure Placeholder]}\\\smallskip See \texttt{figures/framework\_figure\_spec.md} for detailed specification.\vspace{4cm}}}
+  \caption{Overview of the proposed self-evolving framework. Given only unlabeled images and a frozen unified backbone, three lightweight LoRA adapters instantiate a proposer, solver, and generator. During understanding steps (left), the proposer generates visual questions, the solver answers them under diverse prompt perturbations, and the resulting self-consistency entropy together with solver token entropy provide the training signal for both the proposer (via GRPO) and the solver (via REINFORCE). During generation steps (right), the generator synthesizes images from text, and the solver evaluates them through question-answering fidelity scoring and cycle-consistent captioning, directly coupling understanding quality to the generation training signal. The framework requires no human annotations or external reward models. The same algorithmic components are applied identically across three architecturally distinct generation paradigms (bottom).}
+  \label{fig:framework}
+\end{figure*}
 
 
 \subsection{Self-Consistent Understanding}

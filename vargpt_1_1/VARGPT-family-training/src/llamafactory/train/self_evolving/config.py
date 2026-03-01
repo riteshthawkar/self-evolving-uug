@@ -91,7 +91,7 @@ class SelfEvolvingConfig:
     # ── Reward Shaping ───────────────────────────────────────────────────
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
-    solver_use_forced_choice_from_proposer: bool = False
+    solver_use_forced_choice_from_proposer: bool = True
     solver_temp_min: float = 0.4
     solver_temp_max: float = 2.6
     solver_top_p_min: float = 0.35

@@ -82,7 +82,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--solver_soft_gamma", type=float, default=0.7)
     p.add_argument("--solver_use_temperature_mix", action="store_true", default=True)
     p.add_argument("--disable_solver_temperature_mix", dest="solver_use_temperature_mix", action="store_false")
-    p.add_argument("--solver_use_forced_choice_from_proposer", action="store_true", default=False)
+    p.add_argument("--solver_use_forced_choice_from_proposer", action="store_true", default=True)
     p.add_argument(
         "--disable_solver_use_forced_choice_from_proposer",
         dest="solver_use_forced_choice_from_proposer",
@@ -203,7 +203,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--proposer_easy_reward_floor", type=float, default=-0.35)
     p.add_argument("--proposer_all_easy_rank_spread", type=float, default=0.08)
-    p.add_argument("--solver_skip_update_on_easy", action="store_true", default=True)
+    p.add_argument("--solver_skip_update_on_easy", action="store_true", default=False)
     p.add_argument(
         "--allow_solver_update_on_easy",
         dest="solver_skip_update_on_easy",

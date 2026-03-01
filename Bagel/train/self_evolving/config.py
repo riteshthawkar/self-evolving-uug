@@ -106,7 +106,7 @@ class RolloutConfig:
     baseline_momentum: float = 0.9
     grpo_eps: float = 1e-6
     solver_reward_mix_gamma: float = 0.7
-    solver_skip_easy_updates: bool = True
+    solver_skip_easy_updates: bool = False
     solver_easy_update_majority_threshold: float = 0.98
     train_understanding_proposer: bool = True
     train_solver: bool = True

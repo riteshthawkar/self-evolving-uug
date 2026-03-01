@@ -49,7 +49,7 @@ class UnderstandingSelfEvolvingConfig:
     # Reward shaping
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
-    solver_use_forced_choice_from_proposer: bool = False
+    solver_use_forced_choice_from_proposer: bool = True
     solver_temp_min: float = 0.4
     solver_temp_max: float = 2.6
     solver_top_p_min: float = 0.35
@@ -182,7 +182,7 @@ class UnderstandingSelfEvolvingConfig:
     proposer_early_solver_updates_min: int = 1
     proposer_early_collapse_streak_max: int = 3
     proposer_health_window_size: int = 256
-    solver_skip_update_on_easy: bool = True
+    solver_skip_update_on_easy: bool = False
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
     rejected_question_penalty: float = 0.35
@@ -460,7 +460,7 @@ class GenerationSelfEvolvingConfig:
     # Reward shaping
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
-    solver_use_forced_choice_from_proposer: bool = False
+    solver_use_forced_choice_from_proposer: bool = True
     solver_temp_min: float = 0.4
     solver_temp_max: float = 2.6
     solver_top_p_min: float = 0.35
@@ -593,7 +593,7 @@ class GenerationSelfEvolvingConfig:
     proposer_early_solver_updates_min: int = 1
     proposer_early_collapse_streak_max: int = 3
     proposer_health_window_size: int = 256
-    solver_skip_update_on_easy: bool = True
+    solver_skip_update_on_easy: bool = False
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
     rejected_question_penalty: float = 0.35

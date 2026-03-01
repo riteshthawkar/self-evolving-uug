@@ -177,7 +177,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--baseline_momentum", type=float, default=0.9)
     p.add_argument("--grpo_eps", type=float, default=1e-6)
     p.add_argument("--solver_reward_mix_gamma", type=float, default=0.7)
-    p.add_argument("--solver_skip_easy_updates", action="store_true", default=True)
+    p.add_argument("--solver_skip_easy_updates", action="store_true", default=False)
     p.add_argument(
         "--disable_solver_skip_easy_updates",
         dest="solver_skip_easy_updates",
