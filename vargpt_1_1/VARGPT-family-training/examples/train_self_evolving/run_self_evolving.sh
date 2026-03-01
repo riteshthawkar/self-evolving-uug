@@ -351,6 +351,9 @@ echo "=============================================="
 # ── Build temporary YAML with overrides ──────────────────────────────────────
 DATASET_DIR="${DATASET_DIR:-data_temp}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
+if [ -z "${OUTPUT_DIR}" ]; then
+    OUTPUT_DIR="${REPO_ROOT}/saves/vargpt_se_${EXPERIMENT}_$(date +%Y%m%d_%H%M%S)"
+fi
 if [ -n "${RESUME_FROM:-}" ]; then
     OVERWRITE_OUTPUT_DIR="${OVERWRITE_OUTPUT_DIR:-false}"
 else

@@ -182,6 +182,9 @@ SE_PROPOSER_EARLY_FAILFAST_STOP="${SE_PROPOSER_EARLY_FAILFAST_STOP:-false}"
 SE_PROPOSER_EARLY_FAILFAST_RECOVER="${SE_PROPOSER_EARLY_FAILFAST_RECOVER:-true}"
 DATASET_DIR="${DATASET_DIR:-data_temp}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
+if [[ -z "${OUTPUT_DIR}" ]]; then
+    OUTPUT_DIR="${REPO_ROOT}/saves/vargpt_se_joint_$(date +%Y%m%d_%H%M%S)"
+fi
 
 # ── Pre-flight checks ────────────────────────────────────────────────────────
 if [[ ! -f "$CONFIG" ]]; then
