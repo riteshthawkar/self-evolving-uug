@@ -40,6 +40,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model_path", type=str, required=True)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--vae_device", type=str, default="")
+    p.add_argument(
+        "--lora_checkpoint_path",
+        type=str,
+        default="",
+        help=(
+            "Optional LoRA checkpoint to load before rollout/training. "
+            "Accepts: step_XXXXXX.pt, checkpoint directory, or step_XXXXXX_lora folder."
+        ),
+    )
     p.add_argument("--max_latent_size", type=int, default=64)
     p.add_argument("--enable_lora", action="store_true", default=False)
     p.add_argument("--lora_rank", type=int, default=16)
@@ -60,7 +69,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Data/outputs
     p.add_argument("--image_dir", type=str, required=True)
     p.add_argument("--output_dir", type=str, required=True)
-    p.add_argument("--steps", type=int, default=500)
+    p.add_argument("--steps", type=int, default=10000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log_every", type=int, default=10)
     p.add_argument("--understanding_steps_per_cycle", type=int, default=3)
@@ -177,9 +186,39 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--solver_easy_update_majority_threshold", type=float, default=0.98)
     p.add_argument("--proposer_num_candidates", type=int, default=3)
     p.add_argument("--proposer_spot_check_samples", type=int, default=3)
-    p.add_argument("--proposer_spot_entropy_min_gate", type=float, default=0.05)
+    p.add_argument("--proposer_spot_entropy_min_gate", type=float, default=0.15)
     p.add_argument("--proposer_grpo_gen_group_size", type=int, default=3)
     p.add_argument("--grpo_extra_sc_samples", type=int, default=3)
+    p.add_argument("--understanding_skip_no_acceptable", action="store_true", default=True)
+    p.add_argument(
+        "--disable_understanding_skip_no_acceptable",
+        dest="understanding_skip_no_acceptable",
+        action="store_false",
+    )
+    p.add_argument("--understanding_require_acceptable_for_update", action="store_true", default=True)
+    p.add_argument(
+        "--disable_understanding_require_acceptable_for_update",
+        dest="understanding_require_acceptable_for_update",
+        action="store_false",
+    )
+    p.add_argument("--understanding_update_require_disagreement", action="store_true", default=True)
+    p.add_argument(
+        "--disable_understanding_update_require_disagreement",
+        dest="understanding_update_require_disagreement",
+        action="store_false",
+    )
+    p.add_argument("--proposer_reject_unsolvable", action="store_true", default=True)
+    p.add_argument(
+        "--disable_proposer_reject_unsolvable",
+        dest="proposer_reject_unsolvable",
+        action="store_false",
+    )
+    p.add_argument("--solver_skip_unsolvable_updates", action="store_true", default=True)
+    p.add_argument(
+        "--disable_solver_skip_unsolvable_updates",
+        dest="solver_skip_unsolvable_updates",
+        action="store_false",
+    )
     p.add_argument("--score_grpo_extras", action="store_true", default=True)
     p.add_argument(
         "--disable_score_grpo_extras",
@@ -399,6 +438,7 @@ def main() -> None:
         model_path=args.model_path,
         device=args.device,
         vae_device=str(args.vae_device or ""),
+        lora_checkpoint_path=str(args.lora_checkpoint_path or ""),
         max_latent_size=int(args.max_latent_size),
         enable_lora=bool(args.enable_lora),
         lora_rank=int(args.lora_rank),
@@ -460,6 +500,11 @@ def main() -> None:
         proposer_spot_entropy_min_gate=float(args.proposer_spot_entropy_min_gate),
         proposer_grpo_gen_group_size=max(1, int(args.proposer_grpo_gen_group_size)),
         grpo_extra_sc_samples=max(1, int(args.grpo_extra_sc_samples)),
+        understanding_skip_no_acceptable=bool(args.understanding_skip_no_acceptable),
+        understanding_require_acceptable_for_update=bool(args.understanding_require_acceptable_for_update),
+        understanding_update_require_disagreement=bool(args.understanding_update_require_disagreement),
+        proposer_reject_unsolvable=bool(args.proposer_reject_unsolvable),
+        solver_skip_unsolvable_updates=bool(args.solver_skip_unsolvable_updates),
         score_grpo_extras=bool(args.score_grpo_extras),
         grpo_extra_temp_multiplier=float(args.grpo_extra_temp_multiplier),
         solver_token_entropy_enabled=bool(args.solver_token_entropy_enabled),

@@ -76,6 +76,11 @@ Key train-mode flags:
 - `--lora_rank`, `--lora_alpha`, `--lora_dropout`
 - `--lora_target_modules_csv`
 - `--lora_role_adapters_csv` (default: `proposer,solver,generator`)
+- `--understanding_skip_no_acceptable`
+- `--understanding_require_acceptable_for_update`
+- `--understanding_update_require_disagreement`
+- `--proposer_reject_unsolvable`
+- `--solver_skip_unsolvable_updates`
 - `--policy_lr`, `--policy_grad_accum_steps`, `--policy_max_grad_norm`
 - `--checkpoint_every`, `--resume_from`
 
@@ -99,4 +104,29 @@ Outputs:
 - `metrics.jsonl`: periodic heartbeat records (`log_every`) + final summary/error rows
 - `status.json`: latest run state snapshot (`running`/`completed`/`failed`) with progress + ETA
 - `summary.json`: run-level metrics
-- `checkpoints/step_*.pt`: adapter/update state checkpoints (train mode)
+- `checkpoints/step_*.pt`: trainer state + LoRA model state (resume-compatible)
+- `checkpoints/step_*_lora/`: role-wise LoRA snapshots for inference parity:
+  - `role_proposer.pt`
+  - `role_solver.pt`
+  - `role_generator.pt`
+  - `adapter_roles.json` (role-to-adapter manifest)
+
+To initialize runtime from a specific LoRA checkpoint:
+
+```bash
+python3 train/train_self_evolving.py \
+  --experiment understanding_self_evolving \
+  --model_path /path/to/BAGEL-7B-MoT \
+  --image_dir /path/to/images \
+  --output_dir /path/to/out \
+  --enable_lora \
+  --lora_checkpoint_path /path/to/checkpoints/step_001000_lora
+```
+
+Backfill role-wise LoRA exports from older `step_*.pt` checkpoints:
+
+```bash
+python3 train/self_evolving/export_role_lora_from_checkpoint.py \
+  --checkpoint /path/to/checkpoints/step_001000.pt \
+  --overwrite
+```

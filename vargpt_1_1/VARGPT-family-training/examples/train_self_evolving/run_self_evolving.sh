@@ -323,6 +323,9 @@ yaml_delete_key "se_image_folder"
     echo ""
     echo "# --- auto overrides from run_self_evolving.sh ---"
     echo "dataset_dir: \"$(yaml_quote "${DATASET_DIR}")\""
+    echo "se_total_steps: ${SE_TOTAL_STEPS:-10000}"
+    echo "se_save_every: ${SE_SAVE_EVERY:-200}"
+    echo "save_steps: ${SAVE_STEPS:-200}"
 
     if [ -n "${RESUME_FROM:-}" ]; then
         echo "resume_from_checkpoint: \"$(yaml_quote "${RESUME_FROM}")\""

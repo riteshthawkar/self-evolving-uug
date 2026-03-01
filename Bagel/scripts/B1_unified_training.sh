@@ -27,7 +27,7 @@ set -euo pipefail
 #   TRAIN_STAGE=warmup|strict
 #   RUN_MODE=train|rollout             # default: train (unified strategy)
 #   EXPERIMENT=unified_self_evolving   # default: unified
-#   STEPS=500
+#   STEPS=10000
 #   DEVICE=cuda
 #   MULTI_GPU_SPLIT=auto|on|off        # default: auto (model/vae split)
 #   MODEL_DEVICE_INDEX=0
@@ -36,6 +36,12 @@ set -euo pipefail
 #   ENABLE_SUDER=1                     # default: 1 in train mode
 #   PROPOSER_GEN_ENTROPY_WEIGHT=0.7 # alpha in joint reward blend
 #   POLICY_UPDATE_METHOD=reinforce|grpo
+#   LORA_CHECKPOINT_PATH=/path/to/checkpoints/step_001000_lora
+#   UNDERSTANDING_SKIP_NO_ACCEPTABLE=1
+#   UNDERSTANDING_REQUIRE_ACCEPTABLE_FOR_UPDATE=1
+#   UNDERSTANDING_UPDATE_REQUIRE_DISAGREEMENT=1
+#   PROPOSER_REJECT_UNSOLVABLE=1
+#   SOLVER_SKIP_UNSOLVABLE_UPDATES=1
 # ══════════════════════════════════════════════════════════════════════════════
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,7 +61,7 @@ OUTPUT_LAYOUT="${OUTPUT_LAYOUT:-direct}"   # direct|timestamp
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RUN_MODE="${RUN_MODE:-train}"
 EXPERIMENT="${EXPERIMENT:-unified_self_evolving}"
-STEPS="${STEPS:-500}"
+STEPS="${STEPS:-10000}"
 DEVICE="${DEVICE:-cuda}"
 VAE_DEVICE="${VAE_DEVICE:-}"
 MULTI_GPU_SPLIT="${MULTI_GPU_SPLIT:-auto}"   # auto|on|off
@@ -72,6 +78,7 @@ GEN_IMAGE_SIZE="${GEN_IMAGE_SIZE:-640}"
 GEN_NUM_TIMESTEPS="${GEN_NUM_TIMESTEPS:-50}"
 SAVE_GENERATED_IMAGES="${SAVE_GENERATED_IMAGES:-0}"
 ENABLE_LORA="${ENABLE_LORA:-0}"
+LORA_CHECKPOINT_PATH="${LORA_CHECKPOINT_PATH:-}"
 LORA_RANK="${LORA_RANK:-16}"
 LORA_ALPHA="${LORA_ALPHA:-32}"
 LORA_DROPOUT="${LORA_DROPOUT:-0.05}"
@@ -145,8 +152,13 @@ GENERATED_MIX_REFRESH_EVERY="${GENERATED_MIX_REFRESH_EVERY:-10}"
 UNDERSTANDING_GENERATED_ONLY="${UNDERSTANDING_GENERATED_ONLY:-0}"
 PROPOSER_NUM_CANDIDATES="${PROPOSER_NUM_CANDIDATES:-3}"
 PROPOSER_SPOT_CHECK_SAMPLES="${PROPOSER_SPOT_CHECK_SAMPLES:-3}"
-PROPOSER_SPOT_ENTROPY_MIN_GATE="${PROPOSER_SPOT_ENTROPY_MIN_GATE:-0.05}"
+PROPOSER_SPOT_ENTROPY_MIN_GATE="${PROPOSER_SPOT_ENTROPY_MIN_GATE:-0.15}"
 PROPOSER_GRPO_GEN_GROUP_SIZE="${PROPOSER_GRPO_GEN_GROUP_SIZE:-3}"
+UNDERSTANDING_SKIP_NO_ACCEPTABLE="${UNDERSTANDING_SKIP_NO_ACCEPTABLE:-1}"
+UNDERSTANDING_REQUIRE_ACCEPTABLE_FOR_UPDATE="${UNDERSTANDING_REQUIRE_ACCEPTABLE_FOR_UPDATE:-1}"
+UNDERSTANDING_UPDATE_REQUIRE_DISAGREEMENT="${UNDERSTANDING_UPDATE_REQUIRE_DISAGREEMENT:-1}"
+PROPOSER_REJECT_UNSOLVABLE="${PROPOSER_REJECT_UNSOLVABLE:-1}"
+SOLVER_SKIP_UNSOLVABLE_UPDATES="${SOLVER_SKIP_UNSOLVABLE_UPDATES:-1}"
 SCORE_GRPO_EXTRAS="${SCORE_GRPO_EXTRAS:-1}"
 GRPO_EXTRA_TEMP_MULTIPLIER="${GRPO_EXTRA_TEMP_MULTIPLIER:-1.5}"
 SOLVER_TOKEN_ENTROPY_ENABLED="${SOLVER_TOKEN_ENTROPY_ENABLED:-1}"
@@ -524,6 +536,31 @@ if [[ "$SCORE_GRPO_EXTRAS" == "1" ]]; then
 else
   SHARED_ARGS+=(--disable_score_grpo_extras)
 fi
+if [[ "$UNDERSTANDING_SKIP_NO_ACCEPTABLE" == "1" ]]; then
+  SHARED_ARGS+=(--understanding_skip_no_acceptable)
+else
+  SHARED_ARGS+=(--disable_understanding_skip_no_acceptable)
+fi
+if [[ "$UNDERSTANDING_REQUIRE_ACCEPTABLE_FOR_UPDATE" == "1" ]]; then
+  SHARED_ARGS+=(--understanding_require_acceptable_for_update)
+else
+  SHARED_ARGS+=(--disable_understanding_require_acceptable_for_update)
+fi
+if [[ "$UNDERSTANDING_UPDATE_REQUIRE_DISAGREEMENT" == "1" ]]; then
+  SHARED_ARGS+=(--understanding_update_require_disagreement)
+else
+  SHARED_ARGS+=(--disable_understanding_update_require_disagreement)
+fi
+if [[ "$PROPOSER_REJECT_UNSOLVABLE" == "1" ]]; then
+  SHARED_ARGS+=(--proposer_reject_unsolvable)
+else
+  SHARED_ARGS+=(--disable_proposer_reject_unsolvable)
+fi
+if [[ "$SOLVER_SKIP_UNSOLVABLE_UPDATES" == "1" ]]; then
+  SHARED_ARGS+=(--solver_skip_unsolvable_updates)
+else
+  SHARED_ARGS+=(--disable_solver_skip_unsolvable_updates)
+fi
 if [[ "$SOLVER_TOKEN_ENTROPY_ENABLED" == "1" ]]; then
   SHARED_ARGS+=(--solver_token_entropy_enabled)
 else
@@ -625,6 +662,9 @@ if [[ "$ENABLE_LORA" == "1" ]]; then
     --lora_role_adapters_csv "$LORA_ROLE_ADAPTERS_CSV"
     --lora_default_adapter "$LORA_DEFAULT_ADAPTER"
   )
+  if [[ -n "$LORA_CHECKPOINT_PATH" ]]; then
+    TRAIN_ARGS+=(--lora_checkpoint_path "$LORA_CHECKPOINT_PATH")
+  fi
 fi
 
 if [[ "$RUN_MODE" == "train" ]]; then
@@ -748,9 +788,13 @@ if [[ "$RUN_MODE" == "train" ]]; then
   echo "[B1]   PolicyTok:  max_completion_tokens=$POLICY_MAX_COMPLETION_TOKENS min_completion_tokens=$POLICY_MIN_COMPLETION_TOKENS max_prompt_tokens=$POLICY_MAX_PROMPT_TOKENS text_only=$POLICY_TEXT_ONLY_MAX_COMPLETION_TOKENS retries=$POLICY_TEXT_ONLY_MAX_RETRIES"
   echo "[B1]   PolicyFB:   text_only_fallback=$POLICY_TEXT_ONLY_FALLBACK text_only_mode=$POLICY_TEXT_ONLY_MODE rocm_force_text_only=$POLICY_ROCM_FORCE_TEXT_ONLY empty_cache_each_step=$POLICY_EMPTY_CACHE_EACH_STEP"
   echo "[B1]   PolicyUpd:  solver_max_samples=$SOLVER_POLICY_MAX_SAMPLES gen_solver_max_samples=$GEN_SOLVER_POLICY_MAX_SAMPLES proposer_max_candidates=$PROPOSER_POLICY_MAX_CANDIDATES"
+  echo "[B1]   U-Gating:   skip_no_acceptable=$UNDERSTANDING_SKIP_NO_ACCEPTABLE require_acceptable=$UNDERSTANDING_REQUIRE_ACCEPTABLE_FOR_UPDATE require_disagreement=$UNDERSTANDING_UPDATE_REQUIRE_DISAGREEMENT reject_unsolvable=$PROPOSER_REJECT_UNSOLVABLE solver_skip_unsolvable=$SOLVER_SKIP_UNSOLVABLE_UPDATES"
   echo "[B1]   TrainRoles: U-proposer=$TRAIN_UNDERSTANDING_PROPOSER solver=$TRAIN_SOLVER G-proposer=$TRAIN_GENERATION_PROPOSER generator=$TRAIN_GENERATOR"
   echo "[B1]   Gen-GRPO:   group=$PROPOSER_GRPO_GEN_GROUP_SIZE score_extras=$SCORE_GRPO_EXTRAS temp_mult=$GRPO_EXTRA_TEMP_MULTIPLIER"
   echo "[B1]   LoRA:       enabled (r=$LORA_RANK, alpha=$LORA_ALPHA, dropout=$LORA_DROPOUT)"
+  if [[ -n "$LORA_CHECKPOINT_PATH" ]]; then
+    echo "[B1]   LoRACkpt:   $LORA_CHECKPOINT_PATH"
+  fi
 fi
 echo "[B1]   LauncherLog:$LAUNCH_LOG"
 echo "[B1]   Monitor:    tail -f \"$LAUNCH_LOG\""

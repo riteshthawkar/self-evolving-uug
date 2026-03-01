@@ -30,6 +30,12 @@ _NON_OBJECTIVE_RE = re.compile(
     r"\b(why|might|could|likely|opinion|feel|emotion|think|believe|suggest|imply|purpose|reason)\b",
     flags=re.IGNORECASE,
 )
+_INVALID_QUESTION_ARTIFACT_RE = re.compile(
+    r"(<|>|</|/>|\{|\}|\[|\]|\\x|\\u[0-9a-fA-F]{4}|"
+    r"\b(task_card|reasoning_domains|reasoning_chain|strategy_used|visual_target|two_answer_test|rationale)\b)",
+    flags=re.IGNORECASE,
+)
+_RUNAWAY_PUNCT_RE = re.compile(r"[!?.,;:|/_\-]{4,}")
 
 
 @dataclass(frozen=True)
@@ -183,7 +189,7 @@ def parse_proposer_question_candidates(text: str) -> List[Dict[str, str]]:
     for block in blocks:
         q_text = (strip_tags(block, "text") or parse_first_question(block) or "").strip()
         q_text = " ".join(q_text.replace("\n", " ").split())
-        if not q_text:
+        if not q_text or (not is_well_formed_question(q_text)):
             continue
         candidates.append(
             {
@@ -199,18 +205,21 @@ def parse_proposer_question_candidates(text: str) -> List[Dict[str, str]]:
         )
     if candidates:
         return candidates
-    return [{"text": q} for q in parse_all_questions(raw)]
+    return [{"text": q} for q in parse_all_questions(raw) if is_well_formed_question(q)]
 
 
 def parse_first_question(text: str) -> str:
     raw = text or ""
     match = _QUESTION_TAG_RE.search(raw)
     if match:
-        return " ".join(match.group(1).strip().split())
+        q = " ".join(match.group(1).strip().split())
+        return q if is_well_formed_question(q) else ""
     for line in raw.splitlines():
         line = line.strip()
         if "?" in line and len(line) > 3:
-            return " ".join(line.split())
+            q = " ".join(line.split())
+            if is_well_formed_question(q):
+                return q
     return ""
 
 
@@ -242,6 +251,8 @@ def parse_all_questions(text: str) -> List[str]:
         if not val or "?" not in val:
             continue
         q = " ".join(val.split())
+        if not is_well_formed_question(q):
+            continue
         key = q.lower()
         if key in seen:
             continue
@@ -268,6 +279,38 @@ def is_objective_question(question: str) -> bool:
     if not q:
         return False
     return _NON_OBJECTIVE_RE.search(q) is None
+
+
+def is_well_formed_question(question: str) -> bool:
+    q = " ".join(str(question or "").strip().split())
+    if not q:
+        return False
+    if len(q) < 8 or len(q) > 220:
+        return False
+    if _INVALID_QUESTION_ARTIFACT_RE.search(q):
+        return False
+    if _RUNAWAY_PUNCT_RE.search(q):
+        return False
+    if q.count("?") != 1 or not q.endswith("?"):
+        return False
+
+    non_space = [ch for ch in q if not ch.isspace()]
+    if not non_space:
+        return False
+    alpha_count = sum(1 for ch in non_space if ch.isalpha())
+    digit_count = sum(1 for ch in non_space if ch.isdigit())
+    alpha_ratio = float(alpha_count) / float(len(non_space))
+    digit_ratio = float(digit_count) / float(len(non_space))
+    if alpha_ratio < 0.45:
+        return False
+    if digit_ratio > 0.35:
+        return False
+
+    if " " in q:
+        toks = q.split()
+        if len(toks) < 3 or len(toks) > 40:
+            return False
+    return True
 
 
 def parse_generation_spec(text: str, min_qa_pairs: int = 2) -> Optional[GenerationSpec]:

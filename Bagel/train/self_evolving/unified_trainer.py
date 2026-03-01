@@ -20,6 +20,7 @@ from .prompts import (
     build_solver_prompt_pps,
     build_solver_prompt,
     is_objective_question,
+    is_well_formed_question,
     parse_all_questions,
     parse_answer,
     parse_first_question,
@@ -700,6 +701,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         if not bool(getattr(self.cfg, "proposer_certificate_enabled", True)):
             return {"score": 1.0, "valid": 1.0}
         q = str(question or "").strip()
+        structural = 1.0 if is_well_formed_question(q) else 0.0
         objective = 1.0 if is_objective_question(q) else 0.0
         target = 1.0 if str(meta.get("visual_target", "") or "").strip() else 0.0
         chain_words = len(str(meta.get("reasoning_chain", "") or "").split())
@@ -709,7 +711,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         two_raw = str(meta.get("two_answer_test", "") or "")
         two_opts = [s.strip() for s in two_raw.replace(" vs ", "|").replace("/", "|").split("|") if s.strip()]
         two_ok = 1.0 if len(two_opts) >= 2 and two_opts[0].lower() != two_opts[1].lower() else 0.0
-        score = float(objective + target + chain + domains_ok + two_ok) / 5.0
+        score = float(structural + objective + target + chain + domains_ok + two_ok) / 6.0
         min_score = max(0.0, min(1.0, float(getattr(self.cfg, "proposer_certificate_min_score", 0.55))))
         valid = 1.0 if score >= min_score else 0.0
         return {"score": float(score), "valid": float(valid)}
@@ -745,6 +747,36 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         penalty_boost: float = 1.0,
     ) -> Dict[str, Any]:
         cand_meta = dict(meta or {})
+        question = " ".join(str(question or "").strip().split())
+        if not is_well_formed_question(question):
+            return {
+                "valid": False,
+                "candidate_index": int(candidate_index),
+                "question": question,
+                "completion": f"<question>{question}</question>",
+                "meta": cand_meta,
+                "solver_outputs_raw": [],
+                "spot_answers_norm": [],
+                "spot_solver_samples": [],
+                "entropy_nats": 0.0,
+                "majority_fraction": 0.0,
+                "easy_case": True,
+                "unsolvable_case": False,
+                "non_objective": not is_objective_question(question),
+                "reward": -1.0,
+                "reward_raw": -1.0,
+                "reward_bonus": 0.0,
+                "sample_entropy_difficulty": 0.0,
+                "ste_difficulty": 0.0,
+                "score": -1.0,
+                "gate_passed": False,
+                "acceptable": False,
+                "certificate_score": 0.0,
+                "certificate_valid": 0.0,
+                "text_hardness_bonus": 0.0,
+                "strategy_quota_bonus": 0.0,
+                "contrastive_bonus": 0.0,
+            }
         focus_hint = str(cand_meta.get("visual_target", "") or "").strip()
         outputs_raw: List[str] = []
         answers_norm: List[str] = []
@@ -879,6 +911,8 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         if self.cfg.proposer_require_objective and non_objective:
             acceptable = False
         if self.cfg.acceptance_require_non_easy and bool(dual.easy_case):
+            acceptable = False
+        if bool(getattr(self.cfg, "proposer_reject_unsolvable", True)) and bool(dual.unsolvable_case):
             acceptable = False
         if bool(getattr(self.cfg, "proposer_certificate_enabled", True)) and bool(
             getattr(self.cfg, "proposer_certificate_strict_struct", True)
@@ -1265,6 +1299,9 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             qq = str(info.get("text", "") or "").strip()
             if not qq:
                 continue
+            qq = " ".join(qq.split())
+            if not is_well_formed_question(qq):
+                continue
             key = qq.lower()
             if key in seen_q:
                 continue
@@ -1333,6 +1370,47 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             }
 
         acceptable_candidates = [c for c in valid_candidates if bool(c.get("acceptable", False))]
+        if (not acceptable_candidates) and bool(getattr(self.cfg, "understanding_skip_no_acceptable", True)):
+            record = {
+                "step": int(step),
+                "phase": "understanding",
+                "status": "skipped",
+                "skip_reason": "no_acceptable_candidates",
+                "image_path": image_path,
+                "proposer_raw": proposer.text if self.cfg.save_raw_generations else "",
+                "proposer_candidate_questions": candidate_questions,
+                "proposer_candidate_count_requested": int(proposer_candidate_count),
+                "proposer_candidate_count_parsed": int(len(candidate_questions)),
+                "proposer_candidate_count_valid": int(len(valid_candidates)),
+                "proposer_candidate_count_acceptable": 0,
+                "proposer_candidate_rewards": [float(c.get("reward", 0.0)) for c in valid_candidates],
+                "proposer_candidate_scores": [float(c.get("score", 0.0)) for c in valid_candidates],
+                "proposer_candidate_entropy_nats": [float(c.get("entropy_nats", 0.0)) for c in valid_candidates],
+                "proposer_candidate_ste_difficulty": [float(c.get("ste_difficulty", 0.0)) for c in valid_candidates],
+                "proposer_candidate_certificate_scores": [float(c.get("certificate_score", 0.0)) for c in valid_candidates],
+                "proposer_candidate_easy_flags": [bool(c.get("easy_case", True)) for c in valid_candidates],
+                "proposer_candidate_non_easy_rate": float(
+                    sum(1 for c in valid_candidates if not bool(c.get("easy_case", True))) / float(max(1, len(valid_candidates)))
+                ),
+                "policy_update_attempted": False,
+                "policy_update_applied": False,
+                "policy_update_reason": "gated_no_acceptable_candidates",
+            }
+            return {
+                "record": record,
+                "valid": 0,
+                "skipped": 1,
+                "reward_sum": 0.0,
+                "reward_nonzero": 0,
+                "dual_disagree": 0,
+                "policy_attempted": 0,
+                "policy_applied": 0,
+            }
+
+        if bool(getattr(self.cfg, "understanding_require_acceptable_for_update", True)):
+            selected_pool = acceptable_candidates if acceptable_candidates else valid_candidates
+        else:
+            selected_pool = acceptable_candidates or valid_candidates
         all_easy_candidate_group = bool(valid_candidates and all(bool(c.get("easy_case", True)) for c in valid_candidates))
         if all_easy_candidate_group:
             self._all_easy_streak = int(self._all_easy_streak) + 1
@@ -1346,7 +1424,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             )
             self._all_easy_streak = 0
         selected_candidate = max(
-            acceptable_candidates or valid_candidates,
+            selected_pool,
             key=lambda c: (float(c.get("score", -1.0)), float(c.get("reward", -1.0)), float(c.get("entropy_nats", 0.0))),
         )
         question = str(selected_candidate["question"])
@@ -1462,6 +1540,37 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             reward += proposer_bonus
         reward = max(-1.0, min(1.0, reward))
 
+        selected_candidate_acceptable = bool(selected_candidate.get("acceptable", False))
+        entropy_train_threshold = max(
+            float(entropy_easy_threshold),
+            max(0.0, float(getattr(self.cfg, "proposer_spot_entropy_min_gate", 0.05))),
+        )
+        understanding_update_eligible = True
+        understanding_update_skip_reason = "ok"
+        if bool(getattr(self.cfg, "understanding_require_acceptable_for_update", True)) and (
+            not selected_candidate_acceptable
+        ):
+            understanding_update_eligible = False
+            understanding_update_skip_reason = "selected_candidate_not_acceptable"
+        elif self.cfg.proposer_require_objective and non_objective:
+            understanding_update_eligible = False
+            understanding_update_skip_reason = "non_objective_question"
+        elif bool(getattr(self.cfg, "proposer_reject_unsolvable", True)) and bool(dual.unsolvable_case):
+            understanding_update_eligible = False
+            understanding_update_skip_reason = "unsolvable_case"
+        elif bool(getattr(self.cfg, "understanding_update_require_disagreement", True)):
+            if bool(dual.easy_case):
+                understanding_update_eligible = False
+                understanding_update_skip_reason = "easy_case"
+            elif float(dual.entropy_nats) < entropy_train_threshold:
+                understanding_update_eligible = False
+                understanding_update_skip_reason = "low_disagreement_entropy"
+        if bool(getattr(self.cfg, "proposer_certificate_enabled", True)) and bool(
+            getattr(self.cfg, "proposer_certificate_strict_struct", True)
+        ) and cert_valid <= 0.5:
+            understanding_update_eligible = False
+            understanding_update_skip_reason = "certificate_invalid"
+
         proposer_update_stats: Dict[str, Any] = {"skipped": True, "reason": "disabled"}
         proposer_update_attempted = False
         proposer_update_applied = False
@@ -1471,17 +1580,23 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             self.policy_updates_enabled
             and self.cfg.train_understanding_proposer
             and self.proposer_updater is not None
+            and understanding_update_eligible
         ):
             proposer_update_attempted = True
             update_method = self.cfg.normalized_update_method()
-            if update_method == "grpo" and len(valid_candidates) > 1:
+            proposer_update_candidates = (
+                acceptable_candidates
+                if bool(getattr(self.cfg, "understanding_require_acceptable_for_update", True))
+                else valid_candidates
+            )
+            if update_method == "grpo" and len(proposer_update_candidates) > 1:
                 group_rewards: List[float] = []
-                for cand in valid_candidates:
+                for cand in proposer_update_candidates:
                     cand_reward = float(cand.get("reward", 0.0))
                     if int(cand.get("candidate_index", -1)) == int(selected_candidate.get("candidate_index", -2)):
                         cand_reward = float(reward)
                     group_rewards.append(cand_reward)
-                group_buckets = [str(c.get("difficulty_bucket", "easy")) for c in valid_candidates]
+                group_buckets = [str(c.get("difficulty_bucket", "easy")) for c in proposer_update_candidates]
                 group_rewards, grpo_rank_deltas = self._apply_grpo_pairwise_ranking(
                     group_rewards,
                     group_buckets,
@@ -1495,7 +1610,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                     0,
                     int(os.environ.get("BAGEL_PROPOSER_POLICY_MAX_CANDIDATES", "0") or "0"),
                 )
-                for cand, cand_reward in zip(valid_candidates, group_rewards):
+                for cand, cand_reward in zip(proposer_update_candidates, group_rewards):
                     if max_proposer_updates > 0 and len(per_candidate_stats) >= max_proposer_updates:
                         break
                     stats = self.proposer_updater.step(
@@ -1548,11 +1663,14 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                 proposer_update_applied = bool(not proposer_update_stats.get("skipped", True))
                 policy_attempted += 1
                 policy_applied += int(proposer_update_applied)
+        elif self.policy_updates_enabled and self.cfg.train_understanding_proposer and self.proposer_updater is not None:
+            proposer_update_stats = {"skipped": True, "reason": f"gated_{understanding_update_skip_reason}"}
 
-        self.proposer_baseline = (
-            baseline_momentum * self.proposer_baseline
-            + (1.0 - baseline_momentum) * float(reward)
-        )
+        if understanding_update_eligible:
+            self.proposer_baseline = (
+                baseline_momentum * self.proposer_baseline
+                + (1.0 - baseline_momentum) * float(reward)
+            )
 
         solver_group_rewards = [
             float(answer_match_score(ans_norm, dual.majority_answer))
@@ -1576,7 +1694,13 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         )
         solver_update_stats: List[Dict[str, Any]] = []
         solver_update_reason = "disabled"
-        if solver_skip_update:
+        if not understanding_update_eligible and bool(getattr(self.cfg, "understanding_update_require_disagreement", True)):
+            solver_skip_update = True
+            solver_update_reason = f"gated_{understanding_update_skip_reason}"
+        elif bool(getattr(self.cfg, "solver_skip_unsolvable_updates", True)) and bool(dual.unsolvable_case):
+            solver_skip_update = True
+            solver_update_reason = "unsolvable_case_skip"
+        elif solver_skip_update:
             solver_update_reason = "easy_question_skip"
         elif self.policy_updates_enabled and self.cfg.train_solver and self.solver_updater is not None:
             max_solver_updates = max(
@@ -1604,10 +1728,11 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                 policy_applied += int(not update_stats.get("skipped", True))
             solver_update_reason = "ok" if solver_update_stats else "no_samples"
 
-        self.solver_baseline = (
-            baseline_momentum * self.solver_baseline
-            + (1.0 - baseline_momentum) * float(solver_scalar_reward)
-        )
+        if understanding_update_eligible:
+            self.solver_baseline = (
+                baseline_momentum * self.solver_baseline
+                + (1.0 - baseline_momentum) * float(solver_scalar_reward)
+            )
 
         selected_non_easy = int(not bool(dual.easy_case))
         self._candidate_non_easy_window.append(
@@ -1787,6 +1912,10 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             "proposer_baseline": float(self.proposer_baseline),
             "solver_baseline": float(self.solver_baseline),
             "policy_updates_enabled": bool(self.policy_updates_enabled),
+            "understanding_update_eligible": bool(understanding_update_eligible),
+            "understanding_update_skip_reason": str(understanding_update_skip_reason),
+            "selected_candidate_acceptable": bool(selected_candidate_acceptable),
+            "understanding_update_entropy_threshold": float(entropy_train_threshold),
             "proposer_policy_update_attempted": bool(proposer_update_attempted),
             "proposer_policy_update_applied": bool(proposer_update_applied),
             "proposer_policy_update_stats": proposer_update_stats,
@@ -2578,6 +2707,8 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                 path = self._save_checkpoint(step)
                 if path:
                     print(f"[self_evolving] saved checkpoint: {path}")
+                    if self.last_lora_checkpoint_dir:
+                        print(f"[self_evolving] saved role LoRA checkpoint: {self.last_lora_checkpoint_dir}")
 
         flushed_optim_steps = 0
         if self.proposer_updater is not None:
@@ -2591,6 +2722,8 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             final_ckpt = self._save_checkpoint(int(self.cfg.steps))
             if final_ckpt:
                 print(f"[self_evolving] final checkpoint: {final_ckpt}")
+                if self.last_lora_checkpoint_dir:
+                    print(f"[self_evolving] final role LoRA checkpoint: {self.last_lora_checkpoint_dir}")
 
         replay_stats = self.replay_buffer.stats() if self.replay_buffer is not None else {
             "replay_buffer_size": 0.0,
@@ -2629,6 +2762,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             "generated_mix_dir": str(self._generated_mix_dir),
             "optimizer_flush_steps": int(flushed_optim_steps),
             "last_checkpoint_path": str(self.last_checkpoint_path),
+            "last_lora_checkpoint_dir": str(self.last_lora_checkpoint_dir),
             "replay_buffer_size": float(replay_stats["replay_buffer_size"]),
             "replay_buffer_mean_reward": float(replay_stats["replay_buffer_mean_reward"]),
             "replay_buffer_min_step": float(replay_stats["replay_buffer_min_step"]),

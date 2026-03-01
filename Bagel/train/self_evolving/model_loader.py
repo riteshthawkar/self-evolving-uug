@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict, Optional
 
 import torch
 from safetensors.torch import load_file
@@ -146,6 +147,158 @@ def _resolve_weights_path(model_path: str) -> str:
     )
 
 
+def _remap_adapter_state_dict(state_dict: Dict[str, torch.Tensor], src_adapter: str, dst_adapter: str) -> Dict[str, torch.Tensor]:
+    src = str(src_adapter or "").strip()
+    dst = str(dst_adapter or "").strip()
+    if not src or not dst or src == dst:
+        return dict(state_dict)
+
+    remapped: Dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        key_new = str(key)
+        key_new = key_new.replace(f".{src}.", f".{dst}.")
+        key_new = key_new.replace(f"lora_{src}", f"lora_{dst}")
+        remapped[key_new] = value
+    return remapped
+
+
+def _is_tensor_state_dict(obj: Any) -> bool:
+    if not isinstance(obj, dict) or not obj:
+        return False
+    for value in obj.values():
+        if not torch.is_tensor(value):
+            return False
+    return True
+
+
+def _load_role_lora_folder(
+    language_model: torch.nn.Module,
+    role_to_adapter: Dict[str, str],
+    root: Path,
+) -> Dict[str, int]:
+    manifest_path = root / "adapter_roles.json"
+    manifest: Dict[str, Any] = {}
+    if manifest_path.is_file():
+        try:
+            with manifest_path.open("r", encoding="utf-8") as f:
+                manifest = json.load(f)
+        except Exception:
+            manifest = {}
+
+    manifest_role_to_adapter = manifest.get("role_to_adapter", {})
+    files_meta = manifest.get("files", {})
+
+    roles_loaded = 0
+    tensors_loaded = 0
+    for role, dst_adapter in role_to_adapter.items():
+        role_name = str(role)
+        file_name = f"role_{role_name}.pt"
+        if isinstance(files_meta, dict) and isinstance(files_meta.get(role_name), dict):
+            file_name = str(files_meta[role_name].get("file") or file_name)
+        role_file = root / file_name
+        if not role_file.is_file():
+            continue
+
+        payload = torch.load(role_file, map_location="cpu")
+        state_dict: Optional[Dict[str, torch.Tensor]] = None
+        src_adapter = str(dst_adapter)
+        if isinstance(payload, dict) and _is_tensor_state_dict(payload.get("state_dict", {})):
+            state_dict = dict(payload["state_dict"])
+            src_adapter = str(payload.get("adapter_name") or src_adapter)
+        elif _is_tensor_state_dict(payload):
+            state_dict = dict(payload)
+            src_adapter = str(manifest_role_to_adapter.get(role_name) or src_adapter)
+        if state_dict is None or not state_dict:
+            continue
+
+        if src_adapter != str(dst_adapter):
+            state_dict = _remap_adapter_state_dict(
+                state_dict=state_dict,
+                src_adapter=src_adapter,
+                dst_adapter=str(dst_adapter),
+            )
+        msg = language_model.load_state_dict(state_dict, strict=False)
+        missing = len(getattr(msg, "missing_keys", []) or [])
+        unexpected = len(getattr(msg, "unexpected_keys", []) or [])
+        print(
+            f"[model_loader] loaded role adapter role={role_name} file={role_file.name} "
+            f"(src_adapter={src_adapter}, dst_adapter={dst_adapter}, tensors={len(state_dict)}, "
+            f"missing={missing}, unexpected={unexpected})"
+        )
+        roles_loaded += 1
+        tensors_loaded += int(len(state_dict))
+
+    return {"roles_loaded": roles_loaded, "tensors_loaded": tensors_loaded}
+
+
+def load_role_lora_checkpoint(
+    language_model: torch.nn.Module,
+    *,
+    checkpoint_path: str,
+    role_to_adapter: Dict[str, str],
+) -> Dict[str, Any]:
+    """Load LoRA checkpoints for proposer/solver/generator adapters.
+
+    Supported inputs:
+    - `step_XXXXXX.pt` checkpoint payload containing `model_state`
+    - checkpoint root directory containing `step_*.pt`
+    - role-export directory `step_XXXXXX_lora` with `role_<role>.pt` files
+    """
+    root = Path(str(checkpoint_path or "")).expanduser().resolve()
+    if not root.exists():
+        raise FileNotFoundError(f"LoRA checkpoint path not found: {root}")
+
+    if root.is_file():
+        payload = torch.load(root, map_location="cpu")
+        model_state = payload.get("model_state") if isinstance(payload, dict) else None
+        if _is_tensor_state_dict(model_state):
+            msg = language_model.load_state_dict(model_state, strict=False)
+            missing = len(getattr(msg, "missing_keys", []) or [])
+            unexpected = len(getattr(msg, "unexpected_keys", []) or [])
+            return {
+                "source": str(root),
+                "mode": "step_pt_model_state",
+                "roles_loaded": int(len(role_to_adapter)),
+                "tensors_loaded": int(len(model_state)),
+                "missing": int(missing),
+                "unexpected": int(unexpected),
+            }
+        if _is_tensor_state_dict(payload):
+            msg = language_model.load_state_dict(payload, strict=False)
+            missing = len(getattr(msg, "missing_keys", []) or [])
+            unexpected = len(getattr(msg, "unexpected_keys", []) or [])
+            return {
+                "source": str(root),
+                "mode": "raw_state_dict",
+                "roles_loaded": int(len(role_to_adapter)),
+                "tensors_loaded": int(len(payload)),
+                "missing": int(missing),
+                "unexpected": int(unexpected),
+            }
+        raise RuntimeError(f"Unsupported LoRA checkpoint file format: {root}")
+
+    role_stats = _load_role_lora_folder(language_model, role_to_adapter, root)
+    if int(role_stats.get("roles_loaded", 0)) > 0:
+        return {
+            "source": str(root),
+            "mode": "role_adapter_folder",
+            **role_stats,
+        }
+
+    # If path is a checkpoint directory, load latest step checkpoint.
+    step_ckpts = sorted(root.glob("step_*.pt"))
+    if step_ckpts:
+        return load_role_lora_checkpoint(
+            language_model,
+            checkpoint_path=str(step_ckpts[-1]),
+            role_to_adapter=role_to_adapter,
+        )
+
+    raise RuntimeError(
+        f"No role adapter files or step checkpoints found under: {root}"
+    )
+
+
 def load_bagel_runtime(cfg: ModelLoadConfig) -> BagelRuntime:
     device = torch.device(cfg.device if cfg.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     vae_device = torch.device(cfg.vae_device if str(cfg.vae_device or "").strip() else str(device))
@@ -207,6 +360,18 @@ def load_bagel_runtime(cfg: ModelLoadConfig) -> BagelRuntime:
             "[model_loader] enabled LoRA role adapters "
             f"(active_default={cfg.lora_default_adapter}, adapters={sorted(list(lora_adapters.keys()))})"
         )
+        lora_ckpt_path = str(getattr(cfg, "lora_checkpoint_path", "") or "").strip()
+        if lora_ckpt_path:
+            stats = load_role_lora_checkpoint(
+                model.language_model,
+                checkpoint_path=lora_ckpt_path,
+                role_to_adapter=role_to_adapter,
+            )
+            print(
+                "[model_loader] loaded LoRA checkpoint "
+                f"(source={stats.get('source')}, mode={stats.get('mode')}, "
+                f"roles_loaded={stats.get('roles_loaded')}, tensors_loaded={stats.get('tensors_loaded')})"
+            )
 
     model = model.to(device).eval()
     vae_model = vae_model.to(vae_device).eval()

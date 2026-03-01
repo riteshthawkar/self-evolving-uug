@@ -281,10 +281,10 @@ fi
   --cuda_device 0 \
   \
   `# ── Training schedule ──────────────────────────────────────────────────` \
-  --total_steps 1500 \
+  --total_steps 10000 \
   --save_every 50 \
   --log_every 1 \
-  --max_checkpoints 30 \
+  --max_checkpoints "${MAX_CHECKPOINTS:-10000}" \
   --save_generated_images_every 50 \
   --deterministic \
   \

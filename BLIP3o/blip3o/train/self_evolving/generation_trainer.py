@@ -701,14 +701,18 @@ class GenerationSelfEvolvingTrainer:
 
     def _build_run_dir(self) -> pathlib.Path:
         base_dir = pathlib.Path(self.cfg.output_dir).expanduser().resolve()
+        resume_run_dir = self._infer_resume_run_dir()
         if self.distributed and dist.is_initialized():
             obj = [None]
             if self.is_main_process:
-                timestamp = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                run_name = self.cfg.run_name or f"{self.cfg.experiment_name}_{timestamp}"
-                run_dir = base_dir / run_name
-                if run_dir.exists() and any(run_dir.iterdir()) and not self.cfg.resume_from:
-                    run_dir = base_dir / f"{run_name}_{timestamp}"
+                if resume_run_dir is not None:
+                    run_dir = resume_run_dir
+                else:
+                    timestamp = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                    run_name = self.cfg.run_name or f"{self.cfg.experiment_name}_{timestamp}"
+                    run_dir = base_dir / run_name
+                    if run_dir.exists() and any(run_dir.iterdir()) and not self.cfg.resume_from:
+                        run_dir = base_dir / f"{run_name}_{timestamp}"
                 run_dir.mkdir(parents=True, exist_ok=True)
                 obj[0] = str(run_dir)
             dist.broadcast_object_list(obj, src=0)
@@ -717,13 +721,53 @@ class GenerationSelfEvolvingTrainer:
             self._dist_barrier()
             return run_dir
 
-        timestamp = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        run_name = self.cfg.run_name or f"{self.cfg.experiment_name}_{timestamp}"
-        run_dir = base_dir / run_name
-        if run_dir.exists() and any(run_dir.iterdir()) and not self.cfg.resume_from:
-            run_dir = base_dir / f"{run_name}_{timestamp}"
+        if resume_run_dir is not None:
+            run_dir = resume_run_dir
+        else:
+            timestamp = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            run_name = self.cfg.run_name or f"{self.cfg.experiment_name}_{timestamp}"
+            run_dir = base_dir / run_name
+            if run_dir.exists() and any(run_dir.iterdir()) and not self.cfg.resume_from:
+                run_dir = base_dir / f"{run_name}_{timestamp}"
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
+
+    def _infer_resume_run_dir(self) -> Optional[pathlib.Path]:
+        """Resolve the run directory that owns `resume_from` checkpoint path.
+
+        This keeps resumed logs/checkpoints in the original run folder instead of
+        creating a sibling run directory based on output_dir/run_name.
+        """
+        if not self.cfg.resume_from:
+            return None
+
+        candidate = pathlib.Path(self.cfg.resume_from).expanduser().resolve()
+        if not candidate.exists():
+            raise FileNotFoundError(f"resume_from path does not exist: {candidate}")
+
+        if candidate.is_file() and candidate.name == "trainer_state.pt":
+            step_dir = candidate.parent
+            if step_dir.name.startswith("step_"):
+                return step_dir.parent.resolve()
+            return step_dir.resolve()
+
+        if candidate.is_dir() and candidate.name.startswith("step_"):
+            return candidate.parent.resolve()
+
+        if candidate.is_dir() and (candidate / "trainer_state.pt").exists():
+            if candidate.name.startswith("step_"):
+                return candidate.parent.resolve()
+            return candidate.resolve()
+
+        if candidate.is_dir():
+            step_dirs = [
+                p for p in candidate.glob("step_*")
+                if p.is_dir() and (p / "trainer_state.pt").exists()
+            ]
+            if step_dirs:
+                return candidate.resolve()
+
+        return None
 
     def _save_run_metadata(self):
         if not self.is_main_process:
@@ -3422,11 +3466,17 @@ class GenerationSelfEvolvingTrainer:
             self.solver_baseline = m * self.solver_baseline + (1.0 - m) * reward
 
     def _save_candidate_images(self, step: int, scored: List[Dict[str, object]], best_idx: int):
+        if not self.is_main_process:
+            return
         if self.cfg.save_generated_images_every <= 0:
             return
         if (step % self.cfg.save_generated_images_every) != 0:
             return
         step_dir = self.generated_dir / f"step_{step:05d}"
+        # On resume/restart, do not overwrite already-saved image artifacts for
+        # completed steps.
+        if step_dir.exists() and any(step_dir.glob("*.png")):
+            return
         step_dir.mkdir(parents=True, exist_ok=True)
         for i, cand in enumerate(scored):
             image = cand.get("image")
@@ -3439,6 +3489,20 @@ class GenerationSelfEvolvingTrainer:
                 image.save(path)
             except Exception:
                 pass
+
+    def _archive_existing_step_checkpoint(self, step_dir: pathlib.Path) -> Optional[pathlib.Path]:
+        if not step_dir.exists():
+            return None
+        backup_root = self.run_dir / "checkpoint_backups"
+        backup_root.mkdir(parents=True, exist_ok=True)
+        ts = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        backup_dir = backup_root / f"{step_dir.name}_{ts}"
+        suffix = 1
+        while backup_dir.exists():
+            backup_dir = backup_root / f"{step_dir.name}_{ts}_{suffix:02d}"
+            suffix += 1
+        shutil.move(str(step_dir), str(backup_dir))
+        return backup_dir
 
     def _proxy_generator_completion(self, image: Image.Image) -> str:
         completion = self._generate(
@@ -3590,7 +3654,12 @@ class GenerationSelfEvolvingTrainer:
             f.write("ok\n")
 
         if step_dir.exists():
-            shutil.rmtree(step_dir, ignore_errors=True)
+            archived = self._archive_existing_step_checkpoint(step_dir)
+            if archived is not None and self.is_main_process:
+                print(
+                    f"[Generation] Preserved existing checkpoint {step_dir.name} "
+                    f"at {archived}"
+                )
         os.replace(str(tmp_dir), str(step_dir))
 
         self._prune_checkpoints()
