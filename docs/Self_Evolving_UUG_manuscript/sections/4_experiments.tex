@@ -26,14 +26,19 @@ We evaluate image generation on GenEval (compositional attribute accuracy), DPG-
 % and other hyperparameters.
 
 
+Table~\ref{tab:qualitative_comparison} provides a structured qualitative comparison of our framework against existing post-training methods along the five design axes introduced in Section~\ref{sec:related_work}. Our approach is the only method that simultaneously requires no external supervision, optimizes both understanding and generation bidirectionally, employs multiple complementary reward signals, incorporates explicit stability controls, and demonstrates generality across three architecturally distinct model families.
+
+\input{tables/qualitative_comparison}
+
 \subsection{Main Results}
 \label{sec:main_results}
 
-Table~\ref{tab:main_results} presents understanding and generation results across all three backbone architectures. Each model is evaluated in its pretrained base configuration and after applying the self-evolving framework, with the absolute improvement ($\Delta$) reported for each benchmark.
+Table~\ref{tab:main_results} presents understanding and generation results across all three backbone architectures. Existing unified understanding and generation models (Janus-Pro-7B, SEED-X, Emu3) are included as reference points to contextualize the performance landscape. Each of our models is evaluated in its pretrained base configuration and after applying the self-evolving framework, with the absolute improvement ($\Delta$) reported for each benchmark.
 
 % TODO: Add discussion of results once numbers are available.
 % Key points to cover:
 % - Consistent improvement on both understanding AND generation across all 3 models
+% - How our post-trained models compare to other unified models
 % - Highlight that the same algorithm/hyperparameters work across diffusion, flow-matching, and autoregressive
 % - Note any benchmark where improvements are particularly large or small, and why
 % - Generation Avg column provides a single summary statistic
@@ -44,13 +49,14 @@ Table~\ref{tab:main_results} presents understanding and generation results acros
 \subsection{Comparison with Self-Supervised Methods}
 \label{sec:comparison}
 
-To ensure a fair evaluation, we compare exclusively against methods that operate under equivalent supervision constraints: no curated labels, no supervised fine-tuning data, and no external reward models. Table~\ref{tab:selfsup_comparison} reports this comparison. Methods that employ additional supervision (curated SFT data, external reward models, or supervised initialization stages) are reported separately in the supplementary material as reference upper bounds.
+Table~\ref{tab:selfsup_comparison} provides a comprehensive comparison organized into three groups. Base unified models, including the backbones used by competing methods and our own three architectures, establish the starting point before any post-training. Self-supervised post-training methods, which operate without curated labels, supervised fine-tuning data, or external reward models, constitute the fair comparison group. Our results are reported across all three backbones to demonstrate that the improvements are not specific to a single architecture. Methods that employ additional supervision are reported separately in the supplementary material as reference upper bounds.
 
 % TODO: Add discussion once numbers are filled.
 % Key points to cover:
 % - How our method compares to each self-supervised baseline
 % - Highlight that we achieve competitive or superior results without ANY external signal
 % - Note backbone differences where relevant (our BLIP3o-8B vs their Janus-Pro-7B, etc.)
+% - Our three base models serve as direct ablation: base vs ours shows the effect of our framework
 % - Reference supplementary Table S1 for supervised comparison
 
 

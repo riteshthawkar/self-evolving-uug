@@ -50,7 +50,7 @@ class SelfEvolvingConfig:
     max_new_tokens_solver: int = 128
     max_new_tokens_proposer: int = 256
     max_new_tokens_caption: int = 96
-    num_solver_samples: int = 7
+    num_solver_samples: int = 5
     num_solver_samples_spec: int = 3
 
     # ── VARGPT Image Generation (replaces DiT/diffusion params) ─────────
@@ -91,9 +91,10 @@ class SelfEvolvingConfig:
     # ── Reward Shaping ───────────────────────────────────────────────────
     solver_soft_gamma: float = 0.7
     solver_use_temperature_mix: bool = True
-    solver_temp_min: float = 0.5
-    solver_temp_max: float = 2.5
-    solver_top_p_min: float = 0.3
+    solver_use_forced_choice_from_proposer: bool = False
+    solver_temp_min: float = 0.4
+    solver_temp_max: float = 2.6
+    solver_top_p_min: float = 0.35
     solver_top_p_max: float = 1.0
     sc_entropy_min: float = 0.15
     sc_entropy_max: float = 1.2
@@ -117,8 +118,19 @@ class SelfEvolvingConfig:
     solver_unsolvable_maj_threshold: float = 0.20
     proposer_non_objective_penalty: float = 0.20
     proposer_require_objective: bool = True
+    proposer_slot_compiler_enabled: bool = True
+    proposer_slot_compiler_strict: bool = True
+    proposer_reasoning_min_domains: int = 2
+    proposer_reasoning_require_non_relation: bool = True
+    proposer_reasoning_min_chain_words: int = 8
+    proposer_spot_entropy_min_gate: float = 0.05
+    solver_token_entropy_enabled: bool = True
+    solver_token_entropy_tokens: int = 5
+    solver_token_entropy_window_size: int = 128
+    solver_token_entropy_sigmoid_alpha: float = 1.5
+    solver_token_entropy_sigmoid_beta: float = 2.0
     solver_skip_update_on_easy: bool = True
-    easy_update_majority_frac_threshold: float = 1.0
+    easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
     rejected_question_penalty: float = 0.35
 
@@ -135,10 +147,10 @@ class SelfEvolvingConfig:
     # ── Difficulty Curriculum ────────────────────────────────────────────
     difficulty_sampler_enabled: bool = True
     difficulty_sampler_window_size: int = 256
-    difficulty_sampler_min_samples: int = 8
-    difficulty_target_easy: float = 0.00
-    difficulty_target_medium: float = 0.70
-    difficulty_target_hard: float = 0.30
+    difficulty_sampler_min_samples: int = 32
+    difficulty_target_easy: float = 0.10
+    difficulty_target_medium: float = 0.50
+    difficulty_target_hard: float = 0.40
     difficulty_hard_min_entropy: float = 0.90
     difficulty_hard_max_margin: float = 0.35
 
@@ -171,11 +183,23 @@ class SelfEvolvingConfig:
 
     # ── All-Easy Exploration ──────────────────────────────────────────────
     all_easy_explore_trigger: int = 2
-    all_easy_explore_steps: int = 16
+    all_easy_explore_steps: int = 10
     all_easy_explore_num_candidates: int = 6
     all_easy_explore_temp_boost: float = 1.20
-    all_easy_explore_top_p_boost: float = 0.20
-    all_easy_explore_penalty_boost: float = 0.70
+    all_easy_explore_top_p_boost: float = 0.15
+    all_easy_explore_penalty_boost: float = 0.50
+
+    # ── Contrastive replay + GRPO ranking controls ──────────────────────
+    proposer_contrastive_replay_enabled: bool = True
+    proposer_contrastive_replay_size: int = 256
+    proposer_contrastive_pos_bonus: float = 0.08
+    proposer_contrastive_neg_penalty: float = 0.08
+    proposer_easy_reward_floor: float = -0.35
+    proposer_all_easy_rank_spread: float = 0.08
+    grpo_pairwise_ranking_enabled: bool = True
+    grpo_pairwise_ranking_weight: float = 0.15
+    grpo_pairwise_margin: float = 0.10
+    grpo_pairwise_easy_penalty: float = 0.12
 
     # ── Early Fail-Fast / Recovery ───────────────────────────────────────
     proposer_early_failfast_enabled: bool = True

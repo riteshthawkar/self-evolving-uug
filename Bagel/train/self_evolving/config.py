@@ -12,6 +12,7 @@ class ModelLoadConfig:
     model_path: str
     device: str = "cuda"
     vae_device: str = ""
+    lora_checkpoint_path: str = ""
     max_latent_size: int = 64
     vit_max_num_patch_per_side: int = 70
     latent_patch_size: int = 2
@@ -142,6 +143,11 @@ class RolloutConfig:
     score_grpo_extras: bool = True
     grpo_extra_temp_multiplier: float = 1.5
     grpo_extra_sc_samples: int = 3
+    understanding_skip_no_acceptable: bool = True
+    understanding_require_acceptable_for_update: bool = True
+    understanding_update_require_disagreement: bool = True
+    proposer_reject_unsolvable: bool = True
+    solver_skip_unsolvable_updates: bool = True
     solver_token_entropy_enabled: bool = True
     solver_token_entropy_tokens: int = 5
     solver_token_entropy_window_size: int = 128

@@ -33,7 +33,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/data_3k/images}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_3k/images}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/final/E2_understanding_only}"
 RUN_NAME="E2_understanding_only_s42_updated"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
@@ -43,6 +43,18 @@ NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 TRAIN_ENTRY="${TRAIN_ENTRY:-$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+UNDERSTANDING_STEPS_PER_CYCLE="${UNDERSTANDING_STEPS_PER_CYCLE:-5}"
+GENERATION_STEPS_PER_CYCLE="${GENERATION_STEPS_PER_CYCLE:-0}"
+ALLOW_SOLVER_UPDATE_ON_EASY="${ALLOW_SOLVER_UPDATE_ON_EASY:-0}"
+
+EASY_UPDATE_ARGS=()
+if [[ "$ALLOW_SOLVER_UPDATE_ON_EASY" == "1" ]]; then
+  EASY_UPDATE_ARGS+=(--allow_solver_update_on_easy)
+  EASY_UPDATE_MODE_TEXT="DISABLED (solver trains on easy + hard questions)"
+else
+  EASY_UPDATE_MODE_TEXT="ENABLED (easy-bucket solver skipping remains active)"
+fi
 
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
@@ -216,8 +228,10 @@ echo "[E2]   Output dir:  $OUTPUT_DIR"
 echo "[E2]   Data dir:    $DATA_DIR"
 echo "[E2]   GPUs:        $NPROC_PER_NODE"
 echo "[E2]   Attn impl:   $ATTN_IMPL"
+echo "[E2]   Total steps: $TOTAL_STEPS"
+echo "[E2]   Cycle:       U=$UNDERSTANDING_STEPS_PER_CYCLE, G=$GENERATION_STEPS_PER_CYCLE"
 echo "[E2]   NOTE: Generation training DISABLED"
-echo "[E2]   NOTE: Easy-question skipping DISABLED (solver trains on all questions)"
+echo "[E2]   NOTE: Easy-question skipping $EASY_UPDATE_MODE_TEXT"
 if [[ -n "${RESUME_FROM:-}" ]]; then
   echo "[E2]   Resume from: $RESUME_FROM"
 fi
@@ -240,10 +254,10 @@ fi
   --cuda_device 0 \
   \
   `# ── Training schedule ──────────────────────────────────────────────────` \
-  --total_steps 1500 \
+  --total_steps "$TOTAL_STEPS" \
   --save_every 50 \
   --log_every 1 \
-  --max_checkpoints 30 \
+  --max_checkpoints "${MAX_CHECKPOINTS:-10000}" \
   --save_generated_images_every 50 \
   --deterministic \
   \
@@ -323,13 +337,14 @@ fi
   --solver_hardness_min_entropy 0.20 \
   --easy_update_majority_frac_threshold 1.00 \
   --entropy_iqr_filter_enabled \
+  ${EASY_UPDATE_ARGS[@]+"${EASY_UPDATE_ARGS[@]}"} \
   \
   `# ── Proposer entropy target ─────────────────────────────────────────────` \
   --prop_entropy_sigma 0.25 \
   \
   `# ── Cycle scheduling: ALL understanding, no generation ─────────────────` \
-  --understanding_steps_per_cycle 5 \
-  --generation_steps_per_cycle 0 \
+  --understanding_steps_per_cycle "$UNDERSTANDING_STEPS_PER_CYCLE" \
+  --generation_steps_per_cycle "$GENERATION_STEPS_PER_CYCLE" \
   --synthetic_solver_update_freq 0 \
   \
   `# ── KL regularisation ───────────────────────────────────────────────────` \

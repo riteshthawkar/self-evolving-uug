@@ -8,7 +8,7 @@ set -euo pipefail
 : "${IMAGE_DIR:?Set IMAGE_DIR to an image folder for understanding rollouts}"
 : "${OUTPUT_DIR:?Set OUTPUT_DIR for rollout logs}"
 
-STEPS="${STEPS:-500}"
+STEPS="${STEPS:-10000}"
 DEVICE="${DEVICE:-cuda}"
 MAX_LATENT_SIZE="${MAX_LATENT_SIZE:-64}"
 
@@ -34,4 +34,3 @@ python3 train/train_self_evolving.py \
   --rejected_question_penalty 0.35 \
   --proposer_require_objective \
   --acceptance_require_non_easy
-

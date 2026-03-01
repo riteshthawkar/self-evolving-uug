@@ -7,6 +7,7 @@ import json
 import math
 import os
 import random
+import shutil
 import time
 from dataclasses import asdict
 from datetime import datetime
@@ -18,13 +19,14 @@ from PIL import Image
 
 from .adapter_manager import ROLE_GENERATOR, ROLE_PROPOSER, ROLE_SOLVER
 from .config import RolloutConfig
-from .model_loader import BagelRuntime
+from .model_loader import BagelRuntime, load_role_lora_checkpoint
 from .policy_updater import BagelGeneratorPolicyUpdater, BagelRolePolicyUpdater
 from .prompts import (
     build_generation_spec_prompt,
     build_proposer_prompt,
     build_solver_prompt,
     is_objective_question,
+    is_well_formed_question,
     parse_answer,
     parse_first_question,
     parse_generation_spec,
@@ -108,6 +110,7 @@ class SelfEvolvingUnderstandingTrainer:
         self.solver_baseline = 0.0
         self.start_step = 1
         self.last_checkpoint_path = ""
+        self.last_lora_checkpoint_dir = ""
 
         self.policy_updates_enabled = bool(cfg.policy_updates_enabled)
         self.proposer_updater: Optional[BagelRolePolicyUpdater] = None
@@ -245,6 +248,11 @@ class SelfEvolvingUnderstandingTrainer:
         if p.is_file():
             return str(p)
         if p.is_dir():
+            if p.name.endswith("_lora"):
+                base_name = p.name[: -len("_lora")]
+                sibling = p.with_name(f"{base_name}.pt")
+                if sibling.is_file():
+                    return str(sibling)
             candidates = sorted(p.glob("step_*.pt"))
             if candidates:
                 return str(candidates[-1])
@@ -261,6 +269,73 @@ class SelfEvolvingUnderstandingTrainer:
                 filtered[key] = value.detach().cpu()
         return filtered
 
+    @staticmethod
+    def _adapter_key_matches(key: str, adapter_name: str) -> bool:
+        name = str(adapter_name or "").strip()
+        if not name:
+            return False
+        k = str(key)
+        return (f".{name}." in k) or (f"lora_{name}" in k) or (
+            name == "default" and ("lora_" in k and ".default." in k)
+        )
+
+    def _collect_role_adapter_state(self, adapter_name: str) -> Dict[str, torch.Tensor]:
+        state = self.runtime.model.language_model.state_dict()
+        selected: Dict[str, torch.Tensor] = {}
+        for key, value in state.items():
+            if self._adapter_key_matches(key, adapter_name):
+                selected[key] = value.detach().cpu()
+        return selected
+
+    def _save_role_adapter_checkpoint(self, step: int) -> str:
+        if not bool(self.runtime.lora_enabled) or not bool(self.runtime.role_to_adapter):
+            return ""
+
+        step_tag = f"step_{int(step):06d}"
+        out_dir = Path(self.checkpoint_dir) / f"{step_tag}_lora"
+        tmp_dir = Path(self.checkpoint_dir) / f"{step_tag}_lora.tmp"
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        files_meta: Dict[str, Dict[str, object]] = {}
+        for role, adapter_name in sorted(self.runtime.role_to_adapter.items()):
+            adapter = str(adapter_name or "").strip()
+            if not adapter:
+                continue
+            role_state = self._collect_role_adapter_state(adapter)
+            role_file = f"role_{role}.pt"
+            torch.save(
+                {
+                    "role": str(role),
+                    "adapter_name": adapter,
+                    "state_dict": role_state,
+                },
+                tmp_dir / role_file,
+            )
+            files_meta[str(role)] = {
+                "file": role_file,
+                "adapter_name": adapter,
+                "tensor_count": int(len(role_state)),
+            }
+
+        with (tmp_dir / "adapter_roles.json").open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "step": int(step),
+                    "role_to_adapter": {str(k): str(v) for k, v in self.runtime.role_to_adapter.items()},
+                    "files": files_meta,
+                },
+                f,
+                indent=2,
+            )
+
+        if out_dir.exists():
+            shutil.rmtree(out_dir, ignore_errors=True)
+        os.replace(str(tmp_dir), str(out_dir))
+        self.last_lora_checkpoint_dir = str(out_dir)
+        return str(out_dir)
+
     def _checkpoint_extra_state(self) -> Dict[str, object]:
         return {}
 
@@ -271,6 +346,8 @@ class SelfEvolvingUnderstandingTrainer:
         if not self.policy_updates_enabled:
             return ""
 
+        role_ckpt_dir = self._save_role_adapter_checkpoint(step)
+
         payload = {
             "step": int(step),
             "proposer_baseline": float(self.proposer_baseline),
@@ -279,6 +356,7 @@ class SelfEvolvingUnderstandingTrainer:
             "generator_baseline": float(self.generator_baseline),
             "policy_update_method": self.cfg.normalized_update_method(),
             "model_state": self._collect_model_state_for_checkpoint(),
+            "lora_roles_dir": str(role_ckpt_dir),
         }
         if self.proposer_updater is not None:
             payload["proposer_updater"] = self.proposer_updater.state_dict()
@@ -302,6 +380,7 @@ class SelfEvolvingUnderstandingTrainer:
         state = torch.load(ckpt_path, map_location="cpu")
 
         model_state = state.get("model_state", None)
+        loaded_model_state = False
         if isinstance(model_state, dict) and model_state:
             msg = self.runtime.model.language_model.load_state_dict(model_state, strict=False)
             missing = len(getattr(msg, "missing_keys", []) or [])
@@ -310,6 +389,26 @@ class SelfEvolvingUnderstandingTrainer:
                 f"[self_evolving] loaded checkpoint model state from {ckpt_path} "
                 f"(missing={missing}, unexpected={unexpected})"
             )
+            loaded_model_state = True
+        elif bool(self.runtime.lora_enabled):
+            # Compatibility fallback: if model_state is missing, attempt role-based LoRA folder load.
+            lora_dir = str(state.get("lora_roles_dir", "") or "").strip()
+            if not lora_dir:
+                ckpt_path_obj = Path(ckpt_path)
+                fallback_dir = ckpt_path_obj.with_name(f"{ckpt_path_obj.stem}_lora")
+                if fallback_dir.is_dir():
+                    lora_dir = str(fallback_dir)
+            if lora_dir:
+                stats = load_role_lora_checkpoint(
+                    self.runtime.model.language_model,
+                    checkpoint_path=lora_dir,
+                    role_to_adapter=self.runtime.role_to_adapter,
+                )
+                self.last_lora_checkpoint_dir = str(stats.get("source", lora_dir))
+                print(
+                    f"[self_evolving] loaded role-based LoRA checkpoint from {self.last_lora_checkpoint_dir} "
+                    f"(roles_loaded={stats.get('roles_loaded')}, tensors_loaded={stats.get('tensors_loaded')})"
+                )
 
         self.proposer_baseline = float(state.get("proposer_baseline", self.proposer_baseline))
         self.solver_baseline = float(state.get("solver_baseline", self.solver_baseline))
@@ -326,6 +425,11 @@ class SelfEvolvingUnderstandingTrainer:
 
         loaded_step = int(state.get("step", 0))
         self.last_checkpoint_path = ckpt_path
+        if loaded_model_state:
+            ckpt_path_obj = Path(ckpt_path)
+            sibling = ckpt_path_obj.with_name(f"{ckpt_path_obj.stem}_lora")
+            if sibling.is_dir():
+                self.last_lora_checkpoint_dir = str(sibling)
         print(f"[self_evolving] resumed from checkpoint step={loaded_step} ({ckpt_path})")
         return loaded_step + 1
 
@@ -828,6 +932,22 @@ class SelfEvolvingUnderstandingTrainer:
                 _run_and_accumulate_suder(step, image_path, image)
                 _emit_training_logs(step, phase="understanding", step_time_sec=float(time.time() - step_t0))
                 continue
+            if not is_well_formed_question(question):
+                skipped_steps += 1
+                _write_jsonl(
+                    self.rollouts_log_path,
+                    {
+                        "step": step,
+                        "status": "skipped",
+                        "skip_reason": "invalid_question",
+                        "image_path": image_path,
+                        "question": question,
+                        "proposer_raw": proposer.text if self.cfg.save_raw_generations else "",
+                    },
+                )
+                _run_and_accumulate_suder(step, image_path, image)
+                _emit_training_logs(step, phase="understanding", step_time_sec=float(time.time() - step_t0))
+                continue
 
             solver_outputs_raw: List[str] = []
             solver_answers_norm: List[str] = []
@@ -887,6 +1007,18 @@ class SelfEvolvingUnderstandingTrainer:
                 reward -= float(self.cfg.rejected_question_penalty)
             reward = max(-1.0, min(1.0, reward))
 
+            understanding_update_eligible = True
+            understanding_update_skip_reason = "ok"
+            if self.cfg.proposer_require_objective and non_objective:
+                understanding_update_eligible = False
+                understanding_update_skip_reason = "non_objective_question"
+            elif bool(getattr(self.cfg, "proposer_reject_unsolvable", True)) and bool(dual.unsolvable_case):
+                understanding_update_eligible = False
+                understanding_update_skip_reason = "unsolvable_case"
+            elif bool(getattr(self.cfg, "understanding_update_require_disagreement", True)) and bool(dual.easy_case):
+                understanding_update_eligible = False
+                understanding_update_skip_reason = "easy_case"
+
             valid_steps += 1
             reward_sum += reward
             reward_nonzero += int(abs(reward) > 1e-9)
@@ -902,6 +1034,7 @@ class SelfEvolvingUnderstandingTrainer:
                 self.policy_updates_enabled
                 and self.cfg.train_understanding_proposer
                 and self.proposer_updater is not None
+                and understanding_update_eligible
             ):
                 proposer_update_attempted = True
                 proposer_update_stats = self.proposer_updater.step(
@@ -914,11 +1047,14 @@ class SelfEvolvingUnderstandingTrainer:
                 proposer_update_applied = bool(not proposer_update_stats.get("skipped", True))
                 policy_updates_attempted += 1
                 policy_updates_applied += int(proposer_update_applied)
+            elif self.policy_updates_enabled and self.cfg.train_understanding_proposer and self.proposer_updater is not None:
+                proposer_update_stats = {"skipped": True, "reason": f"gated_{understanding_update_skip_reason}"}
 
-            self.proposer_baseline = (
-                baseline_momentum * self.proposer_baseline
-                + (1.0 - baseline_momentum) * float(reward)
-            )
+            if understanding_update_eligible:
+                self.proposer_baseline = (
+                    baseline_momentum * self.proposer_baseline
+                    + (1.0 - baseline_momentum) * float(reward)
+                )
 
             solver_group_rewards = [
                 float(answer_match_score(ans_norm, dual.majority_answer))
@@ -942,7 +1078,13 @@ class SelfEvolvingUnderstandingTrainer:
             )
             solver_update_stats: List[Dict] = []
             solver_update_reason = "disabled"
-            if solver_skip_update:
+            if not understanding_update_eligible and bool(getattr(self.cfg, "understanding_update_require_disagreement", True)):
+                solver_skip_update = True
+                solver_update_reason = f"gated_{understanding_update_skip_reason}"
+            elif bool(getattr(self.cfg, "solver_skip_unsolvable_updates", True)) and bool(dual.unsolvable_case):
+                solver_skip_update = True
+                solver_update_reason = "unsolvable_case_skip"
+            elif solver_skip_update:
                 solver_update_reason = "easy_question_skip"
             elif (
                 self.policy_updates_enabled
@@ -969,10 +1111,11 @@ class SelfEvolvingUnderstandingTrainer:
                     policy_updates_applied += int(not update_stats.get("skipped", True))
                 solver_update_reason = "ok" if solver_update_stats else "no_samples"
 
-            self.solver_baseline = (
-                baseline_momentum * self.solver_baseline
-                + (1.0 - baseline_momentum) * float(solver_scalar_reward)
-            )
+            if understanding_update_eligible:
+                self.solver_baseline = (
+                    baseline_momentum * self.solver_baseline
+                    + (1.0 - baseline_momentum) * float(solver_scalar_reward)
+                )
 
             _write_jsonl(
                 self.rollouts_log_path,
@@ -999,6 +1142,8 @@ class SelfEvolvingUnderstandingTrainer:
                     "solver_group_rewards": solver_group_rewards,
                     "proposer_baseline": float(self.proposer_baseline),
                     "solver_baseline": float(self.solver_baseline),
+                    "understanding_update_eligible": bool(understanding_update_eligible),
+                    "understanding_update_skip_reason": str(understanding_update_skip_reason),
                     "policy_updates_enabled": bool(self.policy_updates_enabled),
                     "proposer_policy_update_attempted": bool(proposer_update_attempted),
                     "proposer_policy_update_applied": bool(proposer_update_applied),
@@ -1046,6 +1191,8 @@ class SelfEvolvingUnderstandingTrainer:
                 path = self._save_checkpoint(step)
                 if path:
                     print(f"[self_evolving] saved checkpoint: {path}")
+                    if self.last_lora_checkpoint_dir:
+                        print(f"[self_evolving] saved role LoRA checkpoint: {self.last_lora_checkpoint_dir}")
 
         flushed_optim_steps = 0
         if self.proposer_updater is not None:
@@ -1059,6 +1206,8 @@ class SelfEvolvingUnderstandingTrainer:
             final_ckpt = self._save_checkpoint(int(self.cfg.steps))
             if final_ckpt:
                 print(f"[self_evolving] final checkpoint: {final_ckpt}")
+                if self.last_lora_checkpoint_dir:
+                    print(f"[self_evolving] final role LoRA checkpoint: {self.last_lora_checkpoint_dir}")
 
         summary = {
             "steps_total": int(self.cfg.steps),
@@ -1086,6 +1235,7 @@ class SelfEvolvingUnderstandingTrainer:
             "generator_baseline_final": float(self.generator_baseline),
             "optimizer_flush_steps": int(flushed_optim_steps),
             "last_checkpoint_path": str(self.last_checkpoint_path),
+            "last_lora_checkpoint_dir": str(self.last_lora_checkpoint_dir),
         }
         with open(self.summary_path, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)

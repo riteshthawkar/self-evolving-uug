@@ -1,10 +1,10 @@
 % =====================================================================
-% Table 2: Model-Agnostic Main Results (Understanding + Generation)
-% Combines understanding and generation benchmarks for all 3 architectures
-% in a single table to demonstrate architecture-independent improvements.
+% Table 2: Main Results with Base Unified Model References
+% Base unified understanding-and-generation models as reference,
+% followed by our 3 unified models (Base vs Ours).
 % =====================================================================
 \begin{table}[tb]
-  \caption{Main results across three architecturally distinct unified models. Each model is evaluated in its base configuration and after applying our self-evolving framework. Understanding and generation benchmarks are separated by a vertical rule. The consistent improvements across diffusion-based (BLIP3o), flow-matching (BAGEL), and autoregressive (VARGPT) architectures demonstrate the model-agnostic nature of the framework.}
+  \caption{Main results across three architecturally distinct unified models alongside existing unified understanding and generation models as reference. Each of our models is evaluated in its base configuration and after applying our self-evolving framework. Understanding and generation benchmarks are separated by a vertical rule.}
   \label{tab:main_results}
   \centering
   \small
@@ -15,6 +15,12 @@
     \cmidrule(lr){3-10} \cmidrule(l){11-14}
     Model & Setting & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval & DPG-Bench & WISE & Avg \\
     \midrule
+    \multicolumn{14}{l}{\emph{Unified understanding and generation models}} \\
+    Janus-Pro-7B \cite{chen2025januspro} & & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SEED-X \cite{ge2024seedx} & & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    Emu3 \cite{wang2024emu3} & & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \midrule
+    \multicolumn{14}{l}{\emph{Ours (self-evolving framework)}} \\
     \multirow{3}{*}{BLIP3o-8B} & Base & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
     & Ours & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
     & $\Delta$ & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
@@ -33,12 +39,12 @@
 
 
 % =====================================================================
-% Table 3: Comparison with Self-Supervised Methods (Fair Comparison)
-% Only methods that require NO curated SFT data, NO external reward
-% models, and NO supervised initialization are included here.
+% Table 3: Comparison with Base Unified Models and Self-Supervised Methods
+% Comprehensive comparison including base unified models, self-supervised
+% post-training methods, and our approach across all three backbones.
 % =====================================================================
 \begin{table}[tb]
-  \caption{Comparison with self-supervised post-training methods. All methods listed operate without curated labels, supervised fine-tuning data, or external reward models, ensuring a fair comparison under equivalent supervision constraints. Understanding and generation benchmarks are separated by a vertical rule.}
+  \caption{Comprehensive comparison across base unified models and self-supervised post-training methods. All post-training methods listed operate without curated labels, supervised fine-tuning data, or external reward models. Methods using additional supervision are reported in the supplementary material. Understanding and generation benchmarks are separated by a vertical rule.}
   \label{tab:selfsup_comparison}
   \centering
   \small
@@ -49,13 +55,25 @@
     \cmidrule(lr){3-10} \cmidrule(l){11-13}
     Method & Backbone & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval & DPG-Bench & WISE \\
     \midrule
-    UniGame \cite{su2025unigame} & UMM & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    SUDER \cite{hong2025dualselfrewards} & Janus-Pro-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    EvoLMM \cite{thawakar2025evolmm} & Janus-Pro-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    SILMM \cite{qu2024silmm} & SEED-X & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    ILLUME \cite{wang2024illume} & SEED-X & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \multicolumn{13}{l}{\emph{Base unified understanding and generation models}} \\
+    Janus-Pro-7B \cite{chen2025januspro} & Janus-Pro-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SEED-X \cite{ge2024seedx} & SEED-X & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    Emu3 \cite{wang2024emu3} & Emu3 & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    BLIP3o-8B & BLIP3o-8B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    BAGEL & BAGEL & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    VARGPT & VARGPT & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
     \midrule
+    \multicolumn{13}{l}{\emph{Self-supervised post-training methods}} \\
+    UniGame \cite{su2025unigame} & Janus-Pro-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SUDER \cite{hong2025dualselfrewards} & Janus-Pro-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    EvoLMM \cite{thawakar2025evolmm} & Qwen2.5-VL-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SILMM \cite{qu2024silmm} & SEED-LLaMA & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    ILLUME \cite{wang2024illume} & Vicuna-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \midrule
+    \multicolumn{13}{l}{\emph{Ours (self-supervised, across three architectures)}} \\
     \textbf{Ours} & BLIP3o-8B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \textbf{Ours} & BAGEL & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \textbf{Ours} & VARGPT & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
     \bottomrule
   \end{tabular}%
   }

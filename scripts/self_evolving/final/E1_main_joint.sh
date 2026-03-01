@@ -13,7 +13,7 @@ set -euo pipefail
 #
 # Key differences from X09 (the easy-data pilot):
 #   • Uses natural-image pool (joint_3k) not chart-heavy 50k (charts break DiT)
-#   • Trains for 1500 steps (was 650 in pilot)
+#   • Trains for 10k steps (was 650 in pilot)
 #
 # What this experiment proves:
 #   ✓ Our framework improves BOTH understanding AND generation
@@ -44,6 +44,33 @@ NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 TRAIN_ENTRY="${TRAIN_ENTRY:-$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+UNDERSTANDING_STEPS_PER_CYCLE="${UNDERSTANDING_STEPS_PER_CYCLE:-3}"
+GENERATION_STEPS_PER_CYCLE="${GENERATION_STEPS_PER_CYCLE:-2}"
+GENERATOR_UPDATE_FREQ="${GENERATOR_UPDATE_FREQ:-1}"
+DIT_UPDATE_ENABLED="${DIT_UPDATE_ENABLED:-1}"
+DIT_UPDATE_FREQ="${DIT_UPDATE_FREQ:-1}"
+PROPOSER_GEN_REWARD_ENABLED="${PROPOSER_GEN_REWARD_ENABLED:-1}"
+GEN_STEP_SOLVER_UPDATE_ENABLED="${GEN_STEP_SOLVER_UPDATE_ENABLED:-1}"
+
+DIT_ARGS=()
+if [[ "$DIT_UPDATE_ENABLED" == "1" ]]; then
+  DIT_ARGS+=(--dit_update_enabled)
+fi
+
+PROPOSER_GEN_REWARD_ARGS=()
+if [[ "$PROPOSER_GEN_REWARD_ENABLED" == "1" ]]; then
+  PROPOSER_GEN_REWARD_ARGS+=(
+    --proposer_gen_reward_enabled
+    --proposer_gen_entropy_weight 0.7
+    --proposer_gen_baseline_momentum 0.6
+  )
+fi
+
+GEN_STEP_SOLVER_ARGS=()
+if [[ "$GEN_STEP_SOLVER_UPDATE_ENABLED" == "1" ]]; then
+  GEN_STEP_SOLVER_ARGS+=(--gen_step_solver_update_enabled)
+fi
 
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
@@ -219,6 +246,10 @@ echo "[E1]   Output dir:  $OUTPUT_DIR"
 echo "[E1]   Data dir:    $DATA_DIR"
 echo "[E1]   GPUs:        $NPROC_PER_NODE"
 echo "[E1]   Attn impl:   $ATTN_IMPL"
+echo "[E1]   Total steps: $TOTAL_STEPS"
+echo "[E1]   Cycle:       U=$UNDERSTANDING_STEPS_PER_CYCLE, G=$GENERATION_STEPS_PER_CYCLE"
+echo "[E1]   Gen freq:    $GENERATOR_UPDATE_FREQ, DiT enabled: $DIT_UPDATE_ENABLED (freq=$DIT_UPDATE_FREQ)"
+echo "[E1]   Gen->U aux:  proposer_reward=$PROPOSER_GEN_REWARD_ENABLED, solver_update=$GEN_STEP_SOLVER_UPDATE_ENABLED"
 if [[ -n "${RESUME_FROM:-}" ]]; then
   echo "[E1]   Resume from: $RESUME_FROM"
 fi
@@ -241,10 +272,10 @@ fi
   --cuda_device 0 \
   \
   `# ── Training schedule ──────────────────────────────────────────────────` \
-  --total_steps 1500 \
+  --total_steps "$TOTAL_STEPS" \
   --save_every 50 \
   --log_every 1 \
-  --max_checkpoints 30 \
+  --max_checkpoints "${MAX_CHECKPOINTS:-10000}" \
   --save_generated_images_every 50 \
   --deterministic \
   \
@@ -264,7 +295,7 @@ fi
   \
   `# ── Role update frequencies ─────────────────────────────────────────────` \
   --proposer_update_freq 1 \
-  --generator_update_freq 1 \
+  --generator_update_freq "$GENERATOR_UPDATE_FREQ" \
   --enable_solver_updates \
   --solver_update_freq 1 \
   \
@@ -327,9 +358,9 @@ fi
   `# ── Proposer entropy target ─────────────────────────────────────────────` \
   --prop_entropy_sigma 0.25 \
   \
-  `# ── Cycle scheduling (3 U-steps : 2 G-steps) ──────────────────────────` \
-  --understanding_steps_per_cycle 3 \
-  --generation_steps_per_cycle 2 \
+  `# ── Cycle scheduling ────────────────────────────────────────────────────` \
+  --understanding_steps_per_cycle "$UNDERSTANDING_STEPS_PER_CYCLE" \
+  --generation_steps_per_cycle "$GENERATION_STEPS_PER_CYCLE" \
   --synthetic_solver_update_freq 0 \
   \
   `# ── KL regularisation ───────────────────────────────────────────────────` \
@@ -365,8 +396,8 @@ fi
   --gen_mix_ratio_warmup_steps 1 \
   \
   `# ── DiT SFT + Joint Conditioning + RWR ─────────────────────────────────` \
-  --dit_update_enabled \
-  --dit_update_freq 1 \
+  ${DIT_ARGS[@]+"${DIT_ARGS[@]}"} \
+  --dit_update_freq "$DIT_UPDATE_FREQ" \
   --dit_lr 5e-7 \
   --dit_weight_decay 0.01 \
   --dit_grad_clip 1.0 \
@@ -379,10 +410,8 @@ fi
   --dit_reward_loss_weight 0.5 \
   \
   `# ── Proposer dual reward (understanding + generation) ──────────────────` \
-  --proposer_gen_reward_enabled \
-  --proposer_gen_entropy_weight 0.7 \
-  --proposer_gen_baseline_momentum 0.6 \
-  --gen_step_solver_update_enabled \
+  ${PROPOSER_GEN_REWARD_ARGS[@]+"${PROPOSER_GEN_REWARD_ARGS[@]}"} \
+  ${GEN_STEP_SOLVER_ARGS[@]+"${GEN_STEP_SOLVER_ARGS[@]}"} \
   \
   `# ── Logging / W&B ─────────────────────────────────────────────────────` \
   --wandb_mode disabled \

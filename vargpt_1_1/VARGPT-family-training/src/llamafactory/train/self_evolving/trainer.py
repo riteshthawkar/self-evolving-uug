@@ -305,6 +305,9 @@ class SelfEvolvingTrainer(Trainer):
         selected_candidate: Optional[Dict[str, object]] = None
         selected_candidate_idx: int = -1
         selected_meta: Dict[str, str] = {}
+        selected_choice_mode = False
+        selected_choice_option_a = ""
+        selected_choice_option_b = ""
         controller_state = self._choose_difficulty_target()
         desired_difficulty_bucket = str(controller_state.get("desired_bucket", "medium"))
         warm_start_active = bool(self._is_proposer_warm_start_active(u_step))
@@ -334,7 +337,11 @@ class SelfEvolvingTrainer(Trainer):
             )
         proposer_temp = max(0.05, min(3.5, proposer_temp))
         proposer_top_p = max(0.05, min(1.0, proposer_top_p))
+        spot_entropy_min_gate = max(
+            0.0, float(getattr(cfg, "proposer_spot_entropy_min_gate", 0.05))
+        )
         attempt = 0
+        spot_all_easy_low_entropy = False
 
         for attempt in range(max_retries):
             # ── 2. Proposer generates question candidates ───────────────
@@ -343,6 +350,7 @@ class SelfEvolvingTrainer(Trainer):
                     image,
                     step,
                     target_difficulty=desired_difficulty_bucket,
+                    image_source_hint=source,
                     num_candidates=proposer_num_candidates,
                     temperature=proposer_temp,
                     top_p=proposer_top_p,
@@ -361,16 +369,48 @@ class SelfEvolvingTrainer(Trainer):
             # ── 3. Spot-check each candidate with reduced solver budget ─
             for cand_idx, cand in enumerate(candidates):
                 q = str(cand.get("question", "")).strip()
+                meta = dict(cand.get("meta", {}))
+                q_compiled, compile_ok, compile_reason = self._compile_question_from_slots(q, meta)
+                meta["_compiler_valid"] = "1" if compile_ok else "0"
+                meta["_compiler_reason"] = str(compile_reason)
+                if q_compiled:
+                    q = q_compiled
                 if not q:
                     continue
+                opt_a, opt_b = self._extract_forced_choice_options(
+                    str(meta.get("two_answer_test", "") or "")
+                )
+                choice_mode = bool(
+                    getattr(cfg, "solver_use_forced_choice_from_proposer", False)
+                    and opt_a
+                    and opt_b
+                )
+                solver_q = q
+                if choice_mode:
+                    solver_q = (
+                        f"{q}\n"
+                        f"Choose exactly one option.\n"
+                        f"Option A: {opt_a}\n"
+                        f"Option B: {opt_b}\n"
+                        "Respond with only 'A' or 'B'."
+                    )
                 with use_role(self.model, ROLE_SOLVER):
                     ans_spot, sc_spot = self._generate_solver_answers(
-                        image, q, num_samples=spot_n,
+                        image, solver_q, num_samples=spot_n,
                     )
                 if not ans_spot:
                     continue
 
-                norm = [normalize_answer(a) for a in ans_spot]
+                if choice_mode:
+                    norm = []
+                    for a in ans_spot:
+                        vote = self._parse_forced_choice_answer(a, opt_a, opt_b)
+                        if vote == "a":
+                            norm.append(normalize_answer(opt_a))
+                        elif vote == "b":
+                            norm.append(normalize_answer(opt_b))
+                else:
+                    norm = [normalize_answer(a) for a in ans_spot]
                 norm = [n for n in norm if n]
                 if not norm:
                     continue
@@ -396,7 +436,6 @@ class SelfEvolvingTrainer(Trainer):
                 if cfg.acceptance_require_non_easy and easy_spot:
                     spot_reward -= controller_penalty_boost * float(cfg.rejected_question_penalty)
 
-                meta = dict(cand.get("meta", {}))
                 objective_ok = bool(self._is_objective_question(q))
                 if cfg.proposer_require_objective and not objective_ok:
                     spot_reward -= controller_penalty_boost * float(cfg.proposer_non_objective_penalty)
@@ -404,6 +443,9 @@ class SelfEvolvingTrainer(Trainer):
                 cert = self._proposer_certificate_score(q, meta)
                 cert_score = float(cert.get("score", 0.0))
                 cert_valid = float(cert.get("valid", 0.0))
+                if (not compile_ok) and bool(getattr(cfg, "proposer_slot_compiler_strict", True)):
+                    cert_valid = 0.0
+                    cert_score = min(cert_score, 0.0)
                 cert_bonus = 0.0
                 if bool(getattr(cfg, "proposer_certificate_enabled", True)):
                     cert_weight_cfg = float(
@@ -446,28 +488,67 @@ class SelfEvolvingTrainer(Trainer):
                         "certificate_valid": float(cert_valid),
                         "certificate_bonus": float(cert_bonus),
                         "spot_reward": float(spot_reward),
+                        "choice_mode": bool(choice_mode),
+                        "choice_option_a": str(opt_a),
+                        "choice_option_b": str(opt_b),
                     }
                 )
 
             if not current_candidates:
                 continue
 
-            # Select best candidate: prefer non-easy, then stronger spot reward, then entropy.
-            selected_now = max(
-                current_candidates,
-                key=lambda c: (
-                    1.0 if not bool(c.get("easy_spot", True)) else 0.0,
-                    float(c.get("certificate_valid", 0.0)),
-                    float(c.get("certificate_score", 0.0)),
-                    float(c.get("spot_reward", -1e9)),
-                    float(c.get("spot_entropy", 0.0)),
-                ),
+            def _cand_key(cand: Dict[str, object]) -> Tuple[float, float, float, float]:
+                return (
+                    1.0 if not bool(cand.get("easy_spot", True)) else 0.0,
+                    float(cand.get("certificate_valid", 0.0)),
+                    float(cand.get("spot_reward", -1e9)),
+                    float(cand.get("spot_entropy", 0.0)),
+                )
+
+            # Candidate selection fallback priority:
+            # 1) non-easy + objective + cert-valid
+            # 2) objective + cert-valid
+            # 3) best available candidate
+            best_any = max(current_candidates, key=_cand_key)
+            acceptable = [
+                c for c in current_candidates
+                if (not bool(c.get("easy_spot", True)))
+                and bool(c.get("objective_ok", False))
+                and (float(c.get("certificate_valid", 0.0)) > 0.5)
+            ]
+            valid = [
+                c for c in current_candidates
+                if bool(c.get("objective_ok", False))
+                and (float(c.get("certificate_valid", 0.0)) > 0.5)
+            ]
+            if acceptable:
+                selected_now = max(acceptable, key=_cand_key)
+            elif valid:
+                selected_now = max(valid, key=_cand_key)
+            else:
+                selected_now = best_any
+
+            cand_non_easy_rate_attempt = (
+                sum(1 for c in current_candidates if not bool(c.get("easy_spot", True)))
+                / float(max(1, len(current_candidates)))
             )
+            if (
+                cand_non_easy_rate_attempt <= 0.0
+                and float(selected_now.get("spot_entropy", 0.0)) < spot_entropy_min_gate
+            ):
+                spot_all_easy_low_entropy = True
+                self._forced_explore_steps_left = max(
+                    int(self._forced_explore_steps_left),
+                    max(1, int(getattr(cfg, "all_easy_explore_steps", 10))),
+                )
 
             candidate_records = current_candidates
             selected_candidate = selected_now
             selected_candidate_idx = int(selected_now.get("candidate_index", -1))
             selected_meta = dict(selected_now.get("meta", {}))
+            selected_choice_mode = bool(selected_now.get("choice_mode", False))
+            selected_choice_option_a = str(selected_now.get("choice_option_a", "") or "")
+            selected_choice_option_b = str(selected_now.get("choice_option_b", "") or "")
             question_text = str(selected_now.get("question", "")).strip()
             proposer_completion = str(selected_now.get("completion", ""))
             if not proposer_completion:
@@ -487,9 +568,18 @@ class SelfEvolvingTrainer(Trainer):
             return {"u_skipped": True, "reason": "no_question"}
 
         # ── 4. Full solver rollout on selected candidate ────────────────
+        solver_rollout_question = question_text
+        if selected_choice_mode and selected_choice_option_a and selected_choice_option_b:
+            solver_rollout_question = (
+                f"{question_text}\n"
+                f"Choose exactly one option.\n"
+                f"Option A: {selected_choice_option_a}\n"
+                f"Option B: {selected_choice_option_b}\n"
+                "Respond with only 'A' or 'B'."
+            )
         with use_role(self.model, ROLE_SOLVER):
             answers, solver_completions = self._generate_solver_answers(
-                image, question_text, num_samples=cfg.num_solver_samples,
+                image, solver_rollout_question, num_samples=cfg.num_solver_samples,
             )
         if not answers:
             return {"u_skipped": True, "reason": "no_answers"}
@@ -517,10 +607,23 @@ class SelfEvolvingTrainer(Trainer):
             )
         else:
             stats["proposer_candidate_non_easy_rate"] = 0.0
+        stats["proposer_spot_entropy_min_gate"] = float(spot_entropy_min_gate)
+        stats["proposer_spot_all_easy_low_entropy"] = bool(spot_all_easy_low_entropy)
 
         # ── 5. Compute rewards ──────────────────────────────────────────
         # Normalize answers for voting
-        norm_answers = [normalize_answer(a) for a in answers]
+        if selected_choice_mode and selected_choice_option_a and selected_choice_option_b:
+            norm_answers = []
+            for a in answers:
+                vote = self._parse_forced_choice_answer(
+                    a, selected_choice_option_a, selected_choice_option_b
+                )
+                if vote == "a":
+                    norm_answers.append(normalize_answer(selected_choice_option_a))
+                elif vote == "b":
+                    norm_answers.append(normalize_answer(selected_choice_option_b))
+        else:
+            norm_answers = [normalize_answer(a) for a in answers]
         if not norm_answers:
             return {"u_skipped": True, "reason": "no_answers"}
 
@@ -680,11 +783,33 @@ class SelfEvolvingTrainer(Trainer):
         update_rule = str(getattr(cfg, "proposer_update_rule", "reinforce")).strip().lower()
         if update_rule == "grpo" and len(candidate_records) > 1:
             group_rewards: List[float] = []
+            group_buckets: List[str] = []
             for c in candidate_records:
                 r = float(c.get("spot_reward", 0.0))
+                c_easy = bool(c.get("easy_spot", True))
+                c_entropy = float(c.get("spot_entropy", 0.0))
+                c_margin = float(c.get("spot_margin", 1.0))
+                if c_easy:
+                    bucket = "easy"
+                elif (
+                    c_entropy >= float(getattr(cfg, "difficulty_hard_min_entropy", 0.90))
+                    and c_margin <= float(getattr(cfg, "difficulty_hard_max_margin", 0.35))
+                ):
+                    bucket = "hard"
+                else:
+                    bucket = "medium"
                 if int(c.get("candidate_index", -1)) == int(selected_candidate_idx):
                     r = float(proposer_reward)
+                    bucket = str(diff_bucket)
                 group_rewards.append(r)
+                group_buckets.append(bucket)
+
+            group_rewards, group_rank_deltas = self._apply_grpo_pairwise_ranking(
+                group_rewards, group_buckets
+            )
+            group_rewards, group_all_easy_deltas, group_all_easy_applied = (
+                self._apply_all_easy_relative_negatives(group_rewards, group_buckets)
+            )
             if group_rewards:
                 mean_r = sum(group_rewards) / float(len(group_rewards))
                 std_r = math.sqrt(
@@ -727,6 +852,23 @@ class SelfEvolvingTrainer(Trainer):
             stats["prop_group_reward_mean"] = float(mean_r)
             stats["prop_group_reward_std"] = float(std_r)
             stats["prop_applied_updates"] = len(applied)
+            stats["grpo_pairwise_rank_delta_mean"] = (
+                float(sum(group_rank_deltas) / max(1, len(group_rank_deltas)))
+                if group_rank_deltas
+                else 0.0
+            )
+            stats["grpo_pairwise_rank_delta_max"] = (
+                float(max(group_rank_deltas)) if group_rank_deltas else 0.0
+            )
+            stats["grpo_pairwise_rank_delta_min"] = (
+                float(min(group_rank_deltas)) if group_rank_deltas else 0.0
+            )
+            stats["grpo_all_easy_rank_applied"] = bool(group_all_easy_applied)
+            stats["grpo_all_easy_rank_delta_mean"] = (
+                float(sum(group_all_easy_deltas) / max(1, len(group_all_easy_deltas)))
+                if group_all_easy_deltas
+                else 0.0
+            )
             if group_stats:
                 stats["prop_ce_loss_mean"] = float(
                     sum(float(s.get("ce_loss", 0.0)) for s in group_stats if not math.isnan(float(s.get("ce_loss", 0.0))))
@@ -1124,6 +1266,7 @@ class SelfEvolvingTrainer(Trainer):
         image: Image.Image,
         step: int,
         target_difficulty: str = "",
+        image_source_hint: str = "",
         num_candidates: Optional[int] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
@@ -1148,6 +1291,7 @@ class SelfEvolvingTrainer(Trainer):
             prompt = build_proposer_multi_prompt(
                 target_difficulty=difficulty,
                 num_questions=n_candidates,
+                image_source_hint=image_source_hint,
             )
         else:
             prompt = build_proposer_prompt(target_difficulty=difficulty)
@@ -1566,6 +1710,109 @@ class SelfEvolvingTrainer(Trainer):
             return False
         return True
 
+    def _extract_target_from_question(self, question: str) -> str:
+        q = normalize_answer(str(question or ""), max_words=40)
+        if not q:
+            return ""
+        patterns = (
+            r"(?:of|on|in|behind|beside|near|under|above|left of|right of)\s+the\s+([a-z0-9\- ]+?)(?:\?|$)",
+            r"the\s+([a-z0-9\- ]+?)\s+(?:is|are|was|were)\b",
+        )
+        for pat in patterns:
+            m = re.search(pat, q)
+            if m:
+                t = normalize_answer(m.group(1), max_words=8)
+                if t:
+                    return t
+        tokens = [t for t in re.findall(r"[a-z0-9]+", q) if t]
+        if tokens:
+            return " ".join(tokens[-2:]) if len(tokens) >= 2 else tokens[-1]
+        return ""
+
+    def _compile_question_from_slots(
+        self,
+        question_text: str,
+        meta: Dict[str, str],
+    ) -> Tuple[str, bool, str]:
+        q = str(question_text or "").replace("\n", " ").strip()
+        if not bool(getattr(self.se_config, "proposer_slot_compiler_enabled", True)):
+            return q, True, "disabled"
+        strict = bool(getattr(self.se_config, "proposer_slot_compiler_strict", True))
+        target = normalize_answer(str(meta.get("visual_target", "") or ""), max_words=8)
+        if not target:
+            target = self._extract_target_from_question(q)
+
+        compiled = q
+        qn = normalize_answer(q, max_words=32)
+        if " or " in qn and target:
+            # Rewrite forced-choice question into open-ended form.
+            if qn.startswith("how many"):
+                compiled = f"How many {target} are visible?"
+            else:
+                compiled = f"What is the {target}?"
+        elif qn.startswith("how many") and target:
+            compiled = f"How many {target} are visible?"
+
+        compiled = compiled.strip()
+        if compiled and not compiled.endswith("?"):
+            compiled = compiled + "?"
+
+        if strict and (not target):
+            return "", False, "target_missing"
+        if strict and (not self._is_objective_question(compiled)):
+            return "", False, "non_objective"
+        if not compiled:
+            return "", False, "empty_compiled"
+        return compiled, True, "ok"
+
+    def _extract_forced_choice_options(self, two_answer_test: str) -> Tuple[str, str]:
+        raw = normalize_answer(str(two_answer_test or ""), max_words=30)
+        if not raw:
+            return "", ""
+        parts = [p.strip() for p in re.split(r"\s*(?:vs\.?|or|/|,|\||;)\s*", raw) if p.strip()]
+        cleaned: List[str] = []
+        for p in parts:
+            v = re.sub(r"^(?:option|answer)\s*[ab]\s*[:.)-]?\s*", "", p).strip()
+            v = re.sub(r"^[ab]\s*[:.)-]\s*", "", v).strip()
+            if not v:
+                continue
+            if v in {"a", "b", "option a", "option b", "answer a", "answer b"}:
+                continue
+            if v not in cleaned:
+                cleaned.append(v)
+        if len(cleaned) >= 2 and cleaned[0] != cleaned[1]:
+            return cleaned[0], cleaned[1]
+        return "", ""
+
+    def _parse_forced_choice_answer(
+        self,
+        answer_raw: str,
+        option_a: str,
+        option_b: str,
+    ) -> str:
+        v = normalize_answer(str(answer_raw or ""), max_words=16)
+        if not v:
+            return ""
+        if re.search(r"\b(?:option|answer)?\s*a\b", v) and not re.search(r"\b(?:option|answer)?\s*b\b", v):
+            return "a"
+        if re.search(r"\b(?:option|answer)?\s*b\b", v) and not re.search(r"\b(?:option|answer)?\s*a\b", v):
+            return "b"
+        a = normalize_answer(option_a, max_words=8)
+        b = normalize_answer(option_b, max_words=8)
+        if a and a in v and (not b or b not in v):
+            return "a"
+        if b and b in v and (not a or a not in v):
+            return "b"
+
+        vtoks = set(re.findall(r"[a-z0-9]+", v))
+        atoks = set(re.findall(r"[a-z0-9]+", a))
+        btoks = set(re.findall(r"[a-z0-9]+", b))
+        sa = (len(vtoks & atoks) / float(max(1, len(vtoks | atoks)))) if atoks else 0.0
+        sb = (len(vtoks & btoks) / float(max(1, len(vtoks | btoks)))) if btoks else 0.0
+        if max(sa, sb) < 0.20:
+            return ""
+        return "a" if sa >= sb else "b"
+
     def _proposer_certificate_score(self, question: str, meta: Dict[str, str]) -> Dict[str, float]:
         """Compute lightweight structural validity score for proposer output."""
         if not bool(getattr(self.se_config, "proposer_certificate_enabled", True)):
@@ -1585,22 +1832,33 @@ class SelfEvolvingTrainer(Trainer):
         rationale_ok = 1.0 if len(rationale.split()) >= 6 else 0.0
 
         domains = [d.strip().lower() for d in reasoning_domains.split(",") if d.strip()]
-        domains_ok = 1.0 if len(domains) >= 2 else 0.0
+        min_domains = max(1, int(getattr(self.se_config, "proposer_reasoning_min_domains", 2)))
+        domains_ok = 1.0 if len(domains) >= min_domains else 0.0
+        non_rel_ok = 1.0
+        if bool(getattr(self.se_config, "proposer_reasoning_require_non_relation", True)):
+            non_rel_ok = 1.0 if any(d not in {"d1", "relation", "spatial", "d1=relation/spatial"} for d in domains) else 0.0
 
-        has_split = (" vs " in two_answer_test.lower()) or ("/" in two_answer_test)
-        two_ok = 1.0 if has_split and len(two_answer_test.split()) >= 3 else 0.0
+        two_parts = [p.strip() for p in re.split(r"\s*(?:vs\.?|or|/|,|\||;)\s*", two_answer_test.lower()) if p.strip()]
+        two_parts = [p for p in two_parts if p not in {"a", "b", "option a", "option b", "answer a", "answer b"}]
+        two_ok = 1.0 if len(two_parts) >= 2 and two_parts[0] != two_parts[1] else 0.0
 
         # Use fields present in both old and new prompt templates.
         structural_mid = max(target_ok, strategy_ok)
         context_mid = max(chain_ok, rationale_ok)
-        score = float(objective + structural_mid + context_mid + domains_ok + two_ok) / 5.0
+        score = float(objective + structural_mid + context_mid + domains_ok + non_rel_ok + two_ok) / 6.0
         min_score = max(
             0.0,
             min(1.0, float(getattr(self.se_config, "proposer_certificate_min_score", 0.55))),
         )
         strict_struct = bool(getattr(self.se_config, "proposer_certificate_strict_struct", True))
         valid = 1.0 if score >= min_score else 0.0
-        if strict_struct and (objective < 0.5 or two_ok < 0.5 or structural_mid < 0.5):
+        if strict_struct and (
+            objective < 0.5
+            or two_ok < 0.5
+            or structural_mid < 0.5
+            or domains_ok < 0.5
+            or non_rel_ok < 0.5
+        ):
             valid = 0.0
         return {"score": float(score), "valid": float(valid)}
 
@@ -1648,6 +1906,88 @@ class SelfEvolvingTrainer(Trainer):
         if entropy_nats >= hard_min_entropy and margin <= hard_max_margin:
             return "hard"
         return "medium"
+
+    @staticmethod
+    def _difficulty_rank(bucket: str) -> int:
+        b = str(bucket or "").strip().lower()
+        if b == "hard":
+            return 2
+        if b == "medium":
+            return 1
+        return 0
+
+    def _apply_grpo_pairwise_ranking(
+        self,
+        rewards: List[float],
+        buckets: List[str],
+    ) -> Tuple[List[float], List[float]]:
+        if len(rewards) <= 1:
+            return list(rewards), [0.0 for _ in rewards]
+        if not bool(getattr(self.se_config, "grpo_pairwise_ranking_enabled", True)):
+            return list(rewards), [0.0 for _ in rewards]
+        rank_w = max(
+            0.0, float(getattr(self.se_config, "grpo_pairwise_ranking_weight", 0.15))
+        )
+        margin = max(0.0, float(getattr(self.se_config, "grpo_pairwise_margin", 0.10)))
+        easy_pen = max(
+            0.0, float(getattr(self.se_config, "grpo_pairwise_easy_penalty", 0.12))
+        )
+        if rank_w <= 0.0:
+            return list(rewards), [0.0 for _ in rewards]
+
+        adjusted = [float(r) for r in rewards]
+        deltas = [0.0 for _ in adjusted]
+        n = len(adjusted)
+        for i in range(n):
+            for j in range(i + 1, n):
+                ri = self._difficulty_rank(buckets[i] if i < len(buckets) else "easy")
+                rj = self._difficulty_rank(buckets[j] if j < len(buckets) else "easy")
+                if ri == rj:
+                    continue
+                pref = i if ri > rj else j
+                other = j if pref == i else i
+                gap = adjusted[pref] - adjusted[other]
+                target = margin * float(abs(ri - rj))
+                if gap < target:
+                    boost = rank_w * (target - gap)
+                    deltas[pref] += boost
+                    deltas[other] -= boost
+
+        for i, b in enumerate(buckets):
+            if str(b).strip().lower() == "easy":
+                deltas[i] -= easy_pen
+
+        adjusted = [max(-1.0, min(1.0, r + d)) for r, d in zip(adjusted, deltas)]
+        return adjusted, deltas
+
+    def _apply_all_easy_relative_negatives(
+        self,
+        rewards: List[float],
+        buckets: List[str],
+    ) -> Tuple[List[float], List[float], bool]:
+        if len(rewards) <= 1:
+            return list(rewards), [0.0 for _ in rewards], False
+        labels = [str(b).strip().lower() for b in buckets]
+        if any(b != "easy" for b in labels):
+            return list(rewards), [0.0 for _ in rewards], False
+        easy_floor = min(
+            -1e-6, float(getattr(self.se_config, "proposer_easy_reward_floor", -0.35))
+        )
+        spread = max(
+            0.01, float(getattr(self.se_config, "proposer_all_easy_rank_spread", 0.08))
+        )
+        adjusted = [float(r) for r in rewards]
+        deltas = [0.0 for _ in adjusted]
+        order = sorted(range(len(adjusted)), key=lambda i: adjusted[i], reverse=True)
+        denom = max(1, len(order) - 1)
+        for rank, idx in enumerate(order):
+            target = easy_floor - spread * (float(rank) / float(denom))
+            if adjusted[idx] > target:
+                deltas[idx] += (target - adjusted[idx])
+            else:
+                deltas[idx] += min(0.0, easy_floor - adjusted[idx])
+        adjusted = [max(-1.0, min(1.0, r + d)) for r, d in zip(adjusted, deltas)]
+        return adjusted, deltas, True
 
     @staticmethod
     def _second_highest_frac(norm_answers: List[str]) -> float:
@@ -2060,7 +2400,35 @@ class SelfEvolvingTrainer(Trainer):
 
         # Save model adapters
         try:
-            self.save_model(str(ckpt_dir / "model"))
+            model_dir = ckpt_dir / "model"
+            model_ref = _unwrap_model(self.model)
+            if hasattr(model_ref, "save_pretrained"):
+                peft_cfg = getattr(model_ref, "peft_config", {})
+                selected_adapters: List[str] = []
+                if isinstance(peft_cfg, dict) and peft_cfg:
+                    preferred = [ROLE_GENERATOR, ROLE_PROPOSER, ROLE_SOLVER]
+                    selected_adapters = [name for name in preferred if name in peft_cfg]
+                    if not selected_adapters:
+                        selected_adapters = [str(k) for k in peft_cfg.keys()]
+
+                save_kwargs = {
+                    "safe_serialization": bool(getattr(self.args, "save_safetensors", True)),
+                }
+                try:
+                    if selected_adapters:
+                        model_ref.save_pretrained(
+                            str(model_dir),
+                            selected_adapters=selected_adapters,
+                            **save_kwargs,
+                        )
+                    else:
+                        model_ref.save_pretrained(str(model_dir), **save_kwargs)
+                except TypeError:
+                    # Backward compatibility for older PEFT versions.
+                    model_ref.save_pretrained(str(model_dir), **save_kwargs)
+            else:
+                self.save_model(str(model_dir))
+            self._save_adapter_manifest(model_dir)
         except Exception as e:
             logger.warning(f"[SelfEvolvingTrainer] Model save failed: {e}")
 
@@ -2069,15 +2437,195 @@ class SelfEvolvingTrainer(Trainer):
 
         logger.info(f"[SelfEvolvingTrainer] Saved checkpoint at step {step}")
 
+    def _save_adapter_manifest(self, model_dir: pathlib.Path) -> None:
+        """Persist adapter metadata to make resume robust across PEFT versions."""
+        model_ref = _unwrap_model(self.model)
+        peft_cfg = getattr(model_ref, "peft_config", {})
+        adapter_names: List[str] = []
+        if isinstance(peft_cfg, dict):
+            adapter_names = [str(k) for k in peft_cfg.keys()]
+
+        active_adapter = getattr(model_ref, "active_adapter", None)
+        if isinstance(active_adapter, (list, tuple)):
+            active_adapter = active_adapter[0] if active_adapter else None
+
+        _json_dump(
+            model_dir / "se_adapter_manifest.json",
+            {
+                "adapters": adapter_names,
+                "active_adapter": active_adapter,
+                "role_adapters": {
+                    "generator": ROLE_GENERATOR,
+                    "proposer": ROLE_PROPOSER,
+                    "solver": ROLE_SOLVER,
+                },
+            },
+        )
+
+    @staticmethod
+    def _parse_checkpoint_step(name: str) -> int:
+        if not name.startswith("se_checkpoint_"):
+            return -1
+        suffix = name.split("_")[-1]
+        return int(suffix) if suffix.isdigit() else -1
+
+    def _resolve_se_checkpoint_dir(self, checkpoint_path: str) -> Optional[pathlib.Path]:
+        """Resolve resume input into a concrete se_checkpoint_* directory."""
+        path = pathlib.Path(checkpoint_path).expanduser()
+        if not path.exists():
+            return None
+
+        # Passed directly: /.../se_checkpoint_XXXX/se_state.pt
+        if path.is_file() and path.name == "se_state.pt":
+            return path.parent
+
+        # Passed directly: /.../se_checkpoint_XXXX
+        if path.is_dir() and (path / "se_state.pt").exists():
+            return path
+
+        # Passed model dir: /.../se_checkpoint_XXXX/model
+        if path.is_dir() and path.name == "model" and (path.parent / "se_state.pt").exists():
+            return path.parent
+
+        # Passed run dir: /.../output_dir
+        if path.is_dir():
+            candidates = [
+                p for p in path.glob("se_checkpoint_*")
+                if p.is_dir() and (p / "se_state.pt").exists()
+            ]
+            if candidates:
+                return max(candidates, key=lambda p: self._parse_checkpoint_step(p.name))
+
+        return None
+
+    def _resolve_adapter_model_dir(
+        self,
+        checkpoint_dir: pathlib.Path,
+        original_resume_path: pathlib.Path,
+    ) -> Optional[pathlib.Path]:
+        """Locate adapter directory for a checkpoint."""
+        candidate = checkpoint_dir / "model"
+        if candidate.is_dir():
+            return candidate
+
+        # Allow resume_from pointing directly to model adapter folder.
+        if original_resume_path.is_dir() and (
+            (original_resume_path / "adapter_config.json").exists()
+            or (original_resume_path / "adapter_model.bin").exists()
+            or (original_resume_path / "adapter_model.safetensors").exists()
+        ):
+            return original_resume_path
+
+        return None
+
+    def _load_adapter_checkpoint(self, model_dir: pathlib.Path) -> None:
+        """Best-effort adapter restore (generator/proposer/solver)."""
+        model_ref = _unwrap_model(self.model)
+        if not hasattr(model_ref, "load_adapter"):
+            logger.warning("[SelfEvolvingTrainer] Model has no load_adapter(); skipping adapter restore.")
+            return
+
+        manifest_path = model_dir / "se_adapter_manifest.json"
+        adapter_names: List[str] = []
+        if manifest_path.exists():
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                adapter_names = [str(x) for x in manifest.get("adapters", []) if str(x)]
+            except Exception as e:
+                logger.warning(f"[SelfEvolvingTrainer] Failed to read adapter manifest: {e}")
+
+        # Fallback discovery if manifest is absent.
+        if not adapter_names:
+            adapter_names = [ROLE_GENERATOR, ROLE_PROPOSER, ROLE_SOLVER]
+
+        loaded: List[str] = []
+        for adapter_name in adapter_names:
+            if adapter_name == ROLE_GENERATOR:
+                adapter_path = model_dir
+            else:
+                adapter_path = model_dir / adapter_name
+
+            if not adapter_path.exists():
+                continue
+
+            def _try_load() -> None:
+                try:
+                    model_ref.load_adapter(str(adapter_path), adapter_name, is_trainable=True)
+                except TypeError:
+                    # Older PEFT signatures may not accept is_trainable.
+                    model_ref.load_adapter(str(adapter_path), adapter_name)
+
+            try:
+                _try_load()
+                loaded.append(adapter_name)
+                continue
+            except Exception as first_exc:
+                msg = str(first_exc).lower()
+                if "already exists" in msg and hasattr(model_ref, "delete_adapter"):
+                    try:
+                        active = getattr(model_ref, "active_adapter", None)
+                        if isinstance(active, (list, tuple)):
+                            active = active[0] if active else None
+                        if active == adapter_name and hasattr(model_ref, "set_adapter"):
+                            peft_cfg = getattr(model_ref, "peft_config", {})
+                            if isinstance(peft_cfg, dict):
+                                fallback = next((n for n in peft_cfg.keys() if n != adapter_name), None)
+                                if fallback is not None:
+                                    model_ref.set_adapter(fallback)
+                        model_ref.delete_adapter(adapter_name)
+                        _try_load()
+                        loaded.append(adapter_name)
+                        continue
+                    except Exception as retry_exc:
+                        logger.warning(
+                            f"[SelfEvolvingTrainer] Failed to reload adapter '{adapter_name}' "
+                            f"from {adapter_path}: {retry_exc}"
+                        )
+                        continue
+
+                logger.warning(
+                    f"[SelfEvolvingTrainer] Failed to load adapter '{adapter_name}' "
+                    f"from {adapter_path}: {first_exc}"
+                )
+
+        if hasattr(model_ref, "set_adapter"):
+            target = ROLE_GENERATOR if ROLE_GENERATOR in loaded else (loaded[0] if loaded else None)
+            if target is not None:
+                try:
+                    model_ref.set_adapter(target)
+                except Exception as e:
+                    logger.warning(f"[SelfEvolvingTrainer] Failed to set active adapter '{target}': {e}")
+
+        if loaded:
+            logger.info(
+                f"[SelfEvolvingTrainer] Restored adapters from checkpoint: {','.join(loaded)}"
+            )
+        else:
+            logger.warning(
+                f"[SelfEvolvingTrainer] No adapter weights restored from {model_dir}; "
+                "continuing with current in-memory adapters."
+            )
+
     def _load_se_checkpoint(self, checkpoint_path: str) -> int:
         """Load self-evolving checkpoint. Returns the step to resume from."""
-        ckpt_path = pathlib.Path(checkpoint_path)
+        ckpt_dir = self._resolve_se_checkpoint_dir(checkpoint_path)
+        if ckpt_dir is None:
+            logger.warning(
+                f"[SelfEvolvingTrainer] Could not resolve checkpoint directory from: {checkpoint_path}"
+            )
+            return 0
 
-        se_state_path = ckpt_path / "se_state.pt"
-        if not se_state_path.exists():
-            # Try looking for se_state.pt in parent
-            se_state_path = ckpt_path.parent / "se_state.pt"
+        resume_path = pathlib.Path(checkpoint_path).expanduser()
+        model_dir = self._resolve_adapter_model_dir(ckpt_dir, resume_path)
+        if model_dir is not None:
+            self._load_adapter_checkpoint(model_dir)
+        else:
+            logger.warning(
+                f"[SelfEvolvingTrainer] No model adapter directory found under checkpoint: {ckpt_dir}"
+            )
 
+        se_state_path = ckpt_dir / "se_state.pt"
         if se_state_path.exists():
             state = torch.load(se_state_path, map_location="cpu")
             self.proposer_baseline = state.get("proposer_baseline", 0.0)
@@ -2144,12 +2692,16 @@ class SelfEvolvingTrainer(Trainer):
             if "generator_updater" in state:
                 self.generator_updater.load_state_dict(state["generator_updater"])
 
-            step = state.get("step", 0)
-            logger.info(f"[SelfEvolvingTrainer] Resumed from step {step}")
-            return step
+            saved_step = int(state.get("step", 0))
+            next_step = max(0, saved_step + 1)
+            logger.info(
+                f"[SelfEvolvingTrainer] Resumed from {ckpt_dir} "
+                f"(saved_step={saved_step}, next_step={next_step})"
+            )
+            return next_step
 
         logger.warning(
-            f"[SelfEvolvingTrainer] No se_state.pt found at {checkpoint_path}"
+            f"[SelfEvolvingTrainer] No se_state.pt found at resolved path: {ckpt_dir}"
         )
         return 0
 

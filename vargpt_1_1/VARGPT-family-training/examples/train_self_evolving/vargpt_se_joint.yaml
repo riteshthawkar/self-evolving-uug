@@ -40,6 +40,7 @@ ddp_timeout: 180000000
 se_understanding_steps_per_cycle: 3
 se_generation_steps_per_cycle: 2
 se_total_steps: 10000
+se_save_every: 200
 se_replay_buffer_size: 1000
 se_gen_mix_ratio_max: 0.25
 se_imageless_proposer_mode: false
@@ -79,5 +80,5 @@ se_proposer_early_failfast_recover: true
 
 ### logging
 logging_steps: 10
-save_steps: 500
+save_steps: 200
 plot_loss: true
