@@ -176,6 +176,13 @@ class SelfEvolvingTrainer(Trainer):
         self._hardness_debt_cap_streak: int = 0
         self._hardness_debt_escape_steps_left: int = 0
 
+        # ── Runtime safety / health state ────────────────────────────────
+        self._consecutive_step_errors: int = 0
+        self._total_step_errors: int = 0
+        self._generation_consecutive_unhealthy: int = 0
+        g_window = max(1, int(getattr(se_config, "generation_failfast_window", 20)))
+        self._generation_health_window: collections.deque = collections.deque(maxlen=g_window)
+
         # ── DDP detection ────────────────────────────────────────────────
         self._is_ddp = dist.is_available() and dist.is_initialized()
 
@@ -253,13 +260,33 @@ class SelfEvolvingTrainer(Trainer):
                 import traceback
                 traceback.print_exc()
                 step_stats = {"phase": "error", "error": str(e)}
+                self._consecutive_step_errors += 1
+                self._total_step_errors += 1
+                if bool(getattr(cfg, "fail_on_step_error", True)):
+                    max_consecutive = max(0, int(getattr(cfg, "max_consecutive_step_errors", 0)))
+                    max_total = max(0, int(getattr(cfg, "max_total_step_errors", 0)))
+                    if (
+                        self._consecutive_step_errors > max_consecutive
+                        or self._total_step_errors > max_total
+                    ):
+                        raise RuntimeError(
+                            "[SelfEvolvingTrainer] Aborting due to step errors: "
+                            f"consecutive={self._consecutive_step_errors} (limit={max_consecutive}), "
+                            f"total={self._total_step_errors} (limit={max_total}), step={step}"
+                        ) from e
 
             step_stats["step"] = step
             step_stats["step_time"] = time.time() - step_start
+            if step_stats.get("phase") != "error":
+                self._consecutive_step_errors = 0
 
             # ── Logging ─────────────────────────────────────────────────
             if step % cfg.log_every == 0:
                 self._log_step(step, step_stats)
+
+            # ── Generation health fail-fast ─────────────────────────────
+            if step_stats.get("phase") == "generation":
+                self._update_generation_health(step, step_stats)
 
             # ── Checkpointing ───────────────────────────────────────────
             if step > 0 and step % cfg.save_every == 0:
@@ -1027,18 +1054,32 @@ class SelfEvolvingTrainer(Trainer):
 
         # ── 2. Generate K candidate images ──────────────────────────────
         K = cfg.num_generations
+        stats["generation_attempted"] = int(K)
         candidates = []  # List of (PIL Image, pixel_gen_tensor)
+        generation_failures = 0
         with use_role(self.model, ROLE_GENERATOR):
             for k in range(K):
                 try:
                     gen_image, gen_tensor = self._generate_image(spec.prompt)
-                    if gen_image is not None:
+                    if gen_image is not None and gen_tensor is not None:
                         candidates.append((gen_image, gen_tensor))
+                    else:
+                        generation_failures += 1
                 except Exception as e:
+                    generation_failures += 1
                     logger.warning(f"[SelfEvolvingTrainer] Generation {k} failed: {e}")
 
+        stats["generation_succeeded"] = int(len(candidates))
+        stats["generation_failures"] = int(generation_failures)
+        stats["generation_success_rate"] = (
+            float(len(candidates)) / float(max(1, K))
+        )
         if not candidates:
-            return {"g_skipped": True, "reason": "no_candidates"}
+            return {
+                "g_skipped": True,
+                "reason": "no_candidates",
+                **stats,
+            }
         stats["num_candidates"] = len(candidates)
 
         # Save generated images for early-step sanity checks.
@@ -1167,6 +1208,55 @@ class SelfEvolvingTrainer(Trainer):
         stats["reward_ema"] = self.reward_ema
 
         return stats
+
+    def _update_generation_health(self, step: int, stats: Dict) -> None:
+        """Fail fast when generation pipeline is unhealthy for sustained periods."""
+        cfg = self.se_config
+        if not bool(getattr(cfg, "generation_failfast_enabled", True)):
+            return
+
+        attempted = int(stats.get("generation_attempted", 0) or 0)
+        succeeded = int(stats.get("generation_succeeded", 0) or 0)
+        success_rate = float(stats.get("generation_success_rate", 1.0))
+        skipped = bool(stats.get("g_skipped", False))
+        reason = str(stats.get("reason", ""))
+
+        unhealthy = False
+        if attempted > 0:
+            min_rate = max(0.0, min(1.0, float(getattr(cfg, "generation_failfast_min_success_rate", 0.10))))
+            if succeeded <= 0 or success_rate < min_rate:
+                unhealthy = True
+        elif skipped and reason in {"no_candidates"}:
+            unhealthy = True
+
+        self._generation_health_window.append(0.0 if unhealthy else 1.0)
+        if unhealthy:
+            self._generation_consecutive_unhealthy += 1
+        else:
+            self._generation_consecutive_unhealthy = 0
+
+        max_consecutive = max(1, int(getattr(cfg, "generation_failfast_consecutive_skips", 5)))
+        window_success = (
+            float(sum(self._generation_health_window)) / float(len(self._generation_health_window))
+            if len(self._generation_health_window) > 0
+            else 1.0
+        )
+        min_rate = max(0.0, min(1.0, float(getattr(cfg, "generation_failfast_min_success_rate", 0.10))))
+        if self._generation_consecutive_unhealthy >= max_consecutive:
+            raise RuntimeError(
+                "[SelfEvolvingTrainer] Generation fail-fast triggered: "
+                f"step={step}, consecutive_unhealthy={self._generation_consecutive_unhealthy}, "
+                f"window_success_rate={window_success:.3f}, last_reason={reason or 'n/a'}"
+            )
+        if (
+            len(self._generation_health_window) == int(self._generation_health_window.maxlen)
+            and window_success < min_rate
+        ):
+            raise RuntimeError(
+                "[SelfEvolvingTrainer] Generation fail-fast triggered by window health: "
+                f"step={step}, window={len(self._generation_health_window)}, "
+                f"window_success_rate={window_success:.3f}, min_required={min_rate:.3f}"
+            )
 
     # ── Helper Methods ──────────────────────────────────────────────────
 
@@ -1528,6 +1618,101 @@ class SelfEvolvingTrainer(Trainer):
             return m.base_model.model
         return m
 
+    @staticmethod
+    def _collect_image_payload_candidates(gen_result) -> List[object]:
+        """Collect likely image payload objects from heterogeneous model outputs."""
+        preferred_keys = (
+            "generated_image",
+            "image",
+            "images",
+            "img",
+            "output_image",
+            "img_list",
+        )
+        out: List[object] = []
+        seen: set = set()
+
+        def _walk(obj) -> None:
+            oid = id(obj)
+            if oid in seen:
+                return
+            seen.add(oid)
+            if obj is None:
+                return
+            if torch.is_tensor(obj) or isinstance(obj, Image.Image):
+                out.append(obj)
+                return
+            if isinstance(obj, dict):
+                before = len(out)
+                for k in preferred_keys:
+                    if k in obj:
+                        _walk(obj[k])
+                # Fallback scan only when preferred keys did not yield candidates.
+                if len(out) == before:
+                    for idx, v in enumerate(obj.values()):
+                        if idx >= 16:
+                            break
+                        _walk(v)
+                return
+            if isinstance(obj, (list, tuple)):
+                for idx, item in enumerate(obj):
+                    if idx >= 16:
+                        break
+                    _walk(item)
+                return
+            for k in preferred_keys:
+                if hasattr(obj, k):
+                    try:
+                        _walk(getattr(obj, k))
+                    except Exception:
+                        continue
+
+        _walk(gen_result)
+        return out
+
+    @staticmethod
+    def _looks_like_image_tensor(t: torch.Tensor) -> bool:
+        if not torch.is_tensor(t):
+            return False
+        x = t
+        if x.ndim == 4:
+            if x.shape[0] < 1:
+                return False
+            x = x[0]
+        if x.ndim != 3:
+            return False
+        c_first = int(x.shape[0]) in (1, 3, 4)
+        c_last = int(x.shape[-1]) in (1, 3, 4)
+        if not (c_first or c_last):
+            return False
+        try:
+            if c_first:
+                h, w = int(x.shape[1]), int(x.shape[2])
+            else:
+                h, w = int(x.shape[0]), int(x.shape[1])
+            ratio = max(h, w) / float(max(1, min(h, w)))
+            return ratio <= 6.0
+        except Exception:
+            return False
+
+    def _extract_generated_image_tensor(self, gen_result) -> Optional[torch.Tensor]:
+        """Select a real image tensor from model output robustly."""
+        candidates = self._collect_image_payload_candidates(gen_result)
+        for cand in candidates:
+            if torch.is_tensor(cand) and self._looks_like_image_tensor(cand):
+                return cand
+            if isinstance(cand, Image.Image):
+                # Convert PIL to tensor as a fallback path.
+                try:
+                    import numpy as np  # local import to avoid hard dependency
+
+                    arr = np.asarray(cand.convert("RGB"), dtype=np.uint8)
+                    ten = torch.from_numpy(arr).to(self.device)
+                    return ten
+                except Exception:
+                    continue
+        return None
+
     def _generate_image(
         self, prompt: str
     ) -> Tuple[Optional[Image.Image], Optional[torch.Tensor]]:
@@ -1636,32 +1821,7 @@ class SelfEvolvingTrainer(Trainer):
                 )
 
                 if gen_result is not None:
-                    if isinstance(gen_result, torch.Tensor):
-                        img_tensor = gen_result
-                    elif isinstance(gen_result, (list, tuple)):
-                        img_tensor = gen_result[0] if gen_result else None
-                    else:
-                        img_tensor = None
-                        # Handle ModelOutput-style returns from VARGPT forward.
-                        for key in ("generated_image", "image", "images", "img", "output_image"):
-                            if hasattr(gen_result, key):
-                                value = getattr(gen_result, key)
-                                if isinstance(value, (list, tuple)):
-                                    img_tensor = value[0] if value else None
-                                else:
-                                    img_tensor = value
-                                if img_tensor is not None:
-                                    break
-                        # Dict-like fallback.
-                        if img_tensor is None and isinstance(gen_result, dict):
-                            for key in ("generated_image", "image", "images", "img", "output_image"):
-                                if key in gen_result:
-                                    value = gen_result[key]
-                                    if isinstance(value, (list, tuple)):
-                                        img_tensor = value[0] if value else None
-                                    else:
-                                        img_tensor = value
-                                    break
+                    img_tensor = self._extract_generated_image_tensor(gen_result)
 
                     if img_tensor is not None:
                         # VARGPT inference path returns uint8 HWC in BGR order.
@@ -2361,6 +2521,9 @@ class SelfEvolvingTrainer(Trainer):
 
     def _save_se_checkpoint(self, step: int, output_dir: pathlib.Path):
         """Save self-evolving specific state."""
+        if not self.is_world_process_zero():
+            return
+
         ckpt_dir = output_dir / f"se_checkpoint_{step}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2402,19 +2565,27 @@ class SelfEvolvingTrainer(Trainer):
         try:
             model_dir = ckpt_dir / "model"
             model_ref = _unwrap_model(self.model)
+            generator_adapter_name = self._resolve_generator_adapter_name(model_ref)
             if hasattr(model_ref, "save_pretrained"):
                 peft_cfg = getattr(model_ref, "peft_config", {})
                 selected_adapters: List[str] = []
                 if isinstance(peft_cfg, dict) and peft_cfg:
-                    preferred = [ROLE_GENERATOR, ROLE_PROPOSER, ROLE_SOLVER]
+                    preferred = [generator_adapter_name, ROLE_PROPOSER, ROLE_SOLVER]
                     selected_adapters = [name for name in preferred if name in peft_cfg]
                     if not selected_adapters:
                         selected_adapters = [str(k) for k in peft_cfg.keys()]
+                    # Preserve order while removing duplicates.
+                    selected_adapters = list(dict.fromkeys(selected_adapters))
 
                 save_kwargs = {
                     "safe_serialization": bool(getattr(self.args, "save_safetensors", True)),
                 }
+                prev_active = getattr(model_ref, "active_adapter", None)
+                if isinstance(prev_active, (list, tuple)):
+                    prev_active = prev_active[0] if prev_active else None
                 try:
+                    if hasattr(model_ref, "set_adapter") and generator_adapter_name:
+                        model_ref.set_adapter(generator_adapter_name)
                     if selected_adapters:
                         model_ref.save_pretrained(
                             str(model_dir),
@@ -2426,9 +2597,15 @@ class SelfEvolvingTrainer(Trainer):
                 except TypeError:
                     # Backward compatibility for older PEFT versions.
                     model_ref.save_pretrained(str(model_dir), **save_kwargs)
+                finally:
+                    if prev_active is not None and hasattr(model_ref, "set_adapter"):
+                        try:
+                            model_ref.set_adapter(prev_active)
+                        except Exception:
+                            pass
             else:
                 self.save_model(str(model_dir))
-            self._save_adapter_manifest(model_dir)
+            self._save_adapter_manifest(model_dir, generator_adapter_name)
         except Exception as e:
             logger.warning(f"[SelfEvolvingTrainer] Model save failed: {e}")
 
@@ -2437,7 +2614,19 @@ class SelfEvolvingTrainer(Trainer):
 
         logger.info(f"[SelfEvolvingTrainer] Saved checkpoint at step {step}")
 
-    def _save_adapter_manifest(self, model_dir: pathlib.Path) -> None:
+    def _resolve_generator_adapter_name(self, model_ref: torch.nn.Module) -> str:
+        peft_cfg = getattr(model_ref, "peft_config", {})
+        if not isinstance(peft_cfg, dict) or not peft_cfg:
+            return ROLE_GENERATOR
+        if ROLE_GENERATOR in peft_cfg:
+            return ROLE_GENERATOR
+        for name in peft_cfg.keys():
+            s = str(name)
+            if s not in {ROLE_PROPOSER, ROLE_SOLVER}:
+                return s
+        return str(next(iter(peft_cfg.keys())))
+
+    def _save_adapter_manifest(self, model_dir: pathlib.Path, generator_adapter_name: str) -> None:
         """Persist adapter metadata to make resume robust across PEFT versions."""
         model_ref = _unwrap_model(self.model)
         peft_cfg = getattr(model_ref, "peft_config", {})
@@ -2455,7 +2644,7 @@ class SelfEvolvingTrainer(Trainer):
                 "adapters": adapter_names,
                 "active_adapter": active_adapter,
                 "role_adapters": {
-                    "generator": ROLE_GENERATOR,
+                    "generator": generator_adapter_name,
                     "proposer": ROLE_PROPOSER,
                     "solver": ROLE_SOLVER,
                 },
@@ -2518,30 +2707,43 @@ class SelfEvolvingTrainer(Trainer):
 
         return None
 
-    def _load_adapter_checkpoint(self, model_dir: pathlib.Path) -> None:
+    def _load_adapter_checkpoint(self, model_dir: pathlib.Path) -> bool:
         """Best-effort adapter restore (generator/proposer/solver)."""
         model_ref = _unwrap_model(self.model)
         if not hasattr(model_ref, "load_adapter"):
             logger.warning("[SelfEvolvingTrainer] Model has no load_adapter(); skipping adapter restore.")
-            return
+            return False
 
         manifest_path = model_dir / "se_adapter_manifest.json"
         adapter_names: List[str] = []
+        role_adapters: Dict[str, str] = {}
         if manifest_path.exists():
             try:
                 with open(manifest_path, "r", encoding="utf-8") as f:
                     manifest = json.load(f)
                 adapter_names = [str(x) for x in manifest.get("adapters", []) if str(x)]
+                role_adapters = {
+                    str(k): str(v) for k, v in dict(manifest.get("role_adapters", {})).items()
+                }
             except Exception as e:
                 logger.warning(f"[SelfEvolvingTrainer] Failed to read adapter manifest: {e}")
 
         # Fallback discovery if manifest is absent.
+        generator_name = str(
+            role_adapters.get("generator", self._resolve_generator_adapter_name(model_ref))
+        )
         if not adapter_names:
-            adapter_names = [ROLE_GENERATOR, ROLE_PROPOSER, ROLE_SOLVER]
+            adapter_names = [generator_name, ROLE_PROPOSER, ROLE_SOLVER]
+
+        existing_before: set = set()
+        peft_cfg_before = getattr(model_ref, "peft_config", {})
+        if isinstance(peft_cfg_before, dict):
+            existing_before = {str(k) for k in peft_cfg_before.keys()}
 
         loaded: List[str] = []
+        topology_changed = False
         for adapter_name in adapter_names:
-            if adapter_name == ROLE_GENERATOR:
+            if adapter_name == generator_name:
                 adapter_path = model_dir
             else:
                 adapter_path = model_dir / adapter_name
@@ -2558,6 +2760,8 @@ class SelfEvolvingTrainer(Trainer):
 
             try:
                 _try_load()
+                if adapter_name not in existing_before:
+                    topology_changed = True
                 loaded.append(adapter_name)
                 continue
             except Exception as first_exc:
@@ -2574,6 +2778,7 @@ class SelfEvolvingTrainer(Trainer):
                                 if fallback is not None:
                                     model_ref.set_adapter(fallback)
                         model_ref.delete_adapter(adapter_name)
+                        topology_changed = True
                         _try_load()
                         loaded.append(adapter_name)
                         continue
@@ -2590,7 +2795,7 @@ class SelfEvolvingTrainer(Trainer):
                 )
 
         if hasattr(model_ref, "set_adapter"):
-            target = ROLE_GENERATOR if ROLE_GENERATOR in loaded else (loaded[0] if loaded else None)
+            target = generator_name if generator_name in loaded else (loaded[0] if loaded else None)
             if target is not None:
                 try:
                     model_ref.set_adapter(target)
@@ -2606,6 +2811,27 @@ class SelfEvolvingTrainer(Trainer):
                 f"[SelfEvolvingTrainer] No adapter weights restored from {model_dir}; "
                 "continuing with current in-memory adapters."
             )
+        return topology_changed or bool(loaded)
+
+    def _rebuild_updaters_for_resume(self) -> None:
+        """Recreate role updaters so optimizers bind to current adapter params."""
+        self.proposer_updater = RolePolicyUpdater(
+            model=self.model,
+            processor=self.processor,
+            config=self.se_config,
+            adapter_name=ROLE_PROPOSER,
+        )
+        self.solver_updater = RolePolicyUpdater(
+            model=self.model,
+            processor=self.processor,
+            config=self.se_config,
+            adapter_name=ROLE_SOLVER,
+        )
+        self.generator_updater = VARImageGenPolicyUpdater(
+            model=self.model,
+            tokenizer=self.processor,
+            config=self.se_config,
+        )
 
     def _load_se_checkpoint(self, checkpoint_path: str) -> int:
         """Load self-evolving checkpoint. Returns the step to resume from."""
@@ -2618,8 +2844,9 @@ class SelfEvolvingTrainer(Trainer):
 
         resume_path = pathlib.Path(checkpoint_path).expanduser()
         model_dir = self._resolve_adapter_model_dir(ckpt_dir, resume_path)
+        adapters_restored = False
         if model_dir is not None:
-            self._load_adapter_checkpoint(model_dir)
+            adapters_restored = self._load_adapter_checkpoint(model_dir)
         else:
             logger.warning(
                 f"[SelfEvolvingTrainer] No model adapter directory found under checkpoint: {ckpt_dir}"
@@ -2685,6 +2912,8 @@ class SelfEvolvingTrainer(Trainer):
                 maxlen=self._warm_start_entropy_window.maxlen,
             )
 
+            if adapters_restored:
+                self._rebuild_updaters_for_resume()
             if "proposer_updater" in state:
                 self.proposer_updater.load_state_dict(state["proposer_updater"])
             if "solver_updater" in state:
@@ -2724,6 +2953,9 @@ class SelfEvolvingTrainer(Trainer):
 
     def _log_step(self, step: int, stats: Dict):
         """Log step statistics."""
+        if not self.is_world_process_zero():
+            return
+
         phase = stats.get("phase", "unknown")
         step_time = stats.get("step_time", 0.0)
 

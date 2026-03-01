@@ -129,7 +129,7 @@ class SelfEvolvingConfig:
     solver_token_entropy_window_size: int = 128
     solver_token_entropy_sigmoid_alpha: float = 1.5
     solver_token_entropy_sigmoid_beta: float = 2.0
-    solver_skip_update_on_easy: bool = True
+    solver_skip_update_on_easy: bool = False
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
     rejected_question_penalty: float = 0.35
@@ -215,6 +215,15 @@ class SelfEvolvingConfig:
     proposer_early_selected_non_easy_rate_min: float = 0.10
     proposer_early_solver_updates_min: int = 1
     proposer_early_max_collapse_streak: int = 3
+
+    # ── Runtime Safety / Health Gates ────────────────────────────────────
+    fail_on_step_error: bool = True
+    max_consecutive_step_errors: int = 0
+    max_total_step_errors: int = 0
+    generation_failfast_enabled: bool = True
+    generation_failfast_consecutive_skips: int = 5
+    generation_failfast_window: int = 20
+    generation_failfast_min_success_rate: float = 0.10
 
     # ── Generation Reward Weights ────────────────────────────────────────
     reward_spec_weight: float = 0.65

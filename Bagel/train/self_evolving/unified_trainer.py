@@ -1353,9 +1353,12 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                 "step": int(step),
                 "phase": "understanding",
                 "status": "skipped",
-                "skip_reason": "empty_solver_answers",
+                "skip_reason": "no_valid_candidates",
                 "image_path": image_path,
                 "candidate_questions": candidate_questions,
+                "proposer_candidate_count_requested": int(proposer_candidate_count),
+                "proposer_candidate_count_parsed": int(len(candidate_questions)),
+                "proposer_candidate_count_valid": 0,
                 "proposer_raw": proposer.text if self.cfg.save_raw_generations else "",
             }
             return {
