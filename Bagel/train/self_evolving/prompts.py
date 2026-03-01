@@ -15,6 +15,10 @@ _QUESTION_BLOCK_RE = re.compile(
     r"<question(?:\s+[^>]*)?>(.*?)</question>",
     flags=re.IGNORECASE | re.DOTALL,
 )
+_TEXT_TAG_RE = re.compile(
+    r"<text(?:\s+[^>]*)?>\s*(.*?)\s*(?:</text>|$)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 _ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", flags=re.IGNORECASE | re.DOTALL)
 _PROMPT_TAG_RE = re.compile(r"<prompt>\s*(.*?)\s*</prompt>", flags=re.IGNORECASE | re.DOTALL)
 _PROMPT_RELAXED_RE = re.compile(
@@ -26,6 +30,10 @@ _QA_PAIR_RE = re.compile(
     flags=re.IGNORECASE | re.DOTALL,
 )
 _QA_TEXT_RE = re.compile(r"<qa>\s*(.*?)\s*</qa>", flags=re.IGNORECASE | re.DOTALL)
+_QA_FALLBACK_RE = re.compile(
+    r"(?:^|\n)\s*(?:q(?:uestion)?\s*[:\-]\s*)(.+?)\s*(?:\n|\r\n)\s*(?:a(?:nswer)?\s*[:\-]\s*)(.+?)(?=\n\s*(?:q(?:uestion)?\s*[:\-]|$)|$)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 _NON_OBJECTIVE_RE = re.compile(
     r"\b(why|might|could|likely|opinion|feel|emotion|think|believe|suggest|imply|purpose|reason)\b",
     flags=re.IGNORECASE,
@@ -36,6 +44,36 @@ _INVALID_QUESTION_ARTIFACT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _RUNAWAY_PUNCT_RE = re.compile(r"[!?.,;:|/_\-]{4,}")
+_TAG_RE = re.compile(r"<[^>]+>")
+_QUESTION_SLICE_RE = re.compile(r"[^?]{5,240}\?")
+_INTERROGATIVE_START_RE = re.compile(
+    r"^(what|which|who|whom|whose|where|when|why|how|is|are|was|were|do|does|did|can|could|will|would|should|has|have|had)\b",
+    flags=re.IGNORECASE,
+)
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.IGNORECASE | re.DOTALL)
+_ANSWER_OPEN_RE = re.compile(r"<answer(?:\s+[^>]*)?>\s*(.*)$", flags=re.IGNORECASE | re.DOTALL)
+_ANSWER_PREFIX_RE = re.compile(r"^\s*(?:final\s+answer|answer)\s*[:\-]\s*", flags=re.IGNORECASE)
+_CONCLUSION_RE = re.compile(
+    r"\b(?:conclusion|final answer|answer|therefore|thus)\s*[:\-]\s*(.+)$",
+    flags=re.IGNORECASE,
+)
+_YES_NO_RE = re.compile(r"^\s*(yes|no)\b", flags=re.IGNORECASE)
+_NUMBER_RE = re.compile(r"^\s*[-+]?\d+(?:\.\d+)?\b")
+_PROMPT_PREFIX_RE = re.compile(
+    r"^\s*<?\s*prompt(?:[^A-Za-z0-9_]+|[A-Za-z0-9_]*\s+)\s*[:>\-]?\s*",
+    flags=re.IGNORECASE,
+)
+_PROMPT_QA_MARKERS = (
+    "<qa_pairs",
+    "<qa>",
+    "<qa ",
+    "<question>",
+    "<answer>",
+    "</qa_pairs>",
+    "</qa>",
+    "</question>",
+    "</answer>",
+)
 
 
 @dataclass(frozen=True)
@@ -70,11 +108,11 @@ def build_proposer_prompt(target_difficulty: str = "medium") -> str:
         "Rules:\n"
         "- Must be answerable from visible evidence only.\n"
         "- Avoid subjective/speculative wording (why/might/could/likely/feel).\n"
-        "- Avoid forced-choice binary forms and vague outputs.\n"
+        "- Use a concrete, verifiable question with a single correct answer.\n"
         "- Question must end with '?'.\n"
-        "Output only:\n"
-        "<question>...</question>\n"
-        "<rationale>...</rationale>"
+        "- Use English only.\n"
+        "Output only this XML and no extra text:\n"
+        "<question>...</question>"
     )
 
 
@@ -93,28 +131,19 @@ def build_proposer_multi_prompt(num_questions: int = 3, target_difficulty: str =
         diff_hint = "TARGET MEDIUM: grounded multi-constraint questions."
 
     return (
-        "You are a reasoning-first visual question proposer.\n"
+        "You are a visual question proposer.\n"
         f"{diff_hint}\n"
-        f"Generate exactly {n} candidate questions.\n"
-        "For each candidate, follow this order: task_card -> reasoning_domains -> reasoning_chain -> "
-        "strategy_used -> visual_target -> two_answer_test -> text -> rationale.\n"
+        f"Generate exactly {n} objective, image-grounded questions.\n"
         "Rules:\n"
-        "- Objective and image-grounded only.\n"
+        "- Use English only.\n"
+        "- Every question must end with '?'.\n"
         "- Avoid speculative/subjective wording.\n"
-        "- Avoid explicit binary forced-choice questions.\n"
-        "- Keep answers short and exactly verifiable.\n"
-        "Output format:\n"
+        "- Avoid forced-choice binary templates.\n"
+        "- Keep each question concise and verifiable.\n"
+        "Output only this XML and no extra text:\n"
         "<questions>\n"
-        "  <question id=\"1\">\n"
-        "    <task_card>C1/C2/C3/C4/C5/C6/C7/C8/C9</task_card>\n"
-        "    <reasoning_domains>D1,D2</reasoning_domains>\n"
-        "    <reasoning_chain>step1 -> step2 -> step3</reasoning_chain>\n"
-        "    <strategy_used>H1/H3/H4/H6/H7/H8/M2/M4</strategy_used>\n"
-        "    <visual_target>concrete visual anchor</visual_target>\n"
-        "    <two_answer_test>A option_a vs B option_b</two_answer_test>\n"
-        "    <text>...</text>\n"
-        "    <rationale>...</rationale>\n"
-        "  </question>\n"
+        "  <question>...</question>\n"
+        "  <question>...</question>\n"
         "</questions>"
     )
 
@@ -167,8 +196,10 @@ def build_generation_spec_prompt(min_qa_pairs: int = 2) -> str:
         "Rules:\n"
         "1) Prompt must describe visible content only.\n"
         "2) QA checks must be factual and verifiable from the generated image.\n"
-        f"3) Provide at least {n} QA pairs.\n"
-        "Output format:\n"
+        "3) Every QA question must end with '?'.\n"
+        "4) Keep every answer short (1-8 words).\n"
+        f"5) Provide at least {n} QA pairs.\n"
+        "Output only this XML and no extra text:\n"
         "<prompt>...</prompt>\n"
         "<qa_pairs>\n"
         "  <qa><question>...</question><answer>...</answer></qa>\n"
@@ -182,14 +213,90 @@ def strip_tags(text: str, tag: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _cleanup_question_text(text: str) -> str:
+    raw = str(text or "")
+    raw = raw.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    cleaned = _TAG_RE.sub(" ", raw)
+    cleaned = " ".join(cleaned.replace("\n", " ").split())
+    return cleaned.strip()
+
+
+def _cleanup_prompt_text(text: str) -> str:
+    raw = str(text or "")
+    raw = raw.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    cleaned = " ".join(raw.replace("\n", " ").split())
+    cleaned = _PROMPT_PREFIX_RE.sub("", cleaned).strip()
+    lower = cleaned.lower()
+    for marker in _PROMPT_QA_MARKERS:
+        idx = lower.find(marker)
+        if idx >= 0:
+            cleaned = cleaned[:idx].strip()
+            lower = cleaned.lower()
+    cleaned = _TAG_RE.sub(" ", cleaned)
+    cleaned = " ".join(cleaned.split()).strip(" '\"")
+    if not cleaned:
+        return ""
+    if re.match(r"^(q|question|a|answer)\s*[:\-]\s*", cleaned, flags=re.IGNORECASE):
+        return ""
+    if len(cleaned) < 12:
+        return ""
+    return cleaned
+
+
+def salvage_question(text: str) -> str:
+    cleaned = _cleanup_question_text(text)
+    if not cleaned:
+        return ""
+
+    label_match = re.search(r"(?:^|\b)(?:question|q)\s*[:\-]\s*(.+)$", cleaned, flags=re.IGNORECASE)
+    if label_match:
+        cleaned = " ".join(str(label_match.group(1) or "").split()).strip()
+        if not cleaned:
+            return ""
+
+    if is_well_formed_question(cleaned):
+        return cleaned
+
+    for slice_text in _QUESTION_SLICE_RE.findall(cleaned):
+        candidate = " ".join(str(slice_text).split())
+        candidate = re.sub(r"^[^A-Za-z0-9]+", "", candidate).strip()
+        if not candidate:
+            continue
+        if candidate.count("?") > 1:
+            candidate = candidate.split("?", 1)[0].strip() + "?"
+        if is_well_formed_question(candidate):
+            return candidate
+
+    # Last resort: turn a single clean sentence into a question.
+    if "?" not in cleaned:
+        sentence = re.sub(r"^(?:the\s+)?question\s*(?:is|:)?\s*", "", cleaned, flags=re.IGNORECASE)
+        sentence = sentence.rstrip(" .!;:,")
+        if sentence and _INTERROGATIVE_START_RE.search(sentence):
+            candidate = f"{sentence}?"
+            if is_well_formed_question(candidate):
+                return candidate
+        m_embedded = re.search(
+            r"(?:^|[.;]\s+)((?:what|which|who|whom|whose|where|when|why|how|is|are|was|were|do|does|did|can|could|will|would|should|has|have|had)\b[^?]{5,220})$",
+            sentence,
+            flags=re.IGNORECASE,
+        )
+        if m_embedded:
+            candidate = f"{str(m_embedded.group(1) or '').strip()}?"
+            if is_well_formed_question(candidate):
+                return candidate
+    return ""
+
+
 def parse_proposer_question_candidates(text: str) -> List[Dict[str, str]]:
     raw = str(text or "")
     blocks = _QUESTION_BLOCK_RE.findall(raw)
     candidates: List[Dict[str, str]] = []
     for block in blocks:
-        q_text = (strip_tags(block, "text") or parse_first_question(block) or "").strip()
-        q_text = " ".join(q_text.replace("\n", " ").split())
-        if not q_text or (not is_well_formed_question(q_text)):
+        q_text = (
+            salvage_question(strip_tags(block, "text"))
+            or salvage_question(parse_first_question(block))
+        )
+        if not q_text:
             continue
         candidates.append(
             {
@@ -205,20 +312,59 @@ def parse_proposer_question_candidates(text: str) -> List[Dict[str, str]]:
         )
     if candidates:
         return candidates
-    return [{"text": q} for q in parse_all_questions(raw) if is_well_formed_question(q)]
+
+    fallback_questions: List[str] = []
+    for text_block in _TEXT_TAG_RE.findall(raw):
+        q = salvage_question(text_block)
+        if q:
+            fallback_questions.append(q)
+    for line in raw.splitlines():
+        line_s = str(line).strip()
+        if not line_s:
+            continue
+        q = salvage_question(line_s)
+        if q:
+            fallback_questions.append(q)
+
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for q in (fallback_questions + parse_all_questions(raw)):
+        q_clean = " ".join(str(q or "").split()).strip()
+        if not is_well_formed_question(q_clean):
+            continue
+        key = q_clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"text": q_clean})
+    return out
 
 
 def parse_first_question(text: str) -> str:
     raw = text or ""
     match = _QUESTION_TAG_RE.search(raw)
     if match:
-        q = " ".join(match.group(1).strip().split())
-        return q if is_well_formed_question(q) else ""
+        block = str(match.group(1) or "")
+        if ("<" in block and ">" in block):
+            text_inner = strip_tags(block, "text")
+            if text_inner:
+                q = salvage_question(text_inner)
+                if q:
+                    return q
+        else:
+            q = salvage_question(block)
+            if q:
+                return q
+    text_match = _TEXT_TAG_RE.search(raw)
+    if text_match:
+        q = salvage_question(str(text_match.group(1) or ""))
+        if q:
+            return q
     for line in raw.splitlines():
         line = line.strip()
         if "?" in line and len(line) > 3:
-            q = " ".join(line.split())
-            if is_well_formed_question(q):
+            q = salvage_question(line)
+            if q:
                 return q
     return ""
 
@@ -230,7 +376,7 @@ def parse_all_questions(text: str) -> List[str]:
         out: List[str] = []
         seen = set()
         for m in matches:
-            q = " ".join(str(m).strip().split())
+            q = salvage_question(m)
             if not q:
                 continue
             key = q.lower()
@@ -250,8 +396,8 @@ def parse_all_questions(text: str) -> List[str]:
         val = re.sub(r"^\d+[\).\-\s]*", "", val).strip()
         if not val or "?" not in val:
             continue
-        q = " ".join(val.split())
-        if not is_well_formed_question(q):
+        q = salvage_question(val)
+        if not q:
             continue
         key = q.lower()
         if key in seen:
@@ -266,12 +412,53 @@ def parse_all_questions(text: str) -> List[str]:
 
 
 def parse_answer(text: str) -> str:
-    raw = text or ""
+    raw = str(text or "")
     match = _ANSWER_TAG_RE.search(raw)
     if match:
-        return " ".join(match.group(1).strip().split())
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    return lines[-1] if lines else ""
+        val = " ".join(match.group(1).strip().split())
+        val = _ANSWER_PREFIX_RE.sub("", val).strip()
+        return val
+
+    # Recover malformed "<answer ...>" without a proper closing tag.
+    malformed = _ANSWER_OPEN_RE.search(raw)
+    if malformed:
+        candidate = str(malformed.group(1) or "")
+        candidate = candidate.split("</", 1)[0]
+        candidate = _TAG_RE.sub(" ", candidate)
+        candidate = " ".join(candidate.split()).strip()
+        candidate = _ANSWER_PREFIX_RE.sub("", candidate).strip()
+        if candidate:
+            m_bool = _YES_NO_RE.match(candidate)
+            if m_bool:
+                return m_bool.group(1).lower()
+            m_num = _NUMBER_RE.match(candidate)
+            if m_num:
+                return m_num.group(0)
+            return " ".join(candidate.split()[:8]).strip()
+
+    # Strip reasoning blocks and salvage concise final answer.
+    cleaned = _THINK_BLOCK_RE.sub(" ", raw)
+    cleaned = cleaned.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    cleaned = _TAG_RE.sub(" ", cleaned)
+    cleaned = " ".join(cleaned.split()).strip()
+    if not cleaned:
+        return ""
+    cleaned = _ANSWER_PREFIX_RE.sub("", cleaned).strip()
+    m_conclusion = _CONCLUSION_RE.search(cleaned)
+    if m_conclusion:
+        cleaned = str(m_conclusion.group(1) or "").strip()
+
+    m_bool = _YES_NO_RE.match(cleaned)
+    if m_bool:
+        return m_bool.group(1).lower()
+    m_num = _NUMBER_RE.match(cleaned)
+    if m_num:
+        return m_num.group(0)
+
+    first_segment = re.split(r"[.!?。！？]", cleaned, maxsplit=1)[0].strip()
+    if not first_segment:
+        first_segment = cleaned
+    return " ".join(first_segment.split()[:8]).strip()
 
 
 def is_objective_question(question: str) -> bool:
@@ -315,28 +502,55 @@ def is_well_formed_question(question: str) -> bool:
 
 def parse_generation_spec(text: str, min_qa_pairs: int = 2) -> Optional[GenerationSpec]:
     raw = text or ""
+    prompt_candidates: List[str] = []
     prompt_match = _PROMPT_TAG_RE.search(raw)
     if prompt_match:
-        prompt = " ".join(prompt_match.group(1).strip().split())
-    else:
-        prompt = ""
-        relaxed = _PROMPT_RELAXED_RE.search(raw)
-        if relaxed:
-            prompt = " ".join(relaxed.group(1).strip().split())
-        if not prompt:
-            first_prompt_line = re.search(r"^\s*<prompt[^\n]*", raw, flags=re.IGNORECASE | re.MULTILINE)
-            if first_prompt_line:
-                line = first_prompt_line.group(0).strip()
-                tail = line[len("<prompt") :].lstrip(" >:\t")
-                prompt = " ".join(tail.split())
+        prompt_candidates.append(str(prompt_match.group(1) or ""))
+
+    relaxed = _PROMPT_RELAXED_RE.search(raw)
+    if relaxed:
+        prompt_candidates.append(str(relaxed.group(1) or ""))
+
+    for line in raw.splitlines():
+        line_s = str(line).strip()
+        if not line_s:
+            continue
+        if line_s.lower().startswith("<prompt"):
+            prompt_candidates.append(line_s)
+            break
+
+    for line in raw.splitlines():
+        candidate = " ".join(str(line).strip().split())
+        if not candidate:
+            continue
+        if candidate.startswith("<") and candidate.endswith(">"):
+            continue
+        if candidate.lower().startswith(("q:", "question:", "a:", "answer:")):
+            continue
+        prompt_candidates.append(candidate)
+        break
+
+    prompt = ""
+    for candidate in prompt_candidates:
+        cleaned = _cleanup_prompt_text(candidate)
+        if cleaned:
+            prompt = cleaned
+            break
 
     qa_pairs: List[GenerationQAPair] = []
     seen_questions = set()
 
     def _append_pair(q_raw: str, a_raw: str) -> None:
-        q = " ".join(str(q_raw).strip().split())
+        q = salvage_question(q_raw)
         a = " ".join(str(a_raw).strip().split())
         if not q or not a:
+            return
+        if len(a) > 120:
+            return
+        a_tokens = a.split()
+        if len(a_tokens) > 16:
+            return
+        if _INVALID_QUESTION_ARTIFACT_RE.search(a):
             return
         q_key = q.lower()
         if q_key in seen_questions:
@@ -358,6 +572,11 @@ def parse_generation_spec(text: str, min_qa_pairs: int = 2) -> Optional[Generati
         a_tags = _ANSWER_TAG_RE.findall(raw)
         for q_raw, a_raw in zip(qa_questions, a_tags):
             q_candidate = maybe_strip_tagged(str(q_raw), "question")
+            _append_pair(q_candidate if q_candidate else q_raw, a_raw)
+
+    if len(qa_pairs) < max(1, int(min_qa_pairs)):
+        for q_raw, a_raw in _QA_FALLBACK_RE.findall(raw):
+            q_candidate = salvage_question(q_raw)
             _append_pair(q_candidate if q_candidate else q_raw, a_raw)
 
     if not prompt:

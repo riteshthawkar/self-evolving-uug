@@ -100,6 +100,30 @@ def _env_flag(name: str, default: str = "0") -> bool:
     return str(os.environ.get(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _is_oom_like_error(msg: str) -> bool:
+    text = str(msg or "").lower()
+    return ("out of memory" in text) or ("cuda out of memory" in text) or ("hip out of memory" in text)
+
+
+def _is_runtime_retryable_error(msg: str) -> bool:
+    text = str(msg or "").lower()
+    if _is_oom_like_error(text):
+        return True
+    # ROCm/CUDA kernel selection + precision instability that often recovers with
+    # lower edge / text-only fallback / autocast-off retries.
+    retry_markers = (
+        "hipblas_status_invalid_value",
+        "hipblasltmatmulalgogetheuristic",
+        "cublas_status_not_supported",
+        "cublas_status_alloc_failed",
+        "cudnn_status_not_supported",
+        "mat1 and mat2 must have the same dtype",
+        "expected scalar type",
+        "runtime precision failure",
+    )
+    return any(marker in text for marker in retry_markers)
+
+
 def _build_retry_caps(initial_cap: int, *, min_cap: int) -> List[int]:
     caps: List[int] = []
     curr = max(int(min_cap), int(initial_cap))
@@ -532,6 +556,7 @@ class BagelRolePolicyUpdater:
             int(os.environ.get("BAGEL_POLICY_OOM_PAUSE_STEPS", "32") or "32"),
         )
         self._consecutive_oom = 0
+        self._consecutive_runtime_fail = 0
         self._force_text_only_until_step = 0
         self._pause_until_step = 0
 
@@ -541,6 +566,10 @@ class BagelRolePolicyUpdater:
             "step_id": int(self.step_id),
             "accum_count": int(self._accum_count),
             "has_grad_window": bool(self._has_grad_window),
+            "consecutive_oom": int(self._consecutive_oom),
+            "consecutive_runtime_fail": int(self._consecutive_runtime_fail),
+            "force_text_only_until_step": int(self._force_text_only_until_step),
+            "pause_until_step": int(self._pause_until_step),
         }
 
     def load_state_dict(self, state: Dict) -> None:
@@ -551,6 +580,14 @@ class BagelRolePolicyUpdater:
         self.step_id = int(state.get("step_id", self.step_id))
         self._accum_count = int(state.get("accum_count", self._accum_count))
         self._has_grad_window = bool(state.get("has_grad_window", self._has_grad_window))
+        self._consecutive_oom = int(state.get("consecutive_oom", self._consecutive_oom))
+        self._consecutive_runtime_fail = int(
+            state.get("consecutive_runtime_fail", self._consecutive_runtime_fail)
+        )
+        self._force_text_only_until_step = int(
+            state.get("force_text_only_until_step", self._force_text_only_until_step)
+        )
+        self._pause_until_step = int(state.get("pause_until_step", self._pause_until_step))
 
     def _reset_grad_window(self) -> None:
         self.optimizer.zero_grad(set_to_none=True)
@@ -609,7 +646,7 @@ class BagelRolePolicyUpdater:
         if self.step_id <= self._pause_until_step:
             return PolicyStepResult(
                 skipped=True,
-                reason="oom_pause_cooldown",
+                reason="runtime_pause_cooldown",
                 reward=scaled_reward,
                 baseline=scaled_baseline,
                 advantage=advantage,
@@ -711,6 +748,7 @@ class BagelRolePolicyUpdater:
         autocast_enabled = bool(self.cfg.policy_use_bf16)
         token_count = 0
         oom_attempts_this_step = 0
+        runtime_retry_attempts = 0
 
         try:
             for attempt_idx, attempt in enumerate(attempt_specs, start=1):
@@ -807,6 +845,7 @@ class BagelRolePolicyUpdater:
                             self._reset_grad_window()
 
                     self._consecutive_oom = 0
+                    self._consecutive_runtime_fail = 0
                     return PolicyStepResult(
                         skipped=False,
                         reason="ok",
@@ -821,10 +860,20 @@ class BagelRolePolicyUpdater:
                     ).to_dict()
                 except RuntimeError as exc:
                     msg = str(exc).lower()
-                    oom_like = ("out of memory" in msg) or ("cuda out of memory" in msg) or ("hip out of memory" in msg)
-                    if not oom_like:
+                    oom_like = _is_oom_like_error(msg)
+                    retryable = _is_runtime_retryable_error(msg)
+                    if not retryable:
                         raise
-                    oom_attempts_this_step += 1
+                    if oom_like:
+                        oom_attempts_this_step += 1
+                    else:
+                        runtime_retry_attempts += 1
+                        if autocast_enabled:
+                            autocast_enabled = False
+                            print(
+                                f"[policy_updater][role={self.role}] runtime precision/kernel failure; "
+                                "disabling autocast for retry path."
+                            )
                     if torch.cuda.is_available():
                         gc.collect()
                         torch.cuda.empty_cache()
@@ -843,34 +892,48 @@ class BagelRolePolicyUpdater:
                         if next_include_image:
                             next_edge = int(next_attempt.get("policy_edge", 0))
                             print(
-                                f"[policy_updater][role={self.role}] OOM at max_vit_edge={policy_edge}; "
+                                f"[policy_updater][role={self.role}] "
+                                f"{'OOM' if oom_like else 'runtime'} failure at max_vit_edge={policy_edge}; "
                                 f"retrying with max_vit_edge={next_edge}, completion_cap={next_cap}."
                             )
                         else:
                             print(
-                                f"[policy_updater][role={self.role}] OOM at max_vit_edge={policy_edge}; "
+                                f"[policy_updater][role={self.role}] "
+                                f"{'OOM' if oom_like else 'runtime'} failure at max_vit_edge={policy_edge}; "
                                 f"retrying with text-only policy fallback, completion_cap={next_cap}."
                             )
                         continue
-                    self._consecutive_oom += 1
-                    reason = "cuda_oom"
+                    reason = "runtime_retry_exhausted"
+                    if oom_like:
+                        self._consecutive_oom += 1
+                        reason = "cuda_oom"
+                    else:
+                        self._consecutive_runtime_fail += 1
                     if include_image:
                         self._force_text_only_until_step = max(
                             int(self._force_text_only_until_step),
                             int(self.step_id + self._oom_force_text_only_steps),
                         )
-                        reason = "cuda_oom_force_text_only"
+                        if oom_like:
+                            reason = "cuda_oom_force_text_only"
+                        else:
+                            reason = "runtime_force_text_only"
                         print(
                             f"[policy_updater][role={self.role}] forcing text-only updates for next "
                             f"{self._oom_force_text_only_steps} steps."
                         )
-                    if self._consecutive_oom >= self._oom_pause_after:
+                    if (
+                        (oom_like and self._consecutive_oom >= self._oom_pause_after)
+                        or ((not oom_like) and self._consecutive_runtime_fail >= self._oom_pause_after)
+                    ):
                         self._pause_until_step = int(self.step_id + self._oom_pause_steps)
                         self._consecutive_oom = 0
-                        reason = "cuda_oom_pause"
+                        self._consecutive_runtime_fail = 0
+                        reason = "cuda_oom_pause" if oom_like else "runtime_pause"
                         print(
                             f"[policy_updater][role={self.role}] pausing policy updates for "
-                            f"{self._oom_pause_steps} steps after repeated OOM."
+                            f"{self._oom_pause_steps} steps after repeated "
+                            f"{'OOM' if oom_like else 'runtime failures'}."
                         )
                     return PolicyStepResult(
                         skipped=True,
@@ -948,7 +1011,7 @@ class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
         if self.step_id <= self._pause_until_step:
             return PolicyStepResult(
                 skipped=True,
-                reason="oom_pause_cooldown",
+                reason="runtime_pause_cooldown",
                 reward=scaled_reward,
                 baseline=scaled_baseline,
                 advantage=advantage,
@@ -1105,6 +1168,7 @@ class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
                             self._reset_grad_window()
 
                     self._consecutive_oom = 0
+                    self._consecutive_runtime_fail = 0
                     out = PolicyStepResult(
                         skipped=False,
                         reason="ok",
@@ -1122,9 +1186,16 @@ class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
                     return out
                 except RuntimeError as exc:
                     msg = str(exc).lower()
-                    oom_like = ("out of memory" in msg) or ("cuda out of memory" in msg) or ("hip out of memory" in msg)
-                    if not oom_like:
+                    oom_like = _is_oom_like_error(msg)
+                    retryable = _is_runtime_retryable_error(msg)
+                    if not retryable:
                         raise
+                    if (not oom_like) and autocast_enabled:
+                        autocast_enabled = False
+                        print(
+                            f"[policy_updater][role={self.role}] runtime precision/kernel failure; "
+                            "disabling autocast for retry path."
+                        )
                     if torch.cuda.is_available():
                         gc.collect()
                         torch.cuda.empty_cache()
@@ -1132,19 +1203,29 @@ class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
                     if attempt_idx < len(attempt_specs):
                         next_edge = int(attempt_specs[attempt_idx])
                         print(
-                            f"[policy_updater][role={self.role}] OOM at max_vae_edge={policy_edge}; "
+                            f"[policy_updater][role={self.role}] "
+                            f"{'OOM' if oom_like else 'runtime'} failure at max_vae_edge={policy_edge}; "
                             f"retrying with max_vae_edge={next_edge}."
                         )
                         continue
-                    self._consecutive_oom += 1
-                    reason = "cuda_oom"
-                    if self._consecutive_oom >= self._oom_pause_after:
+                    reason = "runtime_retry_exhausted"
+                    if oom_like:
+                        self._consecutive_oom += 1
+                        reason = "cuda_oom"
+                    else:
+                        self._consecutive_runtime_fail += 1
+                    if (
+                        (oom_like and self._consecutive_oom >= self._oom_pause_after)
+                        or ((not oom_like) and self._consecutive_runtime_fail >= self._oom_pause_after)
+                    ):
                         self._pause_until_step = int(self.step_id + self._oom_pause_steps)
                         self._consecutive_oom = 0
-                        reason = "cuda_oom_pause"
+                        self._consecutive_runtime_fail = 0
+                        reason = "cuda_oom_pause" if oom_like else "runtime_pause"
                         print(
                             f"[policy_updater][role={self.role}] pausing policy updates for "
-                            f"{self._oom_pause_steps} steps after repeated OOM."
+                            f"{self._oom_pause_steps} steps after repeated "
+                            f"{'OOM' if oom_like else 'runtime failures'}."
                         )
                     out = PolicyStepResult(
                         skipped=True,

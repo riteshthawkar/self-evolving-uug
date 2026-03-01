@@ -9,6 +9,7 @@ import random
 import sys
 import time
 import traceback
+from datetime import timedelta
 
 import numpy as np
 import torch
@@ -40,6 +41,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model_path", type=str, required=True)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--vae_device", type=str, default="")
+    p.add_argument("--distributed", action="store_true", default=False)
+    p.add_argument("--disable_distributed", dest="distributed", action="store_false")
+    p.add_argument("--dist_backend", type=str, default="nccl")
+    p.add_argument("--dist_timeout_minutes", type=int, default=120)
+    p.add_argument("--dist_data_shard", action="store_true", default=True)
+    p.add_argument("--disable_dist_data_shard", dest="dist_data_shard", action="store_false")
     p.add_argument(
         "--lora_checkpoint_path",
         type=str,
@@ -414,7 +421,8 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _set_seed(seed: int) -> None:
+def _set_seed(seed: int, rank_offset: int = 0) -> None:
+    seed = int(seed) + int(rank_offset) * 100003
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -425,30 +433,77 @@ def _set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 
+def _init_distributed_runtime(args) -> dict:
+    world_size = max(1, int(os.environ.get("WORLD_SIZE", "1") or "1"))
+    rank = max(0, int(os.environ.get("RANK", "0") or "0"))
+    local_rank = max(0, int(os.environ.get("LOCAL_RANK", str(rank)) or str(rank)))
+    distributed_active = bool(args.distributed) or world_size > 1
+    backend = str(args.dist_backend or "nccl").strip().lower()
+
+    if distributed_active:
+        if not (torch.distributed.is_available()):
+            raise RuntimeError("Distributed mode requested but torch.distributed is unavailable.")
+        use_cuda_device = bool(torch.cuda.is_available() and str(args.device).startswith("cuda"))
+        if (not use_cuda_device) and backend == "nccl":
+            backend = "gloo"
+        if use_cuda_device:
+            torch.cuda.set_device(local_rank)
+            args.device = f"cuda:{local_rank}"
+            vae_raw = str(args.vae_device or "").strip()
+            # In distributed mode, pin model+VAE to local rank by default to avoid
+            # accidental cross-rank contention on a single VAE GPU.
+            if (not vae_raw) or vae_raw.startswith("cuda"):
+                args.vae_device = str(args.device)
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(
+                backend=backend,
+                timeout=timedelta(minutes=max(1, int(args.dist_timeout_minutes))),
+            )
+        world_size = max(1, int(torch.distributed.get_world_size()))
+        rank = max(0, int(torch.distributed.get_rank()))
+        local_rank = max(0, int(os.environ.get("LOCAL_RANK", str(local_rank)) or str(local_rank)))
+
+    return {
+        "enabled": bool(distributed_active),
+        "backend": backend,
+        "world_size": int(world_size),
+        "rank": int(rank),
+        "local_rank": int(local_rank),
+        "main_process": bool(rank == 0),
+    }
+
+
+def _destroy_distributed_runtime() -> None:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+
+
 def main() -> None:
     args = _build_parser().parse_args()
-    if bool(args.policy_updates_enabled) and not bool(args.enable_lora):
-        raise ValueError("--policy_updates_enabled requires --enable_lora for trainable role adapters.")
-    _set_seed(int(args.seed))
-    # Delay heavy imports (model + cv2 dependencies) until actual execution.
-    from train.self_evolving.model_loader import load_bagel_runtime
-    from train.self_evolving.trainer import SelfEvolvingUnderstandingTrainer
+    dist_ctx = _init_distributed_runtime(args)
+    try:
+        if bool(args.policy_updates_enabled) and not bool(args.enable_lora):
+            raise ValueError("--policy_updates_enabled requires --enable_lora for trainable role adapters.")
+        _set_seed(int(args.seed), rank_offset=int(dist_ctx["rank"]))
+        # Delay heavy imports (model + cv2 dependencies) until actual execution.
+        from train.self_evolving.model_loader import load_bagel_runtime
+        from train.self_evolving.trainer import SelfEvolvingUnderstandingTrainer
 
-    model_cfg = ModelLoadConfig(
-        model_path=args.model_path,
-        device=args.device,
-        vae_device=str(args.vae_device or ""),
-        lora_checkpoint_path=str(args.lora_checkpoint_path or ""),
-        max_latent_size=int(args.max_latent_size),
-        enable_lora=bool(args.enable_lora),
-        lora_rank=int(args.lora_rank),
-        lora_alpha=int(args.lora_alpha),
-        lora_dropout=float(args.lora_dropout),
-        lora_target_modules_csv=str(args.lora_target_modules_csv),
-        lora_role_adapters_csv=str(args.lora_role_adapters_csv),
-        lora_default_adapter=str(args.lora_default_adapter),
-    )
-    rollout_cfg = RolloutConfig(
+        model_cfg = ModelLoadConfig(
+            model_path=args.model_path,
+            device=args.device,
+            vae_device=str(args.vae_device or ""),
+            lora_checkpoint_path=str(args.lora_checkpoint_path or ""),
+            max_latent_size=int(args.max_latent_size),
+            enable_lora=bool(args.enable_lora),
+            lora_rank=int(args.lora_rank),
+            lora_alpha=int(args.lora_alpha),
+            lora_dropout=float(args.lora_dropout),
+            lora_target_modules_csv=str(args.lora_target_modules_csv),
+            lora_role_adapters_csv=str(args.lora_role_adapters_csv),
+            lora_default_adapter=str(args.lora_default_adapter),
+        )
+        rollout_cfg = RolloutConfig(
         experiment_name=str(args.experiment),
         image_dir=args.image_dir,
         output_dir=args.output_dir,
@@ -612,70 +667,87 @@ def main() -> None:
         gen_mix_ratio_max=float(args.gen_mix_ratio_max),
         gen_mix_ratio_warmup_steps=max(1, int(args.gen_mix_ratio_warmup_steps)),
         reward_ema_momentum=float(args.reward_ema_momentum),
-    )
+        dist_enabled=bool(dist_ctx["enabled"]),
+        dist_backend=str(dist_ctx["backend"]),
+        dist_world_size=int(dist_ctx["world_size"]),
+        dist_rank=int(dist_ctx["rank"]),
+        dist_local_rank=int(dist_ctx["local_rank"]),
+        dist_main_process=bool(dist_ctx["main_process"]),
+        dist_data_shard=bool(args.dist_data_shard),
+        )
 
-    os.makedirs(rollout_cfg.output_dir, exist_ok=True)
-    runtime = load_bagel_runtime(model_cfg)
-    exp = rollout_cfg.normalized_experiment_name()
-    if exp == "understanding_self_evolving":
-        trainer = SelfEvolvingUnderstandingTrainer(runtime=runtime, cfg=rollout_cfg)
-    else:
-        from train.self_evolving.unified_trainer import UnifiedSelfEvolvingTrainer
-        # generation-only convenience mode.
-        if exp == "generation_self_evolving":
-            rollout_cfg.understanding_steps_per_cycle = 0
-            rollout_cfg.generation_steps_per_cycle = max(1, int(rollout_cfg.generation_steps_per_cycle))
-        trainer = UnifiedSelfEvolvingTrainer(runtime=runtime, cfg=rollout_cfg)
-    run_started_at = float(time.time())
-    try:
-        summary = trainer.run()
-    except Exception as exc:
-        # Best-effort fatal status emission for external monitoring tools.
-        if hasattr(trainer, "_write_status") and hasattr(trainer, "_progress_core"):
-            error_text = f"{type(exc).__name__}: {exc}"
-            step_hint = int(getattr(trainer, "start_step", 1)) - 1
-            try:
-                progress = trainer._progress_core(  # type: ignore[attr-defined]
-                    step=step_hint,
-                    phase="failed",
-                    run_started_at=run_started_at,
-                )
-            except Exception:
-                progress = {
-                    "step": int(step_hint),
-                    "phase": "failed",
-                    "timestamp_unix": float(time.time()),
-                }
-            metrics = {
-                "fatal_error": error_text,
-                "fatal_error_type": type(exc).__name__,
-            }
-            try:
-                if hasattr(trainer, "_append_metrics"):
-                    trainer._append_metrics(  # type: ignore[attr-defined]
-                        {
-                            "kind": "fatal_error",
-                            "error": error_text,
-                            "traceback": traceback.format_exc(),
-                            **progress,
-                            **metrics,
-                        }
+        os.makedirs(rollout_cfg.output_dir, exist_ok=True)
+        runtime = load_bagel_runtime(model_cfg)
+        if bool(dist_ctx["enabled"]):
+            print(
+                "[self_evolving] distributed runtime: "
+                f"backend={dist_ctx['backend']} world_size={dist_ctx['world_size']} "
+                f"rank={dist_ctx['rank']} local_rank={dist_ctx['local_rank']} "
+                f"device={args.device} vae_device={str(args.vae_device or args.device)}"
+            )
+        exp = rollout_cfg.normalized_experiment_name()
+        if exp == "understanding_self_evolving":
+            trainer = SelfEvolvingUnderstandingTrainer(runtime=runtime, cfg=rollout_cfg)
+        else:
+            from train.self_evolving.unified_trainer import UnifiedSelfEvolvingTrainer
+            # generation-only convenience mode.
+            if exp == "generation_self_evolving":
+                rollout_cfg.understanding_steps_per_cycle = 0
+                rollout_cfg.generation_steps_per_cycle = max(1, int(rollout_cfg.generation_steps_per_cycle))
+            trainer = UnifiedSelfEvolvingTrainer(runtime=runtime, cfg=rollout_cfg)
+        run_started_at = float(time.time())
+        try:
+            summary = trainer.run()
+        except Exception as exc:
+            # Best-effort fatal status emission for external monitoring tools.
+            if hasattr(trainer, "_write_status") and hasattr(trainer, "_progress_core"):
+                error_text = f"{type(exc).__name__}: {exc}"
+                step_hint = int(getattr(trainer, "start_step", 1)) - 1
+                try:
+                    progress = trainer._progress_core(  # type: ignore[attr-defined]
+                        step=step_hint,
+                        phase="failed",
+                        run_started_at=run_started_at,
                     )
-            except Exception:
-                pass
-            try:
-                trainer._write_status(  # type: ignore[attr-defined]
-                    state="failed",
-                    progress=progress,
-                    metrics=metrics,
-                    last_error=error_text,
-                )
-            except Exception:
-                pass
-        raise
-    print("[self_evolving] run summary:")
-    for key, value in summary.items():
-        print(f"  {key}: {value}")
+                except Exception:
+                    progress = {
+                        "step": int(step_hint),
+                        "phase": "failed",
+                        "timestamp_unix": float(time.time()),
+                    }
+                metrics = {
+                    "fatal_error": error_text,
+                    "fatal_error_type": type(exc).__name__,
+                }
+                try:
+                    if hasattr(trainer, "_append_metrics"):
+                        trainer._append_metrics(  # type: ignore[attr-defined]
+                            {
+                                "kind": "fatal_error",
+                                "error": error_text,
+                                "traceback": traceback.format_exc(),
+                                **progress,
+                                **metrics,
+                            }
+                        )
+                except Exception:
+                    pass
+                try:
+                    trainer._write_status(  # type: ignore[attr-defined]
+                        state="failed",
+                        progress=progress,
+                        metrics=metrics,
+                        last_error=error_text,
+                    )
+                except Exception:
+                    pass
+            raise
+        if bool(dist_ctx["main_process"]):
+            print("[self_evolving] run summary:")
+            for key, value in summary.items():
+                print(f"  {key}: {value}")
+    finally:
+        _destroy_distributed_runtime()
 
 
 if __name__ == "__main__":

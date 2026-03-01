@@ -17,6 +17,11 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from PIL import Image
 
+try:
+    import torch.distributed as dist
+except Exception:  # pragma: no cover - distributed optional at runtime
+    dist = None
+
 from .adapter_manager import ROLE_GENERATOR, ROLE_PROPOSER, ROLE_SOLVER
 from .config import RolloutConfig
 from .model_loader import BagelRuntime, load_role_lora_checkpoint
@@ -93,6 +98,9 @@ class SelfEvolvingUnderstandingTrainer:
     def __init__(self, runtime: BagelRuntime, cfg: RolloutConfig) -> None:
         self.runtime = runtime
         self.cfg = cfg
+        self.dist_enabled = bool(cfg.dist_enabled) and self._dist_ready()
+        self.dist_world_size = max(1, int(cfg.dist_world_size))
+        self.dist_rank = max(0, int(cfg.dist_rank))
         self.adapter = BagelRolloutAdapter(runtime)
         self.image_paths = _list_images(cfg.image_dir)
         self.output_dir = self._prepare_output_dir(cfg.output_dir)
@@ -129,17 +137,29 @@ class SelfEvolvingUnderstandingTrainer:
 
         self._persist_config()
 
+    @staticmethod
+    def _dist_ready() -> bool:
+        return bool(dist is not None and dist.is_available() and dist.is_initialized())
+
     def _prepare_output_dir(self, output_root: str) -> str:
         # Output layout can be controlled from launcher scripts:
         # - BAGEL_OUTPUT_DIR_MODE=direct: write logs/checkpoints directly in output_root
         # - BAGEL_OUTPUT_DIR_MODE=timestamp (default): create per-run timestamp folder
         mode = str(os.environ.get("BAGEL_OUTPUT_DIR_MODE", "timestamp")).strip().lower()
+        per_rank_output = str(os.environ.get("BAGEL_DIST_PER_RANK_OUTPUT", "1")).strip().lower() in {"1", "true", "yes", "on"}
+        rank_suffix = ""
+        if self.dist_enabled and self.dist_world_size > 1 and per_rank_output:
+            rank_suffix = f"rank_{int(self.dist_rank):02d}"
         if mode in {"direct", "flat", "inplace"}:
-            os.makedirs(output_root, exist_ok=True)
-            return output_root
+            out_dir = os.path.join(output_root, rank_suffix) if rank_suffix else output_root
+            os.makedirs(out_dir, exist_ok=True)
+            return out_dir
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = os.path.join(output_root, f"understanding_rollout_{ts}")
+        run_name = f"understanding_rollout_{ts}"
+        if rank_suffix:
+            run_name = f"{run_name}_{rank_suffix}"
+        run_dir = os.path.join(output_root, run_name)
         os.makedirs(run_dir, exist_ok=True)
         return run_dir
 
@@ -198,8 +218,40 @@ class SelfEvolvingUnderstandingTrainer:
         self._write_json_atomic(self.status_path, payload)
 
     def _sample_image_path(self, step: int) -> str:
-        idx = (step - 1) % len(self.image_paths)
+        if self.dist_enabled and self.dist_world_size > 1 and bool(getattr(self.cfg, "dist_data_shard", True)):
+            idx = ((int(step) - 1) * int(self.dist_world_size) + int(self.dist_rank)) % len(self.image_paths)
+        else:
+            idx = (step - 1) % len(self.image_paths)
         return self.image_paths[idx]
+
+    def _sync_scalar(self, value: float) -> float:
+        if not self.dist_enabled or self.dist_world_size <= 1:
+            return float(value)
+        t = torch.tensor([float(value)], dtype=torch.float32, device=self.runtime.device)
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        t /= float(self.dist_world_size)
+        return float(t.item())
+
+    def _sync_trainable_adapter_params(self) -> None:
+        if not self.dist_enabled or self.dist_world_size <= 1:
+            return
+        if not bool(self.runtime.lora_enabled):
+            return
+        language_model = self.runtime.model.language_model
+        for param in language_model.parameters():
+            if not bool(getattr(param, "requires_grad", False)):
+                continue
+            dist.all_reduce(param.data, op=dist.ReduceOp.SUM)
+            param.data /= float(self.dist_world_size)
+
+    def _sync_distributed_step_state(self) -> None:
+        if not self.dist_enabled or self.dist_world_size <= 1:
+            return
+        self._sync_trainable_adapter_params()
+        self.proposer_baseline = self._sync_scalar(self.proposer_baseline)
+        self.solver_baseline = self._sync_scalar(self.solver_baseline)
+        self.proposer_gen_baseline = self._sync_scalar(self.proposer_gen_baseline)
+        self.generator_baseline = self._sync_scalar(self.generator_baseline)
 
     def _load_image(self, path: str) -> Image.Image:
         with Image.open(path) as img:
@@ -452,31 +504,41 @@ class SelfEvolvingUnderstandingTrainer:
         image: Image.Image,
         solver_temps: List[float],
     ) -> Dict:
-        spec_out = self.adapter.propose_generation_spec(
-            image=image,
-            max_new_tokens=self.cfg.max_new_tokens_gen_spec,
-            temperature=float(self.cfg.gen_spec_temperature),
-            min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs),
-        )
-        spec = parse_generation_spec(spec_out.text, min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs))
+        base_temp = float(self.cfg.gen_spec_temperature)
+        retry_temps = [base_temp, max(0.1, min(0.7, base_temp * 0.6)), 0.25]
+        dedup_retry_temps: List[float] = []
+        for temp in retry_temps:
+            t = float(round(temp, 4))
+            if t not in dedup_retry_temps:
+                dedup_retry_temps.append(t)
+
+        spec = None
+        spec_out = None
         spec_retry_attempted = False
         spec_retry_temperature = 0.0
-        if spec is None:
-            spec_retry_attempted = True
-            spec_retry_temperature = max(0.1, min(0.7, float(self.cfg.gen_spec_temperature) * 0.5))
-            spec_out_retry = self.adapter.propose_generation_spec(
+        spec_retry_count = 0
+        for attempt_idx, temp in enumerate(dedup_retry_temps):
+            if attempt_idx > 0:
+                spec_retry_attempted = True
+                spec_retry_temperature = float(temp)
+                spec_retry_count = int(attempt_idx)
+            candidate_out = self.adapter.propose_generation_spec(
                 image=image,
                 max_new_tokens=self.cfg.max_new_tokens_gen_spec,
-                temperature=float(spec_retry_temperature),
+                temperature=float(temp),
+                min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs),
+                do_sample=bool(attempt_idx < (len(dedup_retry_temps) - 1)),
+            )
+            if spec_out is None:
+                spec_out = candidate_out
+            candidate_spec = parse_generation_spec(
+                candidate_out.text,
                 min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs),
             )
-            spec_retry = parse_generation_spec(
-                spec_out_retry.text,
-                min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs),
-            )
-            if spec_retry is not None:
-                spec = spec_retry
-                spec_out = spec_out_retry
+            if candidate_spec is not None:
+                spec = candidate_spec
+                spec_out = candidate_out
+                break
 
         if spec is None:
             return {
@@ -484,12 +546,13 @@ class SelfEvolvingUnderstandingTrainer:
                 "status": "skipped",
                 "skip_reason": "invalid_generation_spec",
                 "image_path": image_path,
-                "proposer_spec_raw": spec_out.text if self.cfg.save_raw_generations else "",
+                "proposer_spec_raw": (spec_out.text if (spec_out is not None and self.cfg.save_raw_generations) else ""),
                 "policy_update_attempted": False,
                 "policy_update_applied": False,
                 "policy_update_reason": "invalid_generation_spec",
                 "spec_retry_attempted": bool(spec_retry_attempted),
                 "spec_retry_temperature": float(spec_retry_temperature),
+                "spec_retry_count": int(spec_retry_count),
             }
 
         max_spec_prompt_chars = max(
@@ -800,6 +863,7 @@ class SelfEvolvingUnderstandingTrainer:
             "solver_temperatures": solver_temps,
             "spec_retry_attempted": bool(spec_retry_attempted),
             "spec_retry_temperature": float(spec_retry_temperature),
+            "spec_retry_count": int(spec_retry_count),
         }
 
     def run(self) -> Dict[str, float]:
@@ -915,8 +979,37 @@ class SelfEvolvingUnderstandingTrainer:
                 image=image,
                 max_new_tokens=self.cfg.max_new_tokens_proposer,
                 temperature=self.cfg.proposer_temperature,
+                do_sample=True,
             )
             question = parse_first_question(proposer.text)
+            proposer_retry_attempted = False
+            proposer_retry_count = 0
+            proposer_retry_temps: List[float] = []
+            proposer_retry_recovered = False
+            retry_budget = max(0, int(os.environ.get("BAGEL_PROPOSER_PARSE_RETRIES", "2") or "2"))
+            retry_decay = float(os.environ.get("BAGEL_PROPOSER_PARSE_RETRY_TEMP_DECAY", "0.70") or "0.70")
+            if retry_decay <= 0.0 or retry_decay >= 1.0:
+                retry_decay = 0.70
+            while (not question) and proposer_retry_count < retry_budget:
+                proposer_retry_attempted = True
+                proposer_retry_count += 1
+                retry_temp = max(
+                    0.15,
+                    min(4.0, float(self.cfg.proposer_temperature) * (retry_decay ** proposer_retry_count)),
+                )
+                proposer_retry_temps.append(float(retry_temp))
+                proposer_retry = self.adapter.propose_question(
+                    image=image,
+                    max_new_tokens=self.cfg.max_new_tokens_proposer,
+                    temperature=float(retry_temp),
+                    do_sample=bool(proposer_retry_count < retry_budget),
+                )
+                retry_question = parse_first_question(proposer_retry.text)
+                if retry_question:
+                    proposer = proposer_retry
+                    question = retry_question
+                    proposer_retry_recovered = True
+                    break
             if not question:
                 skipped_steps += 1
                 _write_jsonl(
@@ -927,9 +1020,14 @@ class SelfEvolvingUnderstandingTrainer:
                         "skip_reason": "empty_question",
                         "image_path": image_path,
                         "proposer_raw": proposer.text if self.cfg.save_raw_generations else "",
+                        "proposer_retry_attempted": bool(proposer_retry_attempted),
+                        "proposer_retry_count": int(proposer_retry_count),
+                        "proposer_retry_temps": proposer_retry_temps,
+                        "proposer_retry_recovered": bool(proposer_retry_recovered),
                     },
                 )
                 _run_and_accumulate_suder(step, image_path, image)
+                self._sync_distributed_step_state()
                 _emit_training_logs(step, phase="understanding", step_time_sec=float(time.time() - step_t0))
                 continue
             if not is_well_formed_question(question):
@@ -943,9 +1041,14 @@ class SelfEvolvingUnderstandingTrainer:
                         "image_path": image_path,
                         "question": question,
                         "proposer_raw": proposer.text if self.cfg.save_raw_generations else "",
+                        "proposer_retry_attempted": bool(proposer_retry_attempted),
+                        "proposer_retry_count": int(proposer_retry_count),
+                        "proposer_retry_temps": proposer_retry_temps,
+                        "proposer_retry_recovered": bool(proposer_retry_recovered),
                     },
                 )
                 _run_and_accumulate_suder(step, image_path, image)
+                self._sync_distributed_step_state()
                 _emit_training_logs(step, phase="understanding", step_time_sec=float(time.time() - step_t0))
                 continue
 
@@ -980,6 +1083,7 @@ class SelfEvolvingUnderstandingTrainer:
                     },
                 )
                 _run_and_accumulate_suder(step, image_path, image)
+                self._sync_distributed_step_state()
                 _emit_training_logs(step, phase="understanding", step_time_sec=float(time.time() - step_t0))
                 continue
 
@@ -1162,6 +1266,7 @@ class SelfEvolvingUnderstandingTrainer:
             )
 
             _run_and_accumulate_suder(step, image_path, image)
+            self._sync_distributed_step_state()
             _emit_training_logs(step, phase="understanding", step_time_sec=float(time.time() - step_t0))
 
             if step % max(1, self.cfg.log_every) == 0:
@@ -1201,6 +1306,8 @@ class SelfEvolvingUnderstandingTrainer:
             flushed_optim_steps += int(self.solver_updater.finalize())
         if self.generator_updater is not None:
             flushed_optim_steps += int(self.generator_updater.finalize())
+
+        self._sync_distributed_step_state()
 
         if self.policy_updates_enabled:
             final_ckpt = self._save_checkpoint(int(self.cfg.steps))

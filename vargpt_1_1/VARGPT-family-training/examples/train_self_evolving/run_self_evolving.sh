@@ -94,6 +94,72 @@ resolve_launcher() {
     return 1
 }
 
+check_version_stack() {
+    local py_exec
+    py_exec="$(python - <<'PY' 2>/dev/null || true
+import sys
+print(sys.executable)
+PY
+    )"
+    py_exec="$(echo "${py_exec}" | tr -d '[:space:]')"
+    if [ -z "${py_exec}" ]; then
+        py_exec="python"
+    fi
+
+    local check_out
+    check_out="$(
+        python - <<'PY' 2>&1 || true
+import sys
+
+requirements = [
+    "transformers>=4.41.2,<=4.46.1",
+    "datasets>=2.16.0,<=3.1.0",
+    "accelerate>=0.34.0,<=1.0.1",
+    "peft>=0.11.1,<=0.12.0",
+    "trl>=0.8.6,<=0.9.6",
+]
+
+try:
+    from transformers.utils.versions import require_version
+except Exception as exc:
+    print(f"FAILED: cannot import transformers version utilities: {exc}")
+    sys.exit(2)
+
+errors = []
+for req in requirements:
+    try:
+        require_version(req, "")
+    except Exception as exc:
+        errors.append((req, str(exc).splitlines()[0]))
+
+if errors:
+    print("FAILED")
+    for req, msg in errors:
+        print(f"  - {req} :: {msg}")
+    sys.exit(3)
+
+print("OK")
+PY
+    )"
+
+    if ! grep -q "^OK$" <<< "${check_out}"; then
+        echo "[ERROR] Incompatible Python package stack for VARGPT/LlamaFactory." >&2
+        echo "[ERROR] Active python: ${py_exec}" >&2
+        echo "${check_out}" | sed 's/^/[ERROR] /' >&2
+        echo "[ERROR] Fix in this exact environment with:" >&2
+        echo "[ERROR]   ${py_exec} -m pip install -U \\" >&2
+        echo "[ERROR]     \"transformers>=4.41.2,<=4.46.1\" \\" >&2
+        echo "[ERROR]     \"datasets>=2.16.0,<=3.1.0\" \\" >&2
+        echo "[ERROR]     \"accelerate>=0.34.0,<=1.0.1\" \\" >&2
+        echo "[ERROR]     \"peft>=0.11.1,<=0.12.0\" \\" >&2
+        echo "[ERROR]     \"trl>=0.8.6,<=0.9.6\" \\" >&2
+        echo "[ERROR]     \"tokenizers>=0.19.0,<0.20.4\" \\" >&2
+        echo "[ERROR]     \"deepspeed==0.15.4\"" >&2
+        echo "[ERROR] Do not reinstall torch in ROCm env." >&2
+        exit 1
+    fi
+}
+
 # ── Parse arguments ──────────────────────────────────────────────────────────
 EXPERIMENT=${1:-joint}
 NUM_GPUS="${2:-}"
@@ -174,6 +240,7 @@ if ! resolve_launcher; then
     echo "Or ensure 'python -m llamafactory.cli' imports in current environment." >&2
     exit 1
 fi
+check_version_stack
 
 LLAMAFACTORY_MODULE_DIR="$(
     python - <<'PY' 2>/dev/null || true

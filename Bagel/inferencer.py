@@ -220,7 +220,15 @@ class InterleaveInferencer:
         return image
 
     @torch.no_grad()
-    def gen_text(self, gen_context, max_length: int = 500, do_sample: bool = True, temperature: float = 1.0):
+    def gen_text(
+        self,
+        gen_context,
+        max_length: int = 500,
+        do_sample: bool = True,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        top_k: int = 0,
+    ):
         gen_context = deepcopy(gen_context)
         past_key_values = gen_context['past_key_values']
         kv_lens = gen_context['kv_lens']
@@ -232,6 +240,8 @@ class InterleaveInferencer:
             max_length=max_length,
             do_sample=do_sample,
             temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
             end_token_id=self.new_token_ids['eos_token_id'],
             **generation_input,
         )
@@ -249,6 +259,8 @@ class InterleaveInferencer:
         max_think_token_n=1000,
         do_sample=False,
         text_temperature=0.3,
+        text_top_p=1.0,
+        text_top_k=0,
         cfg_text_scale=3.0,
         cfg_img_scale=1.5,
         cfg_interval=[0.4, 1.0],
@@ -298,6 +310,8 @@ class InterleaveInferencer:
                         gen_context,
                         do_sample=do_sample,
                         temperature=text_temperature,
+                        top_p=text_top_p,
+                        top_k=text_top_k,
                         max_length=max_think_token_n,
                     )
                     output_list.append(gen_text)
@@ -308,6 +322,8 @@ class InterleaveInferencer:
                             gen_context,
                             do_sample=do_sample,
                             temperature=text_temperature,
+                            top_p=text_top_p,
+                            top_k=text_top_k,
                             max_length=max_think_token_n,
                         )
                         gen_context = self.update_context_text(gen_text, gen_context)
