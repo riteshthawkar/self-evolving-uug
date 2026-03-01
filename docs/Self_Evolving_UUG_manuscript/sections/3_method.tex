@@ -2,12 +2,17 @@
 \section{Method}
 \label{sec:method}
 
-We present a self-evolving training framework for unified understanding and generation models. Given a pretrained unified model and a collection of unlabeled images, the framework autonomously improves both capabilities through a closed-loop self-consistency mechanism that requires no human annotations, curated instruction data, or external reward models. We first describe the overall architecture (Sec.~\ref{sec:overview}), then detail the understanding loop (Sec.~\ref{sec:understanding}), the generation assessment mechanism (Sec.~\ref{sec:generation}), the optimization objectives (Sec.~\ref{sec:optimization}), and the training schedule (Sec.~\ref{sec:schedule}). We conclude with a discussion of model-agnostic design considerations (Sec.~\ref{sec:agnostic}).
+\subsection{Problem Formulation}
+\label{sec:problem}
+
+Let $\mathcal{M}_\theta$ denote a pretrained unified model parameterized by $\theta$ that supports two complementary capabilities: visual understanding $\mathcal{U}: (\mathcal{I}, q) \mapsto a$, which generates a textual response $a$ given an image $\mathcal{I}$ and a textual query $q$, and image generation $\mathcal{G}: t \mapsto \hat{\mathcal{I}}$, which synthesizes an image $\hat{\mathcal{I}}$ from a textual description $t$. Given only an unlabeled image collection $\mathcal{D} = \{\mathcal{I}_1, \ldots, \mathcal{I}_N\}$ with no associated captions, question-answer pairs, or quality annotations, our objective is to learn parameter updates $\Delta\theta$ such that the resulting model $\mathcal{M}_{\theta + \Delta\theta}$ improves on both $\mathcal{U}$ and $\mathcal{G}$ relative to the pretrained baseline $\mathcal{M}_\theta$, subject to three constraints: (C1)~no human annotations or curated instruction data are used at any training stage, (C2)~no external reward models, judge components, or pretrained evaluators are employed, and (C3)~the algorithm makes no assumptions about the model's internal architecture, operating solely through the text generation and image synthesis interfaces. These constraints ensure that the framework is fully self-supervised, requires no auxiliary infrastructure, and is portable across architecturally distinct unified model families.
+
+We present a self-evolving training framework that satisfies all three constraints by deriving the entire training signal from the model's own self-consistency. We first describe the overall architecture (Sec.~\ref{sec:overview}), then detail the understanding loop (Sec.~\ref{sec:understanding}), the generation assessment mechanism (Sec.~\ref{sec:generation}), the optimization objectives (Sec.~\ref{sec:optimization}), and the training schedule (Sec.~\ref{sec:schedule}). We conclude with a discussion of model-agnostic design considerations (Sec.~\ref{sec:agnostic}).
 
 \subsection{Framework Overview}
 \label{sec:overview}
 
-Let $\mathcal{M}_\theta$ denote a pretrained unified model with frozen backbone parameters $\theta$ that supports both visual understanding (text generation conditioned on images) and image generation (image synthesis conditioned on text). Rather than fine-tuning the full model, we decompose it into three functional roles by attaching lightweight LoRA adapters~\cite{hu2022lora} to the shared backbone:
+Rather than fine-tuning the full model, we decompose it into three functional roles by attaching lightweight LoRA adapters~\cite{hu2022lora} to the shared backbone, keeping $\theta$ frozen:
 
 \begin{itemize}
     \item \textbf{Proposer} ($\phi_p$): generates open-ended visual questions about an input image.

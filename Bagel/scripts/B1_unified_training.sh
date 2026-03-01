@@ -33,6 +33,7 @@ set -euo pipefail
 #   MODEL_DEVICE_INDEX=0
 #   VAE_DEVICE_INDEX=1
 #   OUTPUT_DIR=/custom/output
+#   FORCE_RUN_ON_EXISTING_OUTPUT=0      # set 1 to allow reusing direct output dir without resume
 #   ENABLE_SUDER=1                     # default: 1 in train mode
 #   PROPOSER_GEN_ENTROPY_WEIGHT=0.7 # alpha in joint reward blend
 #   POLICY_UPDATE_METHOD=reinforce|grpo
@@ -57,6 +58,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$BAGEL_ROOT/scripts/runs/B1_unified_training}"
 #   direct    -> write logs/checkpoints directly under OUTPUT_DIR
 #   timestamp -> create OUTPUT_DIR/unified_rollout_<ts> (legacy behavior)
 OUTPUT_LAYOUT="${OUTPUT_LAYOUT:-direct}"   # direct|timestamp
+FORCE_RUN_ON_EXISTING_OUTPUT="${FORCE_RUN_ON_EXISTING_OUTPUT:-0}"
 
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RUN_MODE="${RUN_MODE:-train}"
@@ -753,6 +755,16 @@ PY
 fi
 
 mkdir -p "$OUTPUT_DIR"
+if [[ "$OUTPUT_LAYOUT" == "direct" && "$FORCE_RUN_ON_EXISTING_OUTPUT" != "1" ]]; then
+  if [[ -z "$RESUME_FROM" ]]; then
+    if [[ -f "$OUTPUT_DIR/rollouts.jsonl" || -f "$OUTPUT_DIR/generation_rollouts.jsonl" || -f "$OUTPUT_DIR/metrics.jsonl" || -f "$OUTPUT_DIR/status.json" || -f "$OUTPUT_DIR/summary.json" || -d "$OUTPUT_DIR/checkpoints" ]]; then
+      echo "[B1] ERROR: OUTPUT_DIR already contains prior run artifacts and RESUME_FROM is empty." >&2
+      echo "[B1]        Use a new OUTPUT_DIR, set OUTPUT_LAYOUT=timestamp, or pass RESUME_FROM." >&2
+      echo "[B1]        To override intentionally, set FORCE_RUN_ON_EXISTING_OUTPUT=1." >&2
+      exit 1
+    fi
+  fi
+fi
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 LAUNCH_LOG="$OUTPUT_DIR/b1_unified_${RUN_TS}.log"
 
