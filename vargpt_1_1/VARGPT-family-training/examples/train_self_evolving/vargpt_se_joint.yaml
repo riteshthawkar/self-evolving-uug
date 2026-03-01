@@ -51,11 +51,12 @@ se_proposer_gen_reward_enabled: true
 se_num_solver_samples: 7
 se_proposer_spot_check_samples: 3
 se_solver_use_temperature_mix: true
+se_solver_use_forced_choice_from_proposer: true
 se_solver_temp_min: 0.5
 se_solver_temp_max: 2.5
 se_solver_top_p_min: 0.3
 se_solver_top_p_max: 1.0
-se_solver_skip_update_on_easy: true
+se_solver_skip_update_on_easy: false
 se_easy_update_majority_frac_threshold: 1.0
 se_difficulty_sampler_enabled: true
 se_difficulty_sampler_min_samples: 8

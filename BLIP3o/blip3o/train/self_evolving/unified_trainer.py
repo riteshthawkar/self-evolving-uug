@@ -2928,7 +2928,11 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         )
         template_fallback_used = False
 
-        solver_choice_mode = False
+        solver_choice_mode = bool(
+            solver_use_forced_choice_from_proposer
+            and selected_choice_option_a
+            and selected_choice_option_b
+        )
         solver_answer_type = self._question_answer_type(question)
         solver_vote_labels: List[str] = []
         solver_low_info_flags: List[bool] = []
@@ -3486,6 +3490,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             0.0, min(1.0, entropy_iqr_filter_min_majority_frac)
         )
         solver_entropy_iqr_blocked = bool(
+            getattr(self.cfg, "solver_skip_update_on_easy", True)
+            and
             entropy_iqr_filter_active
             and (entropy_nats <= entropy_easy_threshold)
             and (maj_frac >= entropy_iqr_filter_min_majority_frac)
