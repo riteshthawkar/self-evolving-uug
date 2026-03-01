@@ -310,6 +310,34 @@ yaml_delete_key() {
     mv "${tmp_file}" "${RUN_CONFIG}"
 }
 
+SUPPORTED_SE_KEYS="$(
+python - <<'PY' 2>/dev/null || true
+try:
+    from llamafactory.hparams.finetuning_args import FinetuningArguments
+    fields = getattr(FinetuningArguments, "__dataclass_fields__", {})
+    for name in sorted(fields.keys()):
+        if name.startswith("se_"):
+            print(name)
+except Exception:
+    pass
+PY
+)"
+
+se_key_supported() {
+    local key="$1"
+    grep -qx "${key}" <<< "${SUPPORTED_SE_KEYS}"
+}
+
+append_se_override() {
+    local key="$1"
+    local value="$2"
+    if se_key_supported "${key}"; then
+        echo "${key}: ${value}"
+    else
+        echo "[WARN] Skipping unsupported self-evolving key in this codebase: ${key}" >&2
+    fi
+}
+
 # Remove keys we always override to avoid duplicate-key ambiguity.
 yaml_delete_key "dataset_dir"
 yaml_delete_key "resume_from_checkpoint"
@@ -318,6 +346,14 @@ yaml_delete_key "output_dir"
 yaml_delete_key "se_image_folder"
 yaml_delete_key "se_solver_use_forced_choice_from_proposer"
 yaml_delete_key "se_solver_skip_update_on_easy"
+yaml_delete_key "se_save_every"
+yaml_delete_key "se_fail_on_step_error"
+yaml_delete_key "se_max_consecutive_step_errors"
+yaml_delete_key "se_max_total_step_errors"
+yaml_delete_key "se_generation_failfast_enabled"
+yaml_delete_key "se_generation_failfast_consecutive_skips"
+yaml_delete_key "se_generation_failfast_min_success_rate"
+yaml_delete_key "se_generat_trainion_failfast_min_success_rate"
 
 {
     echo ""
@@ -330,32 +366,32 @@ yaml_delete_key "se_solver_skip_update_on_easy"
     fi
     echo "overwrite_output_dir: ${OVERWRITE_OUTPUT_DIR}"
     echo "dataset_dir: \"$(yaml_quote "${DATASET_DIR}")\""
-    echo "se_image_folder: \"$(yaml_quote "${IMAGE_FOLDER}")\""
-    echo "se_num_solver_samples: ${SE_NUM_SOLVER_SAMPLES}"
-    echo "se_proposer_spot_check_samples: ${SE_PROPOSER_SPOT_CHECK_SAMPLES}"
-    echo "se_solver_temp_min: ${SE_SOLVER_TEMP_MIN}"
-    echo "se_solver_temp_max: ${SE_SOLVER_TEMP_MAX}"
-    echo "se_solver_top_p_min: ${SE_SOLVER_TOP_P_MIN}"
-    echo "se_solver_top_p_max: ${SE_SOLVER_TOP_P_MAX}"
-    echo "se_solver_use_forced_choice_from_proposer: ${SE_SOLVER_USE_FORCED_CHOICE_FROM_PROPOSER}"
-    echo "se_solver_skip_update_on_easy: ${SE_SOLVER_SKIP_UPDATE_ON_EASY}"
-    echo "se_easy_update_majority_frac_threshold: ${SE_EASY_UPDATE_MAJORITY_FRAC_THRESHOLD}"
-    echo "se_difficulty_sampler_enabled: ${SE_DIFFICULTY_SAMPLER_ENABLED}"
-    echo "se_difficulty_target_easy: ${SE_DIFFICULTY_TARGET_EASY}"
-    echo "se_difficulty_target_medium: ${SE_DIFFICULTY_TARGET_MEDIUM}"
-    echo "se_difficulty_target_hard: ${SE_DIFFICULTY_TARGET_HARD}"
-    echo "se_proposer_warm_start_enabled: ${SE_PROPOSER_WARM_START_ENABLED}"
-    echo "se_proposer_warm_start_max_steps: ${SE_PROPOSER_WARM_START_MAX_STEPS}"
-    echo "se_hardness_debt_enabled: ${SE_HARDNESS_DEBT_ENABLED}"
-    echo "se_hardness_debt_inc_easy: ${SE_HARDNESS_DEBT_INC_EASY}"
-    echo "se_hardness_debt_dec_non_easy: ${SE_HARDNESS_DEBT_DEC_NON_EASY}"
-    echo "se_hardness_debt_hard_recovery_threshold: ${SE_HARDNESS_DEBT_HARD_RECOVERY_THRESHOLD}"
-    echo "se_all_easy_explore_trigger: ${SE_ALL_EASY_EXPLORE_TRIGGER}"
-    echo "se_all_easy_explore_steps: ${SE_ALL_EASY_EXPLORE_STEPS}"
-    echo "se_all_easy_explore_num_candidates: ${SE_ALL_EASY_EXPLORE_NUM_CANDIDATES}"
-    echo "se_proposer_early_failfast_enabled: ${SE_PROPOSER_EARLY_FAILFAST_ENABLED}"
-    echo "se_proposer_early_failfast_stop: ${SE_PROPOSER_EARLY_FAILFAST_STOP}"
-    echo "se_proposer_early_failfast_recover: ${SE_PROPOSER_EARLY_FAILFAST_RECOVER}"
+    append_se_override "se_image_folder" "\"$(yaml_quote "${IMAGE_FOLDER}")\""
+    append_se_override "se_num_solver_samples" "${SE_NUM_SOLVER_SAMPLES}"
+    append_se_override "se_proposer_spot_check_samples" "${SE_PROPOSER_SPOT_CHECK_SAMPLES}"
+    append_se_override "se_solver_temp_min" "${SE_SOLVER_TEMP_MIN}"
+    append_se_override "se_solver_temp_max" "${SE_SOLVER_TEMP_MAX}"
+    append_se_override "se_solver_top_p_min" "${SE_SOLVER_TOP_P_MIN}"
+    append_se_override "se_solver_top_p_max" "${SE_SOLVER_TOP_P_MAX}"
+    append_se_override "se_solver_use_forced_choice_from_proposer" "${SE_SOLVER_USE_FORCED_CHOICE_FROM_PROPOSER}"
+    append_se_override "se_solver_skip_update_on_easy" "${SE_SOLVER_SKIP_UPDATE_ON_EASY}"
+    append_se_override "se_easy_update_majority_frac_threshold" "${SE_EASY_UPDATE_MAJORITY_FRAC_THRESHOLD}"
+    append_se_override "se_difficulty_sampler_enabled" "${SE_DIFFICULTY_SAMPLER_ENABLED}"
+    append_se_override "se_difficulty_target_easy" "${SE_DIFFICULTY_TARGET_EASY}"
+    append_se_override "se_difficulty_target_medium" "${SE_DIFFICULTY_TARGET_MEDIUM}"
+    append_se_override "se_difficulty_target_hard" "${SE_DIFFICULTY_TARGET_HARD}"
+    append_se_override "se_proposer_warm_start_enabled" "${SE_PROPOSER_WARM_START_ENABLED}"
+    append_se_override "se_proposer_warm_start_max_steps" "${SE_PROPOSER_WARM_START_MAX_STEPS}"
+    append_se_override "se_hardness_debt_enabled" "${SE_HARDNESS_DEBT_ENABLED}"
+    append_se_override "se_hardness_debt_inc_easy" "${SE_HARDNESS_DEBT_INC_EASY}"
+    append_se_override "se_hardness_debt_dec_non_easy" "${SE_HARDNESS_DEBT_DEC_NON_EASY}"
+    append_se_override "se_hardness_debt_hard_recovery_threshold" "${SE_HARDNESS_DEBT_HARD_RECOVERY_THRESHOLD}"
+    append_se_override "se_all_easy_explore_trigger" "${SE_ALL_EASY_EXPLORE_TRIGGER}"
+    append_se_override "se_all_easy_explore_steps" "${SE_ALL_EASY_EXPLORE_STEPS}"
+    append_se_override "se_all_easy_explore_num_candidates" "${SE_ALL_EASY_EXPLORE_NUM_CANDIDATES}"
+    append_se_override "se_proposer_early_failfast_enabled" "${SE_PROPOSER_EARLY_FAILFAST_ENABLED}"
+    append_se_override "se_proposer_early_failfast_stop" "${SE_PROPOSER_EARLY_FAILFAST_STOP}"
+    append_se_override "se_proposer_early_failfast_recover" "${SE_PROPOSER_EARLY_FAILFAST_RECOVER}"
 } >> "${RUN_CONFIG}"
 
 effective_value() {
