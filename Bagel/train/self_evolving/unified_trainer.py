@@ -97,12 +97,20 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         # - BAGEL_OUTPUT_DIR_MODE=direct: write logs/checkpoints directly in output_root
         # - BAGEL_OUTPUT_DIR_MODE=timestamp (default): create per-run timestamp folder
         mode = str(os.environ.get("BAGEL_OUTPUT_DIR_MODE", "timestamp")).strip().lower()
+        per_rank_output = str(os.environ.get("BAGEL_DIST_PER_RANK_OUTPUT", "1")).strip().lower() in {"1", "true", "yes", "on"}
+        rank_suffix = ""
+        if self.dist_enabled and self.dist_world_size > 1 and per_rank_output:
+            rank_suffix = f"rank_{int(self.dist_rank):02d}"
         if mode in {"direct", "flat", "inplace"}:
-            os.makedirs(output_root, exist_ok=True)
-            return output_root
+            out_dir = os.path.join(output_root, rank_suffix) if rank_suffix else output_root
+            os.makedirs(out_dir, exist_ok=True)
+            return out_dir
 
         ts = time.strftime("%Y%m%d_%H%M%S")
-        run_dir = os.path.join(output_root, f"unified_rollout_{ts}")
+        run_name = f"unified_rollout_{ts}"
+        if rank_suffix:
+            run_name = f"{run_name}_{rank_suffix}"
+        run_dir = os.path.join(output_root, run_name)
         os.makedirs(run_dir, exist_ok=True)
         return run_dir
 
@@ -703,15 +711,33 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         q = str(question or "").strip()
         structural = 1.0 if is_well_formed_question(q) else 0.0
         objective = 1.0 if is_objective_question(q) else 0.0
-        target = 1.0 if str(meta.get("visual_target", "") or "").strip() else 0.0
-        chain_words = len(str(meta.get("reasoning_chain", "") or "").split())
-        chain = 1.0 if chain_words >= 6 else 0.0
-        domains = [d.strip() for d in str(meta.get("reasoning_domains", "") or "").split(",") if d.strip()]
-        domains_ok = 1.0 if len(domains) >= 2 else 0.0
-        two_raw = str(meta.get("two_answer_test", "") or "")
-        two_opts = [s.strip() for s in two_raw.replace(" vs ", "|").replace("/", "|").split("|") if s.strip()]
-        two_ok = 1.0 if len(two_opts) >= 2 and two_opts[0].lower() != two_opts[1].lower() else 0.0
-        score = float(structural + objective + target + chain + domains_ok + two_ok) / 6.0
+        components: List[float] = [structural, objective]
+
+        visual_target = str(meta.get("visual_target", "") or "").strip()
+        if visual_target:
+            components.append(1.0)
+
+        reasoning_chain = str(meta.get("reasoning_chain", "") or "").strip()
+        if reasoning_chain:
+            components.append(1.0 if len(reasoning_chain.split()) >= 4 else 0.0)
+
+        reasoning_domains = str(meta.get("reasoning_domains", "") or "").strip()
+        if reasoning_domains:
+            domains = [d.strip() for d in reasoning_domains.split(",") if d.strip()]
+            components.append(1.0 if len(domains) >= 1 else 0.0)
+
+        two_raw = str(meta.get("two_answer_test", "") or "").strip()
+        if two_raw:
+            two_opts = [s.strip() for s in two_raw.replace(" vs ", "|").replace("/", "|").split("|") if s.strip()]
+            components.append(1.0 if len(two_opts) >= 2 and two_opts[0].lower() != two_opts[1].lower() else 0.0)
+
+        # If metadata is absent (simple schema mode), fall back to question-only quality checks.
+        if len(components) <= 2:
+            q_tokens = q.split()
+            components.append(1.0 if 4 <= len(q_tokens) <= 28 else 0.0)
+            components.append(1.0 if any(tok.lower() in {"left", "right", "top", "bottom", "color", "number", "count"} for tok in q_tokens) else 0.0)
+
+        score = float(sum(components)) / float(max(1, len(components)))
         min_score = max(0.0, min(1.0, float(getattr(self.cfg, "proposer_certificate_min_score", 0.55))))
         valid = 1.0 if score >= min_score else 0.0
         return {"score": float(score), "valid": float(valid)}
@@ -1284,32 +1310,67 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             temperature=proposer_temp,
             num_questions=proposer_candidate_count,
             target_difficulty=desired_difficulty_bucket,
+            do_sample=True,
         )
 
-        candidate_infos = parse_proposer_question_candidates(proposer.text)
-        if not candidate_infos:
-            candidate_questions = parse_all_questions(proposer.text)
-            fallback_q = parse_first_question(proposer.text)
-            if fallback_q:
-                candidate_questions = candidate_questions + [fallback_q]
-            candidate_infos = [{"text": q} for q in candidate_questions if str(q or "").strip()]
-        deduped_infos: List[Dict[str, str]] = []
-        seen_q = set()
-        for info in candidate_infos:
-            qq = str(info.get("text", "") or "").strip()
-            if not qq:
-                continue
-            qq = " ".join(qq.split())
-            if not is_well_formed_question(qq):
-                continue
-            key = qq.lower()
-            if key in seen_q:
-                continue
-            seen_q.add(key)
-            clean_info = {k: str(v) for k, v in info.items() if str(v).strip()}
-            clean_info["text"] = qq
-            deduped_infos.append(clean_info)
-        candidate_infos = deduped_infos[:proposer_candidate_count]
+        proposer_retry_attempted = False
+        proposer_retry_count = 0
+        proposer_retry_temps: List[float] = []
+        proposer_retry_recovered = False
+
+        def _extract_candidate_infos(raw_text: str) -> List[Dict[str, str]]:
+            candidate_infos_local = parse_proposer_question_candidates(raw_text)
+            if not candidate_infos_local:
+                candidate_questions_local = parse_all_questions(raw_text)
+                fallback_q = parse_first_question(raw_text)
+                if fallback_q:
+                    candidate_questions_local = candidate_questions_local + [fallback_q]
+                candidate_infos_local = [{"text": q} for q in candidate_questions_local if str(q or "").strip()]
+
+            deduped_infos_local: List[Dict[str, str]] = []
+            seen_q_local = set()
+            for info in candidate_infos_local:
+                qq = str(info.get("text", "") or "").strip()
+                if not qq:
+                    continue
+                qq = " ".join(qq.split())
+                if not is_well_formed_question(qq):
+                    continue
+                key = qq.lower()
+                if key in seen_q_local:
+                    continue
+                seen_q_local.add(key)
+                clean_info = {k: str(v) for k, v in info.items() if str(v).strip()}
+                clean_info["text"] = qq
+                deduped_infos_local.append(clean_info)
+            return deduped_infos_local[:proposer_candidate_count]
+
+        candidate_infos = _extract_candidate_infos(proposer.text)
+        retry_budget = max(0, int(os.environ.get("BAGEL_PROPOSER_PARSE_RETRIES", "2") or "2"))
+        retry_decay = float(os.environ.get("BAGEL_PROPOSER_PARSE_RETRY_TEMP_DECAY", "0.70") or "0.70")
+        if retry_decay <= 0.0 or retry_decay >= 1.0:
+            retry_decay = 0.70
+        while (not candidate_infos) and proposer_retry_count < retry_budget:
+            proposer_retry_attempted = True
+            proposer_retry_count += 1
+            retry_temp = max(0.15, min(4.0, proposer_temp * (retry_decay ** proposer_retry_count)))
+            proposer_retry_temps.append(float(retry_temp))
+            retry_questions = proposer_candidate_count if proposer_retry_count < retry_budget else 1
+            proposer_retry = self.adapter.propose_questions(
+                image=image,
+                max_new_tokens=self.cfg.max_new_tokens_proposer,
+                temperature=float(retry_temp),
+                num_questions=int(retry_questions),
+                target_difficulty=desired_difficulty_bucket,
+                do_sample=bool(proposer_retry_count < retry_budget),
+            )
+            recovered_infos = _extract_candidate_infos(proposer_retry.text)
+            if recovered_infos:
+                proposer = proposer_retry
+                candidate_infos = recovered_infos
+                proposer_retry_recovered = True
+                break
+
         candidate_questions = [str(info.get("text", "")) for info in candidate_infos]
 
         if not candidate_questions:
@@ -1320,6 +1381,10 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                 "skip_reason": "empty_question",
                 "image_path": image_path,
                 "proposer_raw": proposer.text if self.cfg.save_raw_generations else "",
+                "proposer_retry_attempted": bool(proposer_retry_attempted),
+                "proposer_retry_count": int(proposer_retry_count),
+                "proposer_retry_temps": proposer_retry_temps,
+                "proposer_retry_recovered": bool(proposer_retry_recovered),
             }
             return {
                 "record": record,
@@ -1360,6 +1425,10 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                 "proposer_candidate_count_parsed": int(len(candidate_questions)),
                 "proposer_candidate_count_valid": 0,
                 "proposer_raw": proposer.text if self.cfg.save_raw_generations else "",
+                "proposer_retry_attempted": bool(proposer_retry_attempted),
+                "proposer_retry_count": int(proposer_retry_count),
+                "proposer_retry_temps": proposer_retry_temps,
+                "proposer_retry_recovered": bool(proposer_retry_recovered),
             }
             return {
                 "record": record,
@@ -1395,6 +1464,10 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                 "proposer_candidate_non_easy_rate": float(
                     sum(1 for c in valid_candidates if not bool(c.get("easy_case", True))) / float(max(1, len(valid_candidates)))
                 ),
+                "proposer_retry_attempted": bool(proposer_retry_attempted),
+                "proposer_retry_count": int(proposer_retry_count),
+                "proposer_retry_temps": proposer_retry_temps,
+                "proposer_retry_recovered": bool(proposer_retry_recovered),
                 "policy_update_attempted": False,
                 "policy_update_applied": False,
                 "policy_update_reason": "gated_no_acceptable_candidates",
@@ -1835,6 +1908,10 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             "proposer_selected_candidate_ste_difficulty": float(selected_candidate.get("ste_difficulty", 0.0)),
             "proposer_selected_candidate_certificate_score": float(selected_candidate.get("certificate_score", 0.0)),
             "proposer_selected_candidate_certificate_valid": float(selected_candidate.get("certificate_valid", 0.0)),
+            "proposer_retry_attempted": bool(proposer_retry_attempted),
+            "proposer_retry_count": int(proposer_retry_count),
+            "proposer_retry_temps": proposer_retry_temps,
+            "proposer_retry_recovered": bool(proposer_retry_recovered),
             "proposer_spot_check_samples": int(len(spot_temps)),
             "proposer_target_difficulty_bucket": str(desired_difficulty_bucket),
             "difficulty_sampler_mode": str(difficulty_sampler_mode),
@@ -2687,6 +2764,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                     else:
                         self._gen_reward_ema = mom * self._gen_reward_ema + (1.0 - mom) * float(mean_gen_reward)
 
+            self._sync_distributed_step_state()
             _emit_training_logs(step, phase=phase, step_time_sec=float(time.time() - step_t0))
 
             if step % max(1, int(self.cfg.log_every)) == 0:
@@ -2720,6 +2798,8 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             flushed_optim_steps += int(self.solver_updater.finalize())
         if self.generator_updater is not None:
             flushed_optim_steps += int(self.generator_updater.finalize())
+
+        self._sync_distributed_step_state()
 
         if self.policy_updates_enabled:
             final_ckpt = self._save_checkpoint(int(self.cfg.steps))

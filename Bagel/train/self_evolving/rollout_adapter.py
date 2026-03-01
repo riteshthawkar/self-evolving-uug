@@ -34,6 +34,28 @@ class BagelRolloutAdapter:
     def __init__(self, runtime: BagelRuntime) -> None:
         self.runtime = runtime
         self.inferencer = runtime.inferencer
+        self._proposer_top_p = self._env_float("BAGEL_PROPOSER_TEXT_TOP_P", self._env_float("BAGEL_TEXT_TOP_P", 0.92))
+        self._proposer_top_k = self._env_int("BAGEL_PROPOSER_TEXT_TOP_K", self._env_int("BAGEL_TEXT_TOP_K", 40))
+        self._solver_top_p = self._env_float("BAGEL_SOLVER_TEXT_TOP_P", self._env_float("BAGEL_TEXT_TOP_P", 0.92))
+        self._solver_top_k = self._env_int("BAGEL_SOLVER_TEXT_TOP_K", self._env_int("BAGEL_TEXT_TOP_K", 40))
+        self._gen_spec_top_p = self._env_float("BAGEL_GEN_SPEC_TEXT_TOP_P", self._proposer_top_p)
+        self._gen_spec_top_k = self._env_int("BAGEL_GEN_SPEC_TEXT_TOP_K", self._proposer_top_k)
+
+    @staticmethod
+    def _env_float(name: str, default: float) -> float:
+        raw = str(os.environ.get(name, str(default))).strip()
+        try:
+            return float(raw)
+        except Exception:
+            return float(default)
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        raw = str(os.environ.get(name, str(default))).strip()
+        try:
+            return int(raw)
+        except Exception:
+            return int(default)
 
     @staticmethod
     def _is_oom_error(exc: BaseException) -> bool:
@@ -96,6 +118,8 @@ class BagelRolloutAdapter:
         max_new_tokens: int,
         do_sample: bool,
         temperature: float,
+        text_top_p: float = 1.0,
+        text_top_k: int = 0,
     ) -> GenerationResult:
         out = self.inferencer(
             image=image,
@@ -105,6 +129,8 @@ class BagelRolloutAdapter:
             max_think_token_n=max_new_tokens,
             do_sample=do_sample,
             text_temperature=temperature,
+            text_top_p=float(text_top_p),
+            text_top_k=int(text_top_k),
         )
         text = str(out.get("text") or "").strip()
         return GenerationResult(text=text, raw=out)
@@ -116,6 +142,7 @@ class BagelRolloutAdapter:
         max_new_tokens: int,
         temperature: float,
         target_difficulty: str = "medium",
+        do_sample: bool = True,
     ) -> GenerationResult:
         proposer_prompt = build_proposer_prompt(target_difficulty=target_difficulty)
         with use_adapter(self.runtime.model.language_model, self._adapter_for_role(ROLE_PROPOSER)):
@@ -123,8 +150,10 @@ class BagelRolloutAdapter:
                 image=image,
                 prompt=proposer_prompt,
                 max_new_tokens=max_new_tokens,
-                do_sample=True,
+                do_sample=bool(do_sample),
                 temperature=temperature,
+                text_top_p=self._proposer_top_p,
+                text_top_k=self._proposer_top_k,
             )
 
     def propose_questions(
@@ -135,6 +164,7 @@ class BagelRolloutAdapter:
         temperature: float,
         num_questions: int,
         target_difficulty: str = "medium",
+        do_sample: bool = True,
     ) -> GenerationResult:
         n = max(1, int(num_questions))
         if n <= 1:
@@ -143,6 +173,7 @@ class BagelRolloutAdapter:
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 target_difficulty=target_difficulty,
+                do_sample=bool(do_sample),
             )
         proposer_prompt = build_proposer_multi_prompt(
             num_questions=n,
@@ -153,8 +184,10 @@ class BagelRolloutAdapter:
                 image=image,
                 prompt=proposer_prompt,
                 max_new_tokens=max_new_tokens,
-                do_sample=True,
+                do_sample=bool(do_sample),
                 temperature=temperature,
+                text_top_p=self._proposer_top_p,
+                text_top_k=self._proposer_top_k,
             )
 
     def solve_question(
@@ -184,6 +217,8 @@ class BagelRolloutAdapter:
                 max_new_tokens=max_new_tokens,
                 do_sample=do_sample,
                 temperature=temperature,
+                text_top_p=self._solver_top_p,
+                text_top_k=self._solver_top_k,
             )
 
     def intuitive_answer(
@@ -208,6 +243,7 @@ class BagelRolloutAdapter:
         max_new_tokens: int,
         temperature: float,
         min_qa_pairs: int,
+        do_sample: bool = True,
     ) -> GenerationResult:
         spec_prompt = build_generation_spec_prompt(min_qa_pairs=min_qa_pairs)
         with use_adapter(self.runtime.model.language_model, self._adapter_for_role(ROLE_PROPOSER)):
@@ -215,8 +251,10 @@ class BagelRolloutAdapter:
                 image=image,
                 prompt=spec_prompt,
                 max_new_tokens=max_new_tokens,
-                do_sample=True,
+                do_sample=bool(do_sample),
                 temperature=temperature,
+                text_top_p=self._gen_spec_top_p,
+                text_top_k=self._gen_spec_top_k,
             )
 
     def generate_image_from_spec(

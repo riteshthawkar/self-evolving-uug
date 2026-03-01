@@ -29,6 +29,9 @@ set -euo pipefail
 #   EXPERIMENT=unified_self_evolving   # default: unified
 #   STEPS=10000
 #   DEVICE=cuda
+#   DISTRIBUTED=1                      # launch with torchrun (1 rank per GPU)
+#   NPROC_PER_NODE=8                   # default: auto-detect GPU count
+#   DIST_BACKEND=nccl
 #   MULTI_GPU_SPLIT=auto|on|off        # default: auto (model/vae split)
 #   MODEL_DEVICE_INDEX=0
 #   VAE_DEVICE_INDEX=1
@@ -66,6 +69,14 @@ EXPERIMENT="${EXPERIMENT:-unified_self_evolving}"
 STEPS="${STEPS:-10000}"
 DEVICE="${DEVICE:-cuda}"
 VAE_DEVICE="${VAE_DEVICE:-}"
+DISTRIBUTED="${DISTRIBUTED:-0}"         # 1 => torchrun multi-process data parallel
+DIST_BACKEND="${DIST_BACKEND:-nccl}"
+DIST_TIMEOUT_MINUTES="${DIST_TIMEOUT_MINUTES:-120}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-0}"   # 0 => auto use detected GPU count
+DIST_MASTER_PORT="${DIST_MASTER_PORT:-29500}"
+DIST_DATA_SHARD="${DIST_DATA_SHARD:-1}"
+DIST_PER_RANK_OUTPUT="${DIST_PER_RANK_OUTPUT:-1}"
+TORCHRUN_BIN="${TORCHRUN_BIN:-torchrun}"
 MULTI_GPU_SPLIT="${MULTI_GPU_SPLIT:-auto}"   # auto|on|off
 MODEL_DEVICE_INDEX="${MODEL_DEVICE_INDEX:-0}"
 VAE_DEVICE_INDEX="${VAE_DEVICE_INDEX:-1}"
@@ -74,10 +85,18 @@ ENABLE_SUDER="${ENABLE_SUDER:-1}"
 PROPOSER_GEN_ENTROPY_WEIGHT="${PROPOSER_GEN_ENTROPY_WEIGHT:-0.7}"
 PROPOSER_GEN_BASELINE_MOMENTUM="${PROPOSER_GEN_BASELINE_MOMENTUM:-0.6}"
 GEN_SPEC_MIN_QA_PAIRS="${GEN_SPEC_MIN_QA_PAIRS:-2}"
-GEN_SPEC_TEMPERATURE="${GEN_SPEC_TEMPERATURE:-0.9}"
-MAX_NEW_TOKENS_GEN_SPEC="${MAX_NEW_TOKENS_GEN_SPEC:-384}"
+GEN_SPEC_TEMPERATURE="${GEN_SPEC_TEMPERATURE:-0.7}"
+MAX_NEW_TOKENS_GEN_SPEC="${MAX_NEW_TOKENS_GEN_SPEC:-256}"
+MAX_NEW_TOKENS_PROPOSER="${MAX_NEW_TOKENS_PROPOSER:-128}"
+MAX_NEW_TOKENS_SOLVER="${MAX_NEW_TOKENS_SOLVER:-96}"
 GEN_IMAGE_SIZE="${GEN_IMAGE_SIZE:-640}"
 GEN_NUM_TIMESTEPS="${GEN_NUM_TIMESTEPS:-50}"
+PROPOSER_TEXT_TOP_P="${PROPOSER_TEXT_TOP_P:-0.85}"
+PROPOSER_TEXT_TOP_K="${PROPOSER_TEXT_TOP_K:-20}"
+SOLVER_TEXT_TOP_P="${SOLVER_TEXT_TOP_P:-0.90}"
+SOLVER_TEXT_TOP_K="${SOLVER_TEXT_TOP_K:-32}"
+GEN_SPEC_TEXT_TOP_P="${GEN_SPEC_TEXT_TOP_P:-0.85}"
+GEN_SPEC_TEXT_TOP_K="${GEN_SPEC_TEXT_TOP_K:-20}"
 SAVE_GENERATED_IMAGES="${SAVE_GENERATED_IMAGES:-0}"
 ENABLE_LORA="${ENABLE_LORA:-0}"
 LORA_CHECKPOINT_PATH="${LORA_CHECKPOINT_PATH:-}"
@@ -156,6 +175,8 @@ PROPOSER_NUM_CANDIDATES="${PROPOSER_NUM_CANDIDATES:-3}"
 PROPOSER_SPOT_CHECK_SAMPLES="${PROPOSER_SPOT_CHECK_SAMPLES:-3}"
 PROPOSER_SPOT_ENTROPY_MIN_GATE="${PROPOSER_SPOT_ENTROPY_MIN_GATE:-0.15}"
 PROPOSER_GRPO_GEN_GROUP_SIZE="${PROPOSER_GRPO_GEN_GROUP_SIZE:-3}"
+PROPOSER_PARSE_RETRIES="${PROPOSER_PARSE_RETRIES:-3}"
+PROPOSER_PARSE_RETRY_TEMP_DECAY="${PROPOSER_PARSE_RETRY_TEMP_DECAY:-0.70}"
 UNDERSTANDING_SKIP_NO_ACCEPTABLE="${UNDERSTANDING_SKIP_NO_ACCEPTABLE:-1}"
 UNDERSTANDING_REQUIRE_ACCEPTABLE_FOR_UPDATE="${UNDERSTANDING_REQUIRE_ACCEPTABLE_FOR_UPDATE:-1}"
 UNDERSTANDING_UPDATE_REQUIRE_DISAGREEMENT="${UNDERSTANDING_UPDATE_REQUIRE_DISAGREEMENT:-1}"
@@ -263,7 +284,7 @@ elif [[ "$TRAIN_STAGE" == "strict" ]]; then
     --rejected_question_penalty 0.35
     --proposer_entropy_mu 0.90
     --proposer_entropy_sigma 0.25
-    --proposer_temperature 1.00
+    --proposer_temperature 0.80
     --num_solver_samples 7
     --solver_temp_min 0.50
     --solver_temp_max 2.50
@@ -280,6 +301,11 @@ fi
 
 if [[ "$MULTI_GPU_SPLIT" != "auto" && "$MULTI_GPU_SPLIT" != "on" && "$MULTI_GPU_SPLIT" != "off" ]]; then
   echo "[B1] ERROR: MULTI_GPU_SPLIT must be one of: auto, on, off (got: $MULTI_GPU_SPLIT)" >&2
+  exit 1
+fi
+
+if [[ "$DISTRIBUTED" != "0" && "$DISTRIBUTED" != "1" ]]; then
+  echo "[B1] ERROR: DISTRIBUTED must be 0 or 1 (got: $DISTRIBUTED)" >&2
   exit 1
 fi
 
@@ -406,6 +432,36 @@ if [[ "$ROCM_RUNTIME" == "1" ]]; then
   fi
 fi
 
+if [[ "$DISTRIBUTED" == "1" ]]; then
+  if [[ "$DEVICE" != cuda* ]]; then
+    echo "[B1] ERROR: DISTRIBUTED=1 currently requires DEVICE to be cuda/cuda:* (got: $DEVICE)" >&2
+    exit 1
+  fi
+  if [[ "$GPU_COUNT" -lt 2 ]]; then
+    echo "[B1] ERROR: DISTRIBUTED=1 requires >=2 GPUs, found $GPU_COUNT" >&2
+    exit 1
+  fi
+  if [[ "$NPROC_PER_NODE" -le 0 ]]; then
+    NPROC_PER_NODE="$GPU_COUNT"
+  fi
+  if [[ "$NPROC_PER_NODE" -gt "$GPU_COUNT" ]]; then
+    echo "[B1] WARN: NPROC_PER_NODE=$NPROC_PER_NODE > detected GPUs=$GPU_COUNT, capping."
+    NPROC_PER_NODE="$GPU_COUNT"
+  fi
+  if [[ "$NPROC_PER_NODE" -lt 2 ]]; then
+    echo "[B1] ERROR: NPROC_PER_NODE must be >=2 for DISTRIBUTED=1 (got: $NPROC_PER_NODE)" >&2
+    exit 1
+  fi
+  if [[ "$MULTI_GPU_SPLIT" != "off" ]]; then
+    echo "[B1] DISTRIBUTED=1: forcing MULTI_GPU_SPLIT=off (each rank uses its own local GPU)."
+    MULTI_GPU_SPLIT="off"
+  fi
+  if [[ -n "$VAE_DEVICE" ]]; then
+    echo "[B1] DISTRIBUTED=1: ignoring explicit VAE_DEVICE='$VAE_DEVICE' (rank-local VAE device will be used)."
+    VAE_DEVICE=""
+  fi
+fi
+
 if [[ "$DEVICE" == cuda* ]]; then
   if [[ -z "$VAE_DEVICE" ]]; then
     if [[ "$MULTI_GPU_SPLIT" == "on" ]]; then
@@ -436,8 +492,8 @@ fi
 # ── Shared arguments ────────────────────────────────────────────────────────
 SHARED_ARGS=(
   --experiment "$EXPERIMENT"
-  --max_new_tokens_proposer 256
-  --max_new_tokens_solver 96
+  --max_new_tokens_proposer "$MAX_NEW_TOKENS_PROPOSER"
+  --max_new_tokens_solver "$MAX_NEW_TOKENS_SOLVER"
   --solver_unsolvable_maj_threshold 0.20
   --zero_entropy_eps 1e-6
   --seed 42
@@ -634,6 +690,21 @@ else
   SHARED_ARGS+=(--disable_gen_step_solver_update)
 fi
 
+# ── Distributed args ─────────────────────────────────────────────────────────
+DIST_ARGS=()
+if [[ "$DISTRIBUTED" == "1" ]]; then
+  DIST_ARGS+=(
+    --distributed
+    --dist_backend "$DIST_BACKEND"
+    --dist_timeout_minutes "$DIST_TIMEOUT_MINUTES"
+  )
+  if [[ "$DIST_DATA_SHARD" == "1" ]]; then
+    DIST_ARGS+=(--dist_data_shard)
+  else
+    DIST_ARGS+=(--disable_dist_data_shard)
+  fi
+fi
+
 # ── Optional SUDER-style generation-phase rollout args ───────────────────────
 SUDER_ARGS=()
 if [[ "$ENABLE_SUDER" == "1" ]]; then
@@ -731,7 +802,7 @@ if [[ ! -d "$DATA_DIR" ]]; then
   exit 1
 fi
 
-if [[ "$DEVICE" == "$VAE_DEVICE" && "$MULTI_GPU_SPLIT" == "on" ]]; then
+if [[ "$DISTRIBUTED" != "1" && "$DEVICE" == "$VAE_DEVICE" && "$MULTI_GPU_SPLIT" == "on" ]]; then
   echo "[B1] ERROR: MULTI_GPU_SPLIT=on requires model and VAE on different GPUs (DEVICE=$DEVICE, VAE_DEVICE=$VAE_DEVICE)" >&2
   exit 1
 fi
@@ -754,6 +825,13 @@ PY
   fi
 fi
 
+if [[ "$DISTRIBUTED" == "1" ]]; then
+  if ! command -v "$TORCHRUN_BIN" >/dev/null 2>&1; then
+    echo "[B1] ERROR: DISTRIBUTED=1 requires torchrun in PATH (TORCHRUN_BIN=$TORCHRUN_BIN)." >&2
+    exit 1
+  fi
+fi
+
 mkdir -p "$OUTPUT_DIR"
 if [[ "$OUTPUT_LAYOUT" == "direct" && "$FORCE_RUN_ON_EXISTING_OUTPUT" != "1" ]]; then
   if [[ -z "$RESUME_FROM" ]]; then
@@ -762,6 +840,14 @@ if [[ "$OUTPUT_LAYOUT" == "direct" && "$FORCE_RUN_ON_EXISTING_OUTPUT" != "1" ]];
       echo "[B1]        Use a new OUTPUT_DIR, set OUTPUT_LAYOUT=timestamp, or pass RESUME_FROM." >&2
       echo "[B1]        To override intentionally, set FORCE_RUN_ON_EXISTING_OUTPUT=1." >&2
       exit 1
+    fi
+    if [[ "$DISTRIBUTED" == "1" && "$DIST_PER_RANK_OUTPUT" == "1" ]]; then
+      if ls -d "$OUTPUT_DIR"/rank_* >/dev/null 2>&1; then
+        echo "[B1] ERROR: OUTPUT_DIR already contains per-rank artifacts and RESUME_FROM is empty." >&2
+        echo "[B1]        Use a new OUTPUT_DIR or provide RESUME_FROM." >&2
+        echo "[B1]        To override intentionally, set FORCE_RUN_ON_EXISTING_OUTPUT=1." >&2
+        exit 1
+      fi
     fi
   fi
 fi
@@ -779,6 +865,7 @@ echo "[B1]   OutLayout:  $OUTPUT_LAYOUT"
 echo "[B1]   Steps:      $STEPS"
 echo "[B1]   Device:     $DEVICE"
 echo "[B1]   GPUs:       count=$GPU_COUNT split=$MULTI_GPU_SPLIT"
+echo "[B1]   Dist:       enabled=$DISTRIBUTED backend=$DIST_BACKEND nproc=${NPROC_PER_NODE:-0} data_shard=$DIST_DATA_SHARD per_rank_output=$DIST_PER_RANK_OUTPUT"
 echo "[B1]   Runtime:    rocm=$ROCM_RUNTIME force_math_sdpa=$FORCE_MATH_SDPA"
 echo "[B1]   SafeMode:   rocm_safe_mode=$ROCM_SAFE_MODE"
 if [[ -n "$VAE_DEVICE" ]]; then
@@ -792,7 +879,9 @@ echo "[B1]   BLAS:       TORCH_BLAS_PREFER_HIPBLASLT=$TORCH_BLAS_PREFER_HIPBLASL
 echo "[B1]   BlockMask:  compile=$BAGEL_COMPILE_BLOCK_MASK"
 echo "[B1]   GenCfg:     image_size=$GEN_IMAGE_SIZE timesteps=$GEN_NUM_TIMESTEPS"
 echo "[B1]   Schedule:   U=$UNDERSTANDING_STEPS_PER_CYCLE G=$GENERATION_STEPS_PER_CYCLE mix=$GEN_MIX_SOURCE_MODE"
-echo "[B1]   Proposer:   K=$PROPOSER_NUM_CANDIDATES spot=$PROPOSER_SPOT_CHECK_SAMPLES"
+  echo "[B1]   Proposer:   K=$PROPOSER_NUM_CANDIDATES spot=$PROPOSER_SPOT_CHECK_SAMPLES"
+  echo "[B1]   PropRetry: retries=$PROPOSER_PARSE_RETRIES temp_decay=$PROPOSER_PARSE_RETRY_TEMP_DECAY"
+  echo "[B1]   TextSample: proposer(top_p=$PROPOSER_TEXT_TOP_P top_k=$PROPOSER_TEXT_TOP_K) solver(top_p=$SOLVER_TEXT_TOP_P top_k=$SOLVER_TEXT_TOP_K) gen_spec(top_p=$GEN_SPEC_TEXT_TOP_P top_k=$GEN_SPEC_TEXT_TOP_K)"
 if [[ "$RUN_MODE" == "train" ]]; then
   echo "[B1]   Policy:     $POLICY_UPDATE_METHOD"
   echo "[B1]   PolicyImg:  max_vit_edge=$POLICY_MAX_VIT_EDGE min_vit_edge=$POLICY_MIN_VIT_EDGE"
@@ -839,25 +928,50 @@ export BAGEL_POLICY_MAX_PROMPT_TOKENS="$POLICY_MAX_PROMPT_TOKENS"
 export BAGEL_SOLVER_POLICY_MAX_SAMPLES="$SOLVER_POLICY_MAX_SAMPLES"
 export BAGEL_GEN_SOLVER_POLICY_MAX_SAMPLES="$GEN_SOLVER_POLICY_MAX_SAMPLES"
 export BAGEL_PROPOSER_POLICY_MAX_CANDIDATES="$PROPOSER_POLICY_MAX_CANDIDATES"
+export BAGEL_PROPOSER_TEXT_TOP_P="$PROPOSER_TEXT_TOP_P"
+export BAGEL_PROPOSER_TEXT_TOP_K="$PROPOSER_TEXT_TOP_K"
+export BAGEL_SOLVER_TEXT_TOP_P="$SOLVER_TEXT_TOP_P"
+export BAGEL_SOLVER_TEXT_TOP_K="$SOLVER_TEXT_TOP_K"
+export BAGEL_GEN_SPEC_TEXT_TOP_P="$GEN_SPEC_TEXT_TOP_P"
+export BAGEL_GEN_SPEC_TEXT_TOP_K="$GEN_SPEC_TEXT_TOP_K"
+export BAGEL_PROPOSER_PARSE_RETRIES="$PROPOSER_PARSE_RETRIES"
+export BAGEL_PROPOSER_PARSE_RETRY_TEMP_DECAY="$PROPOSER_PARSE_RETRY_TEMP_DECAY"
 export BAGEL_OUTPUT_DIR_MODE="$OUTPUT_LAYOUT"
+export BAGEL_DIST_PER_RANK_OUTPUT="$DIST_PER_RANK_OUTPUT"
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
+if [[ "$DISTRIBUTED" == "1" && -z "${OMP_NUM_THREADS:-}" ]]; then
+  export OMP_NUM_THREADS=1
+fi
 
 cd "$BAGEL_ROOT"
 set +e
-"$PYTHON_BIN" -u train/train_self_evolving.py \
-  --model_path "$MODEL_PATH" \
-  --device "$DEVICE" \
-  --vae_device "$VAE_DEVICE" \
-  --max_latent_size "$MAX_LATENT_SIZE" \
-  --image_dir "$DATA_DIR" \
-  --output_dir "$OUTPUT_DIR" \
-  --steps "$STEPS" \
-  "${SHARED_ARGS[@]}" \
-  "${STAGE_ARGS[@]}" \
-  "${TRAIN_ARGS[@]}" \
-  "${SUDER_ARGS[@]}" \
-  2>&1 | tee -a "$LAUNCH_LOG"
+BASE_CMD=(
+  train/train_self_evolving.py
+  --model_path "$MODEL_PATH"
+  --device "$DEVICE"
+  --vae_device "$VAE_DEVICE"
+  --max_latent_size "$MAX_LATENT_SIZE"
+  --image_dir "$DATA_DIR"
+  --output_dir "$OUTPUT_DIR"
+  --steps "$STEPS"
+  "${DIST_ARGS[@]}"
+  "${SHARED_ARGS[@]}"
+  "${STAGE_ARGS[@]}"
+  "${TRAIN_ARGS[@]}"
+  "${SUDER_ARGS[@]}"
+)
+if [[ "$DISTRIBUTED" == "1" ]]; then
+  "$TORCHRUN_BIN" \
+    --standalone \
+    --nnodes 1 \
+    --nproc_per_node "$NPROC_PER_NODE" \
+    --master_port "$DIST_MASTER_PORT" \
+    "${BASE_CMD[@]}" \
+    2>&1 | tee -a "$LAUNCH_LOG"
+else
+  "$PYTHON_BIN" -u "${BASE_CMD[@]}" 2>&1 | tee -a "$LAUNCH_LOG"
+fi
 PY_EXIT_CODE="${PIPESTATUS[0]}"
 set -e
 

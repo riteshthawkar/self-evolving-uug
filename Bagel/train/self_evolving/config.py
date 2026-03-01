@@ -248,6 +248,15 @@ class RolloutConfig:
     # Generation-side joint understanding parity.
     gen_step_solver_update_enabled: bool = False
 
+    # Optional distributed self-evolving runtime.
+    dist_enabled: bool = False
+    dist_backend: str = "nccl"
+    dist_world_size: int = 1
+    dist_rank: int = 0
+    dist_local_rank: int = 0
+    dist_main_process: bool = True
+    dist_data_shard: bool = True
+
     def solver_temperatures(self) -> List[float]:
         n = max(1, int(self.num_solver_samples))
         if n == 1:
@@ -291,3 +300,6 @@ class RolloutConfig:
         elapsed = max(0, int(step) - int(start_step))
         frac = min(1.0, float(elapsed) / float(warmup))
         return float(start + frac * (mx - start))
+
+    def distributed_active(self) -> bool:
+        return bool(self.dist_enabled) and int(self.dist_world_size) > 1

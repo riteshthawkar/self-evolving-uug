@@ -1030,6 +1030,8 @@ class Bagel(PreTrainedModel):
         max_length: int,
         do_sample: bool = False,
         temperature: float = 1.0,
+        top_p: float = 1.0,
+        top_k: int = 0,
         end_token_id: int = None,
     ):
         step = 0
@@ -1071,7 +1073,28 @@ class Bagel(PreTrainedModel):
             pred_logits = self._lm_causal_model().lm_head(packed_query_sequence)
 
             if do_sample:
-                probs = nn.functional.softmax(pred_logits / temperature, dim=-1)
+                logits = pred_logits / max(float(temperature), 1e-5)
+
+                k = int(top_k)
+                if k > 0 and k < logits.shape[-1]:
+                    topk_vals, topk_idx = torch.topk(logits, k=k, dim=-1)
+                    masked_logits = torch.full_like(logits, float("-inf"))
+                    masked_logits.scatter_(1, topk_idx, topk_vals)
+                    logits = masked_logits
+
+                p = float(top_p)
+                if 0.0 < p < 1.0:
+                    sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
+                    sorted_probs = nn.functional.softmax(sorted_logits, dim=-1)
+                    cdf = torch.cumsum(sorted_probs, dim=-1)
+                    remove_mask = cdf > p
+                    remove_mask[..., 0] = False
+                    sorted_logits = sorted_logits.masked_fill(remove_mask, float("-inf"))
+                    masked_logits = torch.full_like(logits, float("-inf"))
+                    masked_logits.scatter_(1, sorted_idx, sorted_logits)
+                    logits = masked_logits
+
+                probs = nn.functional.softmax(logits, dim=-1)
                 curr_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
             else:
                 curr_tokens = torch.argmax(pred_logits, dim=-1)
