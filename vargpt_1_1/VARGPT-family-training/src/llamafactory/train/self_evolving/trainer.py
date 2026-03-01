@@ -200,6 +200,14 @@ class SelfEvolvingTrainer(Trainer):
                 f"{se_config.image_folder}"
             )
 
+        # Step-level logging paths (initialized in train once output_dir is ready)
+        self.run_dir: Optional[pathlib.Path] = None
+        self.logs_dir: Optional[pathlib.Path] = None
+        self.iter_log_path: Optional[pathlib.Path] = None
+        self.understanding_log_path: Optional[pathlib.Path] = None
+        self.generation_log_path: Optional[pathlib.Path] = None
+        self.error_log_path: Optional[pathlib.Path] = None
+
         logger.info(
             f"[SelfEvolvingTrainer] Initialized with "
             f"U={se_config.understanding_steps_per_cycle}, "
@@ -224,6 +232,7 @@ class SelfEvolvingTrainer(Trainer):
         # Create output directory
         output_dir = pathlib.Path(self.args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        self._init_step_log_paths(output_dir)
 
         # Save config
         _json_dump(output_dir / "se_config.json", {
@@ -279,6 +288,18 @@ class SelfEvolvingTrainer(Trainer):
             step_stats["step_time"] = time.time() - step_start
             if step_stats.get("phase") != "error":
                 self._consecutive_step_errors = 0
+
+            # Persist full per-step records (BLIP3o-like traceability).
+            step_record = dict(step_stats)
+            step_record["timestamp_unix"] = time.time()
+            self._append_jsonl(self.iter_log_path, step_record)
+            phase_name = str(step_stats.get("phase", "unknown"))
+            if phase_name == "understanding":
+                self._append_jsonl(self.understanding_log_path, step_record)
+            elif phase_name == "generation":
+                self._append_jsonl(self.generation_log_path, step_record)
+            elif phase_name == "error":
+                self._append_jsonl(self.error_log_path, step_record)
 
             # ── Logging ─────────────────────────────────────────────────
             if step % cfg.log_every == 0:
@@ -2949,6 +2970,54 @@ class SelfEvolvingTrainer(Trainer):
             except Exception:
                 pass
 
+    def _init_step_log_paths(self, output_dir: pathlib.Path):
+        """Initialize run/log directories and JSONL log file paths."""
+        self.run_dir = output_dir
+        self.logs_dir = output_dir / "logs"
+        self.iter_log_path = output_dir / "iter_log.jsonl"
+        self.understanding_log_path = self.logs_dir / "understanding_steps.jsonl"
+        self.generation_log_path = self.logs_dir / "generation_steps.jsonl"
+        self.error_log_path = self.logs_dir / "error_steps.jsonl"
+        if self.is_world_process_zero():
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
+
+    def _to_jsonable(self, value):
+        """Convert nested training stats into JSON-safe values."""
+        if value is None or isinstance(value, (str, int, bool)):
+            return value
+        if isinstance(value, float):
+            if math.isnan(value) or math.isinf(value):
+                return None
+            return value
+        if isinstance(value, dict):
+            return {str(k): self._to_jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._to_jsonable(v) for v in value]
+        if isinstance(value, torch.Tensor):
+            return {
+                "_type": "tensor",
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+            }
+        if isinstance(value, Image.Image):
+            return {
+                "_type": "image",
+                "size": list(value.size),
+                "mode": value.mode,
+            }
+        return str(value)
+
+    def _append_jsonl(self, path: Optional[pathlib.Path], record: Dict):
+        """Append one JSON record to a JSONL log file (main process only)."""
+        if path is None or not self.is_world_process_zero():
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(self._to_jsonable(record), ensure_ascii=True) + "\n")
+        except Exception as exc:
+            logger.warning(f"[SelfEvolvingTrainer] Failed to append log {path}: {exc}")
+
     # ── Logging ─────────────────────────────────────────────────────────
 
     def _log_step(self, step: int, stats: Dict):
@@ -2995,6 +3064,46 @@ class SelfEvolvingTrainer(Trainer):
             msg_parts.append(f"replay_sz={stats.get('replay_buffer_size', 0)}")
 
         logger.info(f"[SE] {' | '.join(msg_parts)}")
+
+        # BLIP3o-style concise step lines to stdout for easy terminal tracking.
+        if phase == "understanding":
+            num_answers = int(stats.get("num_answers", 0))
+            maj_frac = float(stats.get("majority_frac", 0.0))
+            maj_count = int(round(maj_frac * num_answers)) if num_answers > 0 else 0
+            entropy = float(stats.get("entropy", 0.0))
+            margin = float(stats.get("margin", 0.0))
+            info_local = 1 if (not bool(stats.get("easy_question", True))) else 0
+            debt = float(stats.get("proposer_hardness_debt", 0.0))
+            warm = 1 if bool(stats.get("proposer_warm_start_active", False)) else 0
+            q_text = str(stats.get("question", "")).strip()
+            print(
+                f"[Step {step:05d}][U] maj={maj_count}/{num_answers} "
+                f"maj_frac={maj_frac:.2f} H={entropy:.3f} M={margin:.3f} "
+                f"info_local={info_local} P_R={float(stats.get('proposer_reward', 0.0)):.3f} "
+                f"S_R={float(stats.get('solver_reward', 0.0)):.3f} "
+                f"debt={debt:.2f} warm={warm} dt={step_time:.1f}s",
+                flush=True,
+            )
+            if q_text:
+                print(f"  Q: {q_text}", flush=True)
+        elif phase == "generation":
+            print(
+                f"[Step {step:05d}][G] K={int(stats.get('generation_attempted', 0))} "
+                f"ok={int(stats.get('generation_succeeded', 0))} "
+                f"fail={int(stats.get('generation_failures', 0))} "
+                f"succ={float(stats.get('generation_success_rate', 0.0)):.2f} "
+                f"R_mean={float(stats.get('gen_reward_mean', 0.0)):.3f} "
+                f"R_max={float(stats.get('gen_reward_max', 0.0)):.3f} "
+                f"replay={int(stats.get('replay_buffer_size', 0))} "
+                f"dt={step_time:.1f}s",
+                flush=True,
+            )
+        elif phase == "error":
+            print(
+                f"[Step {step:05d}][E] error={str(stats.get('error', 'unknown'))} "
+                f"dt={step_time:.1f}s",
+                flush=True,
+            )
 
         # Log to W&B if available
         try:
