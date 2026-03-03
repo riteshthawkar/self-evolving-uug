@@ -5,6 +5,8 @@ from .modeling_vargpt_qwen2_vl import VARGPTQwen2VLForConditionalGeneration
 from transformers import AutoModelForCausalLM, AutoModelForVision2Seq, CLIPVisionConfig, CLIPVisionModel, AutoTokenizer, AutoImageProcessor, CLIPImageProcessor, AutoConfig
 from transformers import AutoProcessor, Qwen2TokenizerFast, LlavaProcessor, GenerationConfig
 import torch
+import os
+from pathlib import Path
 from transformers import AutoProcessor
 from transformers.processing_utils import ProcessorMixin
 
@@ -57,8 +59,13 @@ cfg= {
   },
   "vocab_size": 152064
 }
-qwen2vl_model_id = "./Qwen2-VL-tokenizer" ### 换成hugging face或本地的路径
-vargpt_save_path = "VARGPT-v1.1" 
+_THIS_DIR = Path(__file__).resolve().parent
+_DEFAULT_LOCAL_TOKENIZER = _THIS_DIR / "Qwen2-VL-tokenizer"
+_DEFAULT_QWEN2VL_SOURCE = (
+    str(_DEFAULT_LOCAL_TOKENIZER) if _DEFAULT_LOCAL_TOKENIZER.exists() else "Qwen/Qwen2-VL-7B-Instruct"
+)
+qwen2vl_model_id = os.environ.get("VARGPT_QWEN2VL_SOURCE", _DEFAULT_QWEN2VL_SOURCE)
+vargpt_save_path = os.environ.get("VARGPT_PREPARED_SAVE_PATH", "VARGPT-v1.1")
 
 
 def check_file_exists(directory, filename):
@@ -67,31 +74,60 @@ def check_file_exists(directory, filename):
     return os.path.isfile(file_path)
 
 
-def prepare_vargpt_qwen2vl_v1_1(save_path=vargpt_save_path, prepared_modules=["model", "tokenizer", "processor", "image_processor"], device=None):
+def _resolve_source_path(source: str, fallback: str) -> str:
+    """Resolve local/relative source path; fallback for invalid dot-relative paths."""
+    source = str(source).strip()
+    if not source:
+        return fallback
+    p = Path(source)
+    if p.is_absolute() and p.exists():
+        return str(p)
+    if p.exists():
+        return str(p.resolve())
+    if source.startswith("./") or source.startswith("../"):
+        rel = (_THIS_DIR / source).resolve()
+        if rel.exists():
+            return str(rel)
+        # Dot-relative but missing: do not pass invalid HF repo id like "./foo".
+        return fallback
+    return source
 
+def prepare_vargpt_qwen2vl_v1_1(
+    save_path=vargpt_save_path,
+    qwen2vl_source=qwen2vl_model_id,
+    prepared_modules=["model", "tokenizer", "processor", "image_processor"],
+    device=None,
+):
 
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
 
     existsed = False
     if check_file_exists(save_path, "config.json"):
         existsed = True
-
-    if existsed:
         vargpt_qwen2vl_config = VARGPTQwen2VLConfig.from_pretrained(save_path)
     else:
-        vargpt_qwen2vl_config = VARGPTQwen2VLConfig(**cfg)
+        # If save_path is a HF/local model id with config, treat it as existing.
+        try:
+            vargpt_qwen2vl_config = VARGPTQwen2VLConfig.from_pretrained(save_path)
+            existsed = True
+        except Exception:
+            vargpt_qwen2vl_config = VARGPTQwen2VLConfig(**cfg)
 
+    base_source = _resolve_source_path(str(qwen2vl_source), _DEFAULT_QWEN2VL_SOURCE)
+    if existsed:
+        tokenizer_source = _resolve_source_path(str(save_path), base_source)
+    else:
+        tokenizer_source = base_source
 
-    tokenizer = AutoTokenizer.from_pretrained(qwen2vl_model_id)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
     special_tokens_dict = {
         'additional_special_tokens': tokenizer.additional_special_tokens + ['<|image_gen_start|>', '<|image_gen_end|>', '<|image_gen_pad|>']  # 你想添加的特殊 token
     }
     num_added_tokens = tokenizer.add_special_tokens(special_tokens_dict)
-    
-    generation_config = GenerationConfig.from_pretrained(qwen2vl_model_id)
+
+    generation_config = GenerationConfig.from_pretrained(tokenizer_source)
     generation_config.special_tokens = {
         "image_gen_start": "<|image_gen_start|>",
         "image_gen_start_token_id": tokenizer.convert_tokens_to_ids('<|image_gen_start|>'),
@@ -101,8 +137,8 @@ def prepare_vargpt_qwen2vl_v1_1(save_path=vargpt_save_path, prepared_modules=["m
         "image_gen_pad_token_id": tokenizer.convert_tokens_to_ids('<|image_gen_pad|>')
     }
     generation_config.allowed_special_tokens = ['<|image_gen_start|>', '<|image_gen_end|>', '<|image_gen_pad|>']
-    
-    image_process = VARGPTQwen2VLImageProcessor.from_pretrained(qwen2vl_model_id)
+
+    image_process = VARGPTQwen2VLImageProcessor.from_pretrained(tokenizer_source)
 
     process = VARGPTQwen2VLProcessor(image_processor=image_process, tokenizer=tokenizer)
 
@@ -123,9 +159,9 @@ def prepare_vargpt_qwen2vl_v1_1(save_path=vargpt_save_path, prepared_modules=["m
             dtype=torch.bfloat16)
         print(f"New model embedding size before resize: {model.get_input_embeddings().weight.shape[0]}")
 
-        print(f"Original tokenizer size before adding tokens: {len(AutoTokenizer.from_pretrained(qwen2vl_model_id))}")
+        print(f"Original tokenizer size before adding tokens: {len(AutoTokenizer.from_pretrained(tokenizer_source))}")
         original_model = AutoModelForVision2Seq.from_pretrained(
-            qwen2vl_model_id,
+            tokenizer_source,
             torch_dtype=torch.bfloat16,
             device_map=device
         )
@@ -137,7 +173,12 @@ def prepare_vargpt_qwen2vl_v1_1(save_path=vargpt_save_path, prepared_modules=["m
 
         model.vae_local.quantize = torch.nn.Identity()
 
-        var_ckpt = "./weights/infinity_2b_reg.pth"
+        var_ckpt = _resolve_source_path("./weights/infinity_2b_reg.pth", "./weights/infinity_2b_reg.pth")
+        if not os.path.isfile(var_ckpt):
+            raise FileNotFoundError(
+                f"Missing VARGPT VAR checkpoint: {var_ckpt}. "
+                "Set VARGPT_QWEN2VL_SOURCE to a prepared model path or ensure weights are available."
+            )
         ckpt = torch.load(var_ckpt, map_location='cpu')
         new_state_dict = {}
         for key, value in ckpt.items():
