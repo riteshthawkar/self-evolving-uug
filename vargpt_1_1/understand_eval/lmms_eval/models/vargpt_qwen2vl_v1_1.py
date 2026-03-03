@@ -56,7 +56,7 @@ class VARGPT_Qwen2_VL_v1_1(lmms):
         print("max_pixels", max_pixels)
         if kwargs:
             eval_logger.warning(f"[VARGPT_Qwen2_VL_v1_1] Ignoring extra kwargs: {kwargs}")
-        prepare_vargpt_qwen2vl_v1_1()
+        prepare_vargpt_qwen2vl_v1_1(save_path=pretrained, qwen2vl_source=pretrained)
 
         accelerator = Accelerator()
         if accelerator.num_processes > 1:
