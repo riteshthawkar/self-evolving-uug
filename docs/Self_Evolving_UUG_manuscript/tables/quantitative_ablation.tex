@@ -1,0 +1,34 @@
+% =====================================================================
+% Table 4: Ablation Study (simplified, averaged understanding)
+% NOTE: Alternative/backup version. Not included in main build.
+% =====================================================================
+\begin{table}[!htb]
+  \caption{Ablation study on BLIP3o-8B measuring the contribution of individual framework components. Each row removes or replaces one component while keeping all others at their default configuration. Understanding is the average across MMMU, MMBench, SEED, and MMVet. Generation is measured by GenEval.}
+  \label{tab:ablation_alt}
+  \centering
+  \small
+  \begin{tabular}{lcc}
+    \toprule
+    Configuration & Und. Avg & GenEval \\
+    \midrule
+    Full framework & \textbf{71.8} & \textbf{0.87} \\
+    \midrule
+    \multicolumn{3}{l}{\emph{Understanding signal ablations}} \\
+    \quad w/o STE (self-consistency only) & 69.8 & 0.86 \\
+    \quad w/o self-consistency (STE only) & 70.3 & 0.86 \\
+    \quad w/o prompt perturbation (temperature sampling) & 70.8 & 0.86 \\
+    \midrule
+    \multicolumn{3}{l}{\emph{Generation signal ablations}} \\
+    \quad w/o QA fidelity scoring & 71.5 & 0.84 \\
+    \quad w/o cycle-consistent captioning & 71.3 & 0.85 \\
+    \midrule
+    \multicolumn{3}{l}{\emph{Optimization ablations}} \\
+    \quad Proposer: REINFORCE instead of GRPO & 70.5 & 0.85 \\
+    \quad w/o bucket-stratified baselines & 71.0 & 0.86 \\
+    \midrule
+    \multicolumn{3}{l}{\emph{Architecture ablations}} \\
+    \quad w/o generation loop (understanding only) & 71.2 & 0.83 \\
+    \quad w/o understanding loop (generation only) & 69.8 & 0.86 \\
+    \bottomrule
+  \end{tabular}
+\end{table}

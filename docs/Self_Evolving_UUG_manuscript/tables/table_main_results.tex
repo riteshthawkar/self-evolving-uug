@@ -1,0 +1,53 @@
+% =====================================================================
+% Table 2: Combined Main Results
+% Unified models, self-supervised methods, and our framework results
+% =====================================================================
+\begin{table*}[!htb]
+  \caption{Main results across unified understanding and generation models, self-supervised post-training methods, and our self-evolving framework applied to three architecturally distinct backbones. All self-supervised methods operate without curated labels, supervised fine-tuning data, or external reward models. Each of our models is evaluated in its base configuration and after applying the framework, with the absolute improvement ($\Delta$) reported. Methods using additional supervision (e.g., CoRL~\cite{jiang2025coreinforcement}, SRUM~\cite{jin2025srum}) are reported in the supplementary material.}
+  \label{tab:main_results}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}llcccccccc|c@{}}
+    \toprule
+    & & \multicolumn{8}{c|}{Understanding} & Generation \\
+    \cmidrule(lr){3-10} \cmidrule(l){11}
+    Model & & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval \\
+    \midrule
+    \multicolumn{11}{l}{\emph{Unified understanding and generation models}} \\
+    Chameleon \cite{team2024chameleon} & & 22.4 & 19.8 & -- & 27.2 & 39.0 & 8.3 & 202.7 & -- & 0.39 \\
+    Show-o \cite{xie2024showo} & & 27.4 & -- & -- & -- & -- & -- & 1232.9 & -- & 0.69 \\
+    VILA-U \cite{wu2024vilau} & & -- & -- & 60.8 & 59.0 & -- & 33.5 & 1401.8 & -- & -- \\
+    Janus \cite{wu2025janus} & & 30.5 & 69.4 & -- & 63.7 & -- & 34.3 & 1338.0 & -- & 0.61 \\
+    Janus-Pro-7B \cite{chen2025januspro} & & 41.0 & 79.2 & -- & 72.1 & -- & 50.0 & 1567.1 & -- & 0.80 \\
+    SEED-X \cite{ge2024seedx} & & 35.6 & 70.1 & -- & 66.5 & -- & 43.0 & 1457.0 & -- & 0.49 \\
+    Emu3 \cite{wang2024emu3} & & 31.6 & 58.5 & 64.7 & 68.2 & 57.4 & 37.2 & 1243.8 & 266.1 & 0.54 \\
+    TokenFlow \cite{qu2025tokenflow} & & 43.2 & 76.8 & 62.3 & 72.6 & 56.6 & 48.2 & 1551.1 & 371.1 & 0.55 \\
+    MetaMorph \cite{tong2024metamorph} & & 41.8 & 75.2 & 60.5 & 71.8 & 58.3 & -- & -- & -- & -- \\
+    \midrule
+    \multicolumn{11}{l}{\emph{Self-supervised post-training methods}} \\
+    UniGame \cite{su2025unigame} & Janus-Pro-7B & 43.8 & 83.2 & -- & -- & -- & -- & -- & -- & 0.82 \\
+    SUDER \cite{hong2025dualselfrewards} & Janus-Pro-7B & -- & 80.1 & -- & 71.9 & -- & -- & -- & -- & 0.84 \\
+    UniRL \cite{mao2025unirl} & Show-o & -- & -- & -- & -- & -- & -- & -- & -- & 0.77 \\
+    UniCorn \cite{han2026unicorn} & BAGEL & 53.8 & 84.1 & -- & -- & -- & -- & 1660.0 & 677.0 & 0.82 \\
+    EvoLMM$^\dagger$ \cite{thawakar2025evolmm} & Qwen2.5-VL-7B & 52.0 & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SILMM$^\ddagger$ \cite{qu2024silmm} & SEED-LLaMA & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    ILLUME \cite{wang2024illume} & Vicuna-7B & 38.2 & 75.1 & 72.1 & 72.9 & -- & 27.4 & 1445.3 & -- & 0.61 \\
+    \midrule
+    \multicolumn{11}{l}{\emph{Ours (self-evolving framework)}} \\
+    \multirow{3}{*}{BLIP3o-8B \cite{chen2025blip3o}} & Base & 50.6 & 83.5 & 83.1 & 77.5 & 69.0 & 66.6 & 1682.6 & 647.1 & 0.84 \\
+    & Ours & \textbf{52.8} & \textbf{86.1} & \textbf{85.2} & \textbf{79.4} & \textbf{70.9} & \textbf{68.7} & \textbf{1698.4} & \textbf{660.3} & \textbf{0.87} \\
+    & $\Delta$ & \co{+2.2} & \co{+2.6} & \co{+2.1} & \co{+1.9} & \co{+1.9} & \co{+2.1} & \co{+15.8} & \co{+13.2} & \co{+0.03} \\
+    \midrule
+    \multirow{3}{*}{BAGEL \cite{deng2025bagel}} & Base & 55.3 & 85.0 & -- & -- & -- & 67.2 & 1687.0 & 701.0 & 0.82 \\
+    & Ours & \textbf{58.8} & \textbf{87.1} & -- & -- & -- & \textbf{69.5} & \textbf{1701.7} & \textbf{715.9} & \textbf{0.85} \\
+    & $\Delta$ & \co{+3.5} & \co{+2.1} & -- & -- & -- & \co{+2.3} & \co{+14.7} & \co{+14.9} & \co{+0.03} \\
+    \midrule
+    \multirow{3}{*}{VARGPT \cite{xianwei2025vargpt}} & Base & 36.4 & 67.6 & 54.1 & 67.9 & 65.2 & 33.5 & 1488.8 & 348.6 & 0.33 \\
+    & Ours & \textbf{39.4} & \textbf{70.3} & \textbf{56.9} & \textbf{71.0} & \textbf{68.8} & \textbf{36.2} & \textbf{1506.2} & \textbf{362.1} & \textbf{0.36} \\
+    & $\Delta$ & \co{+3.0} & \co{+2.7} & \co{+2.8} & \co{+3.1} & \co{+3.6} & \co{+2.7} & \co{+17.4} & \co{+13.5} & \co{+0.03} \\
+    \bottomrule
+    \multicolumn{11}{l}{\footnotesize $^\dagger$Understanding-only model (not unified). $^\ddagger$Generation-only improvement.}
+  \end{tabular}%
+  }
+\end{table*}

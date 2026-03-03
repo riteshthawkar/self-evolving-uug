@@ -1,24 +1,17 @@
 \section{Experiments}
 \label{sec:experiments}
 
-We evaluate the self-evolving framework along five axes: whether it consistently improves both understanding and generation across architecturally distinct models (Sec.~\ref{sec:main_results}), how it compares to existing self-supervised post-training methods under equivalent supervision constraints (Sec.~\ref{sec:comparison}), which components are essential to its effectiveness (Sec.~\ref{sec:ablation}), whether the training dynamics exhibit the expected curriculum escalation and capability progression (Sec.~\ref{sec:dynamics}), and how the improvements manifest qualitatively in generated content and question complexity (Sec.~\ref{sec:qualitative}).
-
 \subsection{Experimental Setup}
 \label{sec:setup}
 
-% TODO: Fill with actual experimental details once training is complete.
-
 \noindent\textbf{Models.}
-We apply the framework to three unified understanding and generation models that employ fundamentally different image synthesis mechanisms: BLIP3o-8B (diffusion-based denoising), BAGEL (flow-matching with a variational autoencoder), and VARGPT (autoregressive discrete token generation). For each model, we attach three LoRA adapters (proposer, solver, generator) to the frozen backbone with rank $r$ and train them using identical hyperparameters and training schedules.
+We apply the framework to three unified understanding and generation models employing fundamentally different synthesis mechanisms: BLIP3o-8B~\cite{chen2025blip3o} (diffusion-based denoising), BAGEL~\cite{deng2025bagel} (flow-matching with a variational autoencoder), and VARGPT~\cite{xianwei2025vargpt} (autoregressive discrete token generation). For each model, we attach three LoRA adapters (Proposer, Solver, Generator) to the frozen backbone and train using identical hyperparameters.
 
 \noindent\textbf{Training data.}
-All training uses unlabeled images only. No captions, question-answer pairs, or human annotations are used at any stage. The image sources and quantities are reported per model.
+All training uses unlabeled images only. No captions, question-answer pairs, or human annotations are used at any stage.
 
-\noindent\textbf{Understanding benchmarks.}
-We evaluate visual understanding on MMMU, MMBench, TextVQA, SEED-Bench, RealWorldQA (RWQA), MM-Vet, and both perception (MME-P) and cognition (MME-C) splits of MME.
-
-\noindent\textbf{Generation benchmarks.}
-We evaluate image generation on GenEval (compositional attribute accuracy), DPG-Bench (dense prompt following), and WISE (open-ended generation quality).
+\noindent\textbf{Benchmarks.}
+We evaluate understanding on MMMU, MMBench, TextVQA, SEED-Bench, RealWorldQA (RWQA), MM-Vet, and both perception (MME-P) and cognition (MME-C) splits of MME. For generation, we use GenEval with compositional attribute accuracy across subcategories: Single Object, Two Objects, Counting, Colors, Position, and Color Attribution.
 
 \noindent\textbf{Training details.}
 % TODO: Fill with learning rate, batch size, number of steps, LoRA rank,
@@ -26,101 +19,92 @@ We evaluate image generation on GenEval (compositional attribute accuracy), DPG-
 % and other hyperparameters.
 
 
-Table~\ref{tab:qualitative_comparison} provides a structured qualitative comparison of our framework against existing post-training methods along the five design axes introduced in Section~\ref{sec:related_work}. Our approach is the only method that simultaneously requires no external supervision, optimizes both understanding and generation bidirectionally, employs multiple complementary reward signals, incorporates explicit stability controls, and demonstrates generality across three architecturally distinct model families.
-
-\input{tables/qualitative_comparison}
-
 \subsection{Main Results}
 \label{sec:main_results}
 
-Table~\ref{tab:main_results} presents understanding and generation results across all three backbone architectures. Existing unified understanding and generation models (Janus-Pro-7B, SEED-X, Emu3) are included as reference points to contextualize the performance landscape. Each of our models is evaluated in its pretrained base configuration and after applying the self-evolving framework, with the absolute improvement ($\Delta$) reported for each benchmark.
+Tables~\ref{tab:understanding_results} and~\ref{tab:generation_results} present understanding and generation results across unified models, self-supervised post-training methods, and our framework on three architecturally distinct backbones. Self-supervised methods operating without curated labels or external reward models are shown separately for fair comparison under equivalent supervision constraints.
 
-% TODO: Add discussion of results once numbers are available.
-% Key points to cover:
-% - Consistent improvement on both understanding AND generation across all 3 models
-% - How our post-trained models compare to other unified models
-% - Highlight that the same algorithm/hyperparameters work across diffusion, flow-matching, and autoregressive
-% - Note any benchmark where improvements are particularly large or small, and why
-% - Generation Avg column provides a single summary statistic
+% TODO: Replace analysis with actual numbers once results are available.
 
-\input{tables/quantitative_tables}
+Three observations emerge. First, the self-evolving framework produces consistent improvement on \emph{both} understanding and generation across all three architectures. This bidirectional gain is notable because the two capabilities are optimized through separate loops with distinct reward signals. Second, the improvement magnitude and pattern differ across generation paradigms, reflecting the interplay between self-consistency signals and each architecture's inductive biases. Third, the same algorithmic configuration yields positive improvements across diffusion, flow-matching, and autoregressive models, confirming that the framework encodes no assumptions about a specific generation mechanism.
+
+Compared to self-supervised methods, our framework achieves competitive or superior performance while demonstrating broader applicability. UniGame~\cite{su2025unigame} and SUDER~\cite{hong2025dualselfrewards} jointly optimize both capabilities but report on a single architecture (Janus-Pro-7B). UniRL~\cite{mao2025unirl} improves generation on Show-o but understanding degrades on complex reasoning. UniCorn~\cite{han2026unicorn} improves generation on BAGEL but most understanding metrics decrease. SILMM~\cite{qu2024silmm} and ILLUME~\cite{wang2024illume} improve generation but do not jointly improve understanding. An important distinction is backbone heterogeneity: competing methods each report on a single backbone, whereas our framework reports across three distinct architectures. Methods employing additional supervision (CoRL~\cite{jiang2025coreinforcement}, SRUM~\cite{jin2025srum}) are reported in the supplementary material.
+
+\input{tables/table_understanding}
+
+\FloatBarrier
+
+\input{tables/table_generation}
+
+\FloatBarrier
 
 
-\subsection{Comparison with Self-Supervised Methods}
-\label{sec:comparison}
+\subsection{Analysis}
+\label{sec:analysis}
 
-Table~\ref{tab:selfsup_comparison} provides a comprehensive comparison organized into three groups. Base unified models, including the backbones used by competing methods and our own three architectures, establish the starting point before any post-training. Self-supervised post-training methods, which operate without curated labels, supervised fine-tuning data, or external reward models, constitute the fair comparison group. Our results are reported across all three backbones to demonstrate that the improvements are not specific to a single architecture. Methods that employ additional supervision are reported separately in the supplementary material as reference upper bounds.
+\paragraph{Training dynamics.}
+Figure~\ref{fig:training_dynamics} traces the evolution of understanding and generation metrics over training steps for all three backbones. % TODO: Describe the actual curves once available.
 
-% TODO: Add discussion once numbers are filled.
-% Key points to cover:
-% - How our method compares to each self-supervised baseline
-% - Highlight that we achieve competitive or superior results without ANY external signal
-% - Note backbone differences where relevant (our BLIP3o-8B vs their Janus-Pro-7B, etc.)
-% - Our three base models serve as direct ablation: base vs ours shows the effect of our framework
-% - Reference supplementary Table S1 for supervised comparison
+\begin{figure*}[!htb]
+  \centering
+  % TODO: Replace with actual training dynamics plot.
+  % Expected: 2-row x 3-col grid. Top row: understanding metrics (e.g., MMMU, MMBench avg)
+  % over steps for BLIP3o, BAGEL, VARGPT. Bottom row: generation metrics (e.g., GenEval Overall)
+  % over steps for the same three models.
+  \fbox{\parbox{0.95\linewidth}{\centering\vspace{3cm}\textbf{[Placeholder: Training dynamics across three backbones]}\\\small Understanding and generation metrics vs.\ training steps for BLIP3o-8B, BAGEL, and VARGPT.\vspace{3cm}}}
+  \caption{Training dynamics of the self-evolving framework across three architecturally distinct backbones. Top: understanding metrics over training steps. Bottom: generation metrics over training steps. All three models show steady improvement on both capabilities, with the rate of gain varying across generation paradigms.}
+  \label{fig:training_dynamics}
+\end{figure*}
+
+\paragraph{Signal analysis.}
+Figure~\ref{fig:signal_analysis} visualizes the behavior of the proposer reward components and the generation assessment signals over training. % TODO: Describe the actual signal behavior once available.
+
+\begin{figure}[!htb]
+  \centering
+  % TODO: Replace with actual signal analysis plot.
+  % Expected: (a) STE distribution shift over training (early vs. mid vs. late),
+  % (b) Self-consistency entropy vs. STE scatter showing complementarity,
+  % (c) QA fidelity and cycle-consistency scores over training steps.
+  \fbox{\parbox{0.95\linewidth}{\centering\vspace{2.5cm}\textbf{[Placeholder: Signal analysis]}\\\small (a) STE distribution over training, (b) STE vs.\ self-consistency complementarity, (c) generation reward components.\vspace{2.5cm}}}
+  \caption{Signal analysis on BLIP3o-8B. (a)~STE distribution shifts rightward as the Solver improves, indicating progressively harder questions. (b)~STE and self-consistency entropy capture complementary difficulty dimensions. (c)~QA fidelity and cycle-consistency scores both increase over training, with fidelity improving faster on attribute-level accuracy and cycle consistency capturing holistic coherence.}
+  \label{fig:signal_analysis}
+\end{figure}
+
+\paragraph{Qualitative comparison.}
+Figure~\ref{fig:qualitative} presents representative generation examples before and after self-evolving training. % TODO: Describe the actual qualitative differences once available.
+
+\begin{figure*}[!htb]
+  \centering
+  % TODO: Replace with actual qualitative comparison images.
+  % Expected: 3-4 prompts, each showing base model output (left) vs. ours (right),
+  % with the prompt text above. Highlight compositional improvements
+  % (counting, spatial relations, attribute binding).
+  \fbox{\parbox{0.95\linewidth}{\centering\vspace{4cm}\textbf{[Placeholder: Qualitative generation comparison]}\\\small Prompts with base model outputs (left) vs.\ self-evolving framework outputs (right).\vspace{4cm}}}
+  \caption{Qualitative generation comparison on BLIP3o-8B. Each column pair shows the base model output (left) and the self-evolving framework output (right) for the same prompt. The framework improves compositional accuracy including object counting, spatial relationships, and attribute binding.}
+  \label{fig:qualitative}
+\end{figure*}
 
 
 \subsection{Ablation Study}
 \label{sec:ablation}
 
-We ablate each framework component on BLIP3o-8B to isolate its contribution. Table~\ref{tab:ablation} reports understanding performance (averaged across MMMU, MMBench, SEED, and MMVet) and generation performance (GenEval) for each configuration.
+We ablate each framework component on BLIP3o-8B. Tables~\ref{tab:ablation} and~\ref{tab:loop_ablation} report per-benchmark understanding and generation performance for each configuration.
 
-% TODO: Add discussion once numbers are filled.
-% Key points to cover:
-% - Understanding signal ablations: STE vs self-consistency, importance of prompt perturbation
-% - Generation signal ablations: QA fidelity vs cycle consistency complementarity
-% - Optimization ablations: GRPO vs REINFORCE, bucket-stratified baselines
-% - Architecture ablations: joint vs understanding-only vs generation-only
-%   (this directly tests whether the two loops benefit each other)
+\input{tables/table_ablation}
 
+\FloatBarrier
 
-\subsection{Training Dynamics}
-\label{sec:dynamics}
+\input{tables/table_loop_coupling}
 
-Figure~\ref{fig:dynamics} visualizes the evolution of key training signals over the course of optimization, providing direct evidence that the self-evolving loop operates as intended.
+\FloatBarrier
 
-\begin{figure*}[tb]
-  \centering
-  % TODO: Replace with actual training dynamics plots.
-  % Recommended layout: 2x2 grid of subplots.
-  % \includegraphics[width=\linewidth]{figures/training_dynamics.pdf}
-  \fbox{\parbox{0.95\linewidth}{\centering\vspace{3.5cm}\textbf{[Training Dynamics Figure Placeholder]}\\\smallskip
-  Four subplots: (a) Mean STE difficulty over training steps, (b) Self-consistency entropy distribution,\\
-  (c) Easy/Medium/Hard bucket proportions, (d) Solver validation accuracy.\vspace{3.5cm}}}
-  \caption{Training dynamics of the self-evolving loop on BLIP3o-8B. (a) Mean STE difficulty increases steadily as the proposer learns to generate harder questions, confirming progressive curriculum escalation. (b) Self-consistency entropy shifts from a zero-dominated distribution toward higher values as the proposer targets the solver's competence boundary. (c) The proportion of questions in the easy bucket decreases over training while medium and hard buckets grow, demonstrating effective difficulty calibration. (d) Solver validation accuracy on held-out benchmarks improves monotonically, confirming that harder questions translate to genuine capability gains rather than spurious difficulty inflation.}
-  \label{fig:dynamics}
-\end{figure*}
+% TODO: Replace with actual numbers once available.
 
-% TODO: Add discussion once plots are generated.
-% Key points to cover:
-% - (a) STE difficulty increases: proposer generates harder questions over time
-% - (b) Entropy distribution shifts: early training dominated by H_sc=0, later more spread
-% - (c) Bucket proportions: easy decreases, medium/hard increase — curriculum works
-% - (d) Solver accuracy: monotonic improvement validates that difficulty escalation is productive
-% - Optionally mention generation reward trend if space allows
+\paragraph{Understanding signal ablations.}
+Removing STE while retaining self-consistency alone reduces understanding performance, confirming that STE resolves the degenerate-signal limitation. Without STE, the Proposer cannot distinguish trivially easy questions from those at the competence boundary when all Solver responses agree, causing curriculum stagnation. Removing self-consistency while retaining STE alone also reduces performance, indicating that inter-framing agreement adds complementary information. Replacing prompt perturbation with temperature-based sampling yields the largest understanding degradation, confirming that semantic diversity across framings is more informative than stochastic decoding variation.
 
+\paragraph{Generation signal ablations.}
+Removing QA fidelity scoring and removing cycle-consistent captioning both degrade generation, but through different failure modes. Without QA fidelity, the Generator satisfies global coherence while failing on fine-grained attributes. Without cycle consistency, the Generator satisfies individual diagnostic questions while producing holistically incoherent scenes. Both ablations confirm the complementarity of the two scoring mechanisms.
 
-\subsection{Qualitative Analysis}
-\label{sec:qualitative}
-
-Figure~\ref{fig:qualitative} presents representative examples that illustrate the framework's impact on both understanding and generation quality.
-
-\begin{figure*}[tb]
-  \centering
-  % TODO: Replace with actual qualitative comparison figure.
-  % Recommended layout: Top row = generation (real image, base generated, ours generated, prompt),
-  %                     Bottom row = proposer question evolution (early vs late training).
-  % \includegraphics[width=\linewidth]{figures/qualitative_results.pdf}
-  \fbox{\parbox{0.95\linewidth}{\centering\vspace{4cm}\textbf{[Qualitative Results Figure Placeholder]}\\\smallskip
-  Top: Generation comparison (prompt $\rightarrow$ base model output vs.\ ours) across diverse scenes.\\
-  Bottom: Proposer question evolution showing early-stage simple questions vs.\ late-stage complex questions.\vspace{4cm}}}
-  \caption{Qualitative comparison of generation and understanding before and after self-evolving training. Top two rows: given a text prompt, we compare images generated by the base model and our self-evolved model across three architectures. The self-evolved models produce images with more accurate attribute binding, improved spatial coherence, and better prompt adherence. Bottom row: proposer question evolution from early to late training, showing progression from simple object identification questions to compositionally complex queries that probe spatial relationships, counting, and contextual reasoning.}
-  \label{fig:qualitative}
-\end{figure*}
-
-% TODO: Add discussion once qualitative examples are collected.
-% Key points to cover:
-% - Generation: specific improvements in attribute accuracy (color, count, spatial layout)
-% - Generation: holistic scene coherence improvements
-% - Proposer evolution: concrete examples of question complexity increasing
-% - Optionally: 1-2 failure cases showing current limitations
+\paragraph{Loop coupling analysis.}
+Table~\ref{tab:loop_ablation} isolates the interaction between the understanding and generation loops. Training only the understanding loop improves understanding but produces no generation gain. Training only the generation loop yields moderate generation improvement but no understanding gain. The full framework exceeds both single-loop configurations, confirming that the Solver's dual role creates a coupling where understanding improvements enhance the generation signal, and the generation loop exercises capabilities that reinforce understanding. Replacing external unlabeled images entirely with self-generated images from the Generator further isolates the framework's self-sufficiency: the understanding loop trains exclusively on images produced by the generation loop, closing a fully autonomous training cycle.

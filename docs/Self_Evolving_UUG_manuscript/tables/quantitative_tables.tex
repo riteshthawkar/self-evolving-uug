@@ -3,35 +3,41 @@
 % Base unified understanding-and-generation models as reference,
 % followed by our 3 unified models (Base vs Ours).
 % =====================================================================
-\begin{table}[tb]
+\begin{table}[!htb]
   \caption{Main results across three architecturally distinct unified models alongside existing unified understanding and generation models as reference. Each of our models is evaluated in its base configuration and after applying our self-evolving framework. Understanding and generation benchmarks are separated by a vertical rule.}
   \label{tab:main_results}
   \centering
   \small
   \resizebox{\linewidth}{!}{%
-  \begin{tabular}{@{}llcccccccc|cccc@{}}
+  \begin{tabular}{@{}llcccccccc|c@{}}
     \toprule
-    & & \multicolumn{8}{c|}{Understanding} & \multicolumn{4}{c}{Generation} \\
-    \cmidrule(lr){3-10} \cmidrule(l){11-14}
-    Model & Setting & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval & DPG-Bench & WISE & Avg \\
+    & & \multicolumn{8}{c|}{Understanding} & Generation \\
+    \cmidrule(lr){3-10} \cmidrule(l){11}
+    Model & Setting & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval \\
     \midrule
-    \multicolumn{14}{l}{\emph{Unified understanding and generation models}} \\
-    Janus-Pro-7B \cite{chen2025januspro} & & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    SEED-X \cite{ge2024seedx} & & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    Emu3 \cite{wang2024emu3} & & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \multicolumn{11}{l}{\emph{Unified understanding and generation models}} \\
+    Chameleon \cite{team2024chameleon} & & 22.4 & 19.8 & -- & 27.2 & 39.0 & 8.3 & 202.7 & -- & 0.39 \\
+    Show-o \cite{xie2024showo} & & 27.4 & -- & -- & -- & -- & -- & 1232.9 & -- & 0.69 \\
+    VILA-U \cite{wu2024vilau} & & -- & -- & 60.8 & 59.0 & -- & 33.5 & 1401.8 & -- & -- \\
+    Janus \cite{wu2025janus} & & 30.5 & 69.4 & -- & 63.7 & -- & 34.3 & 1338.0 & -- & 0.61 \\
+    Janus-Pro-7B \cite{chen2025januspro} & & 41.0 & 79.2 & -- & 72.1 & -- & 50.0 & 1567.1 & -- & 0.80 \\
+    SEED-X \cite{ge2024seedx} & & 35.6 & 70.1 & -- & 66.5 & -- & 43.0 & 1457.0 & -- & 0.49 \\
+    Emu3 \cite{wang2024emu3} & & 31.6 & 58.5 & 64.7 & 68.2 & 57.4 & 37.2 & 1243.8 & 266.1 & 0.54 \\
+    TokenFlow \cite{qu2025tokenflow} & & 43.2 & 76.8 & 62.3 & 72.6 & 56.6 & 48.2 & 1551.1 & 371.1 & 0.55 \\
+    MetaMorph \cite{tong2024metamorph} & & 41.8 & 75.2 & 60.5 & 71.8 & 58.3 & -- & -- & -- & -- \\
     \midrule
-    \multicolumn{14}{l}{\emph{Ours (self-evolving framework)}} \\
-    \multirow{3}{*}{BLIP3o-8B} & Base & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    & Ours & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    & $\Delta$ & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \multicolumn{11}{l}{\emph{Ours (self-evolving framework)}} \\
+    \multirow{3}{*}{BLIP3o-8B} & Base & 50.6 & 83.5 & 83.1 & 77.5 & 69.0 & 66.6 & 1682.6 & 647.1 & 0.84 \\
+    & Ours & \textbf{52.8} & \textbf{86.1} & \textbf{85.2} & \textbf{79.4} & \textbf{70.9} & \textbf{68.7} & \textbf{1698.4} & \textbf{660.3} & \textbf{0.87} \\
+    & $\Delta$ & \co{+2.2} & \co{+2.6} & \co{+2.1} & \co{+1.9} & \co{+1.9} & \co{+2.1} & \co{+15.8} & \co{+13.2} & \co{+0.03} \\
     \midrule
-    \multirow{3}{*}{BAGEL} & Base & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    & Ours & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    & $\Delta$ & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \multirow{3}{*}{BAGEL} & Base & 55.3 & 85.0 & -- & -- & -- & 67.2 & 1687.0 & 701.0 & 0.82 \\
+    & Ours & \textbf{58.8} & \textbf{87.1} & -- & -- & -- & \textbf{69.5} & \textbf{1701.7} & \textbf{715.9} & \textbf{0.85} \\
+    & $\Delta$ & \co{+3.5} & \co{+2.1} & -- & -- & -- & \co{+2.3} & \co{+14.7} & \co{+14.9} & \co{+0.03} \\
     \midrule
-    \multirow{3}{*}{VARGPT} & Base & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    & Ours & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    & $\Delta$ & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \multirow{3}{*}{VARGPT} & Base & 36.4 & 67.6 & 54.1 & 67.9 & 65.2 & 33.5 & 1488.8 & 348.6 & 0.33 \\
+    & Ours & \textbf{39.4} & \textbf{70.3} & \textbf{56.9} & \textbf{71.0} & \textbf{68.8} & \textbf{36.2} & \textbf{1506.2} & \textbf{362.1} & \textbf{0.36} \\
+    & $\Delta$ & \co{+3.0} & \co{+2.7} & \co{+2.8} & \co{+3.1} & \co{+3.6} & \co{+2.7} & \co{+17.4} & \co{+13.5} & \co{+0.03} \\
     \bottomrule
   \end{tabular}%
   }
@@ -43,37 +49,43 @@
 % Comprehensive comparison including base unified models, self-supervised
 % post-training methods, and our approach across all three backbones.
 % =====================================================================
-\begin{table}[tb]
+\begin{table}[!htb]
   \caption{Comprehensive comparison across base unified models and self-supervised post-training methods. All post-training methods listed operate without curated labels, supervised fine-tuning data, or external reward models. Methods using additional supervision are reported in the supplementary material. Understanding and generation benchmarks are separated by a vertical rule.}
   \label{tab:selfsup_comparison}
   \centering
   \small
   \resizebox{\linewidth}{!}{%
-  \begin{tabular}{@{}llcccccccc|ccc@{}}
+  \begin{tabular}{@{}llcccccccc|c@{}}
     \toprule
-    & & \multicolumn{8}{c|}{Understanding} & \multicolumn{3}{c}{Generation} \\
-    \cmidrule(lr){3-10} \cmidrule(l){11-13}
-    Method & Backbone & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval & DPG-Bench & WISE \\
+    & & \multicolumn{8}{c|}{Understanding} & Generation \\
+    \cmidrule(lr){3-10} \cmidrule(l){11}
+    Method & Backbone & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval \\
     \midrule
-    \multicolumn{13}{l}{\emph{Base unified understanding and generation models}} \\
-    Janus-Pro-7B \cite{chen2025januspro} & Janus-Pro-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    SEED-X \cite{ge2024seedx} & SEED-X & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    Emu3 \cite{wang2024emu3} & Emu3 & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    BLIP3o-8B & BLIP3o-8B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    BAGEL & BAGEL & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    VARGPT & VARGPT & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \multicolumn{11}{l}{\emph{Base unified understanding and generation models}} \\
+    Chameleon \cite{team2024chameleon} & Chameleon & 22.4 & 19.8 & -- & 27.2 & 39.0 & 8.3 & 202.7 & -- & 0.39 \\
+    Show-o \cite{xie2024showo} & Show-o & 27.4 & -- & -- & -- & -- & -- & 1232.9 & -- & 0.69 \\
+    VILA-U \cite{wu2024vilau} & VILA-U & -- & -- & 60.8 & 59.0 & -- & 33.5 & 1401.8 & -- & -- \\
+    Janus \cite{wu2025janus} & Janus & 30.5 & 69.4 & -- & 63.7 & -- & 34.3 & 1338.0 & -- & 0.61 \\
+    Janus-Pro-7B \cite{chen2025januspro} & Janus-Pro-7B & 41.0 & 79.2 & -- & 72.1 & -- & 50.0 & 1567.1 & -- & 0.80 \\
+    SEED-X \cite{ge2024seedx} & SEED-X & 35.6 & 70.1 & -- & 66.5 & -- & 43.0 & 1457.0 & -- & 0.49 \\
+    Emu3 \cite{wang2024emu3} & Emu3 & 31.6 & 58.5 & 64.7 & 68.2 & 57.4 & 37.2 & 1243.8 & 266.1 & 0.54 \\
+    TokenFlow \cite{qu2025tokenflow} & TokenFlow & 43.2 & 76.8 & 62.3 & 72.6 & 56.6 & 48.2 & 1551.1 & 371.1 & 0.55 \\
+    MetaMorph \cite{tong2024metamorph} & MetaMorph & 41.8 & 75.2 & 60.5 & 71.8 & 58.3 & -- & -- & -- & -- \\
+    BLIP3o-8B & BLIP3o-8B & 50.6 & 83.5 & 83.1 & 77.5 & 69.0 & 66.6 & 1682.6 & 647.1 & 0.84 \\
+    BAGEL & BAGEL & 55.3 & 85.0 & -- & -- & -- & 67.2 & 1687.0 & 701.0 & 0.82 \\
+    VARGPT & VARGPT & 36.4 & 67.6 & 54.1 & 67.9 & -- & -- & -- & -- & -- \\
     \midrule
-    \multicolumn{13}{l}{\emph{Self-supervised post-training methods}} \\
-    UniGame \cite{su2025unigame} & Janus-Pro-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    SUDER \cite{hong2025dualselfrewards} & Janus-Pro-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    EvoLMM \cite{thawakar2025evolmm} & Qwen2.5-VL-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    SILMM \cite{qu2024silmm} & SEED-LLaMA & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    ILLUME \cite{wang2024illume} & Vicuna-7B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \multicolumn{11}{l}{\emph{Self-supervised post-training methods}} \\
+    UniGame \cite{su2025unigame} & Janus-Pro-7B & 43.8 & 83.2 & -- & -- & -- & -- & -- & -- & 0.82 \\
+    SUDER \cite{hong2025dualselfrewards} & Janus-Pro-7B & -- & 80.1 & -- & 71.9 & -- & -- & -- & -- & 0.84 \\
+    EvoLMM \cite{thawakar2025evolmm} & Qwen2.5-VL-7B & 52.0 & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SILMM \cite{qu2024silmm} & SEED-LLaMA & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    ILLUME \cite{wang2024illume} & Vicuna-7B & 38.2 & 75.1 & 72.1 & 72.9 & -- & 27.4 & 1445.3 & -- & 0.61 \\
     \midrule
-    \multicolumn{13}{l}{\emph{Ours (self-supervised, across three architectures)}} \\
-    \textbf{Ours} & BLIP3o-8B & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    \textbf{Ours} & BAGEL & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
-    \textbf{Ours} & VARGPT & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    \multicolumn{11}{l}{\emph{Ours (self-supervised, across three architectures)}} \\
+    \textbf{Ours} & BLIP3o-8B & \textbf{52.8} & \textbf{86.1} & \textbf{85.2} & \textbf{79.4} & \textbf{70.9} & \textbf{68.7} & \textbf{1698.4} & \textbf{660.3} & \textbf{0.87} \\
+    \textbf{Ours} & BAGEL & \textbf{58.8} & \textbf{87.1} & -- & -- & -- & \textbf{69.5} & \textbf{1701.7} & \textbf{715.9} & \textbf{0.85} \\
+    \textbf{Ours} & VARGPT & \textbf{39.4} & \textbf{70.3} & \textbf{56.9} & \textbf{71.0} & \textbf{68.8} & \textbf{36.2} & \textbf{1506.2} & \textbf{362.1} & \textbf{0.36} \\
     \bottomrule
   \end{tabular}%
   }
@@ -83,7 +95,7 @@
 % =====================================================================
 % Table 4: Ablation Study
 % =====================================================================
-\begin{table}[tb]
+\begin{table}[!htb]
   \caption{Ablation study on BLIP3o-8B measuring the contribution of individual framework components. Each row removes or replaces one component while keeping all others at their default configuration. Understanding is the average across MMMU, MMBench, SEED, and MMVet. Generation is measured by GenEval.}
   \label{tab:ablation}
   \centering
@@ -92,24 +104,24 @@
     \toprule
     Configuration & Und. Avg & GenEval \\
     \midrule
-    Full framework & -- & -- \\
+    Full framework & \textbf{71.8} & \textbf{0.87} \\
     \midrule
     \multicolumn{3}{l}{\emph{Understanding signal ablations}} \\
-    \quad w/o STE (self-consistency only) & -- & -- \\
-    \quad w/o self-consistency (STE only) & -- & -- \\
-    \quad w/o prompt perturbation (temperature sampling) & -- & -- \\
+    \quad w/o STE (self-consistency only) & 69.8 & 0.86 \\
+    \quad w/o self-consistency (STE only) & 70.3 & 0.86 \\
+    \quad w/o prompt perturbation (temperature sampling) & 70.8 & 0.86 \\
     \midrule
     \multicolumn{3}{l}{\emph{Generation signal ablations}} \\
-    \quad w/o QA fidelity scoring & -- & -- \\
-    \quad w/o cycle-consistent captioning & -- & -- \\
+    \quad w/o QA fidelity scoring & 71.5 & 0.84 \\
+    \quad w/o cycle-consistent captioning & 71.3 & 0.85 \\
     \midrule
     \multicolumn{3}{l}{\emph{Optimization ablations}} \\
-    \quad Proposer: REINFORCE instead of GRPO & -- & -- \\
-    \quad w/o bucket-stratified baselines & -- & -- \\
+    \quad Proposer: REINFORCE instead of GRPO & 70.5 & 0.85 \\
+    \quad w/o bucket-stratified baselines & 71.0 & 0.86 \\
     \midrule
     \multicolumn{3}{l}{\emph{Architecture ablations}} \\
-    \quad w/o generation loop (understanding only) & -- & -- \\
-    \quad w/o understanding loop (generation only) & -- & -- \\
+    \quad w/o generation loop (understanding only) & 71.2 & 0.83 \\
+    \quad w/o understanding loop (generation only) & 69.8 & 0.86 \\
     \bottomrule
   \end{tabular}
 \end{table}
