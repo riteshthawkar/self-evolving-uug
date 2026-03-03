@@ -167,29 +167,32 @@
 \@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Ablation Study}{11}{subsection.4.4}\protected@file@percent }
 \newlabel{sec:ablation}{{4.4}{11}{Ablation Study}{subsection.4.4}{}}
 \newlabel{sec:ablation@cref}{{[subsection][4][4]4.4}{[1][11][]11}{}{}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Training dynamics of the self-evolving framework across three architecturally distinct backbones. Top: understanding metrics over training steps. Bottom: generation metrics over training steps. All three models show steady improvement on both capabilities, with the rate of gain varying across generation paradigms.}}{12}{figure.caption.13}\protected@file@percent }
-\newlabel{fig:training_dynamics}{{2}{12}{Training dynamics of the self-evolving framework across three architecturally distinct backbones. Top: understanding metrics over training steps. Bottom: generation metrics over training steps. All three models show steady improvement on both capabilities, with the rate of gain varying across generation paradigms}{figure.caption.13}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Training dynamics of the self-evolving framework across three architecturally distinct backbones. Top row: understanding signals (proposer reward, self-consistency entropy, STE difficulty) over training steps. Bottom row: generation signals (total reward, QA fidelity, cycle consistency) over training steps. All three models show steady improvement on both capabilities, with the rate of gain varying across generation paradigms.}}{12}{figure.caption.13}\protected@file@percent }
+\newlabel{fig:training_dynamics}{{2}{12}{Training dynamics of the self-evolving framework across three architecturally distinct backbones. Top row: understanding signals (proposer reward, self-consistency entropy, STE difficulty) over training steps. Bottom row: generation signals (total reward, QA fidelity, cycle consistency) over training steps. All three models show steady improvement on both capabilities, with the rate of gain varying across generation paradigms}{figure.caption.13}{}}
 \newlabel{fig:training_dynamics@cref}{{[figure][2][]2}{[1][11][]12}{}{}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Signal analysis on BLIP3o-8B. (a)~STE distribution shifts rightward as the Solver improves, indicating progressively harder questions. (b)~STE and self-consistency entropy capture complementary difficulty dimensions. (c)~QA fidelity and cycle-consistency scores both increase over training, with fidelity improving faster on attribute-level accuracy and cycle consistency capturing holistic coherence.}}{12}{figure.caption.15}\protected@file@percent }
-\newlabel{fig:signal_analysis}{{3}{12}{Signal analysis on BLIP3o-8B. (a)~STE distribution shifts rightward as the Solver improves, indicating progressively harder questions. (b)~STE and self-consistency entropy capture complementary difficulty dimensions. (c)~QA fidelity and cycle-consistency scores both increase over training, with fidelity improving faster on attribute-level accuracy and cycle consistency capturing holistic coherence}{figure.caption.15}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Signal analysis on BLIP3o-8B. (a)~STE distribution shifts rightward as the Solver improves, indicating progressively harder questions. (b)~STE and self-consistency entropy capture complementary difficulty dimensions across four quadrants: token-hard (high STE, low SC), informative (high both), trivial (low both), and framing-hard (low STE, high SC). (c)~QA fidelity and cycle-consistency scores both increase over training, with fidelity improving faster on attribute-level accuracy and cycle consistency capturing holistic coherence.}}{12}{figure.caption.15}\protected@file@percent }
+\newlabel{fig:signal_analysis}{{3}{12}{Signal analysis on BLIP3o-8B. (a)~STE distribution shifts rightward as the Solver improves, indicating progressively harder questions. (b)~STE and self-consistency entropy capture complementary difficulty dimensions across four quadrants: token-hard (high STE, low SC), informative (high both), trivial (low both), and framing-hard (low STE, high SC). (c)~QA fidelity and cycle-consistency scores both increase over training, with fidelity improving faster on attribute-level accuracy and cycle consistency capturing holistic coherence}{figure.caption.15}{}}
 \newlabel{fig:signal_analysis@cref}{{[figure][3][]3}{[1][11][]12}{}{}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Ablation study on BLIP3o-8B measuring the contribution of individual framework components. Each row removes or replaces one component while keeping all others at their default configuration.}}{12}{table.caption.18}\protected@file@percent }
+\newlabel{tab:ablation}{{3}{12}{Ablation study on BLIP3o-8B measuring the contribution of individual framework components. Each row removes or replaces one component while keeping all others at their default configuration}{table.caption.18}{}}
+\newlabel{tab:ablation@cref}{{[table][3][]3}{[1][11][]12}{}{}{}}
 \@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Qualitative generation comparison on BLIP3o-8B. Each column pair shows the base model output (left) and the self-evolving framework output (right) for the same prompt. The framework improves compositional accuracy including object counting, spatial relationships, and attribute binding.}}{13}{figure.caption.17}\protected@file@percent }
 \newlabel{fig:qualitative}{{4}{13}{Qualitative generation comparison on BLIP3o-8B. Each column pair shows the base model output (left) and the self-evolving framework output (right) for the same prompt. The framework improves compositional accuracy including object counting, spatial relationships, and attribute binding}{figure.caption.17}{}}
 \newlabel{fig:qualitative@cref}{{[figure][4][]4}{[1][11][]13}{}{}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Ablation study on BLIP3o-8B measuring the contribution of individual framework components. Each row removes or replaces one component while keeping all others at their default configuration.}}{13}{table.caption.18}\protected@file@percent }
-\newlabel{tab:ablation}{{3}{13}{Ablation study on BLIP3o-8B measuring the contribution of individual framework components. Each row removes or replaces one component while keeping all others at their default configuration}{table.caption.18}{}}
-\newlabel{tab:ablation@cref}{{[table][3][]3}{[1][11][]13}{}{}{}}
 \@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Loop coupling analysis on BLIP3o-8B. The full framework exceeds both single-loop configurations, confirming that the understanding and generation loops are mutually reinforcing through the Solver's dual role.}}{14}{table.caption.19}\protected@file@percent }
 \newlabel{tab:loop_ablation}{{4}{14}{Loop coupling analysis on BLIP3o-8B. The full framework exceeds both single-loop configurations, confirming that the understanding and generation loops are mutually reinforcing through the Solver's dual role}{table.caption.19}{}}
-\newlabel{tab:loop_ablation@cref}{{[table][4][]4}{[1][13][]14}{}{}{}}
-\@writefile{toc}{\contentsline {paragraph}{Understanding signal ablations.}{15}{section*.20}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Generation signal ablations.}{15}{section*.21}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Loop coupling analysis.}{15}{section*.22}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {5}Conclusion}{15}{section.5}\protected@file@percent }
-\newlabel{sec:conclusion}{{5}{15}{Conclusion}{section.5}{}}
-\newlabel{sec:conclusion@cref}{{[section][5][]5}{[1][15][]15}{}{}{}}
+\newlabel{tab:loop_ablation@cref}{{[table][4][]4}{[1][14][]14}{}{}{}}
+\@writefile{toc}{\contentsline {paragraph}{Understanding signal ablations.}{14}{section*.20}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Generation signal ablations.}{14}{section*.21}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Loop coupling analysis.}{14}{section*.22}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Conclusion}{14}{section.5}\protected@file@percent }
+\newlabel{sec:conclusion}{{5}{14}{Conclusion}{section.5}{}}
+\newlabel{sec:conclusion@cref}{{[section][5][]5}{[1][14][]14}{}{}{}}
 \bibstyle{splncs04}
 \bibdata{main}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Loop coupling analysis on BLIP3o-8B. Left: understanding performance. Right: generation performance. The full framework (blue) exceeds the sum of understanding-only (orange) and generation-only (green), demonstrating synergistic coupling through the Solver's dual role. The shaded area highlights the synergy gap — the improvement attributable to cross-loop interaction.}}{15}{figure.caption.23}\protected@file@percent }
+\newlabel{fig:loop_coupling}{{5}{15}{Loop coupling analysis on BLIP3o-8B. Left: understanding performance. Right: generation performance. The full framework (blue) exceeds the sum of understanding-only (orange) and generation-only (green), demonstrating synergistic coupling through the Solver's dual role. The shaded area highlights the synergy gap — the improvement attributable to cross-loop interaction}{figure.caption.23}{}}
+\newlabel{fig:loop_coupling@cref}{{[figure][5][]5}{[1][14][]15}{}{}{}}
 \bibcite{flux2024}{{1}{}{{}}{{}}}
 \bibcite{team2024chameleon}{{2}{}{{}}{{}}}
 \bibcite{chen2025blip3o}{{3}{}{{}}{{}}}
@@ -221,4 +224,4 @@
 \bibcite{zhuang2025vargpt}{{29}{}{{}}{{}}}
 \bibcite{xianwei2025vargpt}{{30}{}{{}}{{}}}
 \providecommand\NAT@force@numbers{}\NAT@force@numbers
-\gdef \@abspage@last{19}
+\gdef \@abspage@last{18}
