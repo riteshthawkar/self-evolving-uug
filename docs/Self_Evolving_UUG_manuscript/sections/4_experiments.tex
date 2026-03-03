@@ -47,12 +47,8 @@ Figure~\ref{fig:training_dynamics} traces the evolution of understanding and gen
 
 \begin{figure*}[!htb]
   \centering
-  % TODO: Replace with actual training dynamics plot.
-  % Expected: 2-row x 3-col grid. Top row: understanding metrics (e.g., MMMU, MMBench avg)
-  % over steps for BLIP3o, BAGEL, VARGPT. Bottom row: generation metrics (e.g., GenEval Overall)
-  % over steps for the same three models.
-  \fbox{\parbox{0.95\linewidth}{\centering\vspace{3cm}\textbf{[Placeholder: Training dynamics across three backbones]}\\\small Understanding and generation metrics vs.\ training steps for BLIP3o-8B, BAGEL, and VARGPT.\vspace{3cm}}}
-  \caption{Training dynamics of the self-evolving framework across three architecturally distinct backbones. Top: understanding metrics over training steps. Bottom: generation metrics over training steps. All three models show steady improvement on both capabilities, with the rate of gain varying across generation paradigms.}
+  \includegraphics[width=\linewidth]{figures/training_dynamics.pdf}
+  \caption{Training dynamics of the self-evolving framework across three architecturally distinct backbones. Top row: understanding signals (proposer reward, self-consistency entropy, STE difficulty) over training steps. Bottom row: generation signals (total reward, QA fidelity, cycle consistency) over training steps. All three models show steady improvement on both capabilities, with the rate of gain varying across generation paradigms.}
   \label{fig:training_dynamics}
 \end{figure*}
 
@@ -61,12 +57,8 @@ Figure~\ref{fig:signal_analysis} visualizes the behavior of the proposer reward 
 
 \begin{figure}[!htb]
   \centering
-  % TODO: Replace with actual signal analysis plot.
-  % Expected: (a) STE distribution shift over training (early vs. mid vs. late),
-  % (b) Self-consistency entropy vs. STE scatter showing complementarity,
-  % (c) QA fidelity and cycle-consistency scores over training steps.
-  \fbox{\parbox{0.95\linewidth}{\centering\vspace{2.5cm}\textbf{[Placeholder: Signal analysis]}\\\small (a) STE distribution over training, (b) STE vs.\ self-consistency complementarity, (c) generation reward components.\vspace{2.5cm}}}
-  \caption{Signal analysis on BLIP3o-8B. (a)~STE distribution shifts rightward as the Solver improves, indicating progressively harder questions. (b)~STE and self-consistency entropy capture complementary difficulty dimensions. (c)~QA fidelity and cycle-consistency scores both increase over training, with fidelity improving faster on attribute-level accuracy and cycle consistency capturing holistic coherence.}
+  \includegraphics[width=\linewidth]{figures/signal_analysis.pdf}
+  \caption{Signal analysis on BLIP3o-8B. (a)~STE distribution shifts rightward as the Solver improves, indicating progressively harder questions. (b)~STE and self-consistency entropy capture complementary difficulty dimensions across four quadrants: token-hard (high STE, low SC), informative (high both), trivial (low both), and framing-hard (low STE, high SC). (c)~QA fidelity and cycle-consistency scores both increase over training, with fidelity improving faster on attribute-level accuracy and cycle consistency capturing holistic coherence.}
   \label{fig:signal_analysis}
 \end{figure}
 
@@ -75,11 +67,13 @@ Figure~\ref{fig:qualitative} presents representative generation examples before 
 
 \begin{figure*}[!htb]
   \centering
-  % TODO: Replace with actual qualitative comparison images.
-  % Expected: 3-4 prompts, each showing base model output (left) vs. ours (right),
-  % with the prompt text above. Highlight compositional improvements
-  % (counting, spatial relations, attribute binding).
-  \fbox{\parbox{0.95\linewidth}{\centering\vspace{4cm}\textbf{[Placeholder: Qualitative generation comparison]}\\\small Prompts with base model outputs (left) vs.\ self-evolving framework outputs (right).\vspace{4cm}}}
+  % ACTION REQUIRED: Create qualitative_comparison.pdf showing 3-4 GenEval prompts
+  % with base model output (left) vs. ours (right) for each prompt.
+  % Suggested prompts: "Two red apples and one green pear" (counting+color),
+  % "A cat sitting to the left of a dog" (spatial), "A blue car parked in front
+  % of a yellow house" (color attribution + spatial).
+  % Generate images from base BLIP3o and from step_6000 checkpoint.
+  \fbox{\parbox{0.95\linewidth}{\centering\vspace{4cm}\textbf{[ACTION REQUIRED: Create qualitative\_comparison.pdf]}\\\small Generate 3--4 GenEval prompt pairs: base model (left) vs.\ self-evolved (right).\\Use BLIP3o-8B base and step\_6000 checkpoint.\vspace{4cm}}}
   \caption{Qualitative generation comparison on BLIP3o-8B. Each column pair shows the base model output (left) and the self-evolving framework output (right) for the same prompt. The framework improves compositional accuracy including object counting, spatial relationships, and attribute binding.}
   \label{fig:qualitative}
 \end{figure*}
@@ -107,4 +101,11 @@ Removing STE while retaining self-consistency alone reduces understanding perfor
 Removing QA fidelity scoring and removing cycle-consistent captioning both degrade generation, but through different failure modes. Without QA fidelity, the Generator satisfies global coherence while failing on fine-grained attributes. Without cycle consistency, the Generator satisfies individual diagnostic questions while producing holistically incoherent scenes. Both ablations confirm the complementarity of the two scoring mechanisms.
 
 \paragraph{Loop coupling analysis.}
-Table~\ref{tab:loop_ablation} isolates the interaction between the understanding and generation loops. Training only the understanding loop improves understanding but produces no generation gain. Training only the generation loop yields moderate generation improvement but no understanding gain. The full framework exceeds both single-loop configurations, confirming that the Solver's dual role creates a coupling where understanding improvements enhance the generation signal, and the generation loop exercises capabilities that reinforce understanding. Replacing external unlabeled images entirely with self-generated images from the Generator further isolates the framework's self-sufficiency: the understanding loop trains exclusively on images produced by the generation loop, closing a fully autonomous training cycle.
+Table~\ref{tab:loop_ablation} and Figure~\ref{fig:loop_coupling} isolate the interaction between the understanding and generation loops. Training only the understanding loop improves understanding but produces no generation gain. Training only the generation loop yields moderate generation improvement but no understanding gain. The full framework exceeds both single-loop configurations, confirming that the Solver's dual role creates a coupling where understanding improvements enhance the generation signal, and the generation loop exercises capabilities that reinforce understanding. Replacing external unlabeled images entirely with self-generated images from the Generator further isolates the framework's self-sufficiency: the understanding loop trains exclusively on images produced by the generation loop, closing a fully autonomous training cycle.
+
+\begin{figure}[!htb]
+  \centering
+  \includegraphics[width=\linewidth]{figures/loop_coupling.pdf}
+  \caption{Loop coupling analysis on BLIP3o-8B. Left: understanding performance. Right: generation performance. The full framework (blue) exceeds the sum of understanding-only (orange) and generation-only (green), demonstrating synergistic coupling through the Solver's dual role. The shaded area highlights the synergy gap — the improvement attributable to cross-loop interaction.}
+  \label{fig:loop_coupling}
+\end{figure}

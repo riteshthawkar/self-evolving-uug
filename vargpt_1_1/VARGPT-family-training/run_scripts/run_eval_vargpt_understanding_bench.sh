@@ -307,6 +307,17 @@ if [[ ! -e "${VISIONLLM_DIR}/vargpt" ]]; then
   exit 1
 fi
 
+# Also support legacy top-level imports:
+#   visionllm.vargpt...
+TOP_VISIONLLM_LINK="${UNDERSTAND_EVAL_DIR}/visionllm"
+if [[ -d "${VISIONLLM_DIR}" && ! -e "${TOP_VISIONLLM_LINK}" ]]; then
+  ln -sfn "${VISIONLLM_DIR}" "${TOP_VISIONLLM_LINK}"
+fi
+if [[ ! -e "${TOP_VISIONLLM_LINK}" ]]; then
+  echo "[ERROR] Missing top-level visionllm package alias: ${TOP_VISIONLLM_LINK}" >&2
+  exit 1
+fi
+
 IFS=',' read -r -a _eval_sets <<< "${EVAL_SETS}"
 for raw_set in "${_eval_sets[@]}"; do
   set_name="$(echo "${raw_set}" | xargs)"
