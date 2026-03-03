@@ -23,10 +23,12 @@
 % Include other packages here, before hyperref.
 \usepackage{graphicx}
 \usepackage{booktabs}
-\usepackage{natbib}
+\usepackage[numbers,sort&compress]{natbib}
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage{multirow}
+\usepackage{placeins}   % Provides \FloatBarrier to prevent floats from drifting
+% \usepackage{arydshln}   % Disabled: conflicts with resizebox in tables
 
 % The "axessiblity" package can be found at: https://ctan.org/pkg/axessibility?lang=en
 \usepackage[accsupp]{axessibility}  % Improves PDF readability for those with disabilities.
@@ -52,6 +54,9 @@
 % Support for ORCID icon
 \usepackage{orcidlink}
 
+
+% Custom commands (xcolor already loaded by eccv.sty with dvipsnames)
+\newcommand{\co}[1]{\textcolor{teal}{\scriptsize #1}}
 
 \begin{document}
 

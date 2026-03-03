@@ -1,0 +1,38 @@
+% =====================================================================
+% Table 3: Comparison with Self-Supervised Post-Training Methods
+% Focused comparison: base models used by competing methods,
+% the self-supervised methods, and our approach across three backbones.
+% =====================================================================
+\begin{table}[!htb]
+  \caption{Comparison with self-supervised post-training methods. All methods listed operate without curated labels, supervised fine-tuning data, or external reward models. Base model results are shown for backbones shared with competing methods to contextualize the improvement each method achieves. Methods using additional supervision are reported in the supplementary material.}
+  \label{tab:selfsup_comparison}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}llcccccccc|c@{}}
+    \toprule
+    & & \multicolumn{8}{c|}{Understanding} & Generation \\
+    \cmidrule(lr){3-10} \cmidrule(l){11}
+    Method & Backbone & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval \\
+    \midrule
+    \multicolumn{11}{l}{\emph{Base models (before post-training)}} \\
+    Janus-Pro-7B \cite{chen2025januspro} & -- & 41.0 & 79.2 & -- & 72.1 & -- & 50.0 & 1567.1 & -- & 0.80 \\
+    BLIP3o-8B & -- & 50.6 & 83.5 & 83.1 & 77.5 & 69.0 & 66.6 & 1682.6 & 647.1 & 0.84 \\
+    BAGEL & -- & 55.3 & 85.0 & -- & -- & -- & 67.2 & 1687.0 & 701.0 & 0.82 \\
+    VARGPT & -- & 36.4 & 67.6 & 54.1 & 67.9 & -- & -- & -- & -- & -- \\
+    \midrule
+    \multicolumn{11}{l}{\emph{Self-supervised post-training methods}} \\
+    UniGame \cite{su2025unigame} & Janus-Pro-7B & 43.8 & 83.2 & -- & -- & -- & -- & -- & -- & 0.82 \\
+    SUDER \cite{hong2025dualselfrewards} & Janus-Pro-7B & -- & 80.1 & -- & 71.9 & -- & -- & -- & -- & 0.84 \\
+    EvoLMM \cite{thawakar2025evolmm} & Qwen2.5-VL-7B & 52.0 & -- & -- & -- & -- & -- & -- & -- & -- \\
+    SILMM \cite{qu2024silmm} & SEED-LLaMA & -- & -- & -- & -- & -- & -- & -- & -- & -- \\
+    ILLUME \cite{wang2024illume} & Vicuna-7B & 38.2 & 75.1 & 72.1 & 72.9 & -- & 27.4 & 1445.3 & -- & 0.61 \\
+    \midrule
+    \multicolumn{11}{l}{\emph{Ours (self-supervised, across three architectures)}} \\
+    \textbf{Ours} & BLIP3o-8B & \textbf{52.8} & \textbf{86.1} & \textbf{85.2} & \textbf{79.4} & \textbf{70.9} & \textbf{68.7} & \textbf{1698.4} & \textbf{660.3} & \textbf{0.87} \\
+    \textbf{Ours} & BAGEL & \textbf{58.8} & \textbf{87.1} & -- & -- & -- & \textbf{69.5} & \textbf{1701.7} & \textbf{715.9} & \textbf{0.85} \\
+    \textbf{Ours} & VARGPT & \textbf{39.4} & \textbf{70.3} & \textbf{56.9} & \textbf{71.0} & \textbf{68.8} & \textbf{36.2} & \textbf{1506.2} & \textbf{362.1} & \textbf{0.36} \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}

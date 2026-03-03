@@ -1,0 +1,48 @@
+% =====================================================================
+% Table 3: Generation Results (GenEval subcategories expanded)
+% =====================================================================
+\begin{table*}[!htb]
+  \caption{Image generation results across unified models, self-supervised post-training methods, and our self-evolving framework on three backbones. GenEval subcategories are reported where available.}
+  \label{tab:generation_results}
+  \centering
+  \small
+
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}lccccccc@{}}
+    \toprule
+    \multirow{2}{*}{\textbf{Model}} & \multicolumn{7}{c}{\textbf{GenEval}} \\
+    \cmidrule(lr){2-8}
+     & \textbf{Single Obj.} & \textbf{Two Obj.} & \textbf{Counting} & \textbf{Colors} & \textbf{Position} & \textbf{Color Attri.} & \textbf{Overall} \\
+    \midrule
+    \multicolumn{8}{c}{\emph{Unified understanding and generation models}} \\
+    Chameleon \cite{team2024chameleon} & -- & -- & -- & -- & -- & -- & 0.39 \\
+    Show-o \cite{xie2024showo} & 0.98 & 0.81 & 0.69 & 0.82 & 0.32 & 0.53 & 0.69 \\
+    Janus \cite{wu2025janus} & 0.97 & 0.68 & 0.30 & 0.84 & 0.46 & 0.42 & 0.61 \\
+    Janus-Pro-7B \cite{chen2025januspro} & 0.99 & 0.89 & 0.59 & 0.90 & 0.79 & 0.66 & 0.80 \\
+    SEED-X \cite{ge2024seedx} & 0.97 & 0.58 & 0.26 & 0.80 & 0.19 & 0.14 & 0.49 \\
+    Emu3 \cite{wang2024emu3} & 0.98 & 0.71 & 0.34 & 0.81 & 0.17 & 0.21 & 0.54 \\
+    TokenFlow \cite{qu2025tokenflow} & 0.95 & 0.60 & 0.41 & 0.81 & 0.16 & 0.24 & 0.55 \\
+    \midrule
+    \multicolumn{8}{c}{\emph{Self-supervised post-training methods}} \\
+    UniGame \cite{su2025unigame} & 0.99 & 0.91 & 0.62 & 0.93 & 0.80 & 0.68 & 0.82 \\
+    SUDER \cite{hong2025dualselfrewards} & 0.99 & 0.89 & 0.70 & 0.92 & 0.82 & 0.71 & 0.84 \\
+    UniRL \cite{mao2025unirl} & 0.99 & 0.93 & 0.62 & 0.89 & 0.55 & 0.68 & 0.77 \\
+    UniCorn \cite{han2026unicorn} & -- & -- & -- & -- & -- & -- & 0.82 \\
+    SILMM$^\ddagger$ \cite{qu2024silmm} & -- & -- & -- & -- & -- & -- & -- \\
+    ILLUME \cite{wang2024illume} & 0.99 & 0.84 & 0.45 & 0.71 & 0.39 & 0.28 & 0.61 \\
+    \midrule
+    \multicolumn{8}{c}{\emph{Ours (self-evolving framework)}} \\
+    BLIP3o-8B \cite{chen2025blip3o} & 1.00 & 0.85 & 0.63 & 0.92 & 0.90 & 0.74 & 0.84 \\
+    BLIP3o-8B (Ours) & \textbf{0.99} & \textbf{0.93} & \textbf{0.71} & \textbf{0.94} & \textbf{0.90} & \textbf{0.75} & \textbf{0.87} \\
+    BLIP3o-8B ($\Delta$) & \co{-0.01} & \co{+0.08} & \co{+0.08} & \co{+0.02} & \co{0.00} & \co{+0.01} & \co{+0.03} \\
+    BAGEL \cite{deng2025bagel} & 0.99 & 0.94 & 0.81 & 0.88 & 0.64 & 0.63 & 0.82 \\
+    BAGEL (Ours) & \textbf{0.99} & \textbf{0.95} & \textbf{0.83} & \textbf{0.90} & \textbf{0.67} & \textbf{0.66} & \textbf{0.85} \\
+    BAGEL ($\Delta$) & 0.00 & \co{+0.01} & \co{+0.02} & \co{+0.02} & \co{+0.03} & \co{+0.03} & \co{+0.03} \\
+    VARGPT \cite{xianwei2025vargpt} & -- & -- & -- & -- & -- & -- & 0.33 \\
+    VARGPT (Ours) & -- & -- & -- & -- & -- & -- & \textbf{0.36} \\
+    VARGPT ($\Delta$) & -- & -- & -- & -- & -- & -- & \co{+0.03} \\
+    \bottomrule
+    \multicolumn{8}{l}{\footnotesize $^\ddagger$Generation-only improvement.}
+  \end{tabular}%
+  }
+\end{table*}

@@ -294,6 +294,19 @@ mkdir -p "${OUTPUT_ROOT}"
 cd "${UNDERSTAND_EVAL_DIR}"
 export PYTHONPATH="${UNDERSTAND_EVAL_DIR}:${PYTHONPATH:-}"
 
+# Ensure legacy import alias exists:
+#   lmms_eval.models.visionllm.vargpt -> lmms_eval.models.visionllm.vargpt_llava
+# Several VARGPT eval modules import through `...visionllm.vargpt...`.
+VISIONLLM_DIR="${UNDERSTAND_EVAL_DIR}/lmms_eval/models/visionllm"
+if [[ -d "${VISIONLLM_DIR}/vargpt_llava" && ! -e "${VISIONLLM_DIR}/vargpt" ]]; then
+  ln -sfn vargpt_llava "${VISIONLLM_DIR}/vargpt"
+fi
+if [[ ! -e "${VISIONLLM_DIR}/vargpt" ]]; then
+  echo "[ERROR] Missing visionllm alias path: ${VISIONLLM_DIR}/vargpt" >&2
+  echo "[ERROR] Expected ${VISIONLLM_DIR}/vargpt_llava to exist." >&2
+  exit 1
+fi
+
 IFS=',' read -r -a _eval_sets <<< "${EVAL_SETS}"
 for raw_set in "${_eval_sets[@]}"; do
   set_name="$(echo "${raw_set}" | xargs)"

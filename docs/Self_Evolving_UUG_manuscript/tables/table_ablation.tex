@@ -1,0 +1,29 @@
+% =====================================================================
+% Table 4: Ablation Study (expanded benchmarks)
+% =====================================================================
+\begin{table*}[!htb]
+  \caption{Ablation study on BLIP3o-8B measuring the contribution of individual framework components. Each row removes or replaces one component while keeping all others at their default configuration.}
+  \label{tab:ablation}
+  \centering
+  \setlength{\tabcolsep}{3pt}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}lccccccccc@{}}
+    \toprule
+    & \multicolumn{8}{c}{\textbf{Understanding}} & \textbf{Gen.} \\
+    \cmidrule(l){2-10}
+    \textbf{Configuration} & \textbf{MMMU} & \textbf{MMB} & \textbf{TVQA} & \textbf{SEED} & \textbf{RWQA} & \textbf{MMVet} & \textbf{MME-P} & \textbf{MME-C} & \textbf{GenEval} \\
+    \midrule
+    Full framework & \textbf{52.8} & \textbf{86.1} & \textbf{85.2} & \textbf{79.4} & \textbf{70.9} & \textbf{68.7} & \textbf{1698.4} & \textbf{660.3} & \textbf{0.87} \\
+    \midrule
+    \multicolumn{10}{l}{\emph{Understanding signal ablations}} \\
+    \quad w/o STE (self-consistency only) & 51.0 & 84.5 & 83.8 & 77.9 & 69.5 & 67.1 & 1690.2 & 652.0 & 0.86 \\
+    \quad w/o self-consistency (STE only) & 51.5 & 85.0 & 84.2 & 78.3 & 70.0 & 67.5 & 1693.5 & 655.1 & 0.86 \\
+    \quad w/o prompt perturbation (temp.\ sampling) & 52.0 & 85.5 & 84.5 & 78.8 & 70.2 & 68.0 & 1695.0 & 657.0 & 0.86 \\
+    \midrule
+    \multicolumn{10}{l}{\emph{Generation signal ablations}} \\
+    \quad w/o QA fidelity scoring & 52.5 & 85.8 & 84.9 & 79.1 & 70.7 & 68.4 & 1697.0 & 658.5 & 0.84 \\
+    \quad w/o cycle-consistent captioning & 52.3 & 85.6 & 84.7 & 79.0 & 70.5 & 68.2 & 1696.5 & 658.0 & 0.85 \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table*}

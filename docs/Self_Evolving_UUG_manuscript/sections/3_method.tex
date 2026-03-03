@@ -5,29 +5,25 @@
 \subsection{Problem Formulation}
 \label{sec:problem}
 
-Let $\mathcal{M}_\theta$ denote a pretrained unified model parameterized by $\theta$ that supports two complementary capabilities: visual understanding $\mathcal{U}: (\mathcal{I}, q) \mapsto a$, which generates a textual response $a$ given an image $\mathcal{I}$ and a textual query $q$, and image generation $\mathcal{G}: t \mapsto \hat{\mathcal{I}}$, which synthesizes an image $\hat{\mathcal{I}}$ from a textual description $t$. Given only an unlabeled image collection $\mathcal{D} = \{\mathcal{I}_1, \ldots, \mathcal{I}_N\}$ with no associated captions, question-answer pairs, or quality annotations, our objective is to learn parameter updates $\Delta\theta$ such that the resulting model $\mathcal{M}_{\theta + \Delta\theta}$ improves on both $\mathcal{U}$ and $\mathcal{G}$ relative to the pretrained baseline $\mathcal{M}_\theta$, subject to three constraints: (C1)~no human annotations or curated instruction data are used at any training stage, (C2)~no external reward models, judge components, or pretrained evaluators are employed, and (C3)~the algorithm makes no assumptions about the model's internal architecture, operating solely through the text generation and image synthesis interfaces. These constraints ensure that the framework is fully self-supervised, requires no auxiliary infrastructure, and is portable across architecturally distinct unified model families.
-
-We present a self-evolving training framework that satisfies all three constraints by deriving the entire training signal from the model's own self-consistency. We first describe the overall architecture (Sec.~\ref{sec:overview}), then detail the understanding loop (Sec.~\ref{sec:understanding}), the generation assessment mechanism (Sec.~\ref{sec:generation}), the optimization objectives (Sec.~\ref{sec:optimization}), and the training schedule (Sec.~\ref{sec:schedule}). We conclude with a discussion of model-agnostic design considerations (Sec.~\ref{sec:agnostic}).
+Let $\mathcal{M}_\theta$ denote a pretrained unified model parameterized by $\theta$ supporting visual understanding $\mathcal{U}: (\mathcal{I}, q) \mapsto a$ and image generation $\mathcal{G}: t \mapsto \hat{\mathcal{I}}$. Given only an unlabeled image collection $\mathcal{D} = \{\mathcal{I}_1, \ldots, \mathcal{I}_N\}$ with no associated captions, question-answer pairs, or quality annotations, our goal is to learn $\Delta\theta$ such that $\mathcal{M}_{\theta + \Delta\theta}$ improves on both $\mathcal{U}$ and $\mathcal{G}$, subject to: (C1)~no human annotations or curated instruction data at any stage, (C2)~no external reward models or pretrained evaluators, and (C3)~no assumptions about internal architecture, operating solely through text generation and image synthesis interfaces.
 
 \subsection{Framework Overview}
 \label{sec:overview}
 
-Rather than fine-tuning the full model, we decompose it into three functional roles by attaching lightweight LoRA adapters~\cite{hu2022lora} to the shared backbone, keeping $\theta$ frozen:
+We decompose the frozen backbone into three functional roles via lightweight LoRA adapters~\cite{hu2022lora}:
 
 \begin{itemize}
     \item \textbf{Proposer} ($\phi_p$): generates open-ended visual questions about an input image.
-    \item \textbf{Solver} ($\phi_s$): answers visual questions using the model's understanding capability.
-    \item \textbf{Generator} ($\phi_g$): synthesizes images from textual descriptions using the model's generation capability.
+    \item \textbf{Solver} ($\phi_s$): answers visual questions using the understanding capability.
+    \item \textbf{Generator} ($\phi_g$): synthesizes images from textual descriptions using the generation capability.
 \end{itemize}
 
-Each adapter modifies only a small fraction of the model's parameters while keeping $\theta$ fixed, ensuring that all three roles share the same pretrained representations and that independent optimization of each role does not destabilize the base model. Training alternates between \emph{understanding steps}, which update the proposer and solver, and \emph{generation steps}, which update the generator. The solver plays a dual role throughout: it is both a learner within the understanding loop and an internal evaluator within the generation loop, which couples understanding improvement directly to generation quality without any external supervision signal. Figure~\ref{fig:framework} provides a visual overview of the complete framework. The following subsections detail each loop in turn, beginning with the understanding mechanism that produces the core training signal.
+Each adapter modifies a small fraction of parameters while $\theta$ remains frozen, ensuring all three roles share pretrained representations and independent optimization does not destabilize the base model. Training alternates between \emph{understanding steps} (updating proposer and solver) and \emph{generation steps} (updating generator). The Solver plays a dual role: it is a learner within the understanding loop and an internal evaluator within the generation loop, coupling understanding improvement directly to generation quality without external supervision. Figure~\ref{fig:framework} provides a visual overview.
 
-\begin{figure*}[tb]
+\begin{figure*}[!htb]
   \centering
-  % TODO: Replace with actual framework figure file once created.
-  % \includegraphics[width=\linewidth]{figures/framework.pdf}
-  \fbox{\parbox{0.95\linewidth}{\centering\vspace{4cm}\textbf{[Framework Figure Placeholder]}\\\smallskip See \texttt{figures/framework\_figure\_spec.md} for detailed specification.\vspace{4cm}}}
-  \caption{Overview of the proposed self-evolving framework. Given only unlabeled images and a frozen unified backbone, three lightweight LoRA adapters instantiate a proposer, solver, and generator. During understanding steps (left), the proposer generates visual questions, the solver answers them under diverse prompt perturbations, and the resulting self-consistency entropy together with solver token entropy provide the training signal for both the proposer (via GRPO) and the solver (via REINFORCE). During generation steps (right), the generator synthesizes images from text, and the solver evaluates them through question-answering fidelity scoring and cycle-consistent captioning, directly coupling understanding quality to the generation training signal. The framework requires no human annotations or external reward models. The same algorithmic components are applied identically across three architecturally distinct generation paradigms (bottom).}
+  \includegraphics[width=\linewidth]{figures/main-figure.pdf}
+  \caption{Overview of the proposed self-evolving framework. Given only unlabeled images and a frozen backbone, three LoRA adapters instantiate a Proposer, Solver, and Generator. During understanding steps (left), the Proposer generates visual questions, the Solver answers under diverse prompt perturbations, and self-consistency entropy together with Solver Token Entropy provide training signals via GRPO and REINFORCE. During generation steps (right), the Generator synthesizes images, and the Solver evaluates them through QA fidelity scoring and cycle-consistent captioning. The same algorithm applies across diffusion-based, flow-matching, and autoregressive generation paradigms (bottom).}
   \label{fig:framework}
 \end{figure*}
 
@@ -35,148 +31,75 @@ Each adapter modifies only a small fraction of the model's parameters while keep
 \subsection{Self-Consistent Understanding}
 \label{sec:understanding}
 
-The understanding loop operates over unlabeled images. For each sampled image $\mathcal{I}$, the proposer generates a candidate question $q \sim \pi_{\phi_p}(\cdot \mid \mathcal{I})$. The solver then answers $q$ under multiple conditions, and the resulting agreement pattern provides the training signal for both the proposer and the solver.
-
-Rather than sampling multiple answers from the solver using temperature variation alone, which primarily captures stochastic noise in the decoding process, we evaluate the solver under $N$ semantically equivalent but syntactically distinct prompt framings $\{\rho_1, \ldots, \rho_N\}$. Each framing preserves the question content but presents it with different instructional phrasing (e.g., an analytical perspective, an observational perspective, or a concise directive). The solver generates one answer per framing:
+For each sampled image $\mathcal{I}$, the Proposer generates a question $q \sim \pi_{\phi_p}(\cdot \mid \mathcal{I})$. Rather than sampling multiple answers via temperature variation, we evaluate the Solver under $N$ semantically equivalent but syntactically distinct prompt framings $\{\rho_1, \ldots, \rho_N\}$, each preserving question content with different instructional phrasing. The Solver generates one answer per framing:
 \begin{equation}
     a_i = \text{Solver}_{\phi_s}(\mathcal{I}, \rho_i(q)), \quad i = 1, \ldots, N.
 \end{equation}
-We determine the majority answer by plurality vote, $a^* = \arg\max_{a} |\{i : a_i = a\}|$, and compute the sample entropy over the normalized answer histogram:
+The majority answer is $a^* = \arg\max_{a} |\{i : a_i = a\}|$, and the self-consistency entropy is:
 \begin{equation}
-    H_{\text{sc}} = -\sum_{c} p_c \ln p_c, \quad \text{where } p_c = \frac{|\{i : a_i = c\}|}{N}.
+    H_{\text{sc}} = -\sum_{c} p_c \ln p_c, \quad p_c = \frac{|\{i : a_i = c\}|}{N}.
     \label{eq:sample_entropy}
 \end{equation}
+This measures the \emph{robustness} of understanding rather than stochastic variation: a model that genuinely comprehends the visual content produces consistent answers regardless of framing ($H_{\text{sc}} \approx 0$), while fragile understanding yields conflicting answers ($H_{\text{sc}} > 0$).
 
-The entropy $H_{\text{sc}}$ measures the \emph{robustness} of the model's understanding rather than stochastic variation: a model that genuinely understands the visual content produces consistent answers regardless of prompt framing ($H_{\text{sc}} \approx 0$), while fragile or shallow understanding yields conflicting answers ($H_{\text{sc}} > 0$). This reinterpretation distinguishes our prompt-perturbed self-consistency signal from conventional temperature-based sampling, where entropy primarily reflects decoding noise.
-
-A fundamental limitation of this sample-level self-consistency, however, is that it produces a degenerate signal when all solver responses agree: $H_{\text{sc}} = 0$ regardless of how confident or uncertain the model was internally. This creates a dead zone in which the proposer receives no informative gradient, particularly early in training when the solver tends to produce uniform but potentially unreliable answers.
-
-To see why this matters, consider three categories of questions a proposer might generate. For a trivially easy question, the solver answers correctly with high internal confidence across all prompt framings, yielding $H_{\text{sc}} = 0$. For a genuinely hard question, the solver produces conflicting answers, yielding $H_{\text{sc}} > 0$, which provides a clear training signal. The problematic case is the middle regime: a question of moderate difficulty where the solver arrives at the correct answer under all framings, but does so with substantial internal hesitation. The solver effectively ``gets it right while sweating,'' and this is invisible to sample-level self-consistency because the final answers are identical regardless of how uncertain the model was during generation. Yet these moderately difficult questions are precisely the most valuable training signal for the proposer, as they sit at the frontier of the solver's current competence, where the model's knowledge is fragile enough that a slightly harder variant would cause disagreement. Without a mechanism to detect this internal uncertainty, the proposer has no way to distinguish a trivially easy question from one that narrowly succeeded, and therefore cannot learn to target the productive difficulty range.
-
-To address this, we introduce Solver Token Entropy (STE), a continuous difficulty measure derived from the token-level prediction uncertainty of a single greedy solver forward pass. For a greedy generation, let $\mathbf{p}_t \in \mathbb{R}^{|V|}$ denote the softmax distribution over the vocabulary at decoding step $t$. The per-token entropy is $H_t = -\sum_{v=1}^{|V|} p_{t,v} \ln p_{t,v}$, and we define STE as the maximum entropy over the first $K$ answer tokens:
+\paragraph{Solver Token Entropy (STE).}
+A critical limitation of sample-level self-consistency is that $H_{\text{sc}} = 0$ when all responses agree, regardless of the model's internal confidence. Questions where the Solver answers correctly under all framings but with substantial internal hesitation are precisely the most valuable for curriculum learning, as they sit at the competence frontier. We introduce STE, a continuous difficulty measure from a single greedy forward pass. Let $\mathbf{p}_t \in \mathbb{R}^{|V|}$ denote the softmax distribution at decoding step $t$, with per-token entropy $H_t = -\sum_{v} p_{t,v} \ln p_{t,v}$. STE is:
 \begin{equation}
     \hat{H} = \max_{t \in \{1, \ldots, K\}} H_t.
     \label{eq:ste}
 \end{equation}
-The maximum operation captures the point of greatest uncertainty during answer generation. Even if most tokens are produced confidently, a single high-entropy token indicates that the question probes a decision boundary where the model's knowledge is ambiguous. Returning to the three-category example, trivially easy questions produce low STE because the solver's token distributions are peaked throughout, moderately difficult questions produce elevated STE because at least one token decision was uncertain despite the final answer being correct, and genuinely hard questions produce high STE along with nonzero sample entropy. STE thus provides the proposer with a continuous gradient across the entire difficulty spectrum, enabling it to preferentially generate questions in the productive moderate-to-hard range where the solver is learning most effectively.
-
-To make STE values comparable across questions of varying content and difficulty, we normalize via a self-calibrating quantile rank within a rolling window $\mathcal{W}$ of recent STE observations:
+The maximum captures the point of greatest internal uncertainty during answer generation. Even if most tokens are produced confidently, a single high-entropy token indicates the question probes a decision boundary. To make STE comparable across questions, we normalize via a self-calibrating quantile rank within a rolling window $\mathcal{W}$:
 \begin{equation}
     d_{\text{ste}} = \frac{|\{h \in \mathcal{W} : h < \hat{H}\}|}{|\mathcal{W}|},
     \label{eq:ste_quantile}
 \end{equation}
-yielding a difficulty score $d_{\text{ste}} \in [0, 1]$ that adapts to the evolving distribution of question difficulty without requiring manually set thresholds. Importantly, STE is computed from a single greedy forward pass, adding negligible computational cost relative to multi-sample self-consistency evaluation. During the initial phase when fewer than eight observations are available, we use a sigmoid fallback $d_{\text{ste}} = \sigma(\alpha(\hat{H} - \beta))$ with fixed parameters $\alpha$ and $\beta$ until sufficient statistics accumulate.
+yielding $d_{\text{ste}} \in [0, 1]$ that adapts to the evolving difficulty distribution without manual thresholds. STE is computed from a single greedy pass, adding negligible overhead.
+
+\paragraph{Proposer optimization.}
+The Proposer reward combines STE with self-consistency:
+\begin{equation}
+    R_p = w_{\text{ste}} \cdot d_{\text{ste}} + w_{\text{sc}} \cdot r_{\text{sc}},
+    \label{eq:proposer_reward}
+\end{equation}
+where $r_{\text{sc}}$ is a hybrid reward blending a Gaussian component centered on an adaptive entropy target with a local informativeness score. The default weights ($w_{\text{ste}} = 0.70$, $w_{\text{sc}} = 0.30$) ensure the Proposer receives meaningful gradients even when all Solver responses agree. The Proposer is updated via GRPO: at each step, it generates $K$ candidate questions per image, each scored by $R_p$. Advantages are computed using bucket-stratified EMA baselines that separate easy, medium, and hard difficulty tiers, maintaining consistent pressure toward harder questions.
+
+\paragraph{Solver optimization.}
+The Solver is updated via KL-regularized REINFORCE. Each response is rewarded based on agreement with the majority and overall question difficulty: positive reward for majority-agreeing answers on non-trivial questions, penalty for minority answers, and a small penalty for unanimous agreement on trivially easy questions. The reward is modulated by a verbosity penalty to discourage excessively long answers. Both the Proposer and Solver losses include adaptive KL regularization against the frozen reference model to prevent divergence:
+\begin{equation}
+    \mathcal{L}_A = -\mathbb{E}\!\left[(R_A - b_A) \frac{1}{T_A}\sum_{t=1}^{T_A}\log \pi_A(y_t \mid h_t)\right] + \beta_A \cdot \overline{\text{KL}}_A,
+    \label{eq:policy_loss}
+\end{equation}
+where $A \in \{\text{Proposer}, \text{Solver}\}$, $b_A$ is an EMA baseline, and $\beta_A$ is an adaptive KL coefficient.
 
 
 \subsection{Generation Assessment via Internal Evaluation}
 \label{sec:generation}
 
-The generation loop uses the solver as an internal evaluator to assess the quality of synthesized images, providing the training signal for the generator without any external reward model or human judgment. Evaluating generation quality purely from the model's own understanding is challenging because no single self-derived measure captures all dimensions of image quality. We therefore combine two complementary scoring mechanisms, each addressing failure modes that the other cannot detect.
+The generation loop uses the Solver as an internal evaluator, providing the training signal for the Generator without external reward models. We combine two complementary scoring mechanisms that address each other's failure modes.
 
-The first mechanism targets fine-grained semantic content through question-answering fidelity scoring. Given an image $\mathcal{I}$ and a generation prompt $t$, the solver first generates reference answers to a set of $M$ diagnostic questions on the real image: $a^{\text{ref}}_j = \text{Solver}_{\phi_s}(\mathcal{I}, q_j)$ for $j = 1, \ldots, M$. These diagnostic questions probe specific visual attributes such as object identity, color, count, spatial relationships, and scene context. The generator then produces a candidate image $\hat{\mathcal{I}} = \text{Generator}_{\phi_g}(t)$, and the solver answers the same questions conditioned on the synthesized image: $\hat{a}_j = \text{Solver}_{\phi_s}(\hat{\mathcal{I}}, q_j)$. The fidelity score measures agreement between the two sets of answers:
+\paragraph{QA fidelity scoring.}
+Given an image $\mathcal{I}$ and generation prompt $t$, the Solver generates reference answers to $M$ diagnostic questions on the real image: $a^{\text{ref}}_j = \text{Solver}_{\phi_s}(\mathcal{I}, q_j)$. The Generator produces $\hat{\mathcal{I}} = \text{Generator}_{\phi_g}(t)$, and the Solver answers the same questions on the synthesized image: $\hat{a}_j = \text{Solver}_{\phi_s}(\hat{\mathcal{I}}, q_j)$. The fidelity score measures agreement:
 \begin{equation}
     S_{\text{fid}} = \frac{1}{M} \sum_{j=1}^{M} \mathbb{1}[\hat{a}_j = a^{\text{ref}}_j].
     \label{eq:fidelity}
 \end{equation}
-This captures whether the generated image preserves the specific semantic content that the solver identifies in the real image. For instance, if the real image contains a red vehicle next to a building and the generated image produces a blue vehicle in an open field, the fidelity score drops because the solver's answers to questions about vehicle color and scene layout will differ. As the solver improves through understanding training, its reference answers become more accurate and the diagnostic questions probe finer distinctions, naturally coupling understanding quality to the generation training signal. An alternative formulation replaces exact match with the mean per-token log-probability of the reference answer conditioned on the generated image, $\frac{1}{T}\sum_{t=1}^{T}\log P_{\phi_s}(a^{\text{ref}}_t \mid a^{\text{ref}}_{<t}, \hat{\mathcal{I}}, q)$, providing a continuous reward variant.
+This captures whether the generated image preserves specific semantic content. As the Solver improves through understanding training, its reference answers become more accurate and diagnostic questions probe finer distinctions, naturally coupling understanding quality to generation training.
 
-However, QA fidelity scoring alone has an important limitation: it only evaluates the specific attributes that the diagnostic questions happen to probe. As a concrete example, consider the prompt ``a golden retriever sitting on a park bench under a large oak tree.'' If the diagnostic questions ask about the dog breed, its location, and the tree type, the generated image could answer all three correctly while exhibiting a distorted sky, unnatural lighting, or a bench floating above the ground. QA fidelity would assign a perfect score because no question probed sky quality, lighting realism, or physical grounding. More generally, a generated image could answer all diagnostic questions correctly while still failing to capture the holistic meaning of the generation prompt, for example by producing a semantically plausible but visually incoherent scene, or by preserving queried objects while omitting the overall scene context that was not explicitly asked about.
-
-The second mechanism addresses this limitation by evaluating holistic semantic alignment through cycle-consistent captioning. The solver generates a free-form caption $\hat{t}$ of the synthesized image using its understanding capability, and the cycle consistency score measures whether the overall meaning of the generated image aligns with the original generation prompt:
+\paragraph{Cycle-consistent captioning.}
+QA fidelity only evaluates the specific attributes that diagnostic questions probe. A generated image could answer all diagnostic questions correctly while exhibiting holistic failures (incoherent composition, context omission) that no question happened to target. The Solver generates a caption $\hat{t}$ of the synthesized image, and cycle consistency measures global alignment:
 \begin{equation}
     S_{\text{cyc}} = \tfrac{1}{2}\,\text{sim}(f(t), f(\hat{t})) + \tfrac{1}{2}\,\text{sim}_{\text{vl}}(\hat{\mathcal{I}}, t),
     \label{eq:cycle}
 \end{equation}
-where $f(\cdot)$ denotes a text embedding function, $\text{sim}_{\text{vl}}$ denotes a visual-linguistic similarity computed from the model's own frozen encoder, and $\text{sim}$ denotes cosine similarity. The first term measures whether the generated image elicits a caption whose overall meaning is close to the original prompt, capturing global coherence that individual diagnostic questions may miss. The second term directly evaluates visual-textual alignment at the representation level. Both similarity computations use the model's own internal representations rather than an external scoring model.
+where $f(\cdot)$ denotes a text embedding function and $\text{sim}_{\text{vl}}$ denotes visual-linguistic similarity from the model's own frozen encoder. The first term measures whether the generated image elicits a caption whose meaning matches the original prompt; the second evaluates visual-textual alignment at the representation level. Both use the model's internal representations rather than external scoring models.
 
-Cycle consistency alone would also be insufficient, because caption-level similarity is inherently coarse. For example, given the prompt ``a red bicycle leaning against a white fence in a garden,'' a generated image showing a blue bicycle against a wooden fence in a garden would elicit the caption ``a bicycle leaning against a fence in a garden,'' which is semantically close to the original prompt. Cycle consistency would assign a high score because the scene structure matches, yet the bicycle color and fence material are both incorrect. QA fidelity would catch these errors by asking ``What color is the bicycle?'' and ``What material is the fence?'' More broadly, two images with quite different fine-grained content can produce similar captions if they share the same general theme, meaning the generator could satisfy cycle consistency while producing images that are semantically approximate but factually incorrect in their details.
-
-By combining both mechanisms, the generation reward captures errors at multiple levels of granularity. QA fidelity detects fine-grained content errors such as wrong attributes, missing objects, and incorrect spatial relationships that caption-level similarity overlooks, while cycle consistency detects holistic coherence failures such as overall scene mismatch, context omission, and visual incoherence that fall outside the scope of individual diagnostic questions. This multi-scale evaluation also reduces the risk of reward gaming, as improving one score at the expense of the other would require the generator to simultaneously satisfy both fine-grained factual consistency and global semantic alignment. The combined generation reward is:
+\paragraph{Generator optimization.}
+The combined generation reward is:
 \begin{equation}
     R_g = w_{\text{fid}} \cdot S_{\text{fid}} + w_{\text{cyc}} \cdot S_{\text{cyc}} + w_{\text{div}} \cdot S_{\text{div}} - w_{\text{ctr}} \cdot S_{\text{ctr}},
     \label{eq:gen_reward}
 \end{equation}
-where $S_{\text{div}}$ encourages visual diversity among multiple candidates, $S_{\text{ctr}}$ penalizes internal contradictions in the solver's answers about the generated image, and the weights $\{w_\cdot\}$ are normalized to sum to one. The reward is gated by a minimum quality threshold to prevent gradient updates from low-fidelity candidates.
+where $S_{\text{div}}$ encourages visual diversity and $S_{\text{ctr}}$ penalizes internal contradictions, with weights normalized to sum to one. The Generator is updated via KL-regularized REINFORCE using the same form as Eq.~\eqref{eq:policy_loss}. The generation pathway is treated abstractly: for diffusion models the policy gradient applies to text conditioning; for autoregressive models it applies to discrete token prediction. This abstraction enables identical optimization across architecturally distinct unified models.
 
-Having described both the understanding and generation loops, a natural question arises: should the generation loop also provide a training signal back to the proposer, for instance by biasing the proposer toward generating questions about content types where the generator struggles? We deliberately avoid this direct coupling for several reasons. The proposer and generator optimize fundamentally different objectives: the proposer seeks questions that probe the solver's competence boundary, while the generator seeks images that satisfy the solver's evaluation criteria. Mixing generation-quality signals into the proposer's reward would create conflicting gradients, as content that is difficult for the generator to synthesize may not correspond to content that is difficult for the solver to understand. Moreover, the coupling from understanding to generation already flows naturally through the solver: as the proposer generates harder questions and the solver improves on them, the solver's evaluations of generated images become more discriminative, which in turn provides a stronger training signal for the generator. This indirect path through the solver preserves each role's clean optimization objective while still ensuring that understanding improvement benefits generation. Adding a direct generation-to-proposer reward path would also create a three-way circular dependency among all roles, substantially complicating the optimization landscape. The current design instead keeps the two loops loosely coupled through the solver's improving quality, which we find to be both simpler and more stable in practice.
-
-
-\subsection{Optimization}
-\label{sec:optimization}
-
-All three roles are optimized via KL-regularized policy gradient methods using the self-derived signals described above, with different optimization strategies suited to each role's characteristics.
-
-\paragraph{Proposer.}
-The proposer is trained to generate questions that probe the frontier of the solver's competence. Its reward combines the STE difficulty signal with the self-consistency signal:
-\begin{equation}
-    R_p = w_{\text{ste}} \cdot d_{\text{ste}} + w_{\text{sc}} \cdot r_{\text{sc}},
-    \label{eq:proposer_reward}
-\end{equation}
-where $d_{\text{ste}}$ is the normalized STE difficulty from Eq.~\eqref{eq:ste_quantile} and $r_{\text{sc}}$ is the self-consistency reward. The self-consistency component uses a hybrid formulation that blends a Gaussian reward centered on an adaptive entropy target with a local informativeness score:
-\begin{equation}
-    r_{\text{sc}} = w_b \cdot (2 \, s_{\text{info}} - 1) + (1 - w_b) \cdot \exp\!\left(-\frac{(H_{\text{sc}} - \mu)^2}{2\sigma^2}\right),
-    \label{eq:sc_reward}
-\end{equation}
-where $s_{\text{info}} \in [0, 1]$ is a local informativeness score that combines entropy band proximity and majority margin dampening, $w_b$ controls the blend between band and Gaussian components, and $\mu$ is the adaptive entropy target. The Gaussian component peaks when the observed entropy matches $\mu$, rewarding questions of calibrated difficulty, while the band component provides sharper reward gradients near the informative regime.
-
-When STE is the primary signal (default configuration), $w_{\text{ste}} = 0.70$ and $w_{\text{sc}} = 0.30$, ensuring that the proposer receives a meaningful gradient even when all solver responses agree ($H_{\text{sc}} = 0$). In this regime, the STE component alone provides a continuous difficulty gradient.
-
-The adaptive entropy target $\mu$ is maintained as an exponential moving average of observed non-trivial entropy values:
-\begin{equation}
-    \mu_{t+1} = \begin{cases} \alpha \, \mu_t + (1 - \alpha) \, H_{\text{sc}} & \text{if } H_{\text{sc}} > \epsilon \\ \mu_t & \text{otherwise} \end{cases},
-    \label{eq:ema_target}
-\end{equation}
-where $\alpha$ is the momentum coefficient and $\epsilon$ is a floor threshold. By excluding zero-entropy observations from the update, the target tracks the actual difficulty frontier without being dragged toward zero by the prevalence of easy questions. A lower bound $\mu_{\min}$ prevents the target from collapsing below a minimum difficulty level.
-
-The proposer is updated via Group Relative Policy Optimization (GRPO). At each step, the proposer generates a group of $K$ candidate questions for the same image, each scored independently using the reward in Eq.~\eqref{eq:proposer_reward}. Advantages are computed by subtracting bucket-stratified EMA baselines from each candidate's reward:
-\begin{equation}
-    A_k = R_p^{(k)} - b_{c(k)}, \quad b_{c} \leftarrow m \, b_{c} + (1 - m) \, R_p,
-    \label{eq:proposer_advantage}
-\end{equation}
-where $b_{c(k)}$ is the running baseline for the difficulty bucket $c(k) \in \{\text{easy}, \text{medium}, \text{hard}\}$ assigned to candidate $k$ by its STE quantile. The easy-bucket baseline is additionally capped at a small negative value to ensure that easy questions always yield a negative advantage, maintaining consistent pressure toward harder question generation. A pairwise ranking bonus further enforces that harder candidates receive higher advantage than easier ones within the group. Each candidate's loss is then:
-\begin{equation}
-    \mathcal{L}_p^{(k)} = -A_k \cdot \mathcal{L}_{\text{CE}}^{(k)} + \beta \cdot \mathcal{L}_{\text{KL}}^{(k)},
-    \label{eq:proposer_loss}
-\end{equation}
-where $\mathcal{L}_{\text{CE}}^{(k)}$ is the cross-entropy loss on the $k$-th completion, $\mathcal{L}_{\text{KL}}^{(k)}$ is the KL divergence from the frozen reference model, and $\beta$ is an adaptive KL penalty coefficient. The group-relative formulation allows the proposer to learn from the relative quality of its own candidates, providing richer gradient signal than single-sample updates.
-
-\paragraph{Solver.}
-The solver is updated via KL-regularized REINFORCE to improve its accuracy on questions where the self-consistency signal is informative. The reward for each solver response depends on its agreement with the majority and the overall difficulty of the question:
-\begin{equation}
-    R_s^{(i)} = \begin{cases}
-        +r_s & \text{if } a_i = a^* \text{ and } H_{\text{sc}} > 0 \\
-        -\beta_s \, r_s & \text{if } a_i \neq a^* \\
-        -\gamma \, r_s & \text{if } H_{\text{sc}} \approx 0 \;\;\text{(unanimous)}
-    \end{cases},
-    \label{eq:solver_reward}
-\end{equation}
-where $r_s$ is a local informativeness magnitude derived from the entropy band proximity and margin dampening, $\beta_s$ controls the penalty for minority answers, and $\gamma$ penalizes the solver on trivially easy questions where unanimous agreement offers no learning signal. The reward is further modulated by the response's majority probability and a verbosity penalty to discourage excessively long answers:
-\begin{equation}
-    \tilde{R}_s^{(i)} = p_i^\delta \cdot (1 - w_\ell \cdot \ell_i) \cdot R_s^{(i)},
-    \label{eq:solver_soft}
-\end{equation}
-where $p_i$ is the fraction of solvers producing the same answer as $a_i$, $\delta$ is a sharpening exponent, $w_\ell$ is a length penalty weight, and $\ell_i = \min(1, (\text{words}_i - \tau)/\tau)$ penalizes responses exceeding a target word count $\tau$. The solver loss follows the same KL-regularized form as Eq.~\eqref{eq:proposer_loss}, with the advantage replaced by $\tilde{R}_s^{(i)} - b_s$ for a running baseline $b_s$.
-
-\paragraph{Generator.}
-The generator is updated via KL-regularized REINFORCE using the solver-derived reward from Eq.~\eqref{eq:gen_reward}. The loss follows the same form as Eq.~\eqref{eq:proposer_loss}:
-\begin{equation}
-    \mathcal{L}_g = -(R_g - b_g) \cdot \mathcal{L}_{\text{CE}}^{(g)} + \beta_g \cdot \mathcal{L}_{\text{KL}}^{(g)},
-    \label{eq:gen_loss}
-\end{equation}
-where $b_g$ is a running baseline for generation quality and $\beta_g$ is the generator's KL penalty. The generation pathway is treated abstractly at the framework level: for diffusion-based models, the policy gradient is applied to the text conditioning that drives the denoising process; for autoregressive models, it is applied to the discrete token prediction sequence. This abstraction enables the same optimization procedure across architecturally distinct unified models.
-
-
-\subsection{Training Schedule and Stability}
-\label{sec:schedule}
-
-Training proceeds in repeating cycles of $U$ understanding steps followed by $G$ generation steps. Within each understanding step, the proposer generates a candidate question, the solver evaluates it via prompt-perturbed self-consistency and STE, and both the proposer and solver are updated according to their respective objectives. Within each generation step, the generator produces candidate images, the solver scores them using fidelity and cycle consistency, and the generator is updated.
-
-Several mechanisms maintain training stability throughout the self-evolving loop. During an initial warm-start phase, the proposer generates questions without difficulty-maximizing pressure to establish a diverse question distribution before curriculum optimization begins. The adaptive entropy target from Eq.~\eqref{eq:ema_target} prevents the proposer from collapsing toward either trivial or unsolvable questions by tracking the natural difficulty frontier. The minimum entropy floor $\mu_{\min}$ ensures the target never decays below a level that would eliminate the drive toward harder questions. Bucket-stratified baselines prevent easy questions from dominating the policy gradient, and a quality certificate filter discards structurally degenerate questions (e.g., ambiguous or non-objective formulations) before they can influence the training signal.
-
-
-\subsection{Model-Agnostic Design}
-\label{sec:agnostic}
-
-The framework is defined at the level of role decomposition and cyclic self-supervised optimization, without dependence on specific architectural choices for visual understanding or image generation. The core algorithmic components, namely the proposer, solver, prompt-perturbed self-consistency, STE computation, and solver-based generation scoring, operate entirely through the model's text generation and image synthesis interfaces. No component requires access to intermediate hidden representations, architecture-specific loss functions, or encoder-decoder structural symmetry.
-
-To validate this generality, we implement the framework on three unified models that employ fundamentally different generation mechanisms: (i) a diffusion-based model that synthesizes images via iterative denoising conditioned on text embeddings, (ii) a flow-matching model that uses a variational autoencoder with a flow-based decoder, and (iii) an autoregressive model that generates discrete image tokens from a learned codebook. Each instantiation requires adapting the model loading, forward pass format, and generation trace handling to the target architecture, while the algorithmic components, reward computation, and training schedule remain identical across all three. This demonstrates that the self-evolving loop is portable across the major families of unified understanding and generation architectures currently in use.
+\paragraph{Coupling design.}
+The understanding and generation loops are deliberately kept loosely coupled through the Solver's dual role. The Proposer is not directly influenced by generation quality, as mixing generation-quality signals into its reward would create conflicting gradients. Instead, the coupling flows indirectly: as the Proposer generates harder questions and the Solver improves, the Solver's evaluations of generated images become more discriminative, providing a stronger signal for the Generator.

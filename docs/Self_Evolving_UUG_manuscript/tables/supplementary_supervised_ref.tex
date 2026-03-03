@@ -2,8 +2,6 @@
 % Supplementary Table S1: Reference Comparison with Supervised Methods
 % These methods use curated SFT data, external reward models, or
 % supervised initialization. NOT directly comparable to our framework.
-% Included as reference upper bounds to contextualize the performance
-% gap between supervised and self-supervised post-training.
 % =====================================================================
 \begin{table}[tb]
   \caption{Reference comparison with methods that use additional supervision. These approaches employ curated fine-tuning data, external reward models, or supervised initialization stages, and are therefore not directly comparable to our fully unsupervised framework. Results are shown as reference points to contextualize the performance gap between supervised and self-supervised post-training.}
@@ -11,9 +9,9 @@
   \centering
   \small
   \resizebox{\linewidth}{!}{%
-  \begin{tabular}{@{}lllcccccccc|c@{}}
+  \begin{tabular}{@{}lllccccccccc@{}}
     \toprule
-    & & & \multicolumn{8}{c|}{Understanding} & Generation \\
+    & & & \multicolumn{8}{c}{Understanding} & Generation \\
     \cmidrule(lr){4-11} \cmidrule(l){12}
     Method & Backbone & Ext. Supervision & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval \\
     \midrule
@@ -26,34 +24,6 @@
     \textbf{Ours} & BLIP3o-8B & \textbf{None} & \textbf{52.8} & \textbf{86.1} & \textbf{85.2} & \textbf{79.4} & \textbf{70.9} & \textbf{68.7} & \textbf{1698.4} & \textbf{660.3} & \textbf{0.87} \\
     \textbf{Ours} & BAGEL & \textbf{None} & \textbf{58.8} & \textbf{87.1} & -- & -- & -- & \textbf{69.5} & \textbf{1701.7} & \textbf{715.9} & \textbf{0.85} \\
     \textbf{Ours} & VARGPT & \textbf{None} & \textbf{39.4} & \textbf{70.3} & \textbf{56.9} & \textbf{71.0} & \textbf{68.8} & \textbf{36.2} & \textbf{1506.2} & \textbf{362.1} & \textbf{0.36} \\
-    \bottomrule
-  \end{tabular}%
-  }
-\end{table}
-
-
-% =====================================================================
-% Supplementary Table S2: Model-Agnostic Understanding (Expanded)
-% Full per-benchmark breakdown if space in supplementary allows.
-% =====================================================================
-\begin{table}[tb]
-  \caption{Expanded understanding benchmarks across three architecturally distinct unified models, including additional specialist benchmarks to verify that training does not degrade performance on tasks outside the training distribution.}
-  \label{tab:expanded_understanding}
-  \centering
-  \small
-  \resizebox{\linewidth}{!}{%
-  \begin{tabular}{@{}llcccccccccc@{}}
-    \toprule
-    Model & Setting & MMMU  & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & OCRBench & MathVista \\
-    \midrule
-    \multirow{2}{*}{BLIP3o-8B} & Base & 50.6 & 83.5 & 83.1 & 77.5 & 69.0 & 66.6 & 1682.6 & 647.1 & -- & -- \\
-    & Ours & \textbf{52.8} & \textbf{86.1} & \textbf{85.2} & \textbf{79.4} & \textbf{70.9} & \textbf{68.7} & \textbf{1698.4} & \textbf{660.3} & -- & -- \\
-    \midrule
-    \multirow{2}{*}{BAGEL} & Base & 55.3 & 85.0 & -- & -- & -- & 67.2 & 1687.0 & 701.0 & -- & -- \\
-    & Ours & \textbf{58.8} & \textbf{87.1} & -- & -- & -- & \textbf{69.5} & \textbf{1701.7} & \textbf{715.9} & -- & -- \\
-    \midrule
-    \multirow{2}{*}{VARGPT} & Base & 36.4 & 67.6 & 54.1 & 67.9 & 65.2 & 33.5 & 1488.8 & 348.6 & -- & -- \\
-    & Ours & \textbf{39.4} & \textbf{70.3} & \textbf{56.9} & \textbf{71.0} & \textbf{68.8} & \textbf{36.2} & \textbf{1506.2} & \textbf{362.1} & -- & -- \\
     \bottomrule
   \end{tabular}%
   }
