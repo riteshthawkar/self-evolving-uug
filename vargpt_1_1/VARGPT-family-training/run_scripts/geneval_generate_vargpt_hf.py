@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 
 import numpy as np
 import torch
+import torch.nn as nn
 from transformers import AutoTokenizer
 
 try:
@@ -83,6 +84,27 @@ def _set_image_path_attr(model: Any, image_path: str) -> None:
                 pass
 
 
+def _materialize_meta_tensors(module: nn.Module, dtype: torch.dtype) -> int:
+    """
+    Replace meta parameters/buffers with real CPU tensors so `.to(device)` can succeed.
+    Returns the count of materialized tensors.
+    """
+    fixed = 0
+    for sub in module.modules():
+        for name, param in list(sub._parameters.items()):
+            if param is None or not getattr(param, "is_meta", False):
+                continue
+            t = torch.zeros(param.shape, dtype=dtype, device="cpu")
+            sub._parameters[name] = nn.Parameter(t, requires_grad=param.requires_grad)
+            fixed += 1
+        for name, buf in list(sub._buffers.items()):
+            if buf is None or not getattr(buf, "is_meta", False):
+                continue
+            sub._buffers[name] = torch.zeros(buf.shape, dtype=dtype, device="cpu")
+            fixed += 1
+    return fixed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate GenEval images with VARGPT HF model (+optional LoRA).")
     parser.add_argument("--train_root", required=True, help="Path to VARGPT-family-training root.")
@@ -126,35 +148,33 @@ def main() -> None:
 
     prepare_vargpt_qwen2vl_v1_1(args.pretrained)
 
-    def _load_base_model(use_device_map: bool = False):
+    def _load_base_model():
         load_kwargs: Dict[str, Any] = {
             "torch_dtype": model_dtype,
             # Avoid meta-tensor init path that later fails on `.to(device)`.
             "low_cpu_mem_usage": False,
         }
-        if use_device_map:
-            load_kwargs["device_map"] = {"": str(device)}
         m = VARGPTQwen2VLForConditionalGeneration.from_pretrained(
             args.pretrained,
             **load_kwargs,
         ).eval()
-        if not use_device_map:
-            m = m.to(device).eval()
         return m
 
     try:
-        model = _load_base_model(use_device_map=False)
-        model_loaded_with_device_map = False
+        model = _load_base_model()
+        model = model.to(device).eval()
     except NotImplementedError as exc:
-        # Fallback for environments where any parameter stays on meta and `.to()` fails.
+        # Some checkpoints leave a subset of tensors as meta; materialize then retry.
         print(
             f"[WARN] Direct model.to({device}) failed ({exc}). "
-            "Retrying with from_pretrained(device_map={'': device})."
+            "Materializing meta tensors on CPU and retrying."
         )
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        model = _load_base_model(use_device_map=True)
-        model_loaded_with_device_map = True
+        model = _load_base_model()
+        fixed = _materialize_meta_tensors(model, dtype=model_dtype)
+        print(f"[WARN] Materialized meta tensors: {fixed}")
+        model = model.to(device).eval()
 
     patching(model)
 
@@ -164,10 +184,7 @@ def main() -> None:
         model = PeftModel.from_pretrained(model, args.peft, is_trainable=False)
         if args.peft_adapter_name:
             model.set_adapter(args.peft_adapter_name)
-        if not model_loaded_with_device_map:
-            model = model.to(device).eval()
-        else:
-            model = model.eval()
+        model = model.to(device).eval()
 
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained)
     processor = VARGPTQwen2VLProcessor.from_pretrained(args.pretrained)
