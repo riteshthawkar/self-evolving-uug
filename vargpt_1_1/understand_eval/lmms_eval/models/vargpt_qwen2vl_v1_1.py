@@ -30,6 +30,28 @@ except ImportError:
     eval_logger.warning("Failed to import qwen_vl_utils; Please install it via `pip install qwen-vl-utils`")
 
 
+def _strip_vargpt_generation_modules(model):
+    """Drop generation-only modules to run understanding eval safely."""
+    # These branches are used only for image generation.
+    # They can stay partially meta-initialized and break `.to(device)` in eval.
+    for attr in (
+        "vargpt_gen",
+        "vae_local",
+        "image_gen_projector",
+        "image_gen_projector_out",
+        "sos_embedding",
+        "bitwise_self_correction",
+    ):
+        if hasattr(model, attr):
+            try:
+                delattr(model, attr)
+            except Exception as exc:
+                eval_logger.warning(f"[VARGPT_Qwen2_VL_v1_1] Failed to delete '{attr}': {exc}")
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return model
+
+
 @register_model("vargpt_qwen2vl_v1_1")
 class VARGPT_Qwen2_VL_v1_1(lmms):
     """
@@ -62,13 +84,13 @@ class VARGPT_Qwen2_VL_v1_1(lmms):
         if accelerator.num_processes > 1:
             self._device = torch.device(f"cuda:{accelerator.local_process_index}")
             # In DDP we place one full model copy per rank/device.
-            # Avoid HF device_map dispatch here (can trigger meta-tensor moves).
+            # Avoid HF device_map dispatch here; we move after pruning gen-only modules.
             self.device_map = None
         elif accelerator.num_processes == 1 and device_map == "auto":
             self._device = torch.device(device)
-            self.device_map = device_map
+            self.device_map = "auto"
         else:
-            self._device = torch.device(f"cuda:{accelerator.local_process_index}")
+            self._device = torch.device(device)
             self.device_map = None
 
         common_load_kwargs = {"torch_dtype": "auto"}
@@ -83,22 +105,27 @@ class VARGPT_Qwen2_VL_v1_1(lmms):
                 **common_load_kwargs,
             ).eval()
         else:
-            # Deterministic local-rank loading path (no meta dispatch).
+            # Deterministic local-device loading path (no HF dispatch).
             base_model = VARGPTQwen2VLForConditionalGeneration.from_pretrained(
                 pretrained,
                 low_cpu_mem_usage=False,
                 **common_load_kwargs,
             ).eval()
-            base_model = base_model.to(self._device)
 
-        if hasattr(base_model, 'vargpt_gen'):
-            # 方法1：直接删除整个vargpt_gen模块
-            delattr(base_model, 'vargpt_gen')
-            delattr(base_model, 'vae_local')
+        # IMPORTANT: strip generation modules before moving to device.
+        # These modules can be partially meta-loaded and trigger .to() failures.
+        base_model = _strip_vargpt_generation_modules(base_model)
 
-            # 清理缓存
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        if self.device_map != "auto":
+            try:
+                base_model = base_model.to(self._device)
+            except NotImplementedError as exc:
+                meta_names = [n for n, p in base_model.named_parameters() if getattr(p, "is_meta", False)]
+                preview = ", ".join(meta_names[:8]) if meta_names else "<none>"
+                raise RuntimeError(
+                    "VARGPT eval still has meta tensors after pruning generation modules. "
+                    f"Sample meta params: {preview}"
+                ) from exc
 
         if peft:
             if PeftModel is None:
