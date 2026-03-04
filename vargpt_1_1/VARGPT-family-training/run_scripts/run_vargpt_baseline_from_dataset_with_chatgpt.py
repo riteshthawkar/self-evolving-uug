@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import base64
+import gc
 import json
 import os
 import random
@@ -147,21 +148,28 @@ def _load_baseline_model(pretrained: str, device: torch.device, dtype: torch.dty
 
     prepare_vargpt_qwen2vl_v1_1(pretrained)
 
+    model = VARGPTQwen2VLForConditionalGeneration.from_pretrained(
+        pretrained,
+        torch_dtype=dtype,
+        low_cpu_mem_usage=False,
+    ).eval()
     try:
-        model = VARGPTQwen2VLForConditionalGeneration.from_pretrained(
-            pretrained,
-            torch_dtype=dtype,
-            low_cpu_mem_usage=False,
-        ).eval()
         model = model.to(device).eval()
-    except NotImplementedError:
-        model = VARGPTQwen2VLForConditionalGeneration.from_pretrained(
-            pretrained,
-            torch_dtype=dtype,
-            low_cpu_mem_usage=False,
-        ).eval()
-        _ = _materialize_meta_tensors(model, dtype=dtype)
+    except NotImplementedError as exc:
+        fixed = _materialize_meta_tensors(model, dtype=dtype)
+        print(
+            "[WARN] model.to(device) failed due to meta tensors; "
+            f"materialized {fixed} tensors and retrying."
+        )
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         model = model.to(device).eval()
+    except RuntimeError:
+        # Propagate OOM and other runtime failures, but ensure we free temp refs first.
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise
 
     patching(model)
     processor = VARGPTQwen2VLProcessor.from_pretrained(pretrained)
@@ -239,6 +247,45 @@ def _run_schedule(mode: str, num_runs: int, do_sample: int, temperature: float, 
     return [(bool(do_sample), float(temperature), float(top_p)) for _ in range(num_runs)]
 
 
+def _format_gib(nbytes: int) -> str:
+    return f"{(float(nbytes) / (1024 ** 3)):.2f} GiB"
+
+
+def _pick_freest_cuda_device() -> torch.device:
+    if not torch.cuda.is_available():
+        return torch.device("cpu")
+    count = torch.cuda.device_count()
+    best_idx = 0
+    best_free = -1
+    for i in range(count):
+        try:
+            free_b, total_b = torch.cuda.mem_get_info(i)
+        except Exception:
+            free_b, total_b = (0, 0)
+        print(f"[INFO] cuda:{i} free={_format_gib(free_b)} total={_format_gib(total_b)}")
+        if free_b > best_free:
+            best_free = free_b
+            best_idx = i
+    if best_free < (8 * 1024 ** 3):
+        raise RuntimeError(
+            "No CUDA device has enough free memory for VARGPT baseline inference "
+            f"(best free={_format_gib(best_free)}). Free up GPU memory or pick another node."
+        )
+    print(f"[INFO] Selected device cuda:{best_idx} (max free memory).")
+    return torch.device(f"cuda:{best_idx}")
+
+
+def _resolve_device(device_arg: str, auto_select_gpu: bool) -> torch.device:
+    # If user passed explicit cuda index (e.g., cuda:3), honor it.
+    if device_arg.startswith("cuda:"):
+        return torch.device(device_arg if torch.cuda.is_available() else "cpu")
+    if device_arg == "cuda":
+        if not torch.cuda.is_available():
+            return torch.device("cpu")
+        return _pick_freest_cuda_device() if auto_select_gpu else torch.device("cuda:0")
+    return torch.device(device_arg)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run VARGPT baseline generation using prompt modes: triplet, chatgpt_image, or fixed."
@@ -260,7 +307,14 @@ def main() -> None:
     )
     parser.add_argument("--prompt-text", default="", help="If set, skip ChatGPT and use this exact prompt text")
     parser.add_argument("--device", default="cuda", help="cuda or cpu")
-    parser.add_argument("--dtype", default="float32", choices=["bfloat16", "float16", "float32"])
+    parser.add_argument(
+        "--auto-select-gpu",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="When --device cuda, pick the freest GPU automatically.",
+    )
+    parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--num-runs", type=int, default=4, help="How many baseline generations to run")
     parser.add_argument("--max-new-tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -286,6 +340,7 @@ def main() -> None:
         help="Output directory; default: <train_root>/logs/chatgpt_dataset_baseline/<timestamp>",
     )
     args = parser.parse_args()
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     train_root = Path(args.train_root).resolve()
     _prepare_imports(train_root)
@@ -339,7 +394,9 @@ def main() -> None:
 
     dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
     dtype = dtype_map[args.dtype]
-    device = torch.device(args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu")
+    device = _resolve_device(args.device, auto_select_gpu=bool(args.auto_select_gpu))
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
 
     model, processor, _tokenizer = _load_baseline_model(args.pretrained, device=device, dtype=dtype)
 
