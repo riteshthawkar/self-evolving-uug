@@ -125,11 +125,37 @@ def main() -> None:
     device = torch.device(args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu")
 
     prepare_vargpt_qwen2vl_v1_1(args.pretrained)
-    model = VARGPTQwen2VLForConditionalGeneration.from_pretrained(
-        args.pretrained,
-        torch_dtype=model_dtype,
-        low_cpu_mem_usage=True,
-    ).to(device).eval()
+
+    def _load_base_model(use_device_map: bool = False):
+        load_kwargs: Dict[str, Any] = {
+            "torch_dtype": model_dtype,
+            # Avoid meta-tensor init path that later fails on `.to(device)`.
+            "low_cpu_mem_usage": False,
+        }
+        if use_device_map:
+            load_kwargs["device_map"] = {"": str(device)}
+        m = VARGPTQwen2VLForConditionalGeneration.from_pretrained(
+            args.pretrained,
+            **load_kwargs,
+        ).eval()
+        if not use_device_map:
+            m = m.to(device).eval()
+        return m
+
+    try:
+        model = _load_base_model(use_device_map=False)
+        model_loaded_with_device_map = False
+    except NotImplementedError as exc:
+        # Fallback for environments where any parameter stays on meta and `.to()` fails.
+        print(
+            f"[WARN] Direct model.to({device}) failed ({exc}). "
+            "Retrying with from_pretrained(device_map={'': device})."
+        )
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        model = _load_base_model(use_device_map=True)
+        model_loaded_with_device_map = True
+
     patching(model)
 
     if args.peft:
@@ -138,7 +164,10 @@ def main() -> None:
         model = PeftModel.from_pretrained(model, args.peft, is_trainable=False)
         if args.peft_adapter_name:
             model.set_adapter(args.peft_adapter_name)
-        model = model.to(device).eval()
+        if not model_loaded_with_device_map:
+            model = model.to(device).eval()
+        else:
+            model = model.eval()
 
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained)
     processor = VARGPTQwen2VLProcessor.from_pretrained(args.pretrained)
