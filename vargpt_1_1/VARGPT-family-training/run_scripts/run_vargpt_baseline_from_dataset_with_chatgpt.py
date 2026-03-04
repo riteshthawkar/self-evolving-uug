@@ -151,6 +151,15 @@ def _decode_text(processor, generated_ids: torch.Tensor) -> str:
     return processor.decode(generated_ids[0][:-1], skip_special_tokens=True)
 
 
+def _is_dtype_mismatch_error(exc: RuntimeError) -> bool:
+    msg = str(exc).lower()
+    return (
+        "mat1 and mat2 must have the same dtype" in msg
+        or "mat1 and mat2 must have same dtype" in msg
+        or ("mat1" in msg and "mat2" in msg and "dtype" in msg)
+    )
+
+
 def _to_device(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for k, v in batch.items():
@@ -178,7 +187,7 @@ def main() -> None:
     parser.add_argument("--pretrained", default="VARGPT-family/VARGPT-v1.1", help="Baseline VARGPT model path/id")
     parser.add_argument("--openai-model", default="gpt-4.1-mini", help="OpenAI model for prompt generation")
     parser.add_argument("--device", default="cuda", help="cuda or cpu")
-    parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
+    parser.add_argument("--dtype", default="float32", choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--num-runs", type=int, default=4, help="How many baseline generations to run")
     parser.add_argument("--max-new-tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -242,6 +251,7 @@ def main() -> None:
         "outputs": [],
     }
 
+    did_float32_fallback = False
     for i in range(args.num_runs):
         run_seed = args.seed + i
         _set_seed(run_seed)
@@ -251,14 +261,33 @@ def main() -> None:
         out_image = outdir / f"gen_{i+1:02d}.png"
         model._IMAGE_GEN_PATH = str(out_image)
 
-        with torch.inference_mode():
-            output_ids = model.generate(
-                **inputs,
-                max_new_tokens=args.max_new_tokens,
-                do_sample=bool(args.do_sample),
-                temperature=float(args.temperature),
-                top_p=float(args.top_p),
-            )
+        try:
+            with torch.inference_mode():
+                output_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=args.max_new_tokens,
+                    do_sample=bool(args.do_sample),
+                    temperature=float(args.temperature),
+                    top_p=float(args.top_p),
+                )
+        except RuntimeError as exc:
+            if _is_dtype_mismatch_error(exc) and not did_float32_fallback:
+                print(
+                    "[WARN] Generation hit dtype mismatch. "
+                    "Promoting model to float32 and retrying once."
+                )
+                model = model.float().to(device).eval()
+                did_float32_fallback = True
+                with torch.inference_mode():
+                    output_ids = model.generate(
+                        **inputs,
+                        max_new_tokens=args.max_new_tokens,
+                        do_sample=bool(args.do_sample),
+                        temperature=float(args.temperature),
+                        top_p=float(args.top_p),
+                    )
+            else:
+                raise
         out_text = _decode_text(processor, output_ids)
         meta["outputs"].append(
             {
