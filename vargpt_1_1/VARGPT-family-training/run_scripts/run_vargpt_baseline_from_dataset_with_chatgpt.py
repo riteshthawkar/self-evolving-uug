@@ -230,6 +230,66 @@ def _to_device(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
     return out
 
 
+def _debug_mtime_map(debug_outdir: Path) -> Dict[Path, int]:
+    return {pp: pp.stat().st_mtime_ns for pp in debug_outdir.rglob("*.png")}
+
+
+def _try_copy_changed_debug_image(
+    debug_outdir: Path,
+    before_mtime: Dict[Path, int],
+    out_image: Path,
+) -> bool:
+    changed_debug = []
+    for pp in debug_outdir.rglob("*.png"):
+        try:
+            cur_mtime = pp.stat().st_mtime_ns
+        except FileNotFoundError:
+            continue
+        prev_mtime = before_mtime.get(pp)
+        if prev_mtime is None or cur_mtime > prev_mtime:
+            changed_debug.append((cur_mtime, pp))
+    if not changed_debug:
+        return False
+    _, newest = max(changed_debug, key=lambda x: x[0])
+    shutil.copy2(newest, out_image)
+    return out_image.exists()
+
+
+def _save_generated_image_tensor(image_tensor: torch.Tensor, out_image: Path) -> bool:
+    if image_tensor is None:
+        return False
+    try:
+        arr = image_tensor.detach().cpu().numpy()
+    except Exception:
+        return False
+
+    # Expect HxWxC; squeeze batch if needed.
+    if arr.ndim == 4 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim != 3:
+        return False
+
+    if arr.dtype != np.uint8:
+        arr = np.nan_to_num(arr)
+        if arr.max(initial=0.0) <= 1.0 and arr.min(initial=0.0) >= 0.0:
+            arr = (arr * 255.0).clip(0, 255).astype(np.uint8)
+        else:
+            arr = arr.clip(0, 255).astype(np.uint8)
+
+    try:
+        import cv2
+
+        cv2.imwrite(str(out_image), arr)
+    except Exception:
+        try:
+            from PIL import Image
+
+            Image.fromarray(arr).save(out_image)
+        except Exception:
+            return False
+    return out_image.exists()
+
+
 def _run_schedule(mode: str, num_runs: int, do_sample: int, temperature: float, top_p: float) -> List[Tuple[bool, float, float]]:
     if mode == "sweep":
         presets: List[Tuple[bool, float, float]] = [
@@ -452,66 +512,102 @@ def main() -> None:
                 out_image = prompt_outdir / f"gen_{i+1:02d}.png"
 
             do_sample_i, temp_i, top_p_i = schedule[i]
-            # Track debug image mtimes so we can detect both:
-            # 1) newly created files, and
-            # 2) overwritten files with stable names (common in VARGPT eval hooks).
-            existing_debug_mtime = {
-                pp: pp.stat().st_mtime_ns
-                for pp in debug_outdir.rglob("*.png")
-            }
+            output_ids = None
+            out_text = ""
+            image_saved = False
 
-            try:
-                with torch.inference_mode():
-                    _set_image_path_attr(model, str(out_image))
-                    output_ids = model.generate(
-                        **inputs,
-                        max_new_tokens=args.max_new_tokens,
-                        do_sample=bool(do_sample_i),
-                        temperature=float(temp_i),
-                        top_p=float(top_p_i),
-                    )
-            except RuntimeError as exc:
-                if _is_dtype_mismatch_error(exc) and not did_float32_fallback:
-                    print(
-                        "[WARN] Generation hit dtype mismatch. "
-                        "Promoting model to float32 and retrying once."
-                    )
-                    model = model.float().to(device).eval()
-                    did_float32_fallback = True
+            # Primary decode + conservative fallbacks if image token is not triggered.
+            attempts: List[Tuple[bool, float, float]] = [(bool(do_sample_i), float(temp_i), float(top_p_i))]
+            if attempts[0] != (False, 1.0, 1.0):
+                attempts.append((False, 1.0, 1.0))
+            if attempts[0] != (True, 0.9, 0.95):
+                attempts.append((True, 0.9, 0.95))
+
+            for attempt_idx, (attempt_do_sample, attempt_temp, attempt_top_p) in enumerate(attempts):
+                _set_seed(run_seed + attempt_idx)
+                before_debug_mtime = _debug_mtime_map(debug_outdir)
+                try:
                     with torch.inference_mode():
                         _set_image_path_attr(model, str(out_image))
                         output_ids = model.generate(
                             **inputs,
                             max_new_tokens=args.max_new_tokens,
-                            do_sample=bool(do_sample_i),
-                            temperature=float(temp_i),
-                            top_p=float(top_p_i),
+                            do_sample=attempt_do_sample,
+                            temperature=attempt_temp,
+                            top_p=attempt_top_p,
                         )
-                else:
-                    raise
+                except RuntimeError as exc:
+                    if _is_dtype_mismatch_error(exc) and not did_float32_fallback:
+                        print(
+                            "[WARN] Generation hit dtype mismatch. "
+                            "Promoting model to float32 and retrying once."
+                        )
+                        model = model.float().to(device).eval()
+                        did_float32_fallback = True
+                        with torch.inference_mode():
+                            _set_image_path_attr(model, str(out_image))
+                            output_ids = model.generate(
+                                **inputs,
+                                max_new_tokens=args.max_new_tokens,
+                                do_sample=attempt_do_sample,
+                                temperature=attempt_temp,
+                                top_p=attempt_top_p,
+                            )
+                    else:
+                        raise
 
-            if not out_image.exists():
-                changed_debug = []
-                for pp in debug_outdir.rglob("*.png"):
-                    try:
-                        cur_mtime = pp.stat().st_mtime_ns
-                    except FileNotFoundError:
-                        continue
-                    prev_mtime = existing_debug_mtime.get(pp)
-                    if prev_mtime is None or cur_mtime > prev_mtime:
-                        changed_debug.append((cur_mtime, pp))
+                if out_image.exists() or _try_copy_changed_debug_image(debug_outdir, before_debug_mtime, out_image):
+                    image_saved = True
+                    break
+                print(
+                    f"[WARN] No image artifact after attempt {attempt_idx + 1} "
+                    f"(do_sample={int(attempt_do_sample)}, temp={attempt_temp}, top_p={attempt_top_p})."
+                )
 
-                if changed_debug:
-                    # Use most recently written/updated debug artifact.
-                    _, newest = max(changed_debug, key=lambda x: x[0])
-                    shutil.copy2(newest, out_image)
-                else:
-                    raise RuntimeError(
-                        f"No generated image file found for category={category}, run={i+1}. "
-                        "Model returned text output but no image artifact."
-                    )
+            # Final fallback: call forward with inference_image_gen=True directly.
+            if not image_saved:
+                before_debug_mtime = _debug_mtime_map(debug_outdir)
+                try:
+                    with torch.inference_mode():
+                        _set_image_path_attr(model, str(out_image))
+                        direct_out = model(**inputs, return_dict=True, inference_image_gen=True)
+                    if not out_image.exists():
+                        saved_from_tensor = _save_generated_image_tensor(
+                            getattr(direct_out, "generated_image", None), out_image
+                        )
+                        image_saved = bool(saved_from_tensor)
+                    if not image_saved:
+                        image_saved = _try_copy_changed_debug_image(debug_outdir, before_debug_mtime, out_image)
+                except Exception as exc:
+                    print(f"[WARN] Direct inference_image_gen fallback failed: {exc}")
 
-            out_text = _decode_text(processor, output_ids)
+            if output_ids is not None:
+                out_text = _decode_text(processor, output_ids)
+
+            if not image_saved:
+                err_msg = (
+                    f"No generated image file found for category={category}, run={i+1}. "
+                    f"Tried decode fallbacks and direct inference_image_gen. Debug dir: {debug_outdir}"
+                )
+                print(f"[ERROR] {err_msg}")
+                meta["outputs"].append(
+                    {
+                        "prompt_index": p_idx,
+                        "category": category,
+                        "prompt_text": prompt_text,
+                        "run_idx": i + 1,
+                        "seed": run_seed,
+                        "image_path": None,
+                        "decoded_text": out_text,
+                        "do_sample": bool(do_sample_i),
+                        "temperature": float(temp_i),
+                        "top_p": float(top_p_i),
+                        "status": "failed_no_image_artifact",
+                        "error": err_msg,
+                    }
+                )
+                continue
+
             meta["outputs"].append(
                 {
                     "prompt_index": p_idx,
@@ -524,6 +620,7 @@ def main() -> None:
                     "do_sample": bool(do_sample_i),
                     "temperature": float(temp_i),
                     "top_p": float(top_p_i),
+                    "status": "ok",
                 }
             )
             print(f"[INFO] category={category} run={i+1} saved={out_image}")
