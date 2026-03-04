@@ -20,18 +20,13 @@ with open(Path(__file__).parent / "mmvet.yaml", "r") as f:
 API_TYPE = os.getenv("API_TYPE", "openai")
 
 if API_TYPE == "openai":
+    API_KEY = os.getenv("OPENAI_API_KEY", os.getenv("API_KEY", ""))
     API_URL = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-    }
 elif API_TYPE == "azure":
     API_URL = os.getenv("AZURE_ENDPOINT", "https://api.cognitive.microsoft.com/sts/v1.0/issueToken")
-    API_KEY = os.getenv("AZURE_API_KEY", "YOUR_API_KEY")
-    headers = {
-        "api-key": API_KEY,
-        "Content-Type": "application/json",
-    }
+    API_KEY = os.getenv("AZURE_API_KEY", "")
+else:
+    raise ValueError(f"Unsupported API_TYPE='{API_TYPE}'. Expected 'openai' or 'azure'.")
 
 GPT_EVAL_MODEL_NAME = config["metadata"]["gpt_eval_model_name"]
 MM_VET_PROMPT = """Compare the ground truth and prediction from AI models, to give a correctness score for the prediction. <AND> in the ground truth means it is totally right only when all elements in the ground truth are present in the prediction, and <OR> means it is totally right when any one element in the ground truth is present in the prediction. The correctness score is 0.0 (totally wrong), 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, or 1.0 (totally right). Just complete the last space of the correctness score.
@@ -48,10 +43,23 @@ Can you explain this meme? | This meme is poking fun at the fact that the names 
 
 
 def get_chat_response(prompt, model=GPT_EVAL_MODEL_NAME, temperature=0.0, max_tokens=128, patience=3, sleep_time=5):
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-    }
+    if not API_KEY:
+        eval_logger.error(
+            f"Missing API key for API_TYPE='{API_TYPE}'. "
+            "Set OPENAI_API_KEY (or API_KEY) for openai, or AZURE_API_KEY for azure."
+        )
+        return "", ""
+
+    if API_TYPE == "openai":
+        headers = {
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json",
+        }
+    else:
+        headers = {
+            "api-key": API_KEY,
+            "Content-Type": "application/json",
+        }
 
     messages = [
         {"role": "user", "content": prompt},
