@@ -2,7 +2,7 @@
 % Table 2: Understanding Results
 % =====================================================================
 \begin{table*}[!htb]
-  \caption{Visual understanding results across unified models, self-supervised post-training methods, and our self-evolving framework on three backbones. All self-supervised methods operate without curated labels or external reward models. Methods using additional supervision (e.g., CoRL~\cite{jiang2025coreinforcement}, SRUM~\cite{jin2025srum}) are reported in the supplementary material.}
+  \caption{Visual understanding results across unified models, self-evolving/post-training methods from prior work, and our framework on three backbones. Prior methods use heterogeneous supervision assumptions and evaluation protocols; we therefore treat cross-paper numbers as reference comparisons. Methods with explicit additional supervision (e.g., CoRL~\cite{jiang2025coreinforcement}, SRUM~\cite{jin2025srum}) are reported separately in the supplementary material.}
   \label{tab:understanding_results}
   \centering
   \small
@@ -37,9 +37,9 @@
     BAGEL \cite{deng2025bagel} & 55.3 & 85.0 & -- & -- & -- & 67.2 & 1687.0 & 701.0 \\
     BAGEL (Ours) & \textbf{58.8} & \textbf{87.1} & -- & -- & -- & \textbf{69.5} & \textbf{1701.7} & \textbf{715.9} \\
     BAGEL ($\Delta$) & \co{+3.5} & \co{+2.1} & -- & -- & -- & \co{+2.3} & \co{+14.7} & \co{+14.9} \\
-    VARGPT \cite{xianwei2025vargpt} & 36.4 & 67.6 & 54.1 & 67.9 & 65.2 & 33.5 & 1488.8 & 348.6 \\
-    VARGPT (Ours) & \textbf{39.4} & \textbf{70.3} & \textbf{56.9} & \textbf{71.0} & \textbf{68.8} & \textbf{36.2} & \textbf{1506.2} & \textbf{362.1} \\
-    VARGPT ($\Delta$) & \co{+3.0} & \co{+2.7} & \co{+2.8} & \co{+3.1} & \co{+3.6} & \co{+2.7} & \co{+17.4} & \co{+13.5} \\
+    VARGPT$_{1.1}$ \cite{zhuang2025vargpt} & 36.4 & 67.6 & 54.1 & 67.9 & 65.2 & 33.5 & 1488.8 & 348.6 \\
+    VARGPT$_{1.1}$ (Ours) & \textbf{39.4} & \textbf{70.3} & \textbf{56.9} & \textbf{71.0} & \textbf{68.8} & \textbf{36.2} & \textbf{1506.2} & \textbf{362.1} \\
+    VARGPT$_{1.1}$ ($\Delta$) & \co{+3.0} & \co{+2.7} & \co{+2.8} & \co{+3.1} & \co{+3.6} & \co{+2.7} & \co{+17.4} & \co{+13.5} \\
     \bottomrule
     \multicolumn{9}{l}{\footnotesize $^\dagger$Understanding-only model (not unified).}
   \end{tabular}%

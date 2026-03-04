@@ -1,0 +1,35 @@
+\begin{thebibliography}{1}
+\providecommand{\url}[1]{\texttt{#1}}
+\providecommand{\urlprefix}{URL }
+\providecommand{\doi}[1]{https://doi.org/#1}
+
+\bibitem{han2026unicorn}
+Han, R., Fang, Z., Sun, X., Ma, Y., Wang, Z., Zeng, Y., Chen, Z., Chen, L.,
+  Huang, W., Xu, W.J., Cao, Y., Zhao, F.: Unicorn: Towards self-improving
+  unified multimodal models through self-generated supervision. arXiv preprint
+  arXiv:2601.03193  (2026), \url{https://arxiv.org/abs/2601.03193}
+
+\bibitem{han2025internalgap}
+Han, Y., He, Y., Lin, C., Wang, Z., Wang, K., Ma, Y., Xiang, Y., Yang, X., Ye,
+  H., Song, L., Feng, J.: Turning internal gap into self-improvement: Promoting
+  the generation-understanding unification in mllms. arXiv preprint
+  arXiv:2507.16663  (2025), \url{https://arxiv.org/abs/2507.16663}
+
+\bibitem{jiang2025coreinforcement}
+Jiang, J., Si, C., Luo, J., Zhang, H., Ma, C.: Co-reinforcement learning for
+  unified multimodal understanding and generation. arXiv preprint
+  arXiv:2505.17534  (2025), \url{https://arxiv.org/abs/2505.17534}
+
+\bibitem{mao2025unirl}
+Mao, W., Yang, Z., Shou, M.Z.: {UniRL}: Self-improving unified multimodal
+  models via supervised and reinforcement learning. arXiv preprint
+  arXiv:2505.23380  (2025), \url{https://arxiv.org/abs/2505.23380}
+
+\bibitem{yan2025understandinggeneration}
+Yan, Y., Feng, Y., Liu, Y., Liu, T., Liu, Y., Chen, W., Chen, J., Wu, Y., Yang,
+  J., Liu, T., Hu, X., Yu, Q., Gong, J.: Can understanding and generation truly
+  benefit together -- or just coexist? unified multimodal models as
+  auto-encoder. arXiv preprint arXiv:2509.09666  (2025),
+  \url{https://arxiv.org/abs/2509.09666}
+
+\end{thebibliography}

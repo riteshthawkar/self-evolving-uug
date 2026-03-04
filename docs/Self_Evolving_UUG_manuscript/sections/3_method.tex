@@ -43,7 +43,7 @@ The majority answer is $a^* = \arg\max_{a} |\{i : a_i = a\}|$, and the self-cons
 This measures the \emph{robustness} of understanding rather than stochastic variation: a model that genuinely comprehends the visual content produces consistent answers regardless of framing ($H_{\text{sc}} \approx 0$), while fragile understanding yields conflicting answers ($H_{\text{sc}} > 0$).
 
 \paragraph{Solver Token Entropy (STE).}
-A critical limitation of sample-level self-consistency is that $H_{\text{sc}} = 0$ when all responses agree, regardless of the model's internal confidence. Questions where the Solver answers correctly under all framings but with substantial internal hesitation are precisely the most valuable for curriculum learning, as they sit at the competence frontier. We introduce STE, a continuous difficulty measure from a single greedy forward pass. Let $\mathbf{p}_t \in \mathbb{R}^{|V|}$ denote the softmax distribution at decoding step $t$, with per-token entropy $H_t = -\sum_{v} p_{t,v} \ln p_{t,v}$. STE is:
+A key limitation of sample-level self-consistency is that $H_{\text{sc}} = 0$ when all responses agree, even if internal confidence is low. Questions where the Solver answers correctly under all framings but with substantial hesitation are the most useful for curriculum learning because they lie near the competence frontier. We introduce STE, a continuous difficulty measure from a single greedy forward pass. Let $\mathbf{p}_t \in \mathbb{R}^{|V|}$ denote the softmax distribution at decoding step $t$, with per-token entropy $H_t = -\sum_{v} p_{t,v} \ln p_{t,v}$. STE is:
 \begin{equation}
     \hat{H} = \max_{t \in \{1, \ldots, K\}} H_t.
     \label{eq:ste}
@@ -56,7 +56,7 @@ The maximum captures the point of greatest internal uncertainty during answer ge
 yielding $d_{\text{ste}} \in [0, 1]$ that adapts to the evolving difficulty distribution without manual thresholds. STE is computed from a single greedy pass, adding negligible overhead.
 
 \paragraph{Proposer optimization.}
-The Proposer reward combines STE with self-consistency:
+We define the Proposer reward as:
 \begin{equation}
     R_p = w_{\text{ste}} \cdot d_{\text{ste}} + w_{\text{sc}} \cdot r_{\text{sc}},
     \label{eq:proposer_reward}
@@ -70,6 +70,9 @@ The Solver is updated via KL-regularized REINFORCE. Each response is rewarded ba
     \label{eq:policy_loss}
 \end{equation}
 where $A \in \{\text{Proposer}, \text{Solver}\}$, $b_A$ is an EMA baseline, and $\beta_A$ is an adaptive KL coefficient.
+
+\paragraph{Training insight.}
+Early in training, Solver outputs can be highly variable, making binary or thresholded rewards sparse and unstable. The STE-augmented Proposer reward and graded Solver reward provide dense feedback even under partial agreement, preventing cold-start stagnation. This naturally induces a curriculum: as the Solver becomes more reliable, the Proposer shifts toward higher-value, boundary-level questions instead of collapsing to trivial prompts.
 
 
 \subsection{Generation Assessment via Internal Evaluation}
@@ -91,7 +94,7 @@ QA fidelity only evaluates the specific attributes that diagnostic questions pro
     S_{\text{cyc}} = \tfrac{1}{2}\,\text{sim}(f(t), f(\hat{t})) + \tfrac{1}{2}\,\text{sim}_{\text{vl}}(\hat{\mathcal{I}}, t),
     \label{eq:cycle}
 \end{equation}
-where $f(\cdot)$ denotes a text embedding function and $\text{sim}_{\text{vl}}$ denotes visual-linguistic similarity from the model's own frozen encoder. The first term measures whether the generated image elicits a caption whose meaning matches the original prompt; the second evaluates visual-textual alignment at the representation level. Both use the model's internal representations rather than external scoring models.
+where $f(\cdot)$ denotes a text embedding function and $\text{sim}_{\text{vl}}$ denotes visual-linguistic similarity from the model's own frozen encoder. The first term measures whether the generated image yields a caption aligned with the original prompt; the second evaluates visual-textual alignment at the representation level. Both use the model's internal representations rather than external scoring models.
 
 \paragraph{Generator optimization.}
 The combined generation reward is:
@@ -99,7 +102,7 @@ The combined generation reward is:
     R_g = w_{\text{fid}} \cdot S_{\text{fid}} + w_{\text{cyc}} \cdot S_{\text{cyc}} + w_{\text{div}} \cdot S_{\text{div}} - w_{\text{ctr}} \cdot S_{\text{ctr}},
     \label{eq:gen_reward}
 \end{equation}
-where $S_{\text{div}}$ encourages visual diversity and $S_{\text{ctr}}$ penalizes internal contradictions, with weights normalized to sum to one. The Generator is updated via KL-regularized REINFORCE using the same form as Eq.~\eqref{eq:policy_loss}. The generation pathway is treated abstractly: for diffusion models the policy gradient applies to text conditioning; for autoregressive models it applies to discrete token prediction. This abstraction enables identical optimization across architecturally distinct unified models.
+where $S_{\text{div}}$ encourages visual diversity and $S_{\text{ctr}}$ penalizes internal contradictions. In practice, we normalize the positive mixture weights $(w_{\text{fid}}, w_{\text{cyc}}, w_{\text{div}})$ and use $w_{\text{ctr}}$ as a separate penalty coefficient. The Generator is updated via KL-regularized REINFORCE using the same form as Eq.~\eqref{eq:policy_loss}. The generation pathway is treated abstractly: for diffusion models the policy gradient applies to text conditioning; for autoregressive models it applies to discrete token prediction. This abstraction enables identical optimization across architecturally distinct unified models.
 
 \paragraph{Coupling design.}
 The understanding and generation loops are deliberately kept loosely coupled through the Solver's dual role. The Proposer is not directly influenced by generation quality, as mixing generation-quality signals into its reward would create conflicting gradients. Instead, the coupling flows indirectly: as the Proposer generates harder questions and the Solver improves, the Solver's evaluations of generated images become more discriminative, providing a stronger signal for the Generator.
