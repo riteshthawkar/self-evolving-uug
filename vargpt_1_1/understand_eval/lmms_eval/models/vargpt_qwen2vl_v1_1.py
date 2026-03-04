@@ -61,23 +61,35 @@ class VARGPT_Qwen2_VL_v1_1(lmms):
         accelerator = Accelerator()
         if accelerator.num_processes > 1:
             self._device = torch.device(f"cuda:{accelerator.local_process_index}")
-            self.device_map = f"cuda:{accelerator.local_process_index}"
+            # In DDP we place one full model copy per rank/device.
+            # Avoid HF device_map dispatch here (can trigger meta-tensor moves).
+            self.device_map = None
         elif accelerator.num_processes == 1 and device_map == "auto":
             self._device = torch.device(device)
             self.device_map = device_map
         else:
             self._device = torch.device(f"cuda:{accelerator.local_process_index}")
-            self.device_map = f"cuda:{accelerator.local_process_index}"
+            self.device_map = None
 
+        common_load_kwargs = {"torch_dtype": "auto"}
         if use_flash_attention_2:
+            common_load_kwargs["attn_implementation"] = "flash_attention_2"
+
+        if self.device_map == "auto":
+            # Single-process auto sharding path.
             base_model = VARGPTQwen2VLForConditionalGeneration.from_pretrained(
                 pretrained,
-                torch_dtype="auto",
-                device_map=self.device_map,
-                attn_implementation="flash_attention_2",
+                device_map="auto",
+                **common_load_kwargs,
             ).eval()
         else:
-            base_model = VARGPTQwen2VLForConditionalGeneration.from_pretrained(pretrained, torch_dtype="auto", device_map=self.device_map).eval()
+            # Deterministic local-rank loading path (no meta dispatch).
+            base_model = VARGPTQwen2VLForConditionalGeneration.from_pretrained(
+                pretrained,
+                low_cpu_mem_usage=False,
+                **common_load_kwargs,
+            ).eval()
+            base_model = base_model.to(self._device)
 
         if hasattr(base_model, 'vargpt_gen'):
             # 方法1：直接删除整个vargpt_gen模块
@@ -131,7 +143,7 @@ class VARGPT_Qwen2_VL_v1_1(lmms):
             self._world_size = self.accelerator.num_processes
         else:
             self._rank = 0
-            self._word_size = 1
+            self._world_size = 1
 
     @property
     def config(self):
