@@ -15,6 +15,7 @@ import json
 import os
 import random
 import subprocess
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -147,6 +148,94 @@ ds_collections = {
     }
 }
 
+DEFAULT_PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
+DEFAULT_DATA_ROOT = os.path.join(DEFAULT_PROJECT_ROOT, "eval", "vlm", "data")
+DEFAULT_IMAGE_ROOT = os.path.join(DEFAULT_PROJECT_ROOT, "eval", "vlm")
+resolved_ds_collections = ds_collections
+
+
+def _resolve_existing_path(path, *, data_root, project_root):
+    if path is None:
+        return None
+
+    if os.path.isabs(path):
+        return path
+
+    candidates = [path]
+    if project_root:
+        candidates.append(os.path.join(project_root, path))
+    if data_root and path.startswith("eval/vlm/data/"):
+        relative_path = path[len("eval/vlm/data/") :]
+        candidates.append(os.path.join(data_root, relative_path))
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[-1]
+
+
+def _resolve_image_path(image_path, *, image_root, project_root, dataset_file):
+    if os.path.isabs(image_path):
+        return image_path
+
+    candidates = [image_path]
+    if image_root:
+        candidates.append(os.path.join(image_root, image_path))
+    if project_root:
+        candidates.append(os.path.join(project_root, "eval", "vlm", image_path))
+    if dataset_file:
+        candidates.append(os.path.join(os.path.dirname(dataset_file), image_path))
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0]
+
+
+def _resolve_dataset_paths(collections, *, data_root, project_root):
+    resolved = {}
+    for name, config in collections.items():
+        config_resolved = dict(config)
+        for key in ("train", "test", "question", "annotation"):
+            if key in config_resolved:
+                config_resolved[key] = _resolve_existing_path(
+                    config_resolved[key],
+                    data_root=data_root,
+                    project_root=project_root,
+                )
+        resolved[name] = config_resolved
+    return resolved
+
+
+def _validate_dataset_paths(dataset_names, collections, *, few_shot):
+    missing = []
+    for dataset_name in dataset_names:
+        config = collections[dataset_name]
+        required_keys = ["test"]
+        if few_shot > 0:
+            required_keys.append("train")
+        if config.get("metric") == "vqa_score":
+            required_keys.extend(["question", "annotation"])
+        elif config.get("metric") == "anls":
+            required_keys.append("annotation")
+
+        for key in required_keys:
+            path = config.get(key)
+            if path and not os.path.exists(path):
+                missing.append((dataset_name, key, path))
+
+    if missing:
+        details = "\n".join(
+            f"  - dataset={dataset_name}, key={key}, path={path}"
+            for dataset_name, key, path in missing
+        )
+        raise FileNotFoundError(
+            "Missing evaluation data files.\n"
+            f"{details}\n"
+            "Set --data-root/--project-root (or BAGEL_EVAL_DATA_ROOT/BAGEL_PROJECT_ROOT) "
+            "to the directory that contains eval/vlm/data."
+        )
+
 
 # https://github.com/google-research/pix2struct/blob/main/pix2struct/metrics.py#L81
 def relaxed_correctness(target: str,
@@ -230,12 +319,15 @@ def collate_fn(batches):
 
 class VQADataset(torch.utils.data.Dataset):
 
-    def __init__(self, train, test, prompt, few_shot):
-        self.test = open(test).readlines()
+    def __init__(self, train, test, prompt, few_shot, image_root=None, project_root=None):
+        self.test_path = test
+        self.test = open(test, encoding="utf-8").readlines()
         self.prompt = prompt
         self.few_shot = few_shot
+        self.image_root = image_root
+        self.project_root = project_root
         if few_shot > 0:
-            self.train = open(train).readlines()
+            self.train = open(train, encoding="utf-8").readlines()
 
     def __len__(self):
         return len(self.test)
@@ -254,7 +346,14 @@ class VQADataset(torch.utils.data.Dataset):
                     sample['image'],
                     sample['question']) + f" {sample['answer']}"
         
-        image = Image.open(os.path.join("eval/vlm", image)).convert('RGB')
+        image = Image.open(
+            _resolve_image_path(
+                image,
+                image_root=self.image_root,
+                project_root=self.project_root,
+                dataset_file=self.test_path,
+            )
+        ).convert('RGB')
         images = [image]
         
         if len(self.prompt) != 0:
@@ -335,10 +434,12 @@ def evaluate_chat_model():
             input_prompt = base_prompt
 
         dataset = VQADataset(
-            train=ds_collections[ds_name]['train'],
-            test=ds_collections[ds_name]['test'],
+            train=resolved_ds_collections[ds_name]['train'],
+            test=resolved_ds_collections[ds_name]['test'],
             prompt=input_prompt,
             few_shot=args.few_shot,
+            image_root=args.image_root,
+            project_root=args.project_root,
         )
         dataloader = torch.utils.data.DataLoader(
             dataset=dataset,
@@ -422,7 +523,7 @@ def evaluate_chat_model():
 
             if ds_collections[ds_name]['metric'] == 'vqa_score':
                 evaluator = TextVQAAccuracyEvaluator()
-                annotation = json.load(open(ds_collections[ds_name]['annotation'], 'r'))['annotations']
+                annotation = json.load(open(resolved_ds_collections[ds_name]['annotation'], 'r', encoding='utf-8'))['annotations']
                 question_id2answers = {}
                 for item in annotation:
                     question_id = item['question_id']
@@ -441,10 +542,10 @@ def evaluate_chat_model():
                           open(results_file, 'w'),
                           ensure_ascii=False)
                 print('python eval/vqa/infographicsvqa_eval.py -g ' +
-                      ds_collections[ds_name]['annotation'] + ' -s ' +
+                      resolved_ds_collections[ds_name]['annotation'] + ' -s ' +
                       results_file)
                 os.system('python eval/vqa/infographicsvqa_eval.py -g ' +
-                          ds_collections[ds_name]['annotation'] + ' -s ' +
+                          resolved_ds_collections[ds_name]['annotation'] + ' -s ' +
                           results_file)
             elif ds_collections[ds_name]['metric'] == 'relaxed_accuracy':
                 relaxed_accuracy = evaluate_relaxed_accuracy(merged_outputs)
@@ -490,6 +591,9 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--model-path', type=str, default='hf/BAGEL-7B-MoT/')
     parser.add_argument('--few-shot', type=int, default=0)
+    parser.add_argument('--project-root', type=str, default=os.getenv('BAGEL_PROJECT_ROOT', DEFAULT_PROJECT_ROOT))
+    parser.add_argument('--data-root', type=str, default=os.getenv('BAGEL_EVAL_DATA_ROOT', DEFAULT_DATA_ROOT))
+    parser.add_argument('--image-root', type=str, default=os.getenv('BAGEL_EVAL_IMAGE_ROOT', DEFAULT_IMAGE_ROOT))
     args = parser.parse_args()
 
     if not os.path.exists(args.out_dir):
@@ -498,19 +602,35 @@ if __name__ == '__main__':
     args.datasets = args.datasets.split(',')
     print('datasets:', args.datasets)
     assert args.batch_size == 1, 'Only batch size 1 is supported'
+    unknown_datasets = [ds for ds in args.datasets if ds not in ds_collections]
+    assert not unknown_datasets, f"Unknown datasets: {unknown_datasets}"
 
-    torch.distributed.init_process_group(
-        backend='nccl',
-        world_size=int(os.getenv('WORLD_SIZE', '1')),
-        rank=int(os.getenv('RANK', '0')),
+    resolved_ds_collections = _resolve_dataset_paths(
+        ds_collections,
+        data_root=args.data_root,
+        project_root=args.project_root,
     )
+    _validate_dataset_paths(args.datasets, resolved_ds_collections, few_shot=args.few_shot)
 
-    torch.cuda.set_device(int(os.getenv('LOCAL_RANK', 0)))
+    dist_initialized = False
 
-    model, tokenizer, new_token_ids = load_model_and_tokenizer(args)
-    image_transform = build_transform()
+    try:
+        torch.distributed.init_process_group(
+            backend='nccl',
+            world_size=int(os.getenv('WORLD_SIZE', '1')),
+            rank=int(os.getenv('RANK', '0')),
+        )
+        dist_initialized = True
 
-    total_params = sum(p.numel() for p in model.parameters()) / 1e9
-    print(f'[test] total_params: {total_params}B')
+        torch.cuda.set_device(int(os.getenv('LOCAL_RANK', 0)))
 
-    evaluate_chat_model()
+        model, tokenizer, new_token_ids = load_model_and_tokenizer(args)
+        image_transform = build_transform()
+
+        total_params = sum(p.numel() for p in model.parameters()) / 1e9
+        print(f'[test] total_params: {total_params}B')
+
+        evaluate_chat_model()
+    finally:
+        if dist_initialized and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
