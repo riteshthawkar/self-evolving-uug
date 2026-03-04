@@ -52,6 +52,8 @@ class TextAttentivePool(nn.Module):
 class SharedAdaLin(nn.Linear):
     def forward(self, cond_BD):
         C = self.weight.shape[0] // 6
+        # Guard against mixed precision mismatches (e.g., cond_BD=float32, weight=bfloat16).
+        cond_BD = cond_BD.to(device=self.weight.device, dtype=self.weight.dtype)
         return super().forward(cond_BD).reshape(-1, 1, 6, C)   # B16C
 
 
