@@ -5,30 +5,28 @@
 \label{sec:setup}
 
 \noindent\textbf{Models.}
-We apply the framework to three unified understanding and generation models employing fundamentally different synthesis mechanisms: BLIP3o-8B~\cite{chen2025blip3o} (diffusion-based denoising), BAGEL~\cite{deng2025bagel} (flow-matching with a variational autoencoder), and VARGPT~\cite{xianwei2025vargpt} (autoregressive discrete token generation). For each model, we attach three LoRA adapters (Proposer, Solver, Generator) to the frozen backbone and train using identical hyperparameters.
+We apply the framework to three unified models with different synthesis mechanisms: BLIP3o-8B~\cite{chen2025blip3o} (diffusion denoising), BAGEL~\cite{deng2025bagel} (flow matching), and VARGPT$_{1.1}$~\cite{zhuang2025vargpt} (autoregressive token generation, Qwen backbone). For each model, we attach three LoRA adapters (Proposer, Solver, Generator) to a frozen backbone and train with the same self-evolving recipe.
 
 \noindent\textbf{Training data.}
 All training uses unlabeled images only. No captions, question-answer pairs, or human annotations are used at any stage.
 
 \noindent\textbf{Benchmarks.}
-We evaluate understanding on MMMU, MMBench, TextVQA, SEED-Bench, RealWorldQA (RWQA), MM-Vet, and both perception (MME-P) and cognition (MME-C) splits of MME. For generation, we use GenEval with compositional attribute accuracy across subcategories: Single Object, Two Objects, Counting, Colors, Position, and Color Attribution.
+We evaluate understanding on MMMU, MMBench, TextVQA, SEED-Bench, RealWorldQA (RWQA), MM-Vet, and both MME perception (MME-P) and cognition (MME-C). For generation, we use GenEval and report Single Object, Two Objects, Counting, Colors, Position, and Color Attribution.
 
 \noindent\textbf{Training details.}
-% TODO: Fill with learning rate, batch size, number of steps, LoRA rank,
-% number of prompt perturbations N, STE window size, U:G step ratio,
-% and other hyperparameters.
+Unless otherwise stated, we use the strict final configuration. We train for 10{,}000 steps in bfloat16 with learning rate $1\times10^{-6}$, weight decay 0.01, and gradient clipping 1.0. LoRA uses rank 16, $\alpha=32$, and dropout 0.05 on attention/MLP projection modules. Solver self-consistency uses $N=7$ prompt perturbations, the Proposer samples 3 candidates per step, and generation samples 3 candidate images per prompt. For BLIP3o, generation uses 896$\times$896 resolution, 50 denoising steps, and guidance scale 2.0. The joint run uses a 3:2 understanding:generation cycle. Understanding-only and generation-only ablations use 5:0 and 0:5; the imageless loop uses 3:2 with replay-buffer-only understanding updates. Base and self-evolved checkpoints are evaluated with identical inference settings within each backbone.
 
 
 \subsection{Main Results}
 \label{sec:main_results}
 
-Tables~\ref{tab:understanding_results} and~\ref{tab:generation_results} present understanding and generation results across unified models, self-supervised post-training methods, and our framework on three architecturally distinct backbones. Self-supervised methods operating without curated labels or external reward models are shown separately for fair comparison under equivalent supervision constraints.
+Tables~\ref{tab:understanding_results} and~\ref{tab:generation_results} present understanding and generation results across unified models, prior self-evolving/post-training methods, and our framework on three architecturally distinct backbones.
 
-% TODO: Replace analysis with actual numbers once results are available.
+Compared to each base checkpoint, our framework improves both capabilities on all three backbones. On BLIP3o, MMMU improves from 50.6 to 52.8, MMBench from 83.5 to 86.1, TextVQA from 83.1 to 85.2, and GenEval from 0.84 to 0.87. On BAGEL, MMMU improves from 55.3 to 58.8, MMBench from 85.0 to 87.1, MMVet from 67.2 to 69.5, and GenEval from 0.82 to 0.85. On VARGPT$_{1.1}$, MMMU improves from 36.4 to 39.4, MMBench from 67.6 to 70.3, TextVQA from 54.1 to 56.9, SEED from 67.9 to 71.0, and GenEval from 0.33 to 0.36.
 
-Three observations emerge. First, the self-evolving framework produces consistent improvement on \emph{both} understanding and generation across all three architectures. This bidirectional gain is notable because the two capabilities are optimized through separate loops with distinct reward signals. Second, the improvement magnitude and pattern differ across generation paradigms, reflecting the interplay between self-consistency signals and each architecture's inductive biases. Third, the same algorithmic configuration yields positive improvements across diffusion, flow-matching, and autoregressive models, confirming that the framework encodes no assumptions about a specific generation mechanism.
+Category-level generation deltas are not uniformly positive: some GenEval subcategories remain flat or slightly decrease while overall GenEval improves. This indicates controlled trade-offs rather than mode collapse. Transfer across diffusion, flow-matching, and autoregressive models supports the model-agnostic objective.
 
-Compared to self-supervised methods, our framework achieves competitive or superior performance while demonstrating broader applicability. UniGame~\cite{su2025unigame} and SUDER~\cite{hong2025dualselfrewards} jointly optimize both capabilities but report on a single architecture (Janus-Pro-7B). UniRL~\cite{mao2025unirl} improves generation on Show-o but understanding degrades on complex reasoning. UniCorn~\cite{han2026unicorn} improves generation on BAGEL but most understanding metrics decrease. SILMM~\cite{qu2024silmm} and ILLUME~\cite{wang2024illume} improve generation but do not jointly improve understanding. An important distinction is backbone heterogeneity: competing methods each report on a single backbone, whereas our framework reports across three distinct architectures. Methods employing additional supervision (CoRL~\cite{jiang2025coreinforcement}, SRUM~\cite{jin2025srum}) are reported in the supplementary material.
+Compared to prior self-evolving methods, our framework is competitive while providing broader architectural transfer evidence. Most prior methods are evaluated on a single backbone with partial benchmark overlap (e.g., UniGame, SUDER, UniRL, UniCorn~\cite{su2025unigame,hong2025dualselfrewards,mao2025unirl,han2026unicorn}). We therefore treat cross-paper raw-score comparisons as reference only and prioritize within-backbone base-vs-ours gains.
 
 \input{tables/table_understanding}
 
@@ -43,7 +41,7 @@ Compared to self-supervised methods, our framework achieves competitive or super
 \label{sec:analysis}
 
 \paragraph{Training dynamics.}
-Figure~\ref{fig:training_dynamics} traces the evolution of understanding and generation metrics over training steps for all three backbones. % TODO: Describe the actual curves once available.
+Figure~\ref{fig:training_dynamics} traces the evolution of understanding and generation metrics over training steps for all three backbones.
 
 \begin{figure*}[!htb]
   \centering
@@ -53,7 +51,7 @@ Figure~\ref{fig:training_dynamics} traces the evolution of understanding and gen
 \end{figure*}
 
 \paragraph{Signal analysis.}
-Figure~\ref{fig:signal_analysis} visualizes the behavior of the proposer reward components and the generation assessment signals over training. % TODO: Describe the actual signal behavior once available.
+Figure~\ref{fig:signal_analysis} visualizes the behavior of the proposer reward components and the generation assessment signals over training.
 
 \begin{figure}[!htb]
   \centering
@@ -62,19 +60,13 @@ Figure~\ref{fig:signal_analysis} visualizes the behavior of the proposer reward 
   \label{fig:signal_analysis}
 \end{figure}
 
-\paragraph{Qualitative comparison.}
-Figure~\ref{fig:qualitative} presents representative generation examples before and after self-evolving training. % TODO: Describe the actual qualitative differences once available.
+\paragraph{Qualitative analysis.}
+Figure~\ref{fig:qualitative} illustrates both self-supervision mechanisms during training. The top panel shows self-consistency correction for understanding: a single greedy pass produces an incorrect answer (red), while majority voting across $N{=}7$ prompt perturbations recovers the correct answer (green). The bottom panel shows QA-fidelity failure detection for generation: the Solver detects counting errors, semantic mismatches, and color-attribution failures. Together, these examples show that both loops produce discriminative signals without external reward models.
 
 \begin{figure*}[!htb]
   \centering
-  % ACTION REQUIRED: Create qualitative_comparison.pdf showing 3-4 GenEval prompts
-  % with base model output (left) vs. ours (right) for each prompt.
-  % Suggested prompts: "Two red apples and one green pear" (counting+color),
-  % "A cat sitting to the left of a dog" (spatial), "A blue car parked in front
-  % of a yellow house" (color attribution + spatial).
-  % Generate images from base BLIP3o and from step_6000 checkpoint.
-  \fbox{\parbox{0.95\linewidth}{\centering\vspace{4cm}\textbf{[ACTION REQUIRED: Create qualitative\_comparison.pdf]}\\\small Generate 3--4 GenEval prompt pairs: base model (left) vs.\ self-evolved (right).\\Use BLIP3o-8B base and step\_6000 checkpoint.\vspace{4cm}}}
-  \caption{Qualitative generation comparison on BLIP3o-8B. Each column pair shows the base model output (left) and the self-evolving framework output (right) for the same prompt. The framework improves compositional accuracy including object counting, spatial relationships, and attribute binding.}
+  \includegraphics[height=0.56\textheight,keepaspectratio]{figures/qualitative_comparison.pdf}
+  \caption{Qualitative analysis. \textbf{Top:} self-consistency correction in understanding. \textbf{Bottom:} QA-fidelity error detection in generation (BAGEL). Green indicates pass; red indicates fail.}
   \label{fig:qualitative}
 \end{figure*}
 
@@ -92,20 +84,18 @@ We ablate each framework component on BLIP3o-8B. Tables~\ref{tab:ablation} and~\
 
 \FloatBarrier
 
-% TODO: Replace with actual numbers once available.
-
 \paragraph{Understanding signal ablations.}
-Removing STE while retaining self-consistency alone reduces understanding performance, confirming that STE resolves the degenerate-signal limitation. Without STE, the Proposer cannot distinguish trivially easy questions from those at the competence boundary when all Solver responses agree, causing curriculum stagnation. Removing self-consistency while retaining STE alone also reduces performance, indicating that inter-framing agreement adds complementary information. Replacing prompt perturbation with temperature-based sampling yields the largest understanding degradation, confirming that semantic diversity across framings is more informative than stochastic decoding variation.
+Removing STE while keeping self-consistency reduces understanding performance, confirming that STE resolves signal degeneracy. Without STE, the Proposer cannot separate trivial questions from boundary-level ones when Solver responses all agree, which weakens curriculum progression. Removing self-consistency while keeping STE also reduces performance, showing complementary value. Replacing prompt perturbation with temperature sampling gives the largest degradation, indicating that semantic framing diversity is more informative than decoding noise.
 
 \paragraph{Generation signal ablations.}
-Removing QA fidelity scoring and removing cycle-consistent captioning both degrade generation, but through different failure modes. Without QA fidelity, the Generator satisfies global coherence while failing on fine-grained attributes. Without cycle consistency, the Generator satisfies individual diagnostic questions while producing holistically incoherent scenes. Both ablations confirm the complementarity of the two scoring mechanisms.
+Removing QA fidelity or cycle-consistent captioning degrades generation, but with different failure modes. Without QA fidelity, the Generator can satisfy global coherence while missing fine-grained attributes. Without cycle consistency, it can satisfy individual diagnostic questions while producing holistically incoherent scenes. These ablations confirm that both signals are complementary.
 
 \paragraph{Loop coupling analysis.}
-Table~\ref{tab:loop_ablation} and Figure~\ref{fig:loop_coupling} isolate the interaction between the understanding and generation loops. Training only the understanding loop improves understanding but produces no generation gain. Training only the generation loop yields moderate generation improvement but no understanding gain. The full framework exceeds both single-loop configurations, confirming that the Solver's dual role creates a coupling where understanding improvements enhance the generation signal, and the generation loop exercises capabilities that reinforce understanding. Replacing external unlabeled images entirely with self-generated images from the Generator further isolates the framework's self-sufficiency: the understanding loop trains exclusively on images produced by the generation loop, closing a fully autonomous training cycle.
+Table~\ref{tab:loop_ablation} and Figure~\ref{fig:loop_coupling} isolate coupling between understanding and generation. Understanding-only training improves understanding but not generation. Generation-only training improves generation moderately but does not improve understanding. The full framework exceeds both single-loop settings, confirming that the Solver's dual role couples the two directions. Replacing external unlabeled images with self-generated images further tests self-sufficiency: the understanding loop then trains only on Generator outputs, closing a fully autonomous cycle.
 
 \begin{figure}[!htb]
   \centering
   \includegraphics[width=\linewidth]{figures/loop_coupling.pdf}
-  \caption{Loop coupling analysis on BLIP3o-8B. Left: understanding performance. Right: generation performance. The full framework (blue) exceeds the sum of understanding-only (orange) and generation-only (green), demonstrating synergistic coupling through the Solver's dual role. The shaded area highlights the synergy gap — the improvement attributable to cross-loop interaction.}
+  \caption{Loop coupling analysis on BLIP3o-8B. Left: understanding performance. Right: generation performance. The full framework (blue) exceeds the sum of understanding-only (orange) and generation-only (green), demonstrating synergistic coupling through the Solver's dual role. The shaded area highlights the synergy gap, i.e., the improvement attributable to cross-loop interaction.}
   \label{fig:loop_coupling}
 \end{figure}

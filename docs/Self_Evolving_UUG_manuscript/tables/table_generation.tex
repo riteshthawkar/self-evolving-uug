@@ -2,7 +2,7 @@
 % Table 3: Generation Results (GenEval subcategories expanded)
 % =====================================================================
 \begin{table*}[!htb]
-  \caption{Image generation results across unified models, self-supervised post-training methods, and our self-evolving framework on three backbones. GenEval subcategories are reported where available.}
+  \caption{Image generation results across unified models, self-evolving/post-training methods, and our framework on three backbones. GenEval subcategories are reported where available; cross-paper comparisons should be interpreted with protocol differences in mind.}
   \label{tab:generation_results}
   \centering
   \small
@@ -33,14 +33,14 @@
     \midrule
     \multicolumn{8}{c}{\emph{Ours (self-evolving framework)}} \\
     BLIP3o-8B \cite{chen2025blip3o} & 1.00 & 0.85 & 0.63 & 0.92 & 0.90 & 0.74 & 0.84 \\
-    BLIP3o-8B (Ours) & \textbf{0.99} & \textbf{0.93} & \textbf{0.71} & \textbf{0.94} & \textbf{0.90} & \textbf{0.75} & \textbf{0.87} \\
+    BLIP3o-8B (Ours) & 0.99 & 0.93 & 0.71 & 0.94 & 0.90 & 0.75 & \textbf{0.87} \\
     BLIP3o-8B ($\Delta$) & \co{-0.01} & \co{+0.08} & \co{+0.08} & \co{+0.02} & \co{0.00} & \co{+0.01} & \co{+0.03} \\
     BAGEL \cite{deng2025bagel} & 0.99 & 0.94 & 0.81 & 0.88 & 0.64 & 0.63 & 0.82 \\
-    BAGEL (Ours) & \textbf{0.99} & \textbf{0.95} & \textbf{0.83} & \textbf{0.90} & \textbf{0.67} & \textbf{0.66} & \textbf{0.85} \\
+    BAGEL (Ours) & 0.99 & 0.95 & 0.83 & 0.90 & 0.67 & 0.66 & \textbf{0.85} \\
     BAGEL ($\Delta$) & 0.00 & \co{+0.01} & \co{+0.02} & \co{+0.02} & \co{+0.03} & \co{+0.03} & \co{+0.03} \\
-    VARGPT \cite{xianwei2025vargpt} & -- & -- & -- & -- & -- & -- & 0.33 \\
-    VARGPT (Ours) & -- & -- & -- & -- & -- & -- & \textbf{0.36} \\
-    VARGPT ($\Delta$) & -- & -- & -- & -- & -- & -- & \co{+0.03} \\
+    VARGPT$_{1.1}$ \cite{zhuang2025vargpt} & -- & -- & -- & -- & -- & -- & 0.33 \\
+    VARGPT$_{1.1}$ (Ours) & -- & -- & -- & -- & -- & -- & \textbf{0.36} \\
+    VARGPT$_{1.1}$ ($\Delta$) & -- & -- & -- & -- & -- & -- & \co{+0.03} \\
     \bottomrule
     \multicolumn{8}{l}{\footnotesize $^\ddagger$Generation-only improvement.}
   \end{tabular}%

@@ -118,10 +118,21 @@ def vargpt_sample(
     unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
     model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
+    # Compatibility: transformers changed `_has_unfinished_sequences` signature across versions.
+    # Older versions accept only `(this_peer_finished, synced_gpus, device)`,
+    # newer ones may additionally accept `cur_len` and `max_length`.
+    _unfinished_params = inspect.signature(self._has_unfinished_sequences).parameters
+
+    def _has_unfinished_sequences_compat() -> bool:
+        kw = {"device": input_ids.device}
+        if "cur_len" in _unfinished_params:
+            kw["cur_len"] = cur_len
+        if "max_length" in _unfinished_params:
+            kw["max_length"] = max_length
+        return self._has_unfinished_sequences(this_peer_finished, synced_gpus, **kw)
+
     generation_end = False
-    while self._has_unfinished_sequences(
-        this_peer_finished, synced_gpus, device=input_ids.device, cur_len=cur_len, max_length=max_length
-    ) and not generation_end:
+    while _has_unfinished_sequences_compat() and not generation_end:
         # prepare model inputs
         model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
