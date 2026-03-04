@@ -32,9 +32,9 @@ TRIPLET_PROMPTS: List[Dict[str, str]] = [
 ]
 
 TRIPLET_BEST_SETTINGS: Dict[str, Tuple[bool, float, float]] = {
-    "counting": (False, 0.0, 1.0),
+    "counting": (False, 1.0, 1.0),
     "position": (True, 0.35, 0.85),
-    "color_attribution": (False, 0.0, 1.0),
+    "color_attribution": (False, 1.0, 1.0),
 }
 
 
@@ -452,7 +452,13 @@ def main() -> None:
                 out_image = prompt_outdir / f"gen_{i+1:02d}.png"
 
             do_sample_i, temp_i, top_p_i = schedule[i]
-            existing_debug = set(debug_outdir.glob("*.png"))
+            # Track debug image mtimes so we can detect both:
+            # 1) newly created files, and
+            # 2) overwritten files with stable names (common in VARGPT eval hooks).
+            existing_debug_mtime = {
+                pp: pp.stat().st_mtime_ns
+                for pp in debug_outdir.rglob("*.png")
+            }
 
             try:
                 with torch.inference_mode():
@@ -485,9 +491,19 @@ def main() -> None:
                     raise
 
             if not out_image.exists():
-                new_debug = [pp for pp in debug_outdir.glob("*.png") if pp not in existing_debug]
-                if new_debug:
-                    newest = max(new_debug, key=lambda pp: pp.stat().st_mtime)
+                changed_debug = []
+                for pp in debug_outdir.rglob("*.png"):
+                    try:
+                        cur_mtime = pp.stat().st_mtime_ns
+                    except FileNotFoundError:
+                        continue
+                    prev_mtime = existing_debug_mtime.get(pp)
+                    if prev_mtime is None or cur_mtime > prev_mtime:
+                        changed_debug.append((cur_mtime, pp))
+
+                if changed_debug:
+                    # Use most recently written/updated debug artifact.
+                    _, newest = max(changed_debug, key=lambda x: x[0])
                     shutil.copy2(newest, out_image)
                 else:
                     raise RuntimeError(
