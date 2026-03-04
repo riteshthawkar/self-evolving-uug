@@ -4,10 +4,11 @@ import base64
 import json
 import os
 import random
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 from urllib import request as urlrequest
 
 import numpy as np
@@ -147,6 +148,33 @@ def _load_baseline_model(pretrained: str, device: torch.device, dtype: torch.dty
     return model, processor, tokenizer
 
 
+def _set_image_path_attr(model: Any, image_path: str) -> None:
+    seen = set()
+    stack = [model]
+    while stack:
+        cur = stack.pop()
+        obj_id = id(cur)
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+        try:
+            setattr(cur, "_IMAGE_GEN_PATH", image_path)
+        except Exception:
+            pass
+        for attr in ("model", "base_model", "module"):
+            nxt = getattr(cur, attr, None)
+            if nxt is not None and nxt is not cur:
+                stack.append(nxt)
+        getter = getattr(cur, "get_base_model", None)
+        if callable(getter):
+            try:
+                nxt = getter()
+                if nxt is not None and nxt is not cur:
+                    stack.append(nxt)
+            except Exception:
+                pass
+
+
 def _decode_text(processor, generated_ids: torch.Tensor) -> str:
     return processor.decode(generated_ids[0][:-1], skip_special_tokens=True)
 
@@ -173,6 +201,23 @@ def _to_device(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
     return out
 
 
+def _run_schedule(mode: str, num_runs: int, do_sample: int, temperature: float, top_p: float) -> List[Tuple[bool, float, float]]:
+    if mode == "sweep":
+        presets: List[Tuple[bool, float, float]] = [
+            (False, 1.0, 1.0),   # deterministic / adherence-heavy
+            (True, 0.7, 0.85),   # balanced
+            (True, 1.1, 0.92),   # diverse
+            (True, 1.6, 1.0),    # stress diversity
+        ]
+        if num_runs <= len(presets):
+            return presets[:num_runs]
+        out = presets[:]
+        while len(out) < num_runs:
+            out.append(presets[(len(out) - len(presets)) % len(presets)])
+        return out
+    return [(bool(do_sample), float(temperature), float(top_p)) for _ in range(num_runs)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Pick one dataset image, ask ChatGPT for a prompt, run VARGPT baseline generation 4 times."
@@ -186,6 +231,7 @@ def main() -> None:
     parser.add_argument("--image-path", default="", help="Optional explicit image path; if set, skip random sampling")
     parser.add_argument("--pretrained", default="VARGPT-family/VARGPT-v1.1", help="Baseline VARGPT model path/id")
     parser.add_argument("--openai-model", default="gpt-4.1-mini", help="OpenAI model for prompt generation")
+    parser.add_argument("--prompt-text", default="", help="If set, skip ChatGPT and use this exact prompt text")
     parser.add_argument("--device", default="cuda", help="cuda or cpu")
     parser.add_argument("--dtype", default="float32", choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--num-runs", type=int, default=4, help="How many baseline generations to run")
@@ -193,6 +239,12 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--do-sample", type=int, default=1, choices=[0, 1])
+    parser.add_argument(
+        "--run-mode",
+        default="sweep",
+        choices=["sweep", "fixed"],
+        help="sweep: 4-profile comparison settings; fixed: same decoding params every run",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--outdir",
@@ -200,10 +252,6 @@ def main() -> None:
         help="Output directory; default: <train_root>/logs/chatgpt_dataset_baseline/<timestamp>",
     )
     args = parser.parse_args()
-
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise EnvironmentError("OPENAI_API_KEY is required in environment.")
 
     train_root = Path(args.train_root).resolve()
     _prepare_imports(train_root)
@@ -222,13 +270,26 @@ def main() -> None:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     outdir = Path(args.outdir).resolve() if args.outdir else (train_root / "logs" / "chatgpt_dataset_baseline" / ts)
     outdir.mkdir(parents=True, exist_ok=True)
+    debug_outdir = outdir / "_raw_debug"
+    debug_outdir.mkdir(parents=True, exist_ok=True)
+
+    # VARGPT model file reads these env vars at import time.
+    os.environ["VARGPT_SAVE_DEBUG_IMAGES"] = "1"
+    os.environ["_OUTPUT_IMAGE_PATH"] = str(debug_outdir)
 
     print(f"[INFO] selected_image={image_path}")
-    prompt_text = _ask_chatgpt_for_prompt(
-        image_path=image_path,
-        api_key=api_key,
-        model=args.openai_model,
-    )
+    if args.prompt_text.strip():
+        prompt_text = args.prompt_text.strip()
+        print("[INFO] using provided --prompt-text (ChatGPT skipped)")
+    else:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise EnvironmentError("OPENAI_API_KEY is required when --prompt-text is not provided.")
+        prompt_text = _ask_chatgpt_for_prompt(
+            image_path=image_path,
+            api_key=api_key,
+            model=args.openai_model,
+        )
     print(f"[INFO] chatgpt_prompt={prompt_text}")
 
     dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
@@ -237,6 +298,13 @@ def main() -> None:
 
     model, processor, _tokenizer = _load_baseline_model(args.pretrained, device=device, dtype=dtype)
     chat_prompt = _build_chat_prompt(processor, prompt_text)
+    schedule = _run_schedule(
+        mode=args.run_mode,
+        num_runs=args.num_runs,
+        do_sample=args.do_sample,
+        temperature=args.temperature,
+        top_p=args.top_p,
+    )
 
     meta: Dict[str, Any] = {
         "selected_image": str(image_path),
@@ -248,6 +316,8 @@ def main() -> None:
         "seed": args.seed,
         "device": str(device),
         "dtype": args.dtype,
+        "run_mode": args.run_mode,
+        "debug_outdir": str(debug_outdir),
         "outputs": [],
     }
 
@@ -261,14 +331,18 @@ def main() -> None:
         out_image = outdir / f"gen_{i+1:02d}.png"
         model._IMAGE_GEN_PATH = str(out_image)
 
+        do_sample_i, temp_i, top_p_i = schedule[i]
+        existing_debug = set(debug_outdir.glob("*.png"))
+
         try:
             with torch.inference_mode():
+                _set_image_path_attr(model, str(out_image))
                 output_ids = model.generate(
                     **inputs,
                     max_new_tokens=args.max_new_tokens,
-                    do_sample=bool(args.do_sample),
-                    temperature=float(args.temperature),
-                    top_p=float(args.top_p),
+                    do_sample=bool(do_sample_i),
+                    temperature=float(temp_i),
+                    top_p=float(top_p_i),
                 )
         except RuntimeError as exc:
             if _is_dtype_mismatch_error(exc) and not did_float32_fallback:
@@ -279,15 +353,27 @@ def main() -> None:
                 model = model.float().to(device).eval()
                 did_float32_fallback = True
                 with torch.inference_mode():
+                    _set_image_path_attr(model, str(out_image))
                     output_ids = model.generate(
                         **inputs,
                         max_new_tokens=args.max_new_tokens,
-                        do_sample=bool(args.do_sample),
-                        temperature=float(args.temperature),
-                        top_p=float(args.top_p),
+                        do_sample=bool(do_sample_i),
+                        temperature=float(temp_i),
+                        top_p=float(top_p_i),
                     )
             else:
                 raise
+
+        # Preferred path: direct save to out_image (if model honors _IMAGE_GEN_PATH).
+        # Fallback path: copy newly written debug image.
+        if not out_image.exists():
+            new_debug = [p for p in debug_outdir.glob("*.png") if p not in existing_debug]
+            if new_debug:
+                newest = max(new_debug, key=lambda p: p.stat().st_mtime)
+                shutil.copy2(newest, out_image)
+            else:
+                print(f"[WARN] No generated image file found for run={i+1}.")
+
         out_text = _decode_text(processor, output_ids)
         meta["outputs"].append(
             {
@@ -295,6 +381,9 @@ def main() -> None:
                 "seed": run_seed,
                 "image_path": str(out_image),
                 "decoded_text": out_text,
+                "do_sample": bool(do_sample_i),
+                "temperature": float(temp_i),
+                "top_p": float(top_p_i),
             }
         )
         print(f"[INFO] run={i+1} saved={out_image}")
