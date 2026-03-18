@@ -69,6 +69,45 @@ class BagelRolloutAdapter:
             torch.cuda.empty_cache()
 
     @staticmethod
+    def _resize_image_max_edge(image: Image.Image, max_edge: int) -> Image.Image:
+        max_edge = int(max_edge)
+        if max_edge <= 0:
+            return image
+        width, height = image.size
+        longest = max(int(width), int(height))
+        if longest <= max_edge:
+            return image
+        scale = float(max_edge) / float(longest)
+        new_width = max(1, int(round(float(width) * scale)))
+        new_height = max(1, int(round(float(height) * scale)))
+        return image.resize((new_width, new_height), resample=Image.BICUBIC)
+
+    def _build_understanding_retry_plan(self, image: Image.Image) -> list[int]:
+        default_edge = self._env_int(
+            "BAGEL_UNDERSTANDING_MAX_VIT_EDGE",
+            self._env_int("BAGEL_POLICY_MAX_VIT_EDGE", 448),
+        )
+        min_edge = max(
+            128,
+            self._env_int("BAGEL_UNDERSTANDING_MIN_VIT_EDGE", self._env_int("BAGEL_POLICY_MIN_VIT_EDGE", 224)),
+        )
+        decay = self._env_float("BAGEL_UNDERSTANDING_EDGE_DECAY", 0.8)
+        if decay <= 0.0 or decay >= 1.0:
+            decay = 0.8
+        max_attempts = max(1, self._env_int("BAGEL_UNDERSTANDING_OOM_MAX_RETRIES", 3))
+
+        start_edge = max(min_edge, min(max(int(image.size[0]), int(image.size[1])), int(default_edge)))
+        plan = [start_edge]
+        for _ in range(max_attempts - 1):
+            next_edge = max(min_edge, int(round(float(plan[-1]) * decay)))
+            if next_edge >= plan[-1]:
+                next_edge = max(min_edge, plan[-1] - 32)
+            if next_edge < min_edge or next_edge == plan[-1]:
+                break
+            plan.append(next_edge)
+        return plan
+
+    @staticmethod
     def _build_generation_retry_plan(
         *,
         image_size: int,
@@ -121,19 +160,37 @@ class BagelRolloutAdapter:
         text_top_p: float = 1.0,
         text_top_k: int = 0,
     ) -> GenerationResult:
-        out = self.inferencer(
-            image=image,
-            text=prompt,
-            understanding_output=True,
-            think=False,
-            max_think_token_n=max_new_tokens,
-            do_sample=do_sample,
-            text_temperature=temperature,
-            text_top_p=float(text_top_p),
-            text_top_k=int(text_top_k),
-        )
-        text = str(out.get("text") or "").strip()
-        return GenerationResult(text=text, raw=out)
+        attempt_edges = self._build_understanding_retry_plan(image)
+        last_exc: Optional[BaseException] = None
+        for attempt_idx, max_edge in enumerate(attempt_edges, start=1):
+            try:
+                out = self.inferencer(
+                    image=self._resize_image_max_edge(image, max_edge),
+                    text=prompt,
+                    understanding_output=True,
+                    think=False,
+                    max_think_token_n=max_new_tokens,
+                    do_sample=do_sample,
+                    text_temperature=temperature,
+                    text_top_p=float(text_top_p),
+                    text_top_k=int(text_top_k),
+                )
+                text = str(out.get("text") or "").strip()
+                return GenerationResult(text=text, raw=out)
+            except RuntimeError as exc:
+                if not self._is_oom_error(exc):
+                    raise
+                last_exc = exc
+                if attempt_idx >= len(attempt_edges):
+                    raise
+                print(
+                    f"[rollout_adapter] OOM during understanding inference; "
+                    f"retrying with max_vit_edge={attempt_edges[attempt_idx]}."
+                )
+                self._clear_memory()
+        if last_exc is not None:
+            raise last_exc
+        return GenerationResult(text="", raw={})
 
     def propose_question(
         self,

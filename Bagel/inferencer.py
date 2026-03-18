@@ -1,6 +1,7 @@
 # Copyright 2025 Bytedance Ltd. and/or its affiliates.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from copy import deepcopy
 from typing import List, Dict, Optional, Union, Any
 
@@ -42,6 +43,38 @@ class InterleaveInferencer:
         for p in self.vae_model.parameters():
             return p.device, p.dtype
         return torch.device("cpu"), torch.float32
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        raw = str(os.environ.get(name, str(default))).strip()
+        try:
+            return int(raw)
+        except Exception:
+            return int(default)
+
+    def _resize_for_understanding(self, image: Image.Image) -> Image.Image:
+        """Cap proposer/solver rollout images before the ViT context update.
+
+        The self-evolving understanding path only needs the ViT branch, so using
+        the larger VAE-oriented resize policy here wastes memory and can OOM on
+        multi-GPU runs. Reuse the policy-update edge budget by default.
+        """
+        max_edge = self._env_int(
+            "BAGEL_UNDERSTANDING_MAX_VIT_EDGE",
+            self._env_int("BAGEL_POLICY_MAX_VIT_EDGE", 448),
+        )
+        if max_edge <= 0:
+            return image
+
+        width, height = image.size
+        longest = max(int(width), int(height))
+        if longest <= max_edge:
+            return image
+
+        scale = float(max_edge) / float(longest)
+        new_width = max(1, int(round(float(width) * scale)))
+        new_height = max(1, int(round(float(height) * scale)))
+        return image.resize((new_width, new_height), resample=Image.BICUBIC)
         
     def init_gen_context(self): 
         gen_context = {
@@ -296,11 +329,15 @@ class InterleaveInferencer:
                         cfg_img_context = self.update_context_text(input_term, cfg_img_context)
 
                     elif isinstance(input_term, Image.Image):
-                        input_term = self.vae_transform.resize_transform(pil_img2rgb(input_term))
-                        gen_context = self.update_context_image(input_term, gen_context, vae=not understanding_output)
-
-                        target_image_shapes = input_term.size[::-1]
-                        cfg_text_context = deepcopy(gen_context)
+                        rgb_image = pil_img2rgb(input_term)
+                        if understanding_output:
+                            input_term = self._resize_for_understanding(rgb_image)
+                            gen_context = self.update_context_image(input_term, gen_context, vae=False, vit=True)
+                        else:
+                            input_term = self.vae_transform.resize_transform(rgb_image)
+                            gen_context = self.update_context_image(input_term, gen_context, vae=True, vit=True)
+                            target_image_shapes = input_term.size[::-1]
+                            cfg_text_context = deepcopy(gen_context)
 
                     else:
                         raise ValueError(f"Unsupported input type: {type(input_term)}")
