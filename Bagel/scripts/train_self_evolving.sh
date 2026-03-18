@@ -4,6 +4,19 @@
 
 set -euo pipefail
 
+# Shared repo environment bootstrap.
+BOOTSTRAP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BOOTSTRAP_SEARCH_DIR="${BOOTSTRAP_DIR}"
+while [[ "${BOOTSTRAP_SEARCH_DIR}" != "/" ]]; do
+  if [[ -f "${BOOTSTRAP_SEARCH_DIR}/scripts/env/bootstrap_training_env.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${BOOTSTRAP_SEARCH_DIR}/scripts/env/bootstrap_training_env.sh"
+    break
+  fi
+  BOOTSTRAP_SEARCH_DIR="$(dirname "${BOOTSTRAP_SEARCH_DIR}")"
+done
+unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
+
 : "${MODEL_PATH:?Set MODEL_PATH to BAGEL model directory (contains ema.safetensors)}"
 : "${IMAGE_DIR:?Set IMAGE_DIR to an image folder for understanding rollouts}"
 : "${OUTPUT_DIR:?Set OUTPUT_DIR for rollout logs}"

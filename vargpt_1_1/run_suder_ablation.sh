@@ -12,6 +12,19 @@
 # 2. DATA_PATH: Path to the dataset (or dataset name in dataset_info.json)
 # 3. OUTPUT_DIR: Directory to save checkpoints and logs
 
+# Shared repo environment bootstrap.
+BOOTSTRAP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BOOTSTRAP_SEARCH_DIR="${BOOTSTRAP_DIR}"
+while [[ "${BOOTSTRAP_SEARCH_DIR}" != "/" ]]; do
+  if [[ -f "${BOOTSTRAP_SEARCH_DIR}/scripts/env/bootstrap_training_env.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${BOOTSTRAP_SEARCH_DIR}/scripts/env/bootstrap_training_env.sh"
+    break
+  fi
+  BOOTSTRAP_SEARCH_DIR="$(dirname "${BOOTSTRAP_SEARCH_DIR}")"
+done
+unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
+
 MODEL_PATH=${1:-"path/to/vargpt_model"}
 DATA_PATH=${2:-"coco_2014_caption"} # Example dataset name
 OUTPUT_DIR=${3:-"output/suder_ablation_v1"}

@@ -1,7 +1,21 @@
+#!/usr/bin/env bash
 # Copyright 2025 Bytedance Ltd. and/or its affiliates.
 # SPDX-License-Identifier: Apache-2.0
 
 # run this script at the root of the project folder
+# Shared repo environment bootstrap.
+BOOTSTRAP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BOOTSTRAP_SEARCH_DIR="${BOOTSTRAP_DIR}"
+while [[ "${BOOTSTRAP_SEARCH_DIR}" != "/" ]]; do
+  if [[ -f "${BOOTSTRAP_SEARCH_DIR}/scripts/env/bootstrap_training_env.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${BOOTSTRAP_SEARCH_DIR}/scripts/env/bootstrap_training_env.sh"
+    break
+  fi
+  BOOTSTRAP_SEARCH_DIR="$(dirname "${BOOTSTRAP_SEARCH_DIR}")"
+done
+unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
+
 pip install httpx==0.23.0
 pip install openai==1.87.0
 pip install datasets
@@ -14,8 +28,8 @@ OUTPUT_DIR="/Path/to/save/results"
 GEN_DIR="$OUTPUT_DIR/gen_image"
 LOG_DIR="$OUTPUT_DIR/logs"
 
-AZURE_ENDPOINT="https://azure_endpoint_url_you_use"  # set up the azure openai endpoint url
-AZURE_OPENAI_KEY=""  # set up the azure openai key
+AZURE_ENDPOINT="${AZURE_ENDPOINT:-${AZURE_OPENAI_ENDPOINT:-}}"
+AZURE_OPENAI_KEY="${AZURE_OPENAI_KEY:-${AZURE_OPENAI_API_KEY:-}}"
 N_GPT_PARALLEL=10
 
 
@@ -45,6 +59,11 @@ echo "Image Generation Done"
 # # ---------------------
 # #    GPT Evaluation
 # # ---------------------
+if [[ -z "${AZURE_ENDPOINT}" || -z "${AZURE_OPENAI_KEY}" ]]; then
+    echo "AZURE_ENDPOINT and AZURE_OPENAI_KEY (or AZURE_OPENAI_API_KEY) are required for GEdit evaluation." >&2
+    exit 1
+fi
+
 cd eval/gen/gedit
 python test_gedit_score.py --save_path "$OUTPUT_DIR" --azure_endpoint "$AZURE_ENDPOINT" --gpt_keys "$AZURE_OPENAI_KEY"  --max_workers "$N_GPT_PARALLEL"
 echo "Evaluation Done"
@@ -54,4 +73,3 @@ echo "Evaluation Done"
 # #    Print Results
 # # --------------------
 python calculate_statistics.py --save_path "$OUTPUT_DIR"  --language en
-

@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Shared repo environment bootstrap.
+BOOTSTRAP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BOOTSTRAP_SEARCH_DIR="${BOOTSTRAP_DIR}"
+while [[ "${BOOTSTRAP_SEARCH_DIR}" != "/" ]]; do
+  if [[ -f "${BOOTSTRAP_SEARCH_DIR}/scripts/env/bootstrap_training_env.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${BOOTSTRAP_SEARCH_DIR}/scripts/env/bootstrap_training_env.sh"
+    break
+  fi
+  BOOTSTRAP_SEARCH_DIR="$(dirname "${BOOTSTRAP_SEARCH_DIR}")"
+done
+unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
+
 # ══════════════════════════════════════════════════════════════════════════════
 # E2 — Ablation: Understanding-Only Training
 # ══════════════════════════════════════════════════════════════════════════════
@@ -208,7 +221,16 @@ export TORCH_NCCL_BLOCKING_WAIT=1
 export TORCH_NCCL_TRACE_BUFFER_SIZE=1048576
 export TORCH_DISTRIBUTED_DEBUG="OFF"
 export NCCL_DEBUG="WARN"
-export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+if [[ -z "${HIP_VISIBLE_DEVICES:-}" && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  export HIP_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
+fi
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" && -n "${HIP_VISIBLE_DEVICES:-}" ]]; then
+  export CUDA_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
+fi
+if [[ -z "${HIP_VISIBLE_DEVICES:-}" && -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+  export CUDA_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
+fi
 
 # ── Pre-flight checks ────────────────────────────────────────────────────────
 if [[ ! -d "$DATA_DIR" ]]; then
