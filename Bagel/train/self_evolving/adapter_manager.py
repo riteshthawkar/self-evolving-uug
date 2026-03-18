@@ -120,13 +120,9 @@ def use_adapter(model, adapter_name: Optional[str]):
     if adapter_name is None:
         disable_adapter = getattr(model, "disable_adapter", None)
         if callable(disable_adapter):
-            try:
-                with disable_adapter():
-                    yield
-                return
-            except Exception:
+            with disable_adapter():
                 yield
-                return
+            return
         yield
         return
 

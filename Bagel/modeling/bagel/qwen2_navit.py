@@ -350,6 +350,34 @@ class BaseNavitOutputWithPast(ModelOutput):
     past_key_values: Optional[NaiveCache] = None
 
 
+def _use_train_path(default_training: bool, args, kwargs) -> bool:
+    """Route packed BAGEL calls by argument shape instead of module.training.
+
+    Reference-policy passes run under ``model.eval()`` to disable dropout, but
+    still use the packed training tensors (``packed_sequence`` / ``sample_lens``).
+    Dispatching purely from ``self.training`` breaks those calls by sending them
+    through the incremental inference path.
+    """
+    train_keys = {
+        "packed_sequence",
+        "sample_lens",
+        "packed_position_ids",
+        "packed_position_embeddings",
+    }
+    infer_keys = {
+        "packed_query_sequence",
+        "query_lens",
+        "packed_query_position_ids",
+        "packed_query_position_embeddings",
+        "packed_query_indexes",
+    }
+    if any(key in kwargs for key in train_keys):
+        return True
+    if any(key in kwargs for key in infer_keys):
+        return False
+    return bool(default_training)
+
+
 def pad_sequence(tensor, pad_size):
     H, L, D = tensor.shape
     pad_tensor = tensor.new_zeros((H, pad_size, D))
@@ -367,7 +395,7 @@ class PackedAttention(Qwen2Attention):
             self.k_norm = nn.Identity()
 
     def forward(self, *args, **kwargs):
-        if self.training:
+        if _use_train_path(self.training, args, kwargs):
             return self.forward_train(*args, **kwargs)
         else:
             return self.forward_inference(*args, **kwargs)
@@ -526,7 +554,7 @@ class PackedAttentionMoT(Qwen2Attention):
         self.o_proj_moe_gen = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
     def forward(self, *args, **kwargs):
-        if self.training:
+        if _use_train_path(self.training, args, kwargs):
             return self.forward_train(*args, **kwargs)
         else:
             return self.forward_inference(*args, **kwargs)
@@ -755,7 +783,7 @@ class Qwen2DecoderLayer(nn.Module):
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, *args, **kwargs):
-        if self.training:
+        if _use_train_path(self.training, args, kwargs):
             return self.forward_train(*args, **kwargs)
         else:
             return self.forward_inference(*args, **kwargs)
@@ -848,7 +876,7 @@ class Qwen2MoTDecoderLayer(nn.Module):
         self.post_attention_layernorm_moe_gen = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, *args, **kwargs):
-        if self.training:
+        if _use_train_path(self.training, args, kwargs):
             return self.forward_train(*args, **kwargs)
         else:
             return self.forward_inference(*args, **kwargs)
@@ -988,7 +1016,7 @@ class Qwen2MoEDecoderLayer(nn.Module):
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, *args, **kwargs):
-        if self.training:
+        if _use_train_path(self.training, args, kwargs):
             return self.forward_train(*args, **kwargs)
         else:
             return self.forward_inference(*args, **kwargs)
@@ -1107,7 +1135,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         self.post_init()
 
     def forward(self, *args, **kwargs):
-        if self.training:
+        if _use_train_path(self.training, args, kwargs):
             return self.forward_train(*args, **kwargs)
         else:
             return self.forward_inference(*args, **kwargs)
@@ -1274,7 +1302,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         return self.model
 
     def forward(self, *args, **kwargs):
-        if self.training:
+        if _use_train_path(self.training, args, kwargs):
             return self.forward_train(*args, **kwargs)
         else:
             return self.forward_inference(*args, **kwargs)

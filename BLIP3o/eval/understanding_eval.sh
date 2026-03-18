@@ -1,34 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export CACHE_ROOT="/workspace/self-evolving-uug/cache"
-export HF_HOME="/workspace/self-evolving-uug/cache"
-export HUGGINGFACE_HUB_CACHE="/workspace/self-evolving-uug/cache"
-export TRANSFORMERS_CACHE="/workspace/self-evolving-uug/cache"
-export HF_DATASETS_CACHE="/workspace/self-evolving-uug/cache"
-export HF_METRICS_CACHE="/workspace/self-evolving-uug/cache"
-export TORCH_HOME="/workspace/self-evolving-uug/cache"
-export TRITON_CACHE_DIR="/workspace/self-evolving-uug/cache"
-export XDG_CACHE_HOME="/workspace/self-evolving-uug/cache"
-export TOKENIZERS_PARALLELISM="false"
-export HF_TOKEN="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"
-export CUDA_VISIBLE_DEVICES=0
-export HIP_VISIBLE_DEVICES=0
+# Shared repo environment bootstrap.
+BOOTSTRAP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BOOTSTRAP_SEARCH_DIR="${BOOTSTRAP_DIR}"
+while [[ "${BOOTSTRAP_SEARCH_DIR}" != "/" ]]; do
+  if [[ -f "${BOOTSTRAP_SEARCH_DIR}/scripts/env/bootstrap_training_env.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${BOOTSTRAP_SEARCH_DIR}/scripts/env/bootstrap_training_env.sh"
+    break
+  fi
+  BOOTSTRAP_SEARCH_DIR="$(dirname "${BOOTSTRAP_SEARCH_DIR}")"
+done
+unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BLIP3O_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+BASE_MODEL="${BASE_MODEL:-BLIP3o/BLIP3o-Model-8B}"
+TASKS="${TASKS:-realworldqa,textvqa}"
+OUTPUT_DIR="${OUTPUT_DIR:-${BLIP3O_ROOT}/eval/logs}"
 
 export PYTHONPATH="${BLIP3O_ROOT}:${BLIP3O_ROOT}/eval/lmms-eval:${PYTHONPATH:-}"
-
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES}}"
 
 python -m accelerate.commands.launch \
     --num_processes=1 \
     -m lmms_eval \
     --model blip3o \
-    --model_args "pretrained=BLIP3o/BLIP3o-Model-8B" \
-    --tasks "realworldqa,textvqa" \
+    --model_args "pretrained=${BASE_MODEL}" \
+    --tasks "${TASKS}" \
     --batch_size 1 \
     --log_samples \
     --log_samples_suffix blip3o \
-    --output_path "/workspace/self-evolving-uug/self-evolving-uug/BLIP3o/eval/logs"
-
+    --output_path "${OUTPUT_DIR}"

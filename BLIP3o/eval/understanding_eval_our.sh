@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Shared repo environment bootstrap.
+BOOTSTRAP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BOOTSTRAP_SEARCH_DIR="${BOOTSTRAP_DIR}"
+while [[ "${BOOTSTRAP_SEARCH_DIR}" != "/" ]]; do
+  if [[ -f "${BOOTSTRAP_SEARCH_DIR}/scripts/env/bootstrap_training_env.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${BOOTSTRAP_SEARCH_DIR}/scripts/env/bootstrap_training_env.sh"
+    break
+  fi
+  BOOTSTRAP_SEARCH_DIR="$(dirname "${BOOTSTRAP_SEARCH_DIR}")"
+done
+unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
+
 # ─── Understanding evaluation for self-evolving trained models (LoRA) ───
 #
 # Usage:
@@ -8,17 +21,6 @@ set -euo pipefail
 #   CHECKPOINT_DIR=/path/to/step_00500 NUM_GPUS=8 bash understanding_eval_our.sh
 #   CHECKPOINT_DIR=/path/to/step_00500 ADAPTER=solver TASKS="realworldqa,textvqa,gqa" bash understanding_eval_our.sh
 
-export CACHE_ROOT="/workspace/self-evolving-uug/cache"
-export HF_HOME="/workspace/self-evolving-uug/cache"
-export HUGGINGFACE_HUB_CACHE="/workspace/self-evolving-uug/cache"
-export TRANSFORMERS_CACHE="/workspace/self-evolving-uug/cache"
-export HF_DATASETS_CACHE="/workspace/self-evolving-uug/cache"
-export HF_METRICS_CACHE="/workspace/self-evolving-uug/cache"
-export TORCH_HOME="/workspace/self-evolving-uug/cache"
-export TRITON_CACHE_DIR="/workspace/self-evolving-uug/cache"
-export XDG_CACHE_HOME="/workspace/self-evolving-uug/cache"
-export TOKENIZERS_PARALLELISM="false"
-export HF_TOKEN="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"
 # ─── Multi-GPU configuration ───
 NUM_GPUS="${NUM_GPUS:-8}"
 # Expose all GPUs: build "0,1,2,...,N-1" string
@@ -38,7 +40,7 @@ BASE_MODEL="${BASE_MODEL:-BLIP3o/BLIP3o-Model-8B}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:?Please set CHECKPOINT_DIR to your training checkpoint path (e.g. /path/to/step_00500)}"
 ADAPTER="${ADAPTER:-solver}"
 TASKS="${TASKS:-realworldqa,textvqa}"
-OUTPUT_DIR="${OUTPUT_DIR:-/workspace/self-evolving-uug/self-evolving-uug/BLIP3o/eval/logs}"
+OUTPUT_DIR="${OUTPUT_DIR:-${BLIP3O_ROOT}/eval/logs}"
 
 # Derive a suffix from the checkpoint path for log identification
 CKPT_NAME="$(basename "$(dirname "$CHECKPOINT_DIR")")"_"$(basename "$CHECKPOINT_DIR")"
