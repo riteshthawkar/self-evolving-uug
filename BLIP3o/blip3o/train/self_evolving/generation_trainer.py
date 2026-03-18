@@ -447,6 +447,13 @@ class GenerationSelfEvolvingTrainer:
         self.unicorn_spec_log_path = self.logs_dir / "unicorn_spec_attempts.jsonl"
         self.unicorn_reconstruction_log_path = self.logs_dir / "unicorn_reconstruction.jsonl"
         self.summary_path = self.run_dir / "ablation_summary.json"
+        self.release_rollouts_log_path = self.run_dir / "rollouts.jsonl"
+        self.release_generation_rollouts_log_path = self.run_dir / "generation_rollouts.jsonl"
+        self.metrics_log_path = self.run_dir / "metrics.jsonl"
+        self.status_path = self.run_dir / "status.json"
+        self.release_summary_path = self.run_dir / "summary.json"
+        self.checkpoint_root = self.run_dir / "checkpoints"
+        self.last_checkpoint_dir = ""
         self._save_run_metadata()
 
         self._blip3o_diffusion_pipe = None
@@ -774,6 +781,7 @@ class GenerationSelfEvolvingTrainer:
             self._dist_barrier()
             return
         repo_root = pathlib.Path(__file__).resolve().parents[4]
+        self.checkpoint_root.mkdir(parents=True, exist_ok=True)
         _json_dump(self.run_dir / "config.json", dataclasses.asdict(self.cfg))
         _json_dump(self.run_dir / "git_info.json", _collect_git_info(repo_root))
         _json_dump(
@@ -793,8 +801,18 @@ class GenerationSelfEvolvingTrainer:
     def _append_jsonl(self, path: pathlib.Path, record: Dict):
         if not self.is_main_process:
             return
+        serialized = json.dumps(record, ensure_ascii=False)
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.write(serialized + "\n")
+        if path == self.iter_log_path:
+            phase = str(record.get("phase", "generation")).strip().lower()
+            mirror_path = (
+                self.release_rollouts_log_path
+                if phase == "understanding"
+                else self.release_generation_rollouts_log_path
+            )
+            with mirror_path.open("a", encoding="utf-8") as f:
+                f.write(serialized + "\n")
 
     def _update_metric(self, name: str, value: float):
         stat = self._metric_stats.setdefault(
@@ -821,6 +839,127 @@ class GenerationSelfEvolvingTrainer:
                 "max": stat["max"],
             }
         return summary
+
+    @staticmethod
+    def _write_json_atomic(path: pathlib.Path, payload: Dict):
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(str(tmp_path), str(path))
+
+    def _progress_core(self, *, step: int, phase: str, run_started_at: float) -> Dict[str, float]:
+        now = float(time.time())
+        elapsed_sec = max(1e-9, now - float(run_started_at))
+        total = max(1, int(self.cfg.total_steps) - int(self.start_step))
+        done = max(0, int(step) - int(self.start_step))
+        done = min(total, done)
+        progress = float(done) / float(total)
+        steps_per_sec = float(done) / float(elapsed_sec) if elapsed_sec > 0.0 else 0.0
+        remaining = max(0, total - done)
+        eta_sec = float(remaining) / float(steps_per_sec) if steps_per_sec > 0.0 else -1.0
+        return {
+            "step": int(step),
+            "phase": str(phase),
+            "steps_total": int(self.cfg.total_steps),
+            "steps_started_from": int(self.start_step),
+            "steps_done": int(done),
+            "steps_remaining": int(remaining),
+            "progress": float(progress),
+            "elapsed_sec": float(elapsed_sec),
+            "steps_per_sec": float(steps_per_sec),
+            "eta_sec": float(eta_sec),
+            "timestamp_unix": float(now),
+            "timestamp_utc": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+
+    def _append_metrics(self, record: Dict):
+        self._append_jsonl(self.metrics_log_path, record)
+
+    def _release_metrics(self, *, step_time_sec: float) -> Dict[str, float]:
+        summary = self._metrics_summary()
+
+        def _mean(name: str, default: float = 0.0) -> float:
+            return float(summary.get(name, {}).get("mean", default))
+
+        return {
+            "step_time_sec": float(step_time_sec),
+            "reward_mean": _mean("reward_mean"),
+            "reward_max": _mean("reward_max"),
+            "reward_min": _mean("reward_min"),
+            "best_spec_score": _mean("best_spec_score"),
+            "best_cycle_score": _mean("best_cycle_score"),
+            "best_diversity_score": _mean("best_diversity_score"),
+            "best_contradiction_score": _mean("best_contradiction_score"),
+            "spec_quality": _mean("spec_quality"),
+            "generator_kl_coef": float(self.generator_updater.kl_coef),
+            "proposer_kl_coef": float(self.proposer_updater.kl_coef),
+            "solver_kl_coef": (
+                float(self.solver_updater.kl_coef) if self.solver_updater is not None else None
+            ),
+            "generator_baseline": float(self.generator_baseline),
+            "proposer_baseline": float(self.proposer_baseline),
+            "proposer_gen_baseline": float(self.proposer_gen_baseline),
+            "solver_baseline": float(self.solver_baseline),
+            "last_checkpoint_dir": str(self.last_checkpoint_dir),
+        }
+
+    def _write_status(self, *, state: str, progress: Dict, metrics: Dict, last_error: str = ""):
+        if not self.is_main_process:
+            return
+        payload = {
+            "state": str(state),
+            "output_dir": str(self.run_dir),
+            "summary_path": str(self.release_summary_path),
+            "rollouts_log_path": str(self.release_rollouts_log_path),
+            "generation_rollouts_log_path": str(self.release_generation_rollouts_log_path),
+            "metrics_log_path": str(self.metrics_log_path),
+            "last_error": str(last_error or ""),
+            "progress": progress,
+            "metrics": metrics,
+        }
+        self._write_json_atomic(self.status_path, payload)
+
+    @staticmethod
+    def _remove_path(path: pathlib.Path):
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+
+    @staticmethod
+    def _link_or_copy_path(src: pathlib.Path, dst: pathlib.Path):
+        try:
+            rel_src = os.path.relpath(str(src), str(dst.parent))
+            os.symlink(rel_src, str(dst), target_is_directory=src.is_dir())
+            return
+        except Exception:
+            pass
+
+        if src.is_dir():
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+
+    def _sync_standard_checkpoint_dir(self, *, step: int, source_dir: pathlib.Path) -> pathlib.Path:
+        alias_dir = self.checkpoint_root / f"step_{int(step):06d}"
+        tmp_dir = self.checkpoint_root / f".{alias_dir.name}.tmp"
+        self._remove_path(tmp_dir)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        for child in source_dir.iterdir():
+            self._link_or_copy_path(child, tmp_dir / child.name)
+        _json_dump(
+            tmp_dir / "checkpoint_target.json",
+            {
+                "step": int(step),
+                "source_checkpoint_dir": str(source_dir),
+            },
+        )
+        self._remove_path(alias_dir)
+        os.replace(str(tmp_dir), str(alias_dir))
+        self.last_checkpoint_dir = str(alias_dir)
+        with (self.checkpoint_root / "latest.txt").open("w", encoding="utf-8") as f:
+            f.write(str(alias_dir) + "\n")
+        return alias_dir
 
     def _resolve_resume_dir(self) -> Optional[pathlib.Path]:
         if not self.cfg.resume_from:
@@ -3661,6 +3800,7 @@ class GenerationSelfEvolvingTrainer:
                     f"at {archived}"
                 )
         os.replace(str(tmp_dir), str(step_dir))
+        self._sync_standard_checkpoint_dir(step=step, source_dir=step_dir)
 
         self._prune_checkpoints()
 
@@ -3671,8 +3811,16 @@ class GenerationSelfEvolvingTrainer:
         checkpoints = self._list_complete_checkpoints()
         if len(checkpoints) <= keep:
             return
+        keep_steps = {int(path.name.split("_")[-1]) for path in checkpoints[-keep:]}
         for path in checkpoints[:-keep]:
             shutil.rmtree(path, ignore_errors=True)
+        for alias_dir in self.checkpoint_root.glob("step_*"):
+            try:
+                alias_step = int(alias_dir.name.split("_")[-1])
+            except Exception:
+                continue
+            if alias_step not in keep_steps:
+                self._remove_path(alias_dir)
 
     def _write_ablation_summary(
         self,
@@ -3684,25 +3832,29 @@ class GenerationSelfEvolvingTrainer:
     ):
         if not self.is_main_process:
             return
-        _json_dump(
-            self.summary_path,
-            {
-                "experiment": self.cfg.experiment_name,
-                "run_dir": str(self.run_dir),
-                "generator_update_rule": self.cfg.generator_update_rule,
-                "final_step": int(final_step),
-                "start_step": int(self.start_step),
-                "status": status,
-                "interrupted_at_step": interrupted_at_step,
-                "error": error,
-                "policy_update_counts": self._policy_update_counts,
-                "generator_update_mode_counts": self._generator_update_mode_counts,
-                "unicorn_reconstruction_update_counts": self._unicorn_reconstruction_update_counts,
-                "unicorn_reconstruction_buffer_size": int(len(self._unicorn_reconstruction_buffer)),
-                "diffusion_repair_count": int(self._diffusion_repair_count),
-                "metrics": self._metrics_summary(),
-            },
-        )
+        payload = {
+            "experiment": self.cfg.experiment_name,
+            "run_dir": str(self.run_dir),
+            "generator_update_rule": self.cfg.generator_update_rule,
+            "final_step": int(final_step),
+            "start_step": int(self.start_step),
+            "status": status,
+            "interrupted_at_step": interrupted_at_step,
+            "error": error,
+            "policy_update_counts": self._policy_update_counts,
+            "generator_update_mode_counts": self._generator_update_mode_counts,
+            "unicorn_reconstruction_update_counts": self._unicorn_reconstruction_update_counts,
+            "unicorn_reconstruction_buffer_size": int(len(self._unicorn_reconstruction_buffer)),
+            "diffusion_repair_count": int(self._diffusion_repair_count),
+            "metrics": self._metrics_summary(),
+            "rollouts_log_path": str(self.release_rollouts_log_path),
+            "generation_rollouts_log_path": str(self.release_generation_rollouts_log_path),
+            "metrics_log_path": str(self.metrics_log_path),
+            "last_checkpoint_dir": str(self.last_checkpoint_dir),
+        }
+        _json_dump(self.summary_path, payload)
+        _json_dump(self.release_summary_path, payload)
+        return payload
 
     def _wandb_log_step(
         self,
@@ -5240,6 +5392,28 @@ class GenerationSelfEvolvingTrainer:
 
         last_completed_step = self.start_step
         last_attempted_step = self.start_step
+        run_started_at = float(time.time())
+
+        def _emit_training_logs(step_id: int, *, phase: str, step_time_sec: float):
+            progress = self._progress_core(
+                step=int(step_id),
+                phase=str(phase),
+                run_started_at=run_started_at,
+            )
+            metrics = self._release_metrics(step_time_sec=step_time_sec)
+            self._write_status(state="running", progress=progress, metrics=metrics)
+            if int(step_id) % max(1, int(cfg.log_every)) == 0:
+                self._append_metrics({"kind": "heartbeat", **progress, **metrics})
+
+        self._write_status(
+            state="running",
+            progress=self._progress_core(
+                step=int(self.start_step),
+                phase="init",
+                run_started_at=run_started_at,
+            ),
+            metrics=self._release_metrics(step_time_sec=0.0),
+        )
         try:
             for step in range(self.start_step + 1, cfg.total_steps + 1):
                 last_attempted_step = step
@@ -5382,6 +5556,7 @@ class GenerationSelfEvolvingTrainer:
                             self._update_metric("dit_loss", dit_loss_val)
                     except Exception:
                         pass
+                _emit_training_logs(step, phase="generation", step_time_sec=step_duration_g)
 
                 if cfg.save_every > 0 and step % cfg.save_every == 0:
                     self._dist_barrier()
@@ -5406,7 +5581,18 @@ class GenerationSelfEvolvingTrainer:
                 self._dist_barrier()
                 self._save_checkpoint(cfg.total_steps)
                 self._dist_barrier()
-            self._write_ablation_summary(cfg.total_steps, status="completed")
+            summary = self._write_ablation_summary(cfg.total_steps, status="completed")
+            final_progress = self._progress_core(
+                step=int(cfg.total_steps),
+                phase="completed",
+                run_started_at=run_started_at,
+            )
+            self._append_metrics({"kind": "final_summary", **final_progress, **summary})
+            self._write_status(
+                state="completed",
+                progress=final_progress,
+                metrics=self._release_metrics(step_time_sec=0.0),
+            )
             if self.is_main_process:
                 print(f"[Generation] Training complete. Final checkpoint at step {cfg.total_steps:05d}.")
 
@@ -5437,14 +5623,14 @@ class GenerationSelfEvolvingTrainer:
                     _json_dump(
                         self.run_dir / "resume_hint.json",
                         {
-                            "resume_from": str(self.run_dir / f"step_{emergency_step:05d}"),
+                            "resume_from": str(self.checkpoint_root / f"step_{emergency_step:06d}"),
                             "start_step": emergency_step,
                             "total_steps": cfg.total_steps,
                             "command_example": (
                                 "python BLIP3o/blip3o/train/train_self_evolving.py "
                                 f"--experiment {cfg.experiment_name} --data_dir {cfg.data_dir} "
                                 f"--output_dir {cfg.output_dir} --run_name {self.run_dir.name} "
-                                f"--resume_from {self.run_dir / f'step_{emergency_step:05d}'} "
+                                f"--resume_from {self.checkpoint_root / f'step_{emergency_step:06d}'} "
                                 f"--start_step {emergency_step} --total_steps {cfg.total_steps}"
                             ),
                         },
@@ -5453,11 +5639,23 @@ class GenerationSelfEvolvingTrainer:
                 if self.is_main_process:
                     print(f"[Generation] Emergency checkpoint failed: {save_exc}")
 
-            self._write_ablation_summary(
+            summary = self._write_ablation_summary(
                 max(last_completed_step, emergency_step),
                 status="interrupted",
                 interrupted_at_step=interrupted_step,
                 error=error_text,
+            )
+            interrupted_progress = self._progress_core(
+                step=max(last_completed_step, emergency_step),
+                phase="interrupted",
+                run_started_at=run_started_at,
+            )
+            self._append_metrics({"kind": "interrupted", **interrupted_progress, **summary})
+            self._write_status(
+                state="interrupted",
+                progress=interrupted_progress,
+                metrics=self._release_metrics(step_time_sec=0.0),
+                last_error=error_text,
             )
             raise
         finally:

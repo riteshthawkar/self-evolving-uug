@@ -1,101 +1,95 @@
+
 \section{Experiments}
 \label{sec:experiments}
 
 \subsection{Experimental Setup}
 \label{sec:setup}
 
-\noindent\textbf{Models.}
-We apply the framework to three unified models with different synthesis mechanisms: BLIP3o-8B~\cite{chen2025blip3o} (diffusion denoising), BAGEL~\cite{deng2025bagel} (flow matching), and VARGPT$_{1.1}$~\cite{zhuang2025vargpt} (autoregressive token generation, Qwen backbone). For each model, we attach three LoRA adapters (Proposer, Solver, Generator) to a frozen backbone and train with the same self-evolving recipe.
+We apply one training recipe to three unified backbones spanning major image synthesis paradigms: BLIP3o-8B~\cite{chen2025blip3o} (diffusion), BAGEL-7B~\cite{deng2025bagel} (flow matching), and VARGPT-v1.1~\cite{zhuang2025vargpt} (autoregressive). For each backbone, we attach three LoRA adapters~\cite{hu2022lora} for the Proposer, Solver, and Generator roles while keeping the base model frozen. Training uses only raw images from a 6{,}000-image pool sampled from five open datasets (COCO, SA-1B, TextVQA, GQA, and LAION-COCO), discarding all dataset-provided annotations. Our primary evidence is within-backbone base-versus-ours deltas under identical inference settings. Visual understanding is evaluated on eight scores: MMMU~\cite{yue2024mmmu}, MMBench~\cite{liu2024mmbench}, TextVQA~\cite{singh2019textvqa}, SEED-Bench~\cite{li2024seedbench}, RealWorldQA~\cite{lmmseval2024}, MM-Vet~\cite{yu2023mmvet}, and MME~\cite{fu2024mme} (reporting both perception and cognition); image generation on GenEval~\cite{ghosh2024geneval} (nine metrics total). Prior method scores are reported as context only.
 
-\noindent\textbf{Training data.}
-All training uses unlabeled images only. No captions, question-answer pairs, or human annotations are used at any stage.
+Unless stated otherwise, all runs share the same hyperparameters: 10k steps with AdamW in bfloat16, learning rate $1\times10^{-6}$, LoRA rank 16 ($\alpha{=}32$, dropout $0.05$), and a 3:2 understanding-to-generation schedule. Self-consistency uses $N{=}7$ prompt perturbations, the Proposer samples $K{=}3$ candidate questions per image, and STE uses a rolling window of 128 samples.
 
-\noindent\textbf{Benchmarks.}
-We evaluate understanding on MMMU, MMBench, TextVQA, SEED-Bench, RealWorldQA (RWQA), MM-Vet, and both MME perception (MME-P) and cognition (MME-C). For generation, we use GenEval and report Single Object, Two Objects, Counting, Colors, Position, and Color Attribution.
-
-\noindent\textbf{Training details.}
-Unless otherwise stated, we use the strict final configuration. We train for 10{,}000 steps in bfloat16 with learning rate $1\times10^{-6}$, weight decay 0.01, and gradient clipping 1.0. LoRA uses rank 16, $\alpha=32$, and dropout 0.05 on attention/MLP projection modules. Solver self-consistency uses $N=7$ prompt perturbations, the Proposer samples 3 candidates per step, and generation samples 3 candidate images per prompt. For BLIP3o, generation uses 896$\times$896 resolution, 50 denoising steps, and guidance scale 2.0. The joint run uses a 3:2 understanding:generation cycle. Understanding-only and generation-only ablations use 5:0 and 0:5; the imageless loop uses 3:2 with replay-buffer-only understanding updates. Base and self-evolved checkpoints are evaluated with identical inference settings within each backbone.
-
-
-\subsection{Main Results}
+\subsection{Results and Analysis}
 \label{sec:main_results}
 
-Tables~\ref{tab:understanding_results} and~\ref{tab:generation_results} present understanding and generation results across unified models, prior self-evolving/post-training methods, and our framework on three architecturally distinct backbones.
-
-Compared to each base checkpoint, our framework improves both capabilities on all three backbones. On BLIP3o, MMMU improves from 50.6 to 52.8, MMBench from 83.5 to 86.1, TextVQA from 83.1 to 85.2, and GenEval from 0.84 to 0.87. On BAGEL, MMMU improves from 55.3 to 58.8, MMBench from 85.0 to 87.1, MMVet from 67.2 to 69.5, and GenEval from 0.82 to 0.85. On VARGPT$_{1.1}$, MMMU improves from 48.6 to 51.6, MMBench from 81.0 to 83.7, TextVQA from 82.0 to 84.8, SEED from 76.1 to 79.2, and GenEval from 0.53 to 0.56.
-
-Category-level generation deltas are not uniformly positive: some GenEval subcategories remain flat or slightly decrease while overall GenEval improves. This indicates controlled trade-offs rather than mode collapse. Transfer across diffusion, flow-matching, and autoregressive models supports the model-agnostic objective.
-
-Compared to prior self-evolving methods, our framework is competitive while providing broader architectural transfer evidence. Most prior methods are evaluated on a single backbone with partial benchmark overlap (e.g., UniGame, SUDER, UniRL, UniCorn~\cite{su2025unigame,hong2025dualselfrewards,mao2025unirl,han2026unicorn}). We therefore treat cross-paper raw-score comparisons as reference only and prioritize within-backbone base-vs-ours gains.
-
 \input{tables/table_understanding}
-
-\FloatBarrier
-
 \input{tables/table_generation}
 
+\noindent\textbf{Base model landscape.} As shown in Tables~\ref{tab:understanding_results} and~\ref{tab:generation_results}, all three backbones achieve strong perceptual performance (MMBench ${\geq}81.0$, TextVQA ${\geq}82.0$) but exhibit characteristic weaknesses: BLIP3o-8B and BAGEL-7B lag on multi-discipline reasoning (MMMU: 50.6 and 55.3), VARGPT-v1.1 on open-ended analysis (MM-Vet: 51.9). For generation, Single Object is near saturation (${\geq}96\%$) but compositional subcategories vary widely (e.g., Position: 90\% on BLIP3o-8B vs.\ 13\% on VARGPT-v1.1). The framework must therefore improve reasoning and composition without degrading perception.
+
+\noindent\textbf{Visual understanding improves consistently, with the largest gains on the weakest capabilities.} The largest relative gains appear on each backbone's weakest benchmark: MMMU, where all three models start lowest, improves by up to +3.5. Other reasoning-heavy metrics (MM-Vet, MME cognition) follow the same pattern, while perceptual benchmarks closer to each backbone's ceiling (MMBench, TextVQA) show smaller but consistent improvements, confirming that self-evolving signals sharpen reasoning without degrading recognition.
+
+\noindent\textbf{Image generation gains concentrate on the hardest compositional subcategories.} The uniform +3\% overall gain masks distinct backbone-specific profiles. On BLIP3o-8B, gains concentrate on the weakest subcategories (Two Objects, Counting) while near-saturated scores are effectively unchanged. On BAGEL-7B, gains distribute more evenly across Position, Color Attribution, and Colors. On VARGPT-v1.1, Counting and Two Objects improve, while Position ($13{\to}15\%$) and Color Attribution ($21{\to}23\%$) show small gains but remain low overall, reflecting autoregressive limitations that semantic-level supervision cannot fully overcome.
+
+\noindent\textbf{Cross-method context.} Prior self-supervised methods report 53.8 MMMU and 82\% GenEval for UniCorn~\cite{han2026unicorn}, and 80.1 MMBench and 84\% GenEval for SUDER~\cite{hong2025dualselfrewards}. Our BAGEL-7B model reaches 58.8 MMMU, 87.1 MMBench, and 85\% GenEval without external evaluators, curated data, or architecture-specific modules. Cross-paper comparisons remain noisy, so our primary evidence is the consistent base-versus-ours deltas under matched settings.
+
 \FloatBarrier
-
-
-\subsection{Analysis}
-\label{sec:analysis}
-
-\paragraph{Training dynamics.}
-Figure~\ref{fig:training_dynamics} traces the evolution of understanding and generation metrics over training steps for all three backbones.
-
-\begin{figure*}[!htb]
-  \centering
-  \includegraphics[width=\linewidth]{figures/training_dynamics.pdf}
-  \caption{\textbf{Training dynamics} across three architecturally distinct backbones (diffusion, flow matching, autoregressive). \textbf{Top row:} understanding signals --- \emph{proposer reward} (quality of self-generated questions), \emph{SC entropy} (self-consistency disagreement among $N{=}7$ prompt perturbations), and \emph{STE difficulty} (Solver Token Entropy, a token-level difficulty proxy). Proposer reward and SC entropy increase as the Proposer learns to generate harder, more informative questions. STE difficulty remains approximately stable throughout training, confirming it serves as a stationary reference signal rather than a drifting curriculum target. \textbf{Bottom row:} generation signals --- \emph{total reward} (weighted combination of generation assessment signals), \emph{QA fidelity} (attribute-level accuracy via Solver re-verification), and \emph{cycle consistency} (caption$\to$image$\to$caption round-trip coherence). Generation improvement is delayed relative to understanding as the generation loop requires warm-up before producing useful training signal. All three backbones show qualitatively similar trends, supporting the model-agnostic design.}
-  \label{fig:training_dynamics}
-\end{figure*}
-
-\paragraph{Signal analysis.}
-Figure~\ref{fig:signal_analysis} visualizes the behavior of the proposer reward components and the generation assessment signals over training.
-
-\begin{figure}[!htb]
-  \centering
-  \includegraphics[width=\linewidth]{figures/signal_analysis.pdf}
-  \caption{\textbf{Signal analysis} on BLIP3o-8B. (a)~\emph{STE curriculum progression:} the distribution of Solver Token Entropy difficulty shifts gradually rightward over training, indicating that the Proposer learns to generate progressively harder questions as the Solver improves. (b)~\emph{Complementary difficulty dimensions:} STE and self-consistency (SC) entropy capture orthogonal aspects of question difficulty. Four quadrants emerge --- \emph{token-hard} (high STE, low SC): questions with difficult tokens but consistent solver answers; \emph{informative} (high both): boundary-level questions that maximise learning signal; \emph{trivial} (low both): easy questions filtered out by the curriculum; \emph{framing-hard} (low STE, high SC): questions where prompt framing causes solver disagreement. Dashed lines mark medians. (c)~\emph{Generation reward components:} QA fidelity (attribute-level accuracy) and cycle consistency (holistic coherence) both improve, with fidelity rising faster. Generation signals are delayed relative to understanding due to the warm-up phase needed for stable generation rollouts.}
-  \label{fig:signal_analysis}
-\end{figure}
-
-\paragraph{Qualitative analysis.}
-Figure~\ref{fig:qualitative} illustrates both self-supervision mechanisms during training. The top panel shows self-consistency correction for understanding: a single greedy pass produces an incorrect answer (red), while majority voting across $N{=}7$ prompt perturbations recovers the correct answer (green). The bottom panel shows QA-fidelity failure detection for generation: the Solver detects counting errors, semantic mismatches, and color-attribution failures. Together, these examples show that both loops produce discriminative signals without external reward models.
-
-\begin{figure*}[!htb]
-  \centering
-  \includegraphics[height=0.56\textheight,keepaspectratio]{figures/qualitative_comparison.pdf}
-  \caption{Qualitative analysis. \textbf{Top:} self-consistency correction in understanding. \textbf{Bottom:} QA-fidelity error detection in generation (BAGEL). Green indicates pass; red indicates fail.}
-  \label{fig:qualitative}
-\end{figure*}
-
 
 \subsection{Ablation Study}
 \label{sec:ablation}
 
-We ablate each framework component on BLIP3o-8B. Tables~\ref{tab:ablation} and~\ref{tab:loop_ablation} report per-benchmark understanding and generation performance for each configuration.
-
 \input{tables/table_ablation}
 
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/signal_analysis.pdf}
+  \caption{Signal analysis on BLIP3o-8B revealing the complementary roles of our self-evolving training signals. (a)~The STE difficulty distribution shifts toward harder quantiles as training progresses, reflecting the emergence of an adaptive curriculum where the \emph{Proposer} generates increasingly challenging questions matched to the \emph{Solver}'s evolving competence. (b)~Self-consistency entropy and STE occupy complementary regions of the difficulty space: self-consistency captures framing-level robustness while STE detects token-level uncertainty, together providing a richer supervision signal than either alone. (c)~Both QA fidelity and cycle-consistency image generation rewards increase monotonically, confirming that the \emph{Solver}'s improving visual understanding directly translates into more discriminative image generation evaluation.}
+  \label{fig:signal_analysis}
+\end{figure}
+
+We run ablations on BLIP3o-8B with the same compute budget as the full method (Table~\ref{tab:ablation}). The two visual understanding signals are complementary, each capturing distinct failure modes; replacing prompt perturbations with temperature sampling also underperforms, confirming that framing variation provides a stronger robustness signal than stochastic decoding. For image generation, QA fidelity contributes more than cycle-consistency, but both are needed for best joint performance. Figure~\ref{fig:signal_analysis} corroborates these findings: STE shifts toward harder questions over training, the two signals occupy complementary difficulty regions, and both image generation rewards increase monotonically.
+
 \FloatBarrier
+
+\subsection{Loop Coupling Analysis}
+\label{sec:loop_coupling}
 
 \input{tables/table_loop_coupling}
 
-\FloatBarrier
-
-\paragraph{Understanding signal ablations.}
-Removing STE while keeping self-consistency reduces understanding performance, confirming that STE resolves signal degeneracy. Without STE, the Proposer cannot separate trivial questions from boundary-level ones when Solver responses all agree, which weakens curriculum progression. Removing self-consistency while keeping STE also reduces performance, showing complementary value. Replacing prompt perturbation with temperature sampling gives the largest degradation, indicating that semantic framing diversity is more informative than decoding noise.
-
-\paragraph{Generation signal ablations.}
-Removing QA fidelity or cycle-consistent captioning degrades generation, but with different failure modes. Without QA fidelity, the Generator can satisfy global coherence while missing fine-grained attributes. Without cycle consistency, it can satisfy individual diagnostic questions while producing holistically incoherent scenes. These ablations confirm that both signals are complementary.
-
-\paragraph{Loop coupling analysis.}
-Table~\ref{tab:loop_ablation} and Figure~\ref{fig:loop_coupling} isolate coupling between understanding and generation. Understanding-only training improves understanding but not generation. Generation-only training improves generation moderately but does not improve understanding. The full framework exceeds both single-loop settings, confirming that the Solver's dual role couples the two directions. Replacing external unlabeled images with self-generated images further tests self-sufficiency: the understanding loop then trains only on Generator outputs, closing a fully autonomous cycle.
-
-\begin{figure}[!htb]
+\begin{figure}[!t]
   \centering
   \includegraphics[width=\linewidth]{figures/loop_coupling.pdf}
-  \caption{\textbf{Loop coupling analysis} on BLIP3o-8B. (a)~Understanding performance and (b)~generation performance measured as relative improvement over the base checkpoint (higher is better). \emph{Full framework} (blue solid) trains both understanding and generation loops jointly. \emph{Understanding only} / \emph{generation only} (dashed) train a single loop in isolation. The opposite-loop baseline (dotted at zero) receives no training signal for that capability. The full framework consistently outperforms either single-loop ablation on \emph{both} tasks, with the shaded \emph{synergy gap} showing the additional improvement attributable to cross-loop coupling through the Solver's dual role. Generation performance benefits more from coupling than understanding, as the Solver's question-answering ability directly improves generation assessment quality.}
+  \caption{Loop coupling dynamics on BLIP3o-8B comparing coupled training against single-loop variants over 10k steps. (a)~For visual understanding, the full framework (blue) consistently outperforms visual understanding-only training (orange), with the synergy gap widening after step 4{,}000 as image generation training provides diverse visual contexts that strengthen the \emph{Solver}'s perceptual grounding. Image generation-only training (green) contributes negligibly to visual understanding. (b)~For image generation, the full framework similarly exceeds image generation-only training by a growing margin, confirming that improved visual understanding yields a more discriminative internal evaluator. The widening synergy gap in both panels demonstrates that coupling between the two loops strengthens over training rather than saturating early.}
   \label{fig:loop_coupling}
 \end{figure}
+
+\noindent\textbf{Joint training outperforms either loop in isolation.} A central design claim is that the Solver's dual role creates cross-task synergy; Table~\ref{tab:loop_ablation} and Figure~\ref{fig:loop_coupling} test this on BLIP3o-8B. Visual understanding-only training improves visual understanding but slightly degrades image generation, while image generation-only training boosts GenEval but yields only modest visual understanding gains. The full framework exceeds both single-loop variants on both tasks. Training on self-generated images only (replacing the unlabeled pool) also underperforms, confirming that real-image diversity remains important. Together, these results show that coupling is mutually reinforcing: visual understanding sharpens the Solver's image generation evaluations, while image generation provides diverse visual contexts that strengthen perceptual grounding.
+
+\FloatBarrier
+
+\subsection{Parameter Strategy Comparison}
+\label{sec:param_strategy}
+
+\input{tables/table_param_strategy}
+
+\noindent\textbf{LoRA is the best update strategy.} Table~\ref{tab:param_strategy} compares four strategies on BLIP3o-8B. LoRA achieves the best results across all benchmarks. QLoRA retains most gains but suffers from quantization noise in STE estimates. SFT improves over the base but exhibits optimization drift without external supervision. Full fine-tuning degrades below the base, confirming that the frozen backbone is essential for stability under purely internal signals.
+
+\FloatBarrier
+
+\subsection{Training Dynamics}
+\label{sec:training_dynamics}
+
+  \begin{figure}[!t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/training_dynamics.pdf}
+  \caption{Training dynamics across all three backbones over 10k steps using one shared recipe. Top row (visual understanding): the \emph{Proposer} reward increases steadily while self-consistency entropy rises as the \emph{Proposer} generates progressively harder questions; STE difficulty initially fluctuates but stabilizes around the mid-range by step 4{,}000--5{,}000, reflecting curriculum convergence to the \emph{Solver}'s evolving competence. On BLIP3o-8B the STE curve becomes stationary around step 6{,}000 (annotated), after which the \emph{Proposer} continues to push difficulty through SC entropy alone. Bottom row (image generation): total reward, QA fidelity, and cycle-consistency all increase monotonically, with VARGPT-v1.1 starting from a lower absolute level but following the same qualitative trajectory as BLIP3o-8B and BAGEL-7B. Despite fundamentally different image generation mechanisms, all three backbones exhibit qualitatively similar dynamics, and the absence of reward plateaus or oscillations indicates stable optimization throughout.}
+  \label{fig:training_dynamics}
+\end{figure}
+
+Figure~\ref{fig:training_dynamics} tracks normalized reward curves over 10k steps. For visual understanding, all three backbones show a consistent two-phase pattern: STE drives exploration in the early stages before self-consistency entropy takes over as the primary difficulty signal. For image generation, rewards increase monotonically without plateaus across all three paradigms, confirming that KL-regularized optimization with a frozen backbone ensures stable training.
+
+\FloatBarrier
+
+\subsection{Qualitative Results}
+\label{sec:qualitative}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.96\linewidth]{figures/qualitative_figure.pdf}
+  \caption{Qualitative examples showing base versus self-evolved outputs across both tasks and all three backbones. Left (visual understanding): before/after answers for three visual questions on BLIP3o-8B, BAGEL-7B, and VARGPT-v1.1. Incorrect base-model answers (\textcolor{red}{red}) are corrected after self-evolving training (\textcolor{ForestGreen}{green}), demonstrating improved object recognition (cat on a suitcase, not a bed), action understanding (cooking $\to$ cutting the fish), and spatial reasoning (straight uphill $\to$ left side of trail). Right (image generation): baseline versus ours for all three backbones---BAGEL-7B, BLIP3o-8B, and VARGPT-v1.1---on three compositional prompts. After training, generated images across all backbones better respect color attributes (red vs.\ blue umbrella), object counts (ripe yellow and unripe green banana), and fine-grained composition (three red and two white roses). These examples confirm that the quantitative gains in Tables~\ref{tab:understanding_results}--\ref{tab:generation_results} are perceptually meaningful and consistent across image generation paradigms.}
+  \label{fig:qualitative}
+\end{figure*}
+
+Figure~\ref{fig:qualitative} shows representative before/after examples. For visual understanding, all three backbones correct errors in object recognition, action understanding, and spatial reasoning after self-evolving training. For image generation, evolved models across all backbones better respect color attributes, object counts, and compositional structure, confirming that the quantitative gains are perceptually meaningful.
+
+\FloatBarrier

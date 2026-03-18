@@ -1,35 +1,66 @@
-\begin{thebibliography}{1}
+\begin{thebibliography}{10}
 \providecommand{\url}[1]{\texttt{#1}}
 \providecommand{\urlprefix}{URL }
 \providecommand{\doi}[1]{https://doi.org/#1}
 
-\bibitem{han2026unicorn}
-Han, R., Fang, Z., Sun, X., Ma, Y., Wang, Z., Zeng, Y., Chen, Z., Chen, L.,
-  Huang, W., Xu, W.J., Cao, Y., Zhao, F.: Unicorn: Towards self-improving
-  unified multimodal models through self-generated supervision. arXiv preprint
-  arXiv:2601.03193  (2026), \url{https://arxiv.org/abs/2601.03193}
+\bibitem{chen2025blip3o}
+Chen, J., Xu, Z., Pan, X., Hu, Y., Qin, C., Goldstein, T., Huang, L., Zhou, T.,
+  Xie, S., Savarese, S., Xue, L., Xiong, C., Xu, R.: {BLIP3-o}: A family of
+  fully open unified multimodal models -- architecture, training and dataset.
+  arXiv preprint arXiv:2505.09568  (2025),
+  \url{https://arxiv.org/abs/2505.09568}
 
-\bibitem{han2025internalgap}
-Han, Y., He, Y., Lin, C., Wang, Z., Wang, K., Ma, Y., Xiang, Y., Yang, X., Ye,
-  H., Song, L., Feng, J.: Turning internal gap into self-improvement: Promoting
-  the generation-understanding unification in mllms. arXiv preprint
-  arXiv:2507.16663  (2025), \url{https://arxiv.org/abs/2507.16663}
+\bibitem{deng2025bagel}
+Deng, C., Zhu, D., Li, K., Gou, C., Li, F., Wang, Z., Zhong, S., Yu, W., Nie,
+  X., Song, Z., Shi, G., Fan, H.: Emerging properties in unified multimodal
+  pretraining. arXiv preprint arXiv:2505.14683  (2025),
+  \url{https://arxiv.org/abs/2505.14683}
 
-\bibitem{jiang2025coreinforcement}
-Jiang, J., Si, C., Luo, J., Zhang, H., Ma, C.: Co-reinforcement learning for
-  unified multimodal understanding and generation. arXiv preprint
-  arXiv:2505.17534  (2025), \url{https://arxiv.org/abs/2505.17534}
+\bibitem{ghosh2024geneval}
+Ghosh, D., Hajishirzi, H., Schmidt, L.: {GenEval}: An object-focused framework
+  for evaluating text-to-image alignment. arXiv preprint arXiv:2310.11513
+  (2024)
 
-\bibitem{mao2025unirl}
-Mao, W., Yang, Z., Shou, M.Z.: {UniRL}: Self-improving unified multimodal
-  models via supervised and reinforcement learning. arXiv preprint
-  arXiv:2505.23380  (2025), \url{https://arxiv.org/abs/2505.23380}
+\bibitem{hu2022lora}
+Hu, E.J., Shen, Y., Wallis, P., Allen-Zhu, Z., Li, Y., Wang, S., Wang, L.,
+  Chen, W.: {LoRA}: Low-rank adaptation of large language models. In: ICLR
+  (2022)
 
-\bibitem{yan2025understandinggeneration}
-Yan, Y., Feng, Y., Liu, Y., Liu, T., Liu, Y., Chen, W., Chen, J., Wu, Y., Yang,
-  J., Liu, T., Hu, X., Yu, Q., Gong, J.: Can understanding and generation truly
-  benefit together -- or just coexist? unified multimodal models as
-  auto-encoder. arXiv preprint arXiv:2509.09666  (2025),
-  \url{https://arxiv.org/abs/2509.09666}
+\bibitem{hudson2019gqa}
+Hudson, D.A., Manning, C.D.: {GQA}: A new dataset for real-world visual
+  reasoning and compositional question answering. In: IEEE/CVF Conference on
+  Computer Vision and Pattern Recognition. pp. 6700--6709 (2019)
+
+\bibitem{kirillov2023segment}
+Kirillov, A., Mintun, E., Ravi, N., Mao, H., Rolland, C., Gustafson, L., Xiao,
+  T., Whitehead, S., Berg, A.C., Lo, W.Y., et~al.: Segment anything. arXiv
+  preprint arXiv:2304.02643  (2023)
+
+\bibitem{lin2014microsoft}
+Lin, T.Y., Maire, M., Belongie, S., Hays, J., Perona, P., Ramanan, D.,
+  Doll{\'a}r, P., Zitnick, C.L.: Microsoft {COCO}: Common objects in context.
+  In: European Conference on Computer Vision. pp. 740--755 (2014)
+
+\bibitem{schuhmann2022laioncoco}
+Schuhmann, C., Beaumont, R., Vencu, R., Gordon, C., Wightman, R., Jitsev, J.:
+  {LAION-COCO}: 600m synthetic captions from {LAION}-2b-en.
+  \url{https://laion.ai/blog/laion-coco/} (2022), accessed March 12, 2026
+
+\bibitem{shao2024deepseekmath}
+Shao, Z., Wang, P., Zhu, Q., Xu, R., Song, J., Zhang, M., Li, Y., Wu, Y., Guo,
+  D.: Deepseekmath: Pushing the limits of mathematical reasoning in open
+  language models. arXiv preprint arXiv:2402.03300  (2024)
+
+\bibitem{singh2019textvqa}
+Singh, A., Natarajan, V., Shah, M., Jiang, Y., Chen, X., Batra, D., Parikh, D.,
+  Rohrbach, M.: {TextVQA}: Towards reading text in images for visual question
+  answering. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition
+  (2019)
+
+\bibitem{zhuang2025vargpt}
+Zhuang, B., Hu, T., Hou, B., Miao, J., Guo, Z., Liu, F., Li, Z., Chen, Z., Shi,
+  Z., Wu, C., et~al.: Vargpt-v1.1: Improve visual autoregressive large unified
+  model via iterative instruction tuning and reinforcement learning. arXiv
+  preprint arXiv:2504.02949  (2025), \url{https://arxiv.org/abs/2504.02949}
 
 \end{thebibliography}

@@ -81,9 +81,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log_every", type=int, default=10)
     p.add_argument("--understanding_steps_per_cycle", type=int, default=3)
     p.add_argument("--generation_steps_per_cycle", type=int, default=2)
-    p.add_argument("--replay_buffer_size", type=int, default=1000)
-    p.add_argument("--replay_min_reward", type=float, default=0.5)
-    p.add_argument("--replay_max_staleness", type=int, default=500)
+    p.add_argument("--replay_buffer_size", type=int, default=1)
+    p.add_argument("--replay_min_reward", type=float, default=1.10)
+    p.add_argument("--replay_max_staleness", type=int, default=1)
     p.add_argument(
         "--gen_mix_source_mode",
         type=str,
@@ -101,9 +101,9 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="understanding_generated_only",
         action="store_false",
     )
-    p.add_argument("--gen_mix_ratio_start", type=float, default=0.02)
-    p.add_argument("--gen_mix_ratio_max", type=float, default=0.25)
-    p.add_argument("--gen_mix_ratio_warmup_steps", type=int, default=1000)
+    p.add_argument("--gen_mix_ratio_start", type=float, default=0.0)
+    p.add_argument("--gen_mix_ratio_max", type=float, default=0.0)
+    p.add_argument("--gen_mix_ratio_warmup_steps", type=int, default=1)
     p.add_argument("--reward_ema_momentum", type=float, default=0.95)
 
     # Generation/reward knobs
@@ -138,7 +138,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
 
-    # SUDER-style generation phase (proposer joint reward logging).
+    # Generation phase reward / scoring controls.
     p.add_argument("--suder_generation_enabled", action="store_true", default=False)
     p.add_argument(
         "--disable_suder_generation",
@@ -150,11 +150,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gen_spec_min_qa_pairs", type=int, default=2)
     p.add_argument("--proposer_gen_entropy_weight", type=float, default=0.7)
     p.add_argument("--proposer_gen_baseline_momentum", type=float, default=0.6)
+    p.add_argument("--generation_num_candidates", type=int, default=3)
     p.add_argument("--generation_cfg_text_scale", type=float, default=4.0)
     p.add_argument("--generation_cfg_img_scale", type=float, default=1.5)
     p.add_argument("--generation_num_timesteps", type=int, default=50)
     p.add_argument("--generation_timestep_shift", type=float, default=3.0)
     p.add_argument("--generation_image_size", type=int, default=1024)
+    p.add_argument("--reward_spec_weight", type=float, default=0.65)
+    p.add_argument("--reward_cycle_weight", type=float, default=0.20)
+    p.add_argument("--reward_diversity_weight", type=float, default=0.10)
+    p.add_argument("--reward_contradiction_weight", type=float, default=0.20)
+    p.add_argument("--min_spec_quality_for_update", type=float, default=0.35)
+    p.add_argument("--min_spec_qa_pairs", type=int, default=2)
+    p.add_argument("--max_expected_words", type=int, default=8)
+    p.add_argument("--max_question_words", type=int, default=24)
     p.add_argument("--save_generated_images", action="store_true", default=False)
     p.add_argument(
         "--disable_save_generated_images",
@@ -169,20 +178,25 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="policy_updates_enabled",
         action="store_false",
     )
-    p.add_argument("--policy_update_method", type=str, default="reinforce", choices=["reinforce", "grpo"])
+    p.add_argument("--policy_update_method", type=str, default="grpo", choices=["reinforce", "grpo"])
     p.add_argument("--policy_use_bf16", action="store_true", default=True)
     p.add_argument(
         "--disable_policy_use_bf16",
         dest="policy_use_bf16",
         action="store_false",
     )
-    p.add_argument("--policy_lr", type=float, default=2e-5)
-    p.add_argument("--policy_weight_decay", type=float, default=0.0)
+    p.add_argument("--policy_lr", type=float, default=1e-6)
+    p.add_argument("--policy_weight_decay", type=float, default=0.01)
     p.add_argument("--policy_max_grad_norm", type=float, default=1.0)
     p.add_argument("--policy_grad_accum_steps", type=int, default=1)
     p.add_argument("--policy_reward_scale", type=float, default=1.0)
-    p.add_argument("--baseline_momentum", type=float, default=0.9)
+    p.add_argument("--baseline_momentum", type=float, default=0.6)
     p.add_argument("--grpo_eps", type=float, default=1e-6)
+    p.add_argument("--kl_coef", type=float, default=0.01)
+    p.add_argument("--kl_target", type=float, default=0.02)
+    p.add_argument("--kl_adapt_rate", type=float, default=0.10)
+    p.add_argument("--kl_min", type=float, default=0.001)
+    p.add_argument("--kl_max", type=float, default=1e2)
     p.add_argument("--solver_reward_mix_gamma", type=float, default=0.7)
     p.add_argument("--solver_skip_easy_updates", action="store_true", default=False)
     p.add_argument(
@@ -193,7 +207,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--solver_easy_update_majority_threshold", type=float, default=0.98)
     p.add_argument("--proposer_num_candidates", type=int, default=3)
     p.add_argument("--proposer_spot_check_samples", type=int, default=3)
-    p.add_argument("--proposer_spot_entropy_min_gate", type=float, default=0.15)
+    p.add_argument("--proposer_spot_entropy_min_gate", type=float, default=0.05)
     p.add_argument("--proposer_grpo_gen_group_size", type=int, default=3)
     p.add_argument("--grpo_extra_sc_samples", type=int, default=3)
     p.add_argument("--understanding_skip_no_acceptable", action="store_true", default=True)
@@ -302,8 +316,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--difficulty_sampler_window_size", type=int, default=256)
     p.add_argument("--difficulty_sampler_min_samples", type=int, default=32)
     p.add_argument("--difficulty_target_easy", type=float, default=0.10)
-    p.add_argument("--difficulty_target_medium", type=float, default=0.50)
-    p.add_argument("--difficulty_target_hard", type=float, default=0.40)
+    p.add_argument("--difficulty_target_medium", type=float, default=0.70)
+    p.add_argument("--difficulty_target_hard", type=float, default=0.30)
     p.add_argument("--difficulty_hard_min_entropy", type=float, default=0.90)
     p.add_argument("--difficulty_hard_max_margin", type=float, default=0.35)
     p.add_argument("--entropy_iqr_filter_enabled", action="store_true", default=True)
@@ -379,7 +393,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--grpo_pairwise_ranking_weight", type=float, default=0.15)
     p.add_argument("--grpo_pairwise_margin", type=float, default=0.10)
     p.add_argument("--grpo_pairwise_easy_penalty", type=float, default=0.12)
-    p.add_argument("--proposer_all_easy_rank_spread", type=float, default=0.08)
+    p.add_argument("--proposer_all_easy_rank_spread", type=float, default=0.20)
     p.add_argument("--gen_step_solver_update_enabled", action="store_true", default=False)
     p.add_argument(
         "--disable_gen_step_solver_update",
@@ -531,11 +545,20 @@ def main() -> None:
         gen_spec_min_qa_pairs=int(args.gen_spec_min_qa_pairs),
         proposer_gen_entropy_weight=float(args.proposer_gen_entropy_weight),
         proposer_gen_baseline_momentum=float(args.proposer_gen_baseline_momentum),
+        generation_num_candidates=max(1, int(args.generation_num_candidates)),
         generation_cfg_text_scale=float(args.generation_cfg_text_scale),
         generation_cfg_img_scale=float(args.generation_cfg_img_scale),
         generation_num_timesteps=int(args.generation_num_timesteps),
         generation_timestep_shift=float(args.generation_timestep_shift),
         generation_image_size=int(args.generation_image_size),
+        reward_spec_weight=float(args.reward_spec_weight),
+        reward_cycle_weight=float(args.reward_cycle_weight),
+        reward_diversity_weight=float(args.reward_diversity_weight),
+        reward_contradiction_weight=float(args.reward_contradiction_weight),
+        min_spec_quality_for_update=float(args.min_spec_quality_for_update),
+        min_spec_qa_pairs=max(1, int(args.min_spec_qa_pairs)),
+        max_expected_words=max(1, int(args.max_expected_words)),
+        max_question_words=max(1, int(args.max_question_words)),
         save_generated_images=bool(args.save_generated_images),
         policy_updates_enabled=bool(args.policy_updates_enabled),
         policy_update_method=str(args.policy_update_method),
@@ -547,6 +570,11 @@ def main() -> None:
         policy_reward_scale=float(args.policy_reward_scale),
         baseline_momentum=float(args.baseline_momentum),
         grpo_eps=float(args.grpo_eps),
+        kl_coef=float(args.kl_coef),
+        kl_target=float(args.kl_target),
+        kl_adapt_rate=float(args.kl_adapt_rate),
+        kl_min=float(args.kl_min),
+        kl_max=float(args.kl_max),
         solver_reward_mix_gamma=float(args.solver_reward_mix_gamma),
         solver_skip_easy_updates=bool(args.solver_skip_easy_updates),
         solver_easy_update_majority_threshold=float(args.solver_easy_update_majority_threshold),

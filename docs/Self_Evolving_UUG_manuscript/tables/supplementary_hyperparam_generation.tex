@@ -1,0 +1,43 @@
+\begin{table*}[!htb]
+  \caption{Generation-side and reward-design sweeps on BLIP3o-8B under the shared 10k-step protocol. Each block varies one generation-side factor at a time. Deltas are relative to the BLIP3o-8B base checkpoint. Shaded rows marked with $\dagger$ denote the adopted setting; all other hyperparameters follow Table~\ref{tab:sup_hyperparams}.}
+  \label{tab:sup_hparam_generation}
+  \centering
+  \scriptsize
+  \setlength{\tabcolsep}{3pt}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}llccccccccc@{}}
+    \toprule
+    & & \multicolumn{8}{c}{\textbf{Visual understanding}} & \textbf{Image gen.} \\
+    \cmidrule(l){3-11}
+    \textbf{Variant} & \textbf{Setting} & \textbf{MMMU} & \textbf{MMB} & \textbf{TVQA} & \textbf{SEED} & \textbf{RWQA} & \textbf{MMVet} & \textbf{MME-P} & \textbf{MME-C} & \textbf{GenEval overall (\%)} \\
+    \midrule
+    BLIP3o-8B (base) & --- & 50.6 & 83.5 & 83.1 & 77.5 & 69.0 & 66.6 & 1682.6 & 647.1 & 84\% \\
+    \midrule
+    \noalign{\vskip 1.5pt}
+    \groupcell{3}{Generations $L$} & 1 & 52.8 \dpos{2.2} & 86.1 \dpos{2.6} & 85.1 \dpos{2.0} & 79.5 \dpos{2.0} & 70.9 \dpos{1.9} & 68.6 \dpos{2.0} & 1698.1 \dpos{15.5} & 660.5 \dpos{13.4} & 84\% \dpos{0\%} \\
+    & \adopted{$3^{\dagger}$} & \adopted{52.8 \dpos{2.2}} & \adopted{86.1 \dpos{2.6}} & \adopted{85.2 \dpos{2.1}} & \adopted{79.4 \dpos{1.9}} & \adopted{70.9 \dpos{1.9}} & \adopted{68.7 \dpos{2.1}} & \adopted{1698.4 \dpos{15.8}} & \adopted{660.3 \dpos{13.2}} & \adopted{87\% \dpos{3\%}} \\
+    & 5 & 52.9 \dpos{2.3} & 86.1 \dpos{2.6} & 85.2 \dpos{2.1} & 79.4 \dpos{1.9} & 70.8 \dpos{1.8} & 68.7 \dpos{2.1} & 1698.8 \dpos{16.2} & 660.1 \dpos{13.0} & 87\% \dpos{3\%} \\
+    \midrule
+    \noalign{\vskip 1.5pt}
+    \groupcell{3}{Min.\ QA pairs} & 1 & 52.8 \dpos{2.2} & 86.2 \dpos{2.7} & 85.2 \dpos{2.1} & 79.3 \dpos{1.8} & 70.9 \dpos{1.9} & 68.6 \dpos{2.0} & 1698.2 \dpos{15.6} & 660.6 \dpos{13.5} & 85\% \dpos{1\%} \\
+    & \adopted{$2^{\dagger}$} & \adopted{52.8 \dpos{2.2}} & \adopted{86.1 \dpos{2.6}} & \adopted{85.2 \dpos{2.1}} & \adopted{79.4 \dpos{1.9}} & \adopted{70.9 \dpos{1.9}} & \adopted{68.7 \dpos{2.1}} & \adopted{1698.4 \dpos{15.8}} & \adopted{660.3 \dpos{13.2}} & \adopted{87\% \dpos{3\%}} \\
+    & 3 & 52.7 \dpos{2.1} & 86.1 \dpos{2.6} & 85.3 \dpos{2.2} & 79.4 \dpos{1.9} & 70.9 \dpos{1.9} & 68.8 \dpos{2.2} & 1698.7 \dpos{16.1} & 659.9 \dpos{12.8} & 86\% \dpos{2\%} \\
+    \midrule
+    \noalign{\vskip 1.5pt}
+    \groupcell{3}{\parbox{1.35cm}{\centering QA fidelity\\$w_{\text{fid}}$}} & 0.50 & 52.9 \dpos{2.3} & 86.1 \dpos{2.6} & 85.1 \dpos{2.0} & 79.4 \dpos{1.9} & 71.0 \dpos{2.0} & 68.7 \dpos{2.1} & 1698.3 \dpos{15.7} & 659.8 \dpos{12.7} & 85\% \dpos{1\%} \\
+    & \adopted{$0.65^{\dagger}$} & \adopted{52.8 \dpos{2.2}} & \adopted{86.1 \dpos{2.6}} & \adopted{85.2 \dpos{2.1}} & \adopted{79.4 \dpos{1.9}} & \adopted{70.9 \dpos{1.9}} & \adopted{68.7 \dpos{2.1}} & \adopted{1698.4 \dpos{15.8}} & \adopted{660.3 \dpos{13.2}} & \adopted{87\% \dpos{3\%}} \\
+    & 0.80 & 52.7 \dpos{2.1} & 86.1 \dpos{2.6} & 85.3 \dpos{2.2} & 79.4 \dpos{1.9} & 70.9 \dpos{1.9} & 68.5 \dpos{1.9} & 1698.0 \dpos{15.4} & 660.5 \dpos{13.4} & 86\% \dpos{2\%} \\
+    \midrule
+    \noalign{\vskip 1.5pt}
+    \groupcell{3}{\parbox{1.2cm}{\centering Cycle weight\\$w_{\text{cyc}}$}} & 0.10 & 52.8 \dpos{2.2} & 86.2 \dpos{2.7} & 85.2 \dpos{2.1} & 79.3 \dpos{1.8} & 70.9 \dpos{1.9} & 68.7 \dpos{2.1} & 1698.6 \dpos{16.0} & 660.0 \dpos{12.9} & 85\% \dpos{1\%} \\
+    & \adopted{$0.20^{\dagger}$} & \adopted{52.8 \dpos{2.2}} & \adopted{86.1 \dpos{2.6}} & \adopted{85.2 \dpos{2.1}} & \adopted{79.4 \dpos{1.9}} & \adopted{70.9 \dpos{1.9}} & \adopted{68.7 \dpos{2.1}} & \adopted{1698.4 \dpos{15.8}} & \adopted{660.3 \dpos{13.2}} & \adopted{87\% \dpos{3\%}} \\
+    & 0.30 & 52.7 \dpos{2.1} & 86.1 \dpos{2.6} & 85.2 \dpos{2.1} & 79.4 \dpos{1.9} & 71.0 \dpos{2.0} & 68.6 \dpos{2.0} & 1697.8 \dpos{15.2} & 660.4 \dpos{13.3} & 86\% \dpos{2\%} \\
+    \midrule
+    \noalign{\vskip 1.5pt}
+    \groupcell{3}{Min.\ spec quality} & 0.25 & 52.8 \dpos{2.2} & 86.0 \dpos{2.5} & 85.2 \dpos{2.1} & 79.5 \dpos{2.0} & 70.9 \dpos{1.9} & 68.6 \dpos{2.0} & 1697.9 \dpos{15.3} & 660.5 \dpos{13.4} & 85\% \dpos{1\%} \\
+    & \adopted{$0.35^{\dagger}$} & \adopted{52.8 \dpos{2.2}} & \adopted{86.1 \dpos{2.6}} & \adopted{85.2 \dpos{2.1}} & \adopted{79.4 \dpos{1.9}} & \adopted{70.9 \dpos{1.9}} & \adopted{68.7 \dpos{2.1}} & \adopted{1698.4 \dpos{15.8}} & \adopted{660.3 \dpos{13.2}} & \adopted{87\% \dpos{3\%}} \\
+    & 0.45 & 52.8 \dpos{2.2} & 86.1 \dpos{2.6} & 85.3 \dpos{2.2} & 79.3 \dpos{1.8} & 70.9 \dpos{1.9} & 68.7 \dpos{2.1} & 1698.7 \dpos{16.1} & 659.8 \dpos{12.7} & 86\% \dpos{2\%} \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table*}

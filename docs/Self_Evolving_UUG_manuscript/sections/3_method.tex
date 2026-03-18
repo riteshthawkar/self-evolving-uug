@@ -5,104 +5,173 @@
 \subsection{Problem Formulation}
 \label{sec:problem}
 
-Let $\mathcal{M}_\theta$ denote a pretrained unified model parameterized by $\theta$ supporting visual understanding $\mathcal{U}: (\mathcal{I}, q) \mapsto a$ and image generation $\mathcal{G}: t \mapsto \hat{\mathcal{I}}$. Given only an unlabeled image collection $\mathcal{D} = \{\mathcal{I}_1, \ldots, \mathcal{I}_N\}$ with no associated captions, question-answer pairs, or quality annotations, our goal is to learn $\Delta\theta$ such that $\mathcal{M}_{\theta + \Delta\theta}$ improves on both $\mathcal{U}$ and $\mathcal{G}$, subject to: (C1)~no human annotations or curated instruction data at any stage, (C2)~no external reward models or pretrained evaluators, and (C3)~no assumptions about internal architecture, operating solely through text generation and image synthesis interfaces.
+We study \emph{unsupervised} post-training of unified multimodal models, where the only training data are raw images. Let a pretrained unified model $\mathcal{M}_\theta$ expose two native interfaces: (i) visual understanding $\mathcal{U}: (\mathcal{I}, q)\mapsto a$ (answer a question $q$ about image $\mathcal{I}$), and (ii) image generation $\mathcal{G}: t\mapsto \hat{\mathcal{I}}$ (generate an image from text prompt $t$). The training pool is an unlabeled image set $\mathcal{D}=\{\mathcal{I}_1,\ldots,\mathcal{I}_N\}$ with no captions, QA pairs, or preference labels.
+
+To preserve base capabilities and keep the procedure architecture-agnostic, we freeze the backbone parameters $\theta$ and train only lightweight role adapters:
+\begin{equation}
+    \phi=\{\phi_p,\phi_s,\phi_g\}, \qquad \theta'=\theta\oplus\phi,
+    \label{eq:adapted_params}
+\end{equation}
+where $\phi_p$ parameterizes a \textbf{Proposer} $\pi_{\phi_p}(q\mid\mathcal{I})$, $\phi_s$ a \textbf{Solver} $\pi_{\phi_s}(a\mid\mathcal{I},q)$, and $\phi_g$ a \textbf{Generator} $\pi_{\phi_g}(\hat{\mathcal{I}}\mid t)$. We use only model-native operations (QA, captioning, and text-conditioned generation) plus similarity computations from frozen representations; we do not assume access to architecture-specific latents or any external judge.
+
+Our goal is to jointly improve visual understanding and image generation using \emph{self-derived} rewards:
+\begin{equation}
+    \begin{aligned}
+        \max_{\phi_p,\phi_s,\phi_g}\ \mathcal{J}(\phi)=
+        &\ \lambda_u\,\mathbb{E}_{\tau_u\sim\pi_{\phi_p,\phi_s}}\!\left[R_p(\tau_u)+R_s(\tau_u)\right] \\
+        &+ \lambda_g\,\mathbb{E}_{\tau_g\sim\pi_{\phi_s,\phi_g}}\!\left[R_g(\tau_g)\right],
+    \end{aligned}
+    \label{eq:joint_objective}
+\end{equation}
+subject to: (C1) no curated supervision, (C2) no external reward model, and (C3) controlled policy drift via KL regularization to frozen reference policies. Eq.~\eqref{eq:joint_objective} naturally separates into two loops: a \emph{visual understanding loop} (Proposer/Solver) and an \emph{image generation loop} (Generator evaluated by the Solver). Below we define the rewards $R_p$, $R_s$, and $R_g$.
 
 \subsection{Framework Overview}
 \label{sec:overview}
 
-We decompose the frozen backbone into three functional roles via lightweight LoRA adapters~\cite{hu2022lora}:
+We instantiate all three roles with LoRA adapters~\cite{hu2022lora} on the same frozen backbone (Figure~\ref{fig:framework}). Training alternates between \emph{visual understanding steps}, which update the Proposer and Solver from self-consistency-based rewards, and \emph{image generation steps}, which update the Generator using the Solver as an internal evaluator. The central coupling mechanism is the Solver’s dual role: as the Solver becomes a stronger visual reasoner, its internal evaluations provide progressively sharper training signals for image generation.
 
-\begin{itemize}
-    \item \textbf{Proposer} ($\phi_p$): generates open-ended visual questions about an input image.
-    \item \textbf{Solver} ($\phi_s$): answers visual questions using the understanding capability.
-    \item \textbf{Generator} ($\phi_g$): synthesizes images from textual descriptions using the generation capability.
-\end{itemize}
-
-Each adapter modifies a small fraction of parameters while $\theta$ remains frozen, ensuring all three roles share pretrained representations and independent optimization does not destabilize the base model. Training alternates between \emph{understanding steps} (updating proposer and solver) and \emph{generation steps} (updating generator). The Solver plays a dual role: it is a learner within the understanding loop and an internal evaluator within the generation loop, coupling understanding improvement directly to generation quality without external supervision. Figure~\ref{fig:framework} provides a visual overview.
-
-\begin{figure*}[!htb]
+\begin{figure*}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/main-figure.pdf}
-  \caption{Overview of the proposed self-evolving framework. Given only unlabeled images and a frozen backbone, three LoRA adapters instantiate a Proposer, Solver, and Generator. During understanding steps (left), the Proposer generates visual questions, the Solver answers under diverse prompt perturbations, and self-consistency entropy together with Solver Token Entropy provide training signals via GRPO and REINFORCE. During generation steps (right), the Generator synthesizes images, and the Solver evaluates them through QA fidelity scoring and cycle-consistent captioning. The same algorithm applies across diffusion-based, flow-matching, and autoregressive generation paradigms (bottom).}
+  \caption{Overview of our \emph{Proposer}--\emph{Solver}--\emph{Generator} self-evolving framework. We attach three lightweight LoRA adapters to a frozen backbone and train using only unlabeled images. Left (visual understanding): the \emph{Proposer} generates questions and the \emph{Solver} answers under prompt perturbations; self-consistency and Solver Token Entropy (STE) provide rewards targeting the \emph{Solver}'s competence frontier. Right (image generation): the \emph{Generator} synthesizes images from text prompts and the \emph{Solver} evaluates outputs via QA fidelity and cycle-consistent captioning, coupling both loops for progressive co-improvement without external labels or reward models.}
   \label{fig:framework}
 \end{figure*}
 
 
-\subsection{Self-Consistent Understanding}
+\subsection{Self-Consistent Visual Understanding}
 \label{sec:understanding}
 
-For each sampled image $\mathcal{I}$, the Proposer generates a question $q \sim \pi_{\phi_p}(\cdot \mid \mathcal{I})$. Rather than sampling multiple answers via temperature variation, we evaluate the Solver under $N$ semantically equivalent but syntactically distinct prompt framings $\{\rho_1, \ldots, \rho_N\}$, each preserving question content with different instructional phrasing. The Solver generates one answer per framing:
-\begin{equation}
-    a_i = \text{Solver}_{\phi_s}(\mathcal{I}, \rho_i(q)), \quad i = 1, \ldots, N.
-\end{equation}
-The majority answer is $a^* = \arg\max_{a} |\{i : a_i = a\}|$, and the self-consistency entropy is:
+We learn to ask and answer informative questions from unlabeled images using two complementary signals: (i) \emph{framing-level robustness}, which measures whether answers remain stable under equivalent instructions, and (ii) \emph{token-level uncertainty}, which remains informative when output-level agreement becomes degenerate.
+
+For an image $\mathcal{I}$, the Proposer samples a question $q \sim \pi_{\phi_p}(\cdot \mid \mathcal{I})$. We query the Solver under $N$ fixed prompt framings $\{\rho_1,\ldots,\rho_N\}$ (templates that preserve semantics but vary wording), i.e., $a_i=\text{Solver}_{\phi_s}(\mathcal{I}, \rho_i(q))$ for $i=1,\ldots,N$.
+Let $p_c$ be the empirical distribution over distinct answers, and $a^*$ the modal answer. We measure sample-level self-consistency by entropy:
 \begin{equation}
     H_{\text{sc}} = -\sum_{c} p_c \ln p_c, \quad p_c = \frac{|\{i : a_i = c\}|}{N}.
     \label{eq:sample_entropy}
 \end{equation}
-This measures the \emph{robustness} of understanding rather than stochastic variation: a model that genuinely comprehends the visual content produces consistent answers regardless of framing ($H_{\text{sc}} \approx 0$), while fragile understanding yields conflicting answers ($H_{\text{sc}} > 0$).
+Low $H_{\text{sc}}$ indicates robustness to rephrasing; high $H_{\text{sc}}$ indicates unstable reasoning.
 
 \paragraph{Solver Token Entropy (STE).}
-A key limitation of sample-level self-consistency is that $H_{\text{sc}} = 0$ when all responses agree, even if internal confidence is low. Questions where the Solver answers correctly under all framings but with substantial hesitation are the most useful for curriculum learning because they lie near the competence frontier. We introduce STE, a continuous difficulty measure from a single greedy forward pass. Let $\mathbf{p}_t \in \mathbb{R}^{|V|}$ denote the softmax distribution at decoding step $t$, with per-token entropy $H_t = -\sum_{v} p_{t,v} \ln p_{t,v}$. STE is:
+$H_{\text{sc}}$ can collapse (all framings yield the same answer) even when the model is uncertain, producing weak curriculum signals. To recover a continuous notion of difficulty, we compute a token-level uncertainty score from the Solver’s next-token distributions. Let $\mathbf{p}_t$ be the next-token distribution at decoding step $t$ of an answer with length $T$, and $H_t = -\sum_{v} p_{t,v} \ln p_{t,v}$ its entropy. We define STE as:
 \begin{equation}
-    \hat{H} = \max_{t \in \{1, \ldots, K\}} H_t.
+    \hat{H} = \max_{t \in \{1, \ldots, T\}} H_t,
     \label{eq:ste}
 \end{equation}
-The maximum captures the point of greatest internal uncertainty during answer generation. Even if most tokens are produced confidently, a single high-entropy token indicates the question probes a decision boundary. To make STE comparable across questions, we normalize via a self-calibrating quantile rank within a rolling window $\mathcal{W}$:
-\begin{equation}
-    d_{\text{ste}} = \frac{|\{h \in \mathcal{W} : h < \hat{H}\}|}{|\mathcal{W}|},
-    \label{eq:ste_quantile}
-\end{equation}
-yielding $d_{\text{ste}} \in [0, 1]$ that adapts to the evolving difficulty distribution without manual thresholds. STE is computed from a single greedy pass, adding negligible overhead.
+and convert $\hat{H}$ into a stable difficulty score $d_{\text{ste}}\in[0,1]$ by taking its percentile rank within a rolling window of recent $\hat{H}$ values. This quantile normalization makes STE comparable across training, even as the Solver’s overall confidence distribution shifts.
 
-\paragraph{Proposer optimization.}
-We define the Proposer reward as:
+\paragraph{Proposer and Solver optimization.}
+The Proposer is trained to generate questions near the Solver’s competence frontier: questions that are neither trivial nor unsolvable. To this end, we compute a bounded self-consistency score $r_{\text{sc}}\in[-1,1]$ that combines (i) an \emph{adaptive target} favoring medium self-consistency entropy (a Gaussian centered at a running EMA target $\mu$) and (ii) a \emph{local informativeness} term that down-weights degenerate cases such as unanimous votes with large margins. To prevent reward degeneracy when $H_{\text{sc}}\!\approx\!0$, we add STE difficulty:
 \begin{equation}
     R_p = w_{\text{ste}} \cdot d_{\text{ste}} + w_{\text{sc}} \cdot r_{\text{sc}},
     \label{eq:proposer_reward}
 \end{equation}
-where $r_{\text{sc}}$ is a hybrid reward blending a Gaussian component centered on an adaptive entropy target with a local informativeness score. The default weights ($w_{\text{ste}} = 0.70$, $w_{\text{sc}} = 0.30$) ensure the Proposer receives meaningful gradients even when all Solver responses agree. The Proposer is updated via GRPO: at each step, it generates $K$ candidate questions per image, each scored by $R_p$. Advantages are computed using bucket-stratified EMA baselines that separate easy, medium, and hard difficulty tiers, maintaining consistent pressure toward harder questions.
+which yields an automatic curriculum that tracks the Solver as it improves.
 
-\paragraph{Solver optimization.}
-The Solver is updated via KL-regularized REINFORCE. Each response is rewarded based on agreement with the majority and overall question difficulty: positive reward for majority-agreeing answers on non-trivial questions, penalty for minority answers, and a small penalty for unanimous agreement on trivially easy questions. The reward is modulated by a verbosity penalty to discourage excessively long answers. Both the Proposer and Solver losses include adaptive KL regularization against the frozen reference model to prevent divergence:
-\begin{equation}
-    \mathcal{L}_A = -\mathbb{E}\!\left[(R_A - b_A) \frac{1}{T_A}\sum_{t=1}^{T_A}\log \pi_A(y_t \mid h_t)\right] + \beta_A \cdot \overline{\text{KL}}_A,
-    \label{eq:policy_loss}
-\end{equation}
-where $A \in \{\text{Proposer}, \text{Solver}\}$, $b_A$ is an EMA baseline, and $\beta_A$ is an adaptive KL coefficient.
+We define the Solver reward $R_s$ to encourage framing-robust answers: it rewards agreement with the modal answer $a^*$ across prompt perturbations, with small penalties for non-canonical outputs and excessive verbosity. In practice, we optimize both Proposer and Solver with KL-regularized policy gradients and EMA baselines (GRPO~\cite{shao2024deepseekmath} over groups of $K$ sampled questions for the Proposer; REINFORCE over answer tokens for the Solver), using an adaptive KL coefficient to control drift from the frozen reference model.
 
-\paragraph{Training insight.}
-Early in training, Solver outputs can be highly variable, making binary or thresholded rewards sparse and unstable. The STE-augmented Proposer reward and graded Solver reward provide dense feedback even under partial agreement, preventing cold-start stagnation. This naturally induces a curriculum: as the Solver becomes more reliable, the Proposer shifts toward higher-value, boundary-level questions instead of collapsing to trivial prompts.
+This design keeps the optimization stable while allowing the Proposer--Solver pair to co-evolve under purely internal signals.
 
 
-\subsection{Generation Assessment via Internal Evaluation}
+\subsection{Image Generation Assessment via Internal Evaluation}
 \label{sec:generation}
 
-The generation loop uses the Solver as an internal evaluator, providing the training signal for the Generator without external reward models. We combine two complementary scoring mechanisms that address each other's failure modes.
+We improve generation by treating the Solver as an internal evaluator. Given a prompt $t$ for a source image $\mathcal{I}$ (obtained by having the Solver caption $\mathcal{I}$), the Generator produces a candidate image $\hat{\mathcal{I}}=\text{Generator}_{\phi_g}(t)$. We compute two complementary rewards.
 
 \paragraph{QA fidelity scoring.}
-Given an image $\mathcal{I}$ and generation prompt $t$, the Solver generates reference answers to $M$ diagnostic questions on the real image: $a^{\text{ref}}_j = \text{Solver}_{\phi_s}(\mathcal{I}, q_j)$. The Generator produces $\hat{\mathcal{I}} = \text{Generator}_{\phi_g}(t)$, and the Solver answers the same questions on the synthesized image: $\hat{a}_j = \text{Solver}_{\phi_s}(\hat{\mathcal{I}}, q_j)$. The fidelity score measures agreement:
+We sample $M$ diagnostic questions about $\mathcal{I}$ (from the Proposer) and obtain reference answers $a_j^{\text{ref}}$. We then ask the same questions on the generated image:
 \begin{equation}
     S_{\text{fid}} = \frac{1}{M} \sum_{j=1}^{M} \mathbb{1}[\hat{a}_j = a^{\text{ref}}_j].
     \label{eq:fidelity}
 \end{equation}
-This captures whether the generated image preserves specific semantic content. As the Solver improves through understanding training, its reference answers become more accurate and diagnostic questions probe finer distinctions, naturally coupling understanding quality to generation training.
+$S_{\text{fid}}$ measures how well semantic attributes are preserved from $\mathcal{I}$ to $\hat{\mathcal{I}}$.
 
 \paragraph{Cycle-consistent captioning.}
-QA fidelity only evaluates the specific attributes that diagnostic questions probe. A generated image could answer all diagnostic questions correctly while exhibiting holistic failures (incoherent composition, context omission) that no question happened to target. The Solver generates a caption $\hat{t}$ of the synthesized image, and cycle consistency measures global alignment:
+QA fidelity is local; we add a global check by captioning the generated image to obtain $\hat{t}$ and measuring cycle consistency:
 \begin{equation}
     S_{\text{cyc}} = \tfrac{1}{2}\,\text{sim}(f(t), f(\hat{t})) + \tfrac{1}{2}\,\text{sim}_{\text{vl}}(\hat{\mathcal{I}}, t),
     \label{eq:cycle}
 \end{equation}
-where $f(\cdot)$ denotes a text embedding function and $\text{sim}_{\text{vl}}$ denotes visual-linguistic similarity from the model's own frozen encoder. The first term measures whether the generated image yields a caption aligned with the original prompt; the second evaluates visual-textual alignment at the representation level. Both use the model's internal representations rather than external scoring models.
+where $f(\cdot)$ is a frozen text embedding and $\text{sim}_{\text{vl}}$ is a frozen vision--language similarity.
 
 \paragraph{Generator optimization.}
-The combined generation reward is:
+The Generator reward combines these signals, plus small diversity/contradiction terms ($S_{\text{div}}$ encourages diversity across multiple candidates; $S_{\text{ctr}}$ penalizes prompt--caption contradictions):
 \begin{equation}
     R_g = w_{\text{fid}} \cdot S_{\text{fid}} + w_{\text{cyc}} \cdot S_{\text{cyc}} + w_{\text{div}} \cdot S_{\text{div}} - w_{\text{ctr}} \cdot S_{\text{ctr}},
     \label{eq:gen_reward}
 \end{equation}
-where $S_{\text{div}}$ encourages visual diversity and $S_{\text{ctr}}$ penalizes internal contradictions. In practice, we normalize the positive mixture weights $(w_{\text{fid}}, w_{\text{cyc}}, w_{\text{div}})$ and use $w_{\text{ctr}}$ as a separate penalty coefficient. The Generator is updated via KL-regularized REINFORCE using the same form as Eq.~\eqref{eq:policy_loss}. The generation pathway is treated abstractly: for diffusion models the policy gradient applies to text conditioning; for autoregressive models it applies to discrete token prediction. This abstraction enables identical optimization across architecturally distinct unified models.
+and we update $\phi_g$ using the same KL-regularized policy-gradient recipe as in the visual understanding loop, which makes the optimization procedure consistent across image generation paradigms.
 
 \paragraph{Coupling design.}
-The understanding and generation loops are deliberately kept loosely coupled through the Solver's dual role. The Proposer is not directly influenced by generation quality, as mixing generation-quality signals into its reward would create conflicting gradients. Instead, the coupling flows indirectly: as the Proposer generates harder questions and the Solver improves, the Solver's evaluations of generated images become more discriminative, providing a stronger signal for the Generator.
+The two loops are coupled only through the Solver: the Proposer is trained purely from visual understanding signals, while image generation rewards become stronger as the Solver becomes a more reliable evaluator.
+
+
+
+% \paragraph{Prompt perturbation details.}
+% The N=7 prompt framings are generated using a template-based system
+% that varies: (1) instruction style (direct question vs. instruction
+% vs. analysis request), (2) verbosity expectation (concise vs. detailed),
+% (3) role framing (neutral vs. expert vs. student), and (4) output
+% format (free-form vs. constrained choice). Each template preserves the
+% core question content while changing surface-level phrasing.
+%
+% Example perturbations for question "What color is the car?":
+%   rho_1: "What color is the car?"
+%   rho_2: "Please analyze this image and identify the color of the car."
+%   rho_3: "As a visual perception expert, what would you say is the
+%           color of the car in this image?"
+%   rho_4: "Look at the car in this image. What color is it? Give a
+%           one-word answer."
+%   rho_5: "Describe the color of the car shown."
+%   rho_6: "I need to know: what color is that car?"
+%   rho_7: "Examining this image carefully, determine the car's color."
+%
+% The key insight is that semantically equivalent but syntactically
+% different framings probe whether the model's answer is grounded in
+% visual understanding (consistent) or surface-level pattern matching
+% (inconsistent). Temperature-based sampling probes stochastic
+% uncertainty but not framing robustness.
+
+% \paragraph{Bucket-stratified EMA baselines.}
+% Standard REINFORCE uses a single EMA baseline b for variance reduction.
+% We partition the reward space into 3 difficulty buckets based on
+% d_ste quantiles: easy (0-0.33), medium (0.33-0.67), hard (0.67-1.0).
+% Each bucket maintains its own EMA baseline with coefficient alpha=0.95.
+% This prevents the common failure mode where a single baseline, dominated
+% by easy questions, assigns artificially high advantage to medium
+% questions, causing the Proposer to get stuck at intermediate difficulty.
+% Bucket-stratified baselines ensure consistent gradient pressure within
+% each difficulty tier.
+
+% \paragraph{Verbosity penalty.}
+% The Solver reward includes a verbosity penalty:
+%   R_verb = -lambda_verb * max(0, len(answer) - L_target) / L_target
+% where L_target is set to the 75th percentile of answer lengths within
+% the current batch, and lambda_verb = 0.1. This prevents the Solver
+% from producing excessively long answers to hedge uncertainty (e.g.,
+% listing multiple possible answers). Without this penalty, the Solver
+% tends to produce longer answers over training, which dilutes the
+% self-consistency signal by introducing more opportunities for
+% partial agreement.
+
+% \paragraph{Adaptive KL scheduling.}
+% The KL coefficient beta_A is adjusted every 100 steps:
+%   if mean_KL > target_KL * 1.5:  beta_A *= 1.5
+%   elif mean_KL < target_KL * 0.5:  beta_A *= 0.67
+% This keeps the KL divergence from the reference model within a
+% controlled range, preventing both collapse to the reference (too high
+% beta) and uncontrolled drift (too low beta). The target KL is set
+% to 0.1 nats for the Solver and 0.05 nats for the Proposer, reflecting
+% the design principle that the Solver should be allowed more deviation
+% (to improve capability) while the Proposer should stay closer to
+% natural question distributions.
+
+% \paragraph{Diversity bonus computation.}
+% S_div is computed as the average pairwise LPIPS distance among the
+% k=3 candidate images per prompt:
+%   S_div = (2 / k(k-1)) * sum_{i<j} LPIPS(I_i, I_j)
+% LPIPS uses the model's own visual encoder features rather than a
+% separate perceptual network. This encourages the Generator to produce
+% visually distinct candidates, preventing mode collapse to a single
+% "safe" composition that satisfies QA fidelity but lacks variety.
+% The diversity bonus weight (w_div=0.10) is deliberately small to
+% avoid rewarding diversity at the expense of fidelity.

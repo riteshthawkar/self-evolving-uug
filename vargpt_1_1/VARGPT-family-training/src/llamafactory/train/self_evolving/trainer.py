@@ -10,6 +10,7 @@ Ported from BLIP3o's unified_trainer.py with VARGPT-specific adaptations.
 """
 
 import collections
+import datetime as dt
 import gc
 import json
 import logging
@@ -18,7 +19,9 @@ import os
 import pathlib
 import random
 import re
+import shutil
 import time
+import traceback
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -39,6 +42,7 @@ from .generation_helpers import (
     GenerationSpec,
     _ensure_pil_image,
     _parse_generation_spec,
+    sanitize_and_score_generation_spec,
 )
 from .gen_policy_updater import VARImageGenPolicyUpdater
 from .policy_updater import RolePolicyUpdater
@@ -52,7 +56,7 @@ from .prompts import (
     build_generator_prompt,
 )
 from .replay_buffer import ReplayBuffer
-from .rewards import score_generated_image
+from .rewards import score_generated_candidates
 from .utils import (
     _build_chat_text,
     _build_text_only_chat,
@@ -207,6 +211,16 @@ class SelfEvolvingTrainer(Trainer):
         self.understanding_log_path: Optional[pathlib.Path] = None
         self.generation_log_path: Optional[pathlib.Path] = None
         self.error_log_path: Optional[pathlib.Path] = None
+        self.release_rollouts_log_path: Optional[pathlib.Path] = None
+        self.release_generation_rollouts_log_path: Optional[pathlib.Path] = None
+        self.metrics_log_path: Optional[pathlib.Path] = None
+        self.status_path: Optional[pathlib.Path] = None
+        self.summary_path: Optional[pathlib.Path] = None
+        self.config_path: Optional[pathlib.Path] = None
+        self.checkpoint_root: Optional[pathlib.Path] = None
+        self.last_checkpoint_dir: str = ""
+        self._metric_stats: Dict[str, Dict[str, float]] = {}
+        self._phase_counts: Dict[str, int] = {"understanding": 0, "generation": 0, "error": 0}
 
         logger.info(
             f"[SelfEvolvingTrainer] Initialized with "
@@ -214,6 +228,50 @@ class SelfEvolvingTrainer(Trainer):
             f"G={se_config.generation_steps_per_cycle}, "
             f"total_steps={se_config.total_steps}"
         )
+
+    @staticmethod
+    def _dist_mean_scalar(value: float, *, device: Optional[torch.device] = None) -> float:
+        if not (dist.is_available() and dist.is_initialized()):
+            return float(value)
+        dev = device
+        if dev is None:
+            if torch.cuda.is_available():
+                local_rank = int(os.environ.get("LOCAL_RANK", "0") or "0")
+                dev = torch.device(f"cuda:{local_rank}")
+            else:
+                dev = torch.device("cpu")
+        tensor = torch.tensor([float(value)], dtype=torch.float32, device=dev)
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        tensor /= float(dist.get_world_size())
+        return float(tensor.item())
+
+    def _sync_distributed_step_state(self) -> None:
+        if not self._is_ddp:
+            return
+        self.proposer_baseline = self._dist_mean_scalar(self.proposer_baseline, device=self.device)
+        self.solver_baseline = self._dist_mean_scalar(self.solver_baseline, device=self.device)
+        self.generator_baseline = self._dist_mean_scalar(self.generator_baseline, device=self.device)
+        self.proposer_gen_baseline = self._dist_mean_scalar(self.proposer_gen_baseline, device=self.device)
+        self.reward_ema = self._dist_mean_scalar(self.reward_ema, device=self.device)
+        self.proposer_entropy_mu_ema = self._dist_mean_scalar(
+            self.proposer_entropy_mu_ema,
+            device=self.device,
+        )
+        if self.proposer_updater is not None:
+            self.proposer_updater.kl_coef = self._dist_mean_scalar(
+                self.proposer_updater.kl_coef,
+                device=self.device,
+            )
+        if self.solver_updater is not None:
+            self.solver_updater.kl_coef = self._dist_mean_scalar(
+                self.solver_updater.kl_coef,
+                device=self.device,
+            )
+        if self.generator_updater is not None:
+            self.generator_updater.kl_coef = self._dist_mean_scalar(
+                self.generator_updater.kl_coef,
+                device=self.device,
+            )
 
     # ── Main training loop ──────────────────────────────────────────────
 
@@ -235,11 +293,14 @@ class SelfEvolvingTrainer(Trainer):
         self._init_step_log_paths(output_dir)
 
         # Save config
-        _json_dump(output_dir / "se_config.json", {
+        config_payload = {
             k: str(v) if not isinstance(v, (int, float, bool, str, type(None)))
             else v
             for k, v in cfg.__dict__.items()
-        })
+        }
+        _json_dump(output_dir / "se_config.json", config_payload)
+        if self.config_path is not None:
+            _json_dump(self.config_path, config_payload)
 
         logger.info(f"[SelfEvolvingTrainer] Starting training from step {start_step}")
 
@@ -248,80 +309,198 @@ class SelfEvolvingTrainer(Trainer):
             raise ValueError("Cycle length must be > 0")
 
         self.model.train()
+        run_started_at = float(time.time())
+        last_completed_step = max(start_step - 1, cfg.start_step - 1)
+        last_attempted_step = last_completed_step
 
-        for step in range(start_step, cfg.total_steps):
-            self.global_step = step
-            step_start = time.time()
+        def _emit_training_logs(step_id: int, *, phase: str, step_time_sec: float):
+            progress = self._progress_core(
+                step=int(step_id),
+                phase=str(phase),
+                run_started_at=run_started_at,
+            )
+            metrics = self._release_metrics(step_time_sec=step_time_sec)
+            self._write_status(state="running", progress=progress, metrics=metrics)
+            if int(step_id) % max(1, int(cfg.log_every)) == 0:
+                self._append_metrics({"kind": "heartbeat", **progress, **metrics})
 
-            # Determine phase
-            phase_in_cycle = step % cycle_len
-            is_u_step = phase_in_cycle < cfg.understanding_steps_per_cycle
+        self._write_status(
+            state="running",
+            progress=self._progress_core(
+                step=int(last_completed_step),
+                phase="init",
+                run_started_at=run_started_at,
+            ),
+            metrics=self._release_metrics(step_time_sec=0.0),
+        )
 
+        try:
+            for step in range(start_step, cfg.total_steps):
+                self.global_step = step
+                step_start = time.time()
+                last_attempted_step = step
+
+                # Determine phase
+                phase_in_cycle = step % cycle_len
+                is_u_step = phase_in_cycle < cfg.understanding_steps_per_cycle
+
+                try:
+                    if is_u_step:
+                        step_stats = self._understanding_step(step)
+                        step_stats["phase"] = "understanding"
+                    else:
+                        step_stats = self._generation_step(step)
+                        step_stats["phase"] = "generation"
+                except Exception as e:
+                    logger.error(f"[SelfEvolvingTrainer] Step {step} failed: {e}")
+                    traceback.print_exc()
+                    step_stats = {"phase": "error", "error": str(e)}
+                    self._consecutive_step_errors += 1
+                    self._total_step_errors += 1
+                    if bool(getattr(cfg, "fail_on_step_error", True)):
+                        max_consecutive = max(0, int(getattr(cfg, "max_consecutive_step_errors", 0)))
+                        max_total = max(0, int(getattr(cfg, "max_total_step_errors", 0)))
+                        if (
+                            self._consecutive_step_errors > max_consecutive
+                            or self._total_step_errors > max_total
+                        ):
+                            raise RuntimeError(
+                                "[SelfEvolvingTrainer] Aborting due to step errors: "
+                                f"consecutive={self._consecutive_step_errors} (limit={max_consecutive}), "
+                                f"total={self._total_step_errors} (limit={max_total}), step={step}"
+                            ) from e
+
+                step_stats["step"] = step
+                step_stats["step_time"] = time.time() - step_start
+                if step_stats.get("phase") != "error":
+                    self._consecutive_step_errors = 0
+                    self._sync_distributed_step_state()
+
+                phase_name = str(step_stats.get("phase", "unknown"))
+                if phase_name in self._phase_counts:
+                    self._phase_counts[phase_name] += 1
+
+                for key, value in step_stats.items():
+                    if isinstance(value, bool):
+                        self._update_metric(str(key), 1.0 if value else 0.0)
+                    elif isinstance(value, (int, float)):
+                        numeric = float(value)
+                        if math.isfinite(numeric):
+                            self._update_metric(str(key), numeric)
+
+                # Persist full per-step records (BLIP3o-like traceability).
+                step_record = dict(step_stats)
+                step_record["timestamp_unix"] = time.time()
+                self._append_jsonl(self.iter_log_path, step_record)
+                if phase_name == "understanding":
+                    self._append_jsonl(self.understanding_log_path, step_record)
+                    self._append_jsonl(self.release_rollouts_log_path, step_record)
+                elif phase_name == "generation":
+                    self._append_jsonl(self.generation_log_path, step_record)
+                    self._append_jsonl(self.release_generation_rollouts_log_path, step_record)
+                elif phase_name == "error":
+                    self._append_jsonl(self.error_log_path, step_record)
+
+                _emit_training_logs(step, phase=phase_name, step_time_sec=float(step_stats.get("step_time", 0.0)))
+
+                # ── Logging ─────────────────────────────────────────────────
+                if step % cfg.log_every == 0:
+                    self._log_step(step, step_stats)
+
+                # ── Generation health fail-fast ─────────────────────────────
+                if step_stats.get("phase") == "generation":
+                    self._update_generation_health(step, step_stats)
+
+                # ── Checkpointing ───────────────────────────────────────────
+                if step > 0 and step % cfg.save_every == 0:
+                    self._save_se_checkpoint(step, output_dir)
+
+                # ── Memory management ───────────────────────────────────────
+                if cfg.clear_cache_every > 0 and step % cfg.clear_cache_every == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                last_completed_step = step
+
+            # Final save
+            self._save_se_checkpoint(cfg.total_steps, output_dir)
+            summary = {
+                "run_dir": str(self.run_dir) if self.run_dir is not None else str(output_dir),
+                "final_step": int(cfg.total_steps),
+                "start_step": int(start_step),
+                "status": "completed",
+                "phase_counts": dict(self._phase_counts),
+                "metrics": self._metrics_summary(),
+                "rollouts_log_path": str(self.release_rollouts_log_path) if self.release_rollouts_log_path is not None else "",
+                "generation_rollouts_log_path": str(self.release_generation_rollouts_log_path) if self.release_generation_rollouts_log_path is not None else "",
+                "metrics_log_path": str(self.metrics_log_path) if self.metrics_log_path is not None else "",
+                "last_checkpoint_dir": str(self.last_checkpoint_dir),
+            }
+            if self.summary_path is not None:
+                _json_dump(self.summary_path, summary)
+            self._append_metrics(
+                {
+                    "kind": "final_summary",
+                    **self._progress_core(
+                        step=int(cfg.total_steps),
+                        phase="completed",
+                        run_started_at=run_started_at,
+                    ),
+                    **summary,
+                }
+            )
+            self._write_status(
+                state="completed",
+                progress=self._progress_core(
+                    step=int(cfg.total_steps),
+                    phase="completed",
+                    run_started_at=run_started_at,
+                ),
+                metrics=self._release_metrics(step_time_sec=0.0),
+            )
+            logger.info("[SelfEvolvingTrainer] Training complete.")
+            return summary
+        except Exception as exc:
+            error_text = f"{type(exc).__name__}: {exc}"
+            interrupted_step = int(last_attempted_step)
+            if self.is_world_process_zero():
+                logger.error(
+                    f"[SelfEvolvingTrainer] Training interrupted at step {interrupted_step}: {error_text}"
+                )
             try:
-                if is_u_step:
-                    step_stats = self._understanding_step(step)
-                    step_stats["phase"] = "understanding"
-                else:
-                    step_stats = self._generation_step(step)
-                    step_stats["phase"] = "generation"
-            except Exception as e:
-                logger.error(f"[SelfEvolvingTrainer] Step {step} failed: {e}")
-                import traceback
-                traceback.print_exc()
-                step_stats = {"phase": "error", "error": str(e)}
-                self._consecutive_step_errors += 1
-                self._total_step_errors += 1
-                if bool(getattr(cfg, "fail_on_step_error", True)):
-                    max_consecutive = max(0, int(getattr(cfg, "max_consecutive_step_errors", 0)))
-                    max_total = max(0, int(getattr(cfg, "max_total_step_errors", 0)))
-                    if (
-                        self._consecutive_step_errors > max_consecutive
-                        or self._total_step_errors > max_total
-                    ):
-                        raise RuntimeError(
-                            "[SelfEvolvingTrainer] Aborting due to step errors: "
-                            f"consecutive={self._consecutive_step_errors} (limit={max_consecutive}), "
-                            f"total={self._total_step_errors} (limit={max_total}), step={step}"
-                        ) from e
-
-            step_stats["step"] = step
-            step_stats["step_time"] = time.time() - step_start
-            if step_stats.get("phase") != "error":
-                self._consecutive_step_errors = 0
-
-            # Persist full per-step records (BLIP3o-like traceability).
-            step_record = dict(step_stats)
-            step_record["timestamp_unix"] = time.time()
-            self._append_jsonl(self.iter_log_path, step_record)
-            phase_name = str(step_stats.get("phase", "unknown"))
-            if phase_name == "understanding":
-                self._append_jsonl(self.understanding_log_path, step_record)
-            elif phase_name == "generation":
-                self._append_jsonl(self.generation_log_path, step_record)
-            elif phase_name == "error":
-                self._append_jsonl(self.error_log_path, step_record)
-
-            # ── Logging ─────────────────────────────────────────────────
-            if step % cfg.log_every == 0:
-                self._log_step(step, step_stats)
-
-            # ── Generation health fail-fast ─────────────────────────────
-            if step_stats.get("phase") == "generation":
-                self._update_generation_health(step, step_stats)
-
-            # ── Checkpointing ───────────────────────────────────────────
-            if step > 0 and step % cfg.save_every == 0:
-                self._save_se_checkpoint(step, output_dir)
-
-            # ── Memory management ───────────────────────────────────────
-            if cfg.clear_cache_every > 0 and step % cfg.clear_cache_every == 0:
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-        # Final save
-        self._save_se_checkpoint(cfg.total_steps, output_dir)
-        logger.info("[SelfEvolvingTrainer] Training complete.")
+                self._save_se_checkpoint(max(0, interrupted_step), output_dir)
+            except Exception as save_exc:
+                logger.warning(f"[SelfEvolvingTrainer] Emergency checkpoint failed: {save_exc}")
+            summary = {
+                "run_dir": str(self.run_dir) if self.run_dir is not None else str(output_dir),
+                "final_step": int(max(last_completed_step, interrupted_step)),
+                "start_step": int(start_step),
+                "status": "interrupted",
+                "interrupted_at_step": int(interrupted_step),
+                "error": error_text,
+                "phase_counts": dict(self._phase_counts),
+                "metrics": self._metrics_summary(),
+                "rollouts_log_path": str(self.release_rollouts_log_path) if self.release_rollouts_log_path is not None else "",
+                "generation_rollouts_log_path": str(self.release_generation_rollouts_log_path) if self.release_generation_rollouts_log_path is not None else "",
+                "metrics_log_path": str(self.metrics_log_path) if self.metrics_log_path is not None else "",
+                "last_checkpoint_dir": str(self.last_checkpoint_dir),
+            }
+            if self.summary_path is not None:
+                _json_dump(self.summary_path, summary)
+            interrupted_progress = self._progress_core(
+                step=int(max(last_completed_step, interrupted_step)),
+                phase="interrupted",
+                run_started_at=run_started_at,
+            )
+            self._append_metrics({"kind": "interrupted", **interrupted_progress, **summary})
+            self._write_status(
+                state="interrupted",
+                progress=interrupted_progress,
+                metrics=self._release_metrics(step_time_sec=0.0),
+                last_error=error_text,
+            )
+            raise
 
     # ── Understanding Step ──────────────────────────────────────────────
 
@@ -1070,8 +1249,19 @@ class SelfEvolvingTrainer(Trainer):
         if spec is None or not spec.prompt:
             return {"g_skipped": True, "reason": "no_spec"}
 
+        spec, spec_quality, spec_quality_details = sanitize_and_score_generation_spec(
+            spec,
+            min_spec_qa_pairs=int(getattr(cfg, "min_spec_qa_pairs", 2)),
+            max_question_words=int(getattr(cfg, "max_question_words", 24)),
+            max_expected_words=int(getattr(cfg, "max_expected_words", 8)),
+        )
+        if not spec.prompt or not spec.qa_pairs:
+            return {"g_skipped": True, "reason": "invalid_spec_after_sanitize"}
+
         stats["gen_prompt"] = spec.prompt[:100]
         stats["num_qa_pairs"] = len(spec.qa_pairs)
+        stats["spec_quality"] = float(spec_quality)
+        stats["spec_quality_details"] = spec_quality_details
 
         # ── 2. Generate K candidate images ──────────────────────────────
         K = cfg.num_generations
@@ -1118,29 +1308,91 @@ class SelfEvolvingTrainer(Trainer):
         # ── 3. Score candidates ─────────────────────────────────────────
         questions = [qa.question for qa in spec.qa_pairs]
         expected_answers = [qa.expected for qa in spec.qa_pairs]
+        candidate_images = [cand[0] for cand in candidates]
+        reward_details_list = score_generated_candidates(
+            model=self.model,
+            processor=self.processor,
+            images=candidate_images,
+            prompt=spec.prompt,
+            questions=questions,
+            expected_answers=expected_answers,
+            device=self.device,
+            config=cfg,
+            spec_quality=float(spec_quality),
+        )
+        rewards = [float(details.get("total_reward", 0.0)) for details in reward_details_list]
+        if not rewards:
+            return {"g_skipped": True, "reason": "reward_scoring_failed", **stats}
 
-        rewards = []
-        reward_details_list = []
-        for gen_image, _ in candidates:
-            reward, details = score_generated_image(
-                model=self.model,
-                processor=self.processor,
-                image=gen_image,
-                prompt=spec.prompt,
-                questions=questions,
-                expected_answers=expected_answers,
-                device=self.device,
-                config=cfg,
-            )
-            rewards.append(reward)
-            reward_details_list.append(details)
+        valid_reward_indices = [
+            idx
+            for idx, details in enumerate(reward_details_list)
+            if any(str(log.get("status", "")) == "ok" for log in details.get("qa_logs", []))
+        ]
+        if not valid_reward_indices:
+            return {"g_skipped": True, "reason": "empty_generation_qa_entropy", **stats}
+
+        best_idx = max(valid_reward_indices, key=lambda idx: rewards[idx])
+        best_reward_details = reward_details_list[best_idx]
+        selected_total_reward = float(best_reward_details.get("total_reward", 0.0))
+        mean_entropy = float(best_reward_details.get("mean_entropy_nats", 0.0))
+        entropy_component = gaussian_reward(
+            mean_entropy,
+            float(getattr(cfg, "prop_entropy_mu", 0.90)),
+            float(getattr(cfg, "prop_entropy_sigma", 0.35)),
+        )
+        if mean_entropy <= 1e-6:
+            entropy_component = -max(0.0, float(getattr(cfg, "zero_entropy_reward_cap", 0.10)))
+        quality_component = max(0.0, min(1.0, float(best_reward_details.get("total_reward", 0.0))))
+        entropy_alpha = max(0.0, min(1.0, float(getattr(cfg, "proposer_gen_entropy_weight", 0.7))))
+        proposer_gen_reward = max(
+            -1.0,
+            min(
+                1.0,
+                entropy_alpha * float(entropy_component)
+                + (1.0 - entropy_alpha) * float(quality_component),
+            ),
+        )
+        quality_gate_ok = bool(
+            float(spec_quality) >= float(getattr(cfg, "min_spec_quality_for_update", 0.35))
+            and len(spec.qa_pairs) >= int(getattr(cfg, "min_spec_qa_pairs", 2))
+        )
 
         stats["gen_rewards"] = rewards
         stats["gen_reward_mean"] = sum(rewards) / len(rewards)
         stats["gen_reward_max"] = max(rewards)
+        stats["best_candidate_idx"] = int(best_idx)
+        stats["best_spec_score"] = float(best_reward_details.get("spec_score", 0.0))
+        stats["best_cycle_score"] = float(best_reward_details.get("cycle_score", 0.0))
+        stats["best_diversity_score"] = float(best_reward_details.get("diversity_score", 0.0))
+        stats["best_contradiction_score"] = float(best_reward_details.get("contradiction_score", 0.0))
+        stats["best_base_reward"] = float(best_reward_details.get("base_reward", 0.0))
+        stats["best_total_reward"] = float(best_reward_details.get("total_reward", 0.0))
+        stats["best_cycle_caption"] = str(best_reward_details.get("cycle_caption", ""))
+        stats["best_qa_confidence"] = float(best_reward_details.get("qa_confidence", 0.0))
+        stats["mean_entropy_nats"] = float(mean_entropy)
+        stats["entropy_component"] = float(entropy_component)
+        stats["quality_component"] = float(quality_component)
+        stats["proposer_gen_reward"] = float(proposer_gen_reward)
+        stats["entropy_weight_alpha"] = float(entropy_alpha)
+        stats["quality_gate_ok"] = bool(quality_gate_ok)
+        stats["gen_candidate_details"] = [
+            {
+                "candidate_idx": int(details.get("candidate_idx", idx)),
+                "spec_score": float(details.get("spec_score", 0.0)),
+                "cycle_score": float(details.get("cycle_score", 0.0)),
+                "diversity_score": float(details.get("diversity_score", 0.0)),
+                "contradiction_score": float(details.get("contradiction_score", 0.0)),
+                "base_reward": float(details.get("base_reward", 0.0)),
+                "total_reward": float(details.get("total_reward", 0.0)),
+                "mean_entropy_nats": float(details.get("mean_entropy_nats", 0.0)),
+                "qa_confidence": float(details.get("qa_confidence", 0.0)),
+            }
+            for idx, details in enumerate(reward_details_list)
+        ]
 
         # ── 4. GRPO update on generator ─────────────────────────────────
-        if len(candidates) >= 2:
+        if len(candidates) >= 2 and quality_gate_ok:
             # Prepare inputs for GRPO
             gen_prompt = build_generator_prompt(spec.prompt)
             chat_text = _build_text_only_chat(self.processor, gen_prompt)
@@ -1163,51 +1415,51 @@ class SelfEvolvingTrainer(Trainer):
                 ddp_no_sync=self._is_ddp,
             )
             stats.update({f"gen_{k}": v for k, v in gen_stats.items()})
+        elif len(candidates) < 2:
+            stats["gen_update_skipped_reason"] = "insufficient_candidates"
+        else:
+            stats["gen_update_skipped_reason"] = "low_spec_quality"
 
         # ── 5. Update proposer with generation quality ──────────────────
         if cfg.proposer_gen_reward_enabled:
-            gen_quality = max(rewards)
-            prop_gen_reward = (
-                cfg.proposer_gen_entropy_weight * 0.5  # placeholder: no entropy here
-                + (1 - cfg.proposer_gen_entropy_weight) * gen_quality
-            )
+            if quality_gate_ok:
+                if cfg.imageless_proposer_mode:
+                    prop_prompt = build_imageless_spec_prompt(
+                        topic or "",
+                        target_difficulty=self._current_difficulty(step),
+                    )
+                    prop_stats = self.proposer_updater.step(
+                        image=None,
+                        prompt=prop_prompt,
+                        completion=spec_completion,
+                        reward=proposer_gen_reward,
+                        baseline=self.proposer_gen_baseline,
+                        device=self.device,
+                        ddp_no_sync=self._is_ddp,
+                    )
+                else:
+                    prop_prompt = build_generation_spec_prompt(
+                        target_difficulty=self._current_difficulty(step),
+                    )
+                    prop_stats = self.proposer_updater.step(
+                        image=image,
+                        prompt=prop_prompt,
+                        completion=spec_completion,
+                        reward=proposer_gen_reward,
+                        baseline=self.proposer_gen_baseline,
+                        device=self.device,
+                        ddp_no_sync=self._is_ddp,
+                    )
 
-            if cfg.imageless_proposer_mode:
-                prop_prompt = build_imageless_spec_prompt(
-                    topic or "",
-                    target_difficulty=self._current_difficulty(step),
+                self.proposer_gen_baseline = (
+                    cfg.proposer_gen_baseline_momentum * self.proposer_gen_baseline
+                    + (1 - cfg.proposer_gen_baseline_momentum) * proposer_gen_reward
                 )
-                prop_stats = self.proposer_updater.step(
-                    image=None,
-                    prompt=prop_prompt,
-                    completion=spec_completion,
-                    reward=prop_gen_reward,
-                    baseline=self.proposer_gen_baseline,
-                    device=self.device,
-                    ddp_no_sync=self._is_ddp,
-                )
+                stats.update({f"prop_gen_{k}": v for k, v in prop_stats.items()})
             else:
-                prop_prompt = build_generation_spec_prompt(
-                    target_difficulty=self._current_difficulty(step),
-                )
-                prop_stats = self.proposer_updater.step(
-                    image=image,
-                    prompt=prop_prompt,
-                    completion=spec_completion,
-                    reward=prop_gen_reward,
-                    baseline=self.proposer_gen_baseline,
-                    device=self.device,
-                    ddp_no_sync=self._is_ddp,
-                )
-
-            self.proposer_gen_baseline = (
-                cfg.proposer_gen_baseline_momentum * self.proposer_gen_baseline
-                + (1 - cfg.proposer_gen_baseline_momentum) * prop_gen_reward
-            )
-            stats.update({f"prop_gen_{k}": v for k, v in prop_stats.items()})
+                stats["prop_gen_skipped_reason"] = "low_spec_quality"
 
         # ── 6. Best image → replay buffer ───────────────────────────────
-        best_idx = rewards.index(max(rewards))
         best_image = candidates[best_idx][0]
 
         added = self.replay_buffer.add(
@@ -1215,7 +1467,7 @@ class SelfEvolvingTrainer(Trainer):
             prompt=spec.prompt,
             questions=questions,
             reference_answers=expected_answers,
-            reward=max(rewards),
+            reward=selected_total_reward,
             step=step,
         )
         stats["replay_buffer_added"] = added
@@ -1224,7 +1476,7 @@ class SelfEvolvingTrainer(Trainer):
         # Update reward EMA
         self.reward_ema = (
             cfg.reward_ema_momentum * self.reward_ema
-            + (1 - cfg.reward_ema_momentum) * max(rewards)
+            + (1 - cfg.reward_ema_momentum) * selected_total_reward
         )
         stats["reward_ema"] = self.reward_ema
 
@@ -2581,6 +2833,8 @@ class SelfEvolvingTrainer(Trainer):
         }
 
         torch.save(state, ckpt_dir / "se_state.pt")
+        with (ckpt_dir / "SAVE_OK").open("w", encoding="utf-8") as f:
+            f.write("ok\n")
 
         # Save model adapters
         try:
@@ -2632,6 +2886,7 @@ class SelfEvolvingTrainer(Trainer):
 
         # Cleanup old checkpoints
         self._cleanup_old_checkpoints(output_dir, keep=self.se_config.max_checkpoints)
+        self._sync_standard_checkpoint_dir(step=step, source_dir=ckpt_dir)
 
         logger.info(f"[SelfEvolvingTrainer] Saved checkpoint at step {step}")
 
@@ -2705,6 +2960,17 @@ class SelfEvolvingTrainer(Trainer):
             ]
             if candidates:
                 return max(candidates, key=lambda p: self._parse_checkpoint_step(p.name))
+            if path.name == "checkpoints" or (path / "checkpoints").is_dir():
+                checkpoint_root = path if path.name == "checkpoints" else (path / "checkpoints")
+                alias_candidates = [
+                    p for p in checkpoint_root.glob("step_*")
+                    if p.is_dir() and (p / "se_state.pt").exists()
+                ]
+                if alias_candidates:
+                    return max(
+                        alias_candidates,
+                        key=lambda p: int(p.name.split("_")[-1]) if p.name.split("_")[-1].isdigit() else -1,
+                    )
 
         return None
 
@@ -2957,7 +3223,6 @@ class SelfEvolvingTrainer(Trainer):
 
     def _cleanup_old_checkpoints(self, output_dir: pathlib.Path, keep: int = 5):
         """Remove old checkpoints, keeping only the most recent `keep`."""
-        import glob
         ckpt_dirs = sorted(
             output_dir.glob("se_checkpoint_*"),
             key=lambda p: int(p.name.split("_")[-1]) if p.name.split("_")[-1].isdigit() else 0,
@@ -2965,10 +3230,21 @@ class SelfEvolvingTrainer(Trainer):
         while len(ckpt_dirs) > keep:
             old_dir = ckpt_dirs.pop(0)
             try:
-                import shutil
                 shutil.rmtree(old_dir)
             except Exception:
                 pass
+        keep_steps = {
+            int(p.name.split("_")[-1]) for p in ckpt_dirs if p.name.split("_")[-1].isdigit()
+        }
+        checkpoint_root = output_dir / "checkpoints"
+        if checkpoint_root.is_dir():
+            for alias_dir in checkpoint_root.glob("step_*"):
+                try:
+                    alias_step = int(alias_dir.name.split("_")[-1])
+                except Exception:
+                    continue
+                if alias_step not in keep_steps:
+                    self._remove_path(alias_dir)
 
     def _init_step_log_paths(self, output_dir: pathlib.Path):
         """Initialize run/log directories and JSONL log file paths."""
@@ -2978,8 +3254,16 @@ class SelfEvolvingTrainer(Trainer):
         self.understanding_log_path = self.logs_dir / "understanding_steps.jsonl"
         self.generation_log_path = self.logs_dir / "generation_steps.jsonl"
         self.error_log_path = self.logs_dir / "error_steps.jsonl"
+        self.release_rollouts_log_path = output_dir / "rollouts.jsonl"
+        self.release_generation_rollouts_log_path = output_dir / "generation_rollouts.jsonl"
+        self.metrics_log_path = output_dir / "metrics.jsonl"
+        self.status_path = output_dir / "status.json"
+        self.summary_path = output_dir / "summary.json"
+        self.config_path = output_dir / "config.json"
+        self.checkpoint_root = output_dir / "checkpoints"
         if self.is_world_process_zero():
             self.logs_dir.mkdir(parents=True, exist_ok=True)
+            self.checkpoint_root.mkdir(parents=True, exist_ok=True)
 
     def _to_jsonable(self, value):
         """Convert nested training stats into JSON-safe values."""
@@ -3017,6 +3301,157 @@ class SelfEvolvingTrainer(Trainer):
                 f.write(json.dumps(self._to_jsonable(record), ensure_ascii=True) + "\n")
         except Exception as exc:
             logger.warning(f"[SelfEvolvingTrainer] Failed to append log {path}: {exc}")
+
+    def _update_metric(self, name: str, value: float):
+        stat = self._metric_stats.setdefault(
+            name,
+            {"count": 0.0, "sum": 0.0, "sum_sq": 0.0, "min": value, "max": value},
+        )
+        stat["count"] += 1.0
+        stat["sum"] += value
+        stat["sum_sq"] += value * value
+        stat["min"] = min(stat["min"], value)
+        stat["max"] = max(stat["max"], value)
+
+    def _metrics_summary(self) -> Dict[str, Dict[str, float]]:
+        summary: Dict[str, Dict[str, float]] = {}
+        for name, stat in self._metric_stats.items():
+            count = max(1.0, stat["count"])
+            mean = stat["sum"] / count
+            variance = max(0.0, (stat["sum_sq"] / count) - (mean * mean))
+            summary[name] = {
+                "count": int(stat["count"]),
+                "mean": mean,
+                "std": math.sqrt(variance),
+                "min": stat["min"],
+                "max": stat["max"],
+            }
+        return summary
+
+    @staticmethod
+    def _write_json_atomic(path: pathlib.Path, payload: Dict) -> None:
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(str(tmp_path), str(path))
+
+    def _progress_core(self, *, step: int, phase: str, run_started_at: float) -> Dict[str, float]:
+        now = float(time.time())
+        elapsed_sec = max(1e-9, now - float(run_started_at))
+        total = max(1, int(self.se_config.total_steps) - int(self.se_config.start_step))
+        done = max(0, int(step) - int(self.se_config.start_step) + 1)
+        done = min(total, done)
+        progress = float(done) / float(total)
+        steps_per_sec = float(done) / float(elapsed_sec) if elapsed_sec > 0.0 else 0.0
+        remaining = max(0, total - done)
+        eta_sec = float(remaining) / float(steps_per_sec) if steps_per_sec > 0.0 else -1.0
+        return {
+            "step": int(step),
+            "phase": str(phase),
+            "steps_total": int(self.se_config.total_steps),
+            "steps_started_from": int(self.se_config.start_step),
+            "steps_done": int(done),
+            "steps_remaining": int(remaining),
+            "progress": float(progress),
+            "elapsed_sec": float(elapsed_sec),
+            "steps_per_sec": float(steps_per_sec),
+            "eta_sec": float(eta_sec),
+            "timestamp_unix": float(now),
+            "timestamp_utc": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+
+    def _append_metrics(self, record: Dict) -> None:
+        self._append_jsonl(self.metrics_log_path, record)
+
+    def _release_metrics(self, *, step_time_sec: float) -> Dict[str, float]:
+        summary = self._metrics_summary()
+
+        def _mean(name: str, default: float = 0.0) -> float:
+            return float(summary.get(name, {}).get("mean", default))
+
+        return {
+            "step_time_sec": float(step_time_sec),
+            "understanding_steps": int(self._phase_counts.get("understanding", 0)),
+            "generation_steps": int(self._phase_counts.get("generation", 0)),
+            "error_steps": int(self._phase_counts.get("error", 0)),
+            "proposer_reward": _mean("proposer_reward"),
+            "solver_reward": _mean("solver_reward"),
+            "entropy": _mean("entropy"),
+            "gen_reward_mean": _mean("gen_reward_mean"),
+            "gen_reward_max": _mean("gen_reward_max"),
+            "generation_success_rate": _mean("generation_success_rate"),
+            "proposer_baseline": float(self.proposer_baseline),
+            "solver_baseline": float(self.solver_baseline),
+            "generator_baseline": float(self.generator_baseline),
+            "proposer_gen_baseline": float(self.proposer_gen_baseline),
+            "reward_ema": float(self.reward_ema),
+            "replay_buffer_size": int(len(self.replay_buffer)),
+            "last_checkpoint_dir": str(self.last_checkpoint_dir),
+        }
+
+    def _write_status(self, *, state: str, progress: Dict, metrics: Dict, last_error: str = "") -> None:
+        if self.status_path is None or not self.is_world_process_zero():
+            return
+        payload = {
+            "state": str(state),
+            "output_dir": str(self.run_dir) if self.run_dir is not None else "",
+            "summary_path": str(self.summary_path) if self.summary_path is not None else "",
+            "rollouts_log_path": str(self.release_rollouts_log_path) if self.release_rollouts_log_path is not None else "",
+            "generation_rollouts_log_path": (
+                str(self.release_generation_rollouts_log_path)
+                if self.release_generation_rollouts_log_path is not None
+                else ""
+            ),
+            "metrics_log_path": str(self.metrics_log_path) if self.metrics_log_path is not None else "",
+            "last_error": str(last_error or ""),
+            "progress": progress,
+            "metrics": metrics,
+        }
+        self._write_json_atomic(self.status_path, payload)
+
+    @staticmethod
+    def _remove_path(path: pathlib.Path) -> None:
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+
+    @staticmethod
+    def _link_or_copy_path(src: pathlib.Path, dst: pathlib.Path) -> None:
+        try:
+            rel_src = os.path.relpath(str(src), str(dst.parent))
+            os.symlink(rel_src, str(dst), target_is_directory=src.is_dir())
+            return
+        except Exception:
+            pass
+
+        if src.is_dir():
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+
+    def _sync_standard_checkpoint_dir(self, *, step: int, source_dir: pathlib.Path) -> pathlib.Path:
+        if self.checkpoint_root is None:
+            raise RuntimeError("checkpoint_root is not initialized")
+        alias_dir = self.checkpoint_root / f"step_{int(step):06d}"
+        tmp_dir = self.checkpoint_root / f".{alias_dir.name}.tmp"
+        self._remove_path(tmp_dir)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        for child in source_dir.iterdir():
+            self._link_or_copy_path(child, tmp_dir / child.name)
+        _json_dump(
+            tmp_dir / "checkpoint_target.json",
+            {
+                "step": int(step),
+                "source_checkpoint_dir": str(source_dir),
+            },
+        )
+        self._remove_path(alias_dir)
+        os.replace(str(tmp_dir), str(alias_dir))
+        self.last_checkpoint_dir = str(alias_dir)
+        with (self.checkpoint_root / "latest.txt").open("w", encoding="utf-8") as f:
+            f.write(str(alias_dir) + "\n")
+        return alias_dir
 
     # ── Logging ─────────────────────────────────────────────────────────
 

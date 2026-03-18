@@ -9,19 +9,71 @@
 \usepackage{eccvabbrv}
 \usepackage{graphicx}
 \usepackage{booktabs}
-\usepackage[numbers,sort&compress]{natbib}
+\usepackage{colortbl}
+\usepackage{tcolorbox}
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage{multirow}
+\usepackage{arydshln}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{dblfloatfix}
+\usepackage{placeins}   % Provides \FloatBarrier to prevent floats drifting
+\makeatletter
+\def\fps@figure{tbp}
+\def\fps@table{tp}
+\setlength{\@fptop}{0pt}
+\setlength{\@fpsep}{8pt plus 1fil}
+\setlength{\@fpbot}{0pt plus 1fil}
+\setlength{\@dblfptop}{0pt}
+\setlength{\@dblfpsep}{8pt plus 1fil}
+\setlength{\@dblfpbot}{0pt plus 1fil}
+\makeatother
+\setcounter{topnumber}{3}
+\setcounter{dbltopnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
+\renewcommand{\topfraction}{0.98}
+\renewcommand{\dbltopfraction}{0.98}
+\renewcommand{\bottomfraction}{0.7}
+\renewcommand{\textfraction}{0.02}
+\renewcommand{\floatpagefraction}{0.7}
+\renewcommand{\dblfloatpagefraction}{0.7}
+\setlength{\textfloatsep}{6pt plus 2pt minus 2pt}
+\setlength{\dbltextfloatsep}{6pt plus 2pt minus 2pt}
+\setlength{\intextsep}{6pt plus 2pt minus 2pt}
+\setlength{\floatsep}{4pt plus 2pt minus 2pt}
+\setlength{\dblfloatsep}{4pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{3pt}
+\setlength{\belowcaptionskip}{0pt}
+\raggedbottom
 \usepackage[accsupp]{axessibility}
 \usepackage[pagebackref,breaklinks,colorlinks,citecolor=eccvblue]{hyperref}
 \usepackage{orcidlink}
 
 \newcommand{\NA}{N/A}
-
+\newcommand{\dpos}[1]{\textcolor{ForestGreen}{\scriptsize (+#1)}}
+\newcommand{\dneg}[1]{\textcolor{BrickRed}{\scriptsize (-#1)}}
+\newcommand{\citep}[1]{\cite{#1}}
+\newcommand{\groupcell}[2]{\multirow{#1}{*}{\parbox[c]{1.60cm}{\centering #2}}}
+\newcommand{\adopted}[1]{\cellcolor{green!8}#1}
+\tcbuselibrary{breakable}
+\newtcolorbox{promptbox}{
+  breakable,
+  colback=eccvblue!4,
+  colframe=eccvblue!45!black,
+  boxrule=0.4pt,
+  arc=2pt,
+  left=5pt,
+  right=5pt,
+  top=4pt,
+  bottom=4pt,
+  before skip=2pt,
+  after skip=2pt,
+}
 \begin{document}
 
-\title{Self-Evolving Unified Understanding and Generation Models through Unsupervised Self-Consistency: Supplementary Material}
+\title{Ask, Solve, Generate: Self-Evolving Unified Multimodal Understanding and Generation via Self-Consistency Rewards: Supplementary Material}
 \titlerunning{Self-Evolving UUG -- Supplementary}
 
 \author{Anonymous ECCV Submission}
@@ -30,84 +82,267 @@
 
 \maketitle
 
-\section{Protocol Comparison With Prior Work}
-\label{sec:sup_protocol}
+\setcounter{table}{0}
+\renewcommand{\thetable}{S\arabic{table}}
+\setcounter{figure}{0}
+\renewcommand{\thefigure}{S\arabic{figure}}
+\setcounter{algorithm}{0}
+\renewcommand{\thealgorithm}{S\arabic{algorithm}}
 
-Table~\ref{tab:supervised_reference} summarizes supervision and optimization differences between our framework and commonly cited post-training baselines. This table is intended to qualify comparability, since many methods differ in reward supervision and architecture assumptions.
+\section{Training Algorithm}
+\label{sec:sup_algorithm}
 
-\begin{table*}[tb]
-  \caption{Protocol-level comparison with prior post-training methods. "Extra supervision" indicates dependence on curated labels, external reward data, or supervised intermediate stages.}
-  \label{tab:supervised_reference}
-  \centering
+Algorithm~\ref{alg:self_evolving} summarizes the end-to-end training loop. We keep the backbone frozen and update only three LoRA adapters (Proposer, Solver, Generator) using KL-regularized policy gradients. The schedule alternates between visual understanding and image generation steps (default 3:2).
+
+\begin{algorithm}[!htb]
+  \caption{Self-evolving UUG training with coupled visual understanding and image generation loops. The algorithm alternates between question proposal/answering and reward-driven generation updates while keeping the backbone frozen and training only the three LoRA role adapters.}
+  \label{alg:self_evolving}
   \small
-  \resizebox{\linewidth}{!}{%
-  \begin{tabular}{@{}lllll@{}}
-    \toprule
-    Method & Backbone setting in paper & Core optimization & Extra supervision & Notes on comparability \\
-    \midrule
-    UniRL~\cite{mao2025unirl} & Janus/Show-o family & Iterative SFT + GRPO & Yes (SFT/reward construction) & Single-family evaluation \\
-    UniCorn~\cite{han2026unicorn} & Unified single-model setting & Role-based self-play reconstruction & Partial (judge/data reconstruction stage) & Limited cross-backbone evidence \\
-    CoRL~\cite{jiang2025coreinforcement} & Janus-Pro-1B & Multi-stage RL & Yes (task-specific reward design) & Additional reward engineering \\
-    UAE~\cite{yan2025understandinggeneration} & Qwen2.5-VL-3B & Unified-GRPO + staged reconstruction & Yes (supervised initialization stage) & Encoder--decoder coupling assumptions \\
-    Internal Gap~\cite{han2025internalgap} & Janus-Pro-7B & SFT + DPO pipeline & Yes (curated preference-style data) & Understanding-guided data curation \\
-    \midrule
-    \textbf{Ours} & BLIP3o / BAGEL / VARGPT$_{1.1}$ & Alternating U/G self-evolving RL & \textbf{No} & Same framework across three generation paradigms \\
-    \bottomrule
-  \end{tabular}%
-  }
-\end{table*}
+  \begin{algorithmic}[1]
+    \STATE \textbf{Input:} unlabeled image pool $\mathcal{D}$; frozen backbone $\mathcal{M}_\theta$; LoRA adapters $\phi_p,\phi_s,\phi_g$
+    \STATE \textbf{Initialize:} reference policies $\pi_{\theta}$; STE window $\mathcal{W}$; (optional) replay buffer $\mathcal{B}$
+    \FOR{$\text{step}=1$ \TO $T$}
+      \IF{visual understanding phase}
+        \STATE Sample image $\mathcal{I}\sim\mathcal{D}$ (optionally mix $\mathcal{I}\sim\mathcal{B}$)
+        \STATE Proposer samples $K$ candidate questions $\{q_k\}_{k=1}^K \sim \pi_{\phi_p}(\cdot\mid\mathcal{I})$
+        \FOR{$k=1$ \TO $K$}
+          \STATE Solver answers under $N$ prompt perturbations: $a_{k,i}\sim\pi_{\phi_s}(\cdot\mid\mathcal{I},\rho_i(q_k))$
+          \STATE Compute self-consistency entropy $H_{\text{sc}}(q_k)$ from $\{a_{k,i}\}_{i=1}^N$
+          \STATE Compute STE difficulty $d_{\text{ste}}(q_k)$ from a greedy solver call; normalize via rolling-window quantile in $\mathcal{W}$
+          \STATE Score candidate with frontier-seeking reward $R_p(q_k)$ (blend of self-consistency and STE, plus light penalties)
+        \ENDFOR
+        \STATE Update Proposer $\phi_p$ with GRPO over the $K$ candidates using $\{R_p(q_k)\}_{k=1}^K$ \cite{shao2024deepseekmath}
+        \STATE Choose $q^\star=\arg\max_k R_p(q_k)$ and update Solver $\phi_s$ with REINFORCE using agreement/format reward $R_s(\mathcal{I},q^\star)$
+      \ELSE
+        \STATE \textit{Image generation phase}
+        \STATE Sample real image $\mathcal{I}\sim\mathcal{D}$ and produce prompt $t$ (caption $\mathcal{I}$)
+        \STATE Sample $M$ diagnostic questions $\{q_j\}_{j=1}^M$ and reference answers $\{a_j^{\text{ref}}\}$ on $\mathcal{I}$
+        \STATE Generator samples $L$ candidate images $\{\hat{\mathcal{I}}_\ell\}_{\ell=1}^L \sim \pi_{\phi_g}(\cdot\mid t)$
+        \STATE Score each candidate via QA fidelity + cycle consistency (+ diversity/contradiction) to obtain rewards $\{R_g(\hat{\mathcal{I}}_\ell)\}$
+        \STATE Update Generator $\phi_g$ with GRPO using $\{R_g(\hat{\mathcal{I}}_\ell)\}$
+        \STATE Push the best candidate into replay buffer $\mathcal{B}$ if it passes the quality gate
+      \ENDIF
+    \ENDFOR
+  \end{algorithmic}
+\end{algorithm}
 
-
-\section{Expanded Quantitative Results}
-\label{sec:sup_expanded}
-
-Table~\ref{tab:expanded_understanding} reports base vs. self-evolved results across all three backbones used in this work. We report only benchmarks that are available under each backbone's current evaluation pipeline; unavailable metrics are marked as \NA.
-
-\begin{table*}[tb]
-  \caption{Per-backbone base vs. self-evolved results across understanding and generation benchmarks.}
-  \label{tab:expanded_understanding}
-  \centering
-  \small
-  \resizebox{\linewidth}{!}{%
-  \begin{tabular}{@{}llccccccccc@{}}
-    \toprule
-    Model & Setting & MMMU & MMBench & TextVQA & SEED & RWQA & MMVet & MME-P & MME-C & GenEval \\
-    \midrule
-    \multirow{3}{*}{BLIP3o-8B} & Base & 50.6 & 83.5 & 83.1 & 77.5 & 69.0 & 66.6 & 1682.6 & 647.1 & 0.84 \\
-    & Ours & \textbf{52.8} & \textbf{86.1} & \textbf{85.2} & \textbf{79.4} & \textbf{70.9} & \textbf{68.7} & \textbf{1698.4} & \textbf{660.3} & \textbf{0.87} \\
-    & $\Delta$ & +2.2 & +2.6 & +2.1 & +1.9 & +1.9 & +2.1 & +15.8 & +13.2 & +0.03 \\
-    \midrule
-    \multirow{3}{*}{BAGEL} & Base & 55.3 & 85.0 & \NA & \NA & \NA & 67.2 & 1687.0 & 701.0 & 0.82 \\
-    & Ours & \textbf{58.8} & \textbf{87.1} & \NA & \NA & \NA & \textbf{69.5} & \textbf{1701.7} & \textbf{715.9} & \textbf{0.85} \\
-    & $\Delta$ & +3.5 & +2.1 & \NA & \NA & \NA & +2.3 & +14.7 & +14.9 & +0.03 \\
-    \midrule
-    \multirow{3}{*}{VARGPT$_{1.1}$} & Base & 36.4 & 67.6 & 54.1 & 67.9 & 65.2 & 33.5 & 1488.8 & 348.6 & 0.33 \\
-    & Ours & \textbf{39.4} & \textbf{70.3} & \textbf{56.9} & \textbf{71.0} & \textbf{68.8} & \textbf{36.2} & \textbf{1506.2} & \textbf{362.1} & \textbf{0.36} \\
-    & $\Delta$ & +3.0 & +2.7 & +2.8 & +3.1 & +3.6 & +2.7 & +17.4 & +13.5 & +0.03 \\
-    \bottomrule
-  \end{tabular}%
-  }
-\end{table*}
-
-
-\section{Implementation Details}
+\section{Experimental Details}
 \label{sec:sup_implementation}
 
 \noindent\textbf{Core optimization settings.}
-All main runs use 10{,}000 steps, bfloat16 training, learning rate $1\times10^{-6}$, weight decay 0.01, gradient clip 1.0, and gradient accumulation 1. LoRA is enabled with rank 16, $\alpha=32$, dropout 0.05, and target modules: q\_proj, k\_proj, v\_proj, o\_proj, gate\_proj, up\_proj, down\_proj, and mm\_projector.
+All reported runs use 10{,}000 steps with AdamW in bfloat16, learning rate $1\times10^{-6}$, weight decay 0.01, gradient clip 1.0, and gradient accumulation 1. We freeze the backbone and train three LoRA adapters~\cite{hu2022lora} with rank 16 ($\alpha=32$, dropout 0.05), targeting q\_proj, k\_proj, v\_proj, o\_proj, gate\_proj, up\_proj, down\_proj, and mm\_projector.
 
 \noindent\textbf{Sampling and generation settings.}
-Solver sampling uses 7 prompt perturbations. The proposer uses 3 candidates per step and 3 spot-check samples. Generation uses 3 candidates per prompt, image size 896$\times$896, 50 denoising/inference steps, and guidance scale 2.0 for BLIP3o-based runs.
+Understanding uses $N=7$ prompt perturbations (Prompt-Perturbed Sampling) and $K=3$ proposer candidates per step, with 3 spot-check samples for candidate selection. For generation, we use $L=3$ candidate images per prompt, image size 896$\times$896, 50 denoising/inference steps, and guidance scale 2.0 for BLIP3o-based runs~\cite{chen2025blip3o}.
 
 \noindent\textbf{Reward and regularization.}
-Generation reward weights are: QA fidelity 0.65, cycle-consistency 0.20, diversity 0.10, contradiction 0.20. Quality gates use minimum spec quality 0.35 and minimum 2 QA pairs per sample. KL control uses coefficient 0.01, target 0.02, adaptation rate 0.10, and bounds $[10^{-3},10^2]$.
+Generation reward weights are: QA fidelity 0.65, cycle consistency 0.20, diversity 0.10, and contradiction 0.20. Quality gates use minimum spec quality 0.35 and minimum 2 QA pairs per sample. KL control uses coefficient 0.01, target 0.02, adaptation rate 0.10, and bounds $[10^{-3},10^2]$.
 
 \noindent\textbf{Cycle schedules.}
-The main joint run uses a 3:2 understanding:generation cycle (E1). Understanding-only and generation-only ablations use 5:0 (E2) and 0:5 (E3), respectively. The imageless loop (E5) also uses 3:2, with replay-buffer-based generated-image training enabled (buffer size 500; generated mix ratio fixed to 1.0).
+The default joint run uses a 3:2 visual understanding\,:\,image generation cycle. Visual understanding-only and image generation-only ablations use 5:0 and 0:5, respectively. The self-generated-images variant also uses 3:2, with replay-buffer-based training enabled (buffer size 500; generated mix ratio fixed to 1.0).
 
 \noindent\textbf{Determinism and logging.}
 All final scripts run with deterministic mode enabled, save checkpoints every 50 steps, and use seed 42 in the default configuration.
 
+\section{Operational Definitions of Reward Terms}
+\label{sec:sup_reward_terms}
+
+This section clarifies how the reward terms named in the main method are instantiated in the training code.
+
+\noindent\textbf{Understanding-side self-consistency and majority fraction.}
+For each question, the Solver produces $N$ answers under prompt-perturbed sampling. Answers are normalized before voting by lowercasing, stripping punctuation, collapsing whitespace, and truncating to a short core span so phrasing differences do not create artificial disagreement. The majority fraction is then the vote share of the most frequent normalized answer, and self-consistency entropy is the Shannon entropy of the empirical answer distribution over these normalized votes.
+
+\noindent\textbf{Solver Token Entropy (STE).}
+STE is computed from the Solver's token probabilities rather than from answer voting. Concretely, we measure the full softmax entropy at each generated answer token and use the maximum value over the early answer tokens as the raw uncertainty signal. This raw value is converted into a difficulty score through a rolling-window rank statistic, so a question receives a high STE score when it triggers higher token-level uncertainty than most recent questions, even if the final sampled answers collapse to the same surface form.
+
+\noindent\textbf{Generation-side QA fidelity and contradiction.}
+Each proposed generation spec contains verification QA pairs. For a generated image, the Solver answers each verification question multiple times, we take the majority answer, and compare it to the expected answer with a soft-match rule: exact match scores 1.0, substring containment scores 0.8, near-numeric matches receive partial credit, and otherwise lexical overlap is used. The per-question QA fidelity score is a weighted combination of answer match (0.7) and majority fraction (0.3). Contradiction is a separate penalty that activates for explicit yes/no polarity conflicts between the predicted and expected answers.
+
+\noindent\textbf{Cycle consistency, diversity, and final generator reward.}
+Cycle consistency captions the generated image and measures semantic agreement between the caption, the prompt, and the image using the model's own embedding-based similarities, with token-overlap fallback only if embedding computation fails. Diversity is computed across candidate images in the same generation batch using leave-one-out image diversity, so candidates are rewarded only when they add non-redundant variation. The final generation reward is the weighted sum of QA fidelity, cycle consistency, and diversity, minus contradiction, and is then multiplied by the spec-quality gate so low-quality prompt cards cannot receive high reward solely from image-side scoring.
+
+\section{Hyperparameter Details}
+\label{sec:sup_hyperparams}
+
+Table~\ref{tab:sup_hyperparams} lists the adopted training defaults used across the main experiments. Tables~\ref{tab:sup_hparam_understanding}, \ref{tab:sup_hparam_optimization}, and \ref{tab:sup_hparam_generation} then report one-factor sweeps for understanding-side design choices, optimization settings, and generation-side reward settings, respectively. Together, these tables show both the exact configuration used in the reported runs and the local sensitivity of the method around that operating point. We use these one-factor sweeps to select an adopted configuration and do not perform exhaustive combinational hyperparameter search.
+
+\input{tables/supplementary_hyperparams}
+\input{tables/supplementary_hyperparam_ablations}
+\input{tables/supplementary_hyperparam_optimization}
+\input{tables/supplementary_hyperparam_generation}
+
+\section{Additional Diagnostic Analyses of Core Mechanisms}
+\label{sec:sup_analysis}
+
+These additional diagnostic plots support two central design claims of the framework. First, they show why Solver Token Entropy (STE) is useful in addition to sample-level self-consistency by remaining informative when answer agreement alone becomes ambiguous. Second, they show how the shared \emph{Solver} links visual understanding and image generation by providing internal generation-side evaluation signals that strengthen as understanding improves over training.
+
+Figure~\ref{fig:sup_reward_calibration} examines whether the internal generation-side scores used during training are aligned with external generation quality. The clearest relationship appears for QA fidelity, while total reward and cycle consistency follow the same direction with more variation. This supports the intended role of the shared \emph{Solver} as an internal evaluator whose signals remain informative at the checkpoint level rather than acting as an arbitrary self-reinforcing reward.
+
+Figure~\ref{fig:sup_ste_blindspot} isolates the failure mode that motivates STE. Sample-level self-consistency entropy remains close to zero not only when the model is consistently correct, but also when it is consistently wrong. STE separates these two cases more clearly, showing why token-level uncertainty is needed to avoid collapsed agreement signals during frontier-seeking question selection.
+
+Figure~\ref{fig:sup_lagged_coupling} provides a complementary view of cross-loop interaction. The stronger understanding-to-generation peak suggests that improvements in visual understanding precede stronger generation-side evaluation signals, which is consistent with the design in which the shared \emph{Solver} serves as both learner and evaluator. We treat this figure as supporting evidence for the coupling claim alongside the main loop-ablation results rather than as a stand-alone causal test.
+
+\begin{figure*}[!htb]
+  \centering
+  \includegraphics[width=\linewidth]{figures/reward_calibration.pdf}
+  \caption{Checkpoint-level relationship between internal generation-side scores and GenEval overall~\cite{ghosh2024geneval}. Panels compare total reward, QA fidelity, and cycle score against GenEval across checkpoints spanning the 10k-step training horizon. All three views follow a positive trend, with QA fidelity showing the clearest alignment. This supports the claim that the shared \emph{Solver} provides a meaningful internal evaluation signal for image generation, while cycle consistency remains complementary but noisier.}
+  \label{fig:sup_reward_calibration}
+\end{figure*}
+
+\begin{figure*}[!htb]
+  \centering
+  \includegraphics[width=\linewidth]{figures/ste_blindspot.pdf}
+  \caption{Diagnostic comparison of self-consistency entropy and Solver Token Entropy across three answer-behavior groups. Self-consistency entropy stays near zero for both consistent-correct and consistent-wrong cases, whereas STE remains substantially higher on consistent-wrong cases. This supports the claim that token-level uncertainty helps resolve the degenerate-signal regime in which sample-level agreement alone cannot distinguish confident correctness from confident error.}
+  \label{fig:sup_ste_blindspot}
+\end{figure*}
+
+\begin{figure*}[!htb]
+  \centering
+  \includegraphics[width=\linewidth]{figures/lagged_coupling.pdf}
+  \caption{Lagged correlation between understanding-side and generation-side signals over training. The left panel shows understanding-side metrics at step $t$ versus generation-side metrics at step $t+\Delta$, and the right panel shows the reverse direction. Both directions remain positive over short-to-mid lags, with the understanding-to-generation direction exhibiting the stronger peak. This is consistent with asymmetric loop coupling through the shared \emph{Solver}, where stronger visual understanding improves later generation-side evaluation more than the reverse.}
+  \label{fig:sup_lagged_coupling}
+\end{figure*}
+
+
+\section{Prompt Templates}
+\label{sec:sup_prompts}
+
+Table~\ref{tab:sup_prompt_families} summarizes the five prompt families used in BLIP3o self-evolving training~\cite{chen2025blip3o}. BAGEL-7B~\cite{deng2025bagel} and VARGPT-v1.1~\cite{zhuang2025vargpt} use the same role decomposition and reward logic, but follow each backbone's native chat wrapper and generation API, so only the surface prompt wrapper differs while the underlying instructions remain analogous. All multimodal prompts are wrapped in a standard chat template with an image placeholder followed by the text prompt; text-only prompts omit the image token.
+
+\begin{table}[!htb]
+  \centering
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \renewcommand{\arraystretch}{1.12}
+  \caption{Prompt families used in BLIP3o self-evolving training. The table organizes prompts by role and training phase, separating question proposal, answer generation, captioning, image generation, and generation-spec construction.}
+  \label{tab:sup_prompt_families}
+  \begin{tabular}{@{}p{0.13\linewidth}p{0.22\linewidth}p{0.57\linewidth}@{}}
+    \toprule
+    Role & Invocation & Prompt content \\
+    \midrule
+    Proposer & Visual understanding & Fixed adversarial question-writing preamble enforcing multi-domain reasoning, two-answer precision tests, and non-dominant grounding. Modulated at runtime by a sampled difficulty target (easy/medium/hard), a source-specific image hint, optional curriculum/anchor guidance, and fixed reasoning/task-card/strategy libraries. \\
+    Solver & Visual understanding & One canonical answer prompt or one of seven PPS preambles (Table~\ref{tab:sup_pps_templates}), followed by shared rules enforcing 1--5 word answers and a runtime focus-hint line drawn from seven perceptual categories. \\
+    Captioner & Image generation & Single-line prompt requesting a detailed image description. \\
+    Generator & Image generation & Single-line wrapper converting a caption into a text-to-image instruction. \\
+    Spec proposer & Image generation & Instruction block requesting one generation prompt and three compositional verification QA pairs in XML format, with an inserted difficulty target. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\noindent\textbf{Proposer design.}
+The proposer preamble enforces reasoning-first construction: each candidate question must use $\geq$2 reasoning domains (from a library of 7), include $\geq$1 non-relational domain, and target non-dominant visual details. A two-answer precision test is required to ensure the question has a single exact answer. The prompt concludes with an XML schema and a mandatory self-check that triggers rewrites for under-specified reasoning, vague alternatives, or questions that leak answer options. Runtime blocks modulate difficulty (three tiers), inject image-source hints (natural photo, text-in-scene, chart, relational scene), and optionally insert curriculum priorities or replay anchors.
+
+\noindent\textbf{Exact proposer prompt anchor.}
+BLIP3o uses a runtime multi-question proposer prompt. Its fixed prefix is:
+\begin{promptbox}
+\small
+\ttfamily\raggedright
+You are an Adversarial Fine-Grained Question Proposer.\par
+GOAL: produce hard, visually grounded, objective questions using reasoning-first construction.\par
+CRITICAL RULES:\par
+- NEVER ask about the main/dominant subject, object, or largest text.\par
+- Each question must use >=2 reasoning domains and include >=1 non-relational domain.\par
+- Each question must include a valid two-answer precision test with distinct concrete alternatives.\par
+- Final question must have one exact answer grounded in visible evidence.\par
+- Use DISTINCT strategy codes across questions.\par
+...\par
+Output XML only:\par
+<questions> ... </questions>
+\end{promptbox}
+The trainer then appends the exact difficulty block, dataset hint, optional curriculum/replay anchors, reasoning-domain block, task-card library, and strategy library from the prompt builder.
+
+\noindent\textbf{Solver and prompt-perturbed sampling (PPS).}
+Table~\ref{tab:sup_pps_templates} lists the seven PPS preambles. All variants share the same answer-format rules (1--5 word answers, no vague terms, XML output) and a runtime focus-hint drawn from a pool of seven perceptual categories. This design ensures answer diversity comes from framing rather than rule changes.
+
+\begin{table}[!htb]
+  \centering
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \renewcommand{\arraystretch}{1.05}
+  \caption{Prompt-perturbed sampling (PPS) variants used by the Solver. Only the preamble changes across variants; the answer-format rules and the question remain fixed so that diversity comes from framing rather than from altered constraints.}
+  \label{tab:sup_pps_templates}
+  \begin{tabular}{@{}cp{0.82\linewidth}@{}}
+    \toprule
+    ID & PPS preamble \\
+    \midrule
+    1 & \texttt{You are a precise vision-language solver. Answer the question using only the provided image.} \\
+    2 & \texttt{Look at the image carefully and provide a precise answer. Base your response solely on what is visible.} \\
+    3 & \texttt{You are a visual analyst examining this image. Provide a factual answer derived from the visual evidence.} \\
+    4 & \texttt{Study the image and answer the following question directly. Use only observable evidence from the image.} \\
+    5 & \texttt{As an image examiner, answer the question below. Your answer must be grounded in what the image shows.} \\
+    6 & \texttt{Based on the image provided, give a brief factual answer. Respond with only what you can verify visually.} \\
+    7 & \texttt{Examine the visual evidence in this image. Answer the question using only observable details.} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\noindent\textbf{Exact canonical solver prompt.}
+The baseline solver call uses the following exact template, where \texttt{<focus hint>} and \texttt{<question text>} are filled at runtime:
+\begin{promptbox}
+\small
+\ttfamily\raggedright
+You are a precise vision-language solver.\par
+Answer the question using only the provided image.\par
+Rules:\par
+- Your answer MUST be 1-5 words only. No full sentences.\par
+- Give only the core answer, not an explanation.\par
+- The answer must be concrete and exact, not vague.\par
+- Focus mode for this sample: <focus hint>.\par
+  Prefer evidence consistent with this focus.\par
+- If the question asks `how many' or `number of', answer with a single integer.\par
+- Never output vague count words or uncertainty phrases.\par
+- Return only the final answer inside XML: <answer>...</answer>\par
+Question: <question text>
+\end{promptbox}
+The seven runtime focus hints cover global scene layout, fine text and symbols, occlusion boundaries, left-right spatial relations, counting visible instances, color and texture evidence, and object interaction cues.
+
+\noindent\textbf{Generation prompts.}
+The captioner uses the exact prompt \texttt{Describe this image in detail.} The generator wrapper is exactly \texttt{Please generate image based on the following caption: <caption>}. The spec proposer asks for one image-grounded generation prompt and three compositional verification QA pairs (each requiring $\geq$2 visual cues) in XML format. Rejected specs are retried with the same schema plus the rejection reason.
+
+\noindent\textbf{Compact exact generation-spec schema.}
+The generation-spec prompt requires XML only in the following fixed structure:
+\begin{promptbox}
+\small
+\texttt{<prompt>...</prompt>}\\
+\texttt{<spec>}\\
+\texttt{\hspace*{1em}<qa><question>...</question><expected>...</expected></qa>}\\
+\texttt{\hspace*{1em}<qa><question>...</question><expected>...</expected></qa>}\\
+\texttt{\hspace*{1em}<qa><question>...</question><expected>...</expected></qa>}\\
+\texttt{</spec>}
+\end{promptbox}
+The retry prompt keeps the same XML schema and prepends three exact lines:
+\begin{promptbox}
+\small
+\texttt{Your previous spec was rejected. Produce a better one.}\\
+\texttt{Previous prompt:}\\
+\texttt{Rejection reason:}
+\end{promptbox}
+
+\section{Additional Qualitative Results}
+\label{sec:sup_qualitative}
+
+These qualitative examples illustrate before/after improvements across the three backbones for both understanding and generation. Figure~\ref{fig:sup_understanding} shows seven understanding cases spanning text grounding, counting, spatial reasoning, and local object identification. Figure~\ref{fig:sup_generation} presents four natural compositional generation prompts involving airline/logo-color binding, local color grounding in a two-entity scene, multi-person interaction, and relative positioning. Figure~\ref{fig:sup_generation_2} complements this with four controlled GenEval-style prompts that isolate counting, cross-object attribute binding, multi-object composition, and spatial arrangement. Exact prompts and source identifiers are provided in the supplementary code package.
+
+\begin{figure*}[!htb]
+  \centering
+  \includegraphics[width=\linewidth]{figures/supplementary_und_figure_new.pdf}
+  \caption{Visual understanding qualitative comparison. Baseline versus self-evolved answers for seven text-grounded, counting, and local-relation questions across the three backbones. Red marks baseline errors and green marks corrected post-training answers.}
+  \label{fig:sup_understanding}
+\end{figure*}
+
+\begin{figure*}[!htb]
+  \centering
+  \includegraphics[width=\linewidth]{figures/supplementary_gen_figure_new.pdf}
+  \caption{Natural-scene image generation qualitative comparison. Baseline versus self-evolved generations for four compositional prompts across the three backbones. The cases probe airline/logo-color binding, local color grounding in a two-entity scene, multi-person interaction around a menu, and relative positioning between two objects.}
+  \label{fig:sup_generation}
+\end{figure*}
+
+\begin{figure*}[!htb]
+  \centering
+  \includegraphics[width=\linewidth]{figures/supplementary_gen_figure_v2.pdf}
+  \caption{Controlled GenEval-style image generation qualitative comparison. Baseline versus self-evolved generations for four prompts spanning exact counting, cross-object attribute binding, multi-object composition, and spatial arrangement across the three backbones. These cases make improvements in count, attribute assignment, and relative placement visually verifiable.}
+  \label{fig:sup_generation_2}
+\end{figure*}
 
 \bibliographystyle{splncs04}
 \bibliography{main}

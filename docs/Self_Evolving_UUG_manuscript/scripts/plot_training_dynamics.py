@@ -222,7 +222,9 @@ def main():
         ("VARGPT", args.vargpt_log),
     ]
 
-    fig, axes = plt.subplots(2, 3, figsize=(14, 6), constrained_layout=True)
+    # Slightly shorter aspect ratio to reduce on-page height when included
+    # with width=\linewidth in LaTeX.
+    fig, axes = plt.subplots(2, 3, figsize=(14, 5.0), constrained_layout=True)
 
     for col, (name, logpath) in enumerate(backbones):
         if logpath and pathlib.Path(logpath).exists():

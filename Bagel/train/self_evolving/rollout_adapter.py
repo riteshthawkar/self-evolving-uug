@@ -236,6 +236,26 @@ class BagelRolloutAdapter:
             do_sample=False,
         )
 
+    def caption_image(
+        self,
+        *,
+        image: Image.Image,
+        max_new_tokens: int = 96,
+        temperature: float = 0.4,
+        do_sample: bool = False,
+    ) -> GenerationResult:
+        caption_prompt = "Describe this image in one concise sentence focusing on key visual facts."
+        with use_adapter(self.runtime.model.language_model, self._adapter_for_role(ROLE_SOLVER)):
+            return self._generate_understanding_text(
+                image=image,
+                prompt=caption_prompt,
+                max_new_tokens=max_new_tokens,
+                do_sample=bool(do_sample),
+                temperature=float(temperature),
+                text_top_p=1.0,
+                text_top_k=0,
+            )
+
     def propose_generation_spec(
         self,
         *,

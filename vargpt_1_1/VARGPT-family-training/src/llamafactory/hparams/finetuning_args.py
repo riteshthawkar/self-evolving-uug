@@ -377,11 +377,11 @@ class FinetuningArguments(FreezeArguments, LoraArguments, RLHFArguments, GaloreA
         metadata={"help": "Total training steps for self-evolving."},
     )
     se_replay_buffer_size: int = field(
-        default=1000,
+        default=1,
         metadata={"help": "Max size of the replay buffer for generated images."},
     )
     se_gen_mix_ratio_max: float = field(
-        default=0.25,
+        default=0.0,
         metadata={"help": "Max ratio of generated images mixed into U-steps."},
     )
     se_imageless_proposer_mode: bool = field(
@@ -390,11 +390,43 @@ class FinetuningArguments(FreezeArguments, LoraArguments, RLHFArguments, GaloreA
     )
     se_gen_reward_mode: str = field(
         default="clip",
-        metadata={"help": "Reward mode for generation: clip, nll, or combined."},
+        metadata={"help": "Legacy compatibility flag; generation uses the shared BLIP-style reward scorer."},
     )
     se_num_generations: int = field(
-        default=4,
+        default=3,
         metadata={"help": "Number of candidate images per G-step."},
+    )
+    se_reward_spec_weight: float = field(
+        default=0.65,
+        metadata={"help": "Weight of QA/spec fidelity in generation reward."},
+    )
+    se_reward_cycle_weight: float = field(
+        default=0.20,
+        metadata={"help": "Weight of cycle consistency in generation reward."},
+    )
+    se_reward_diversity_weight: float = field(
+        default=0.10,
+        metadata={"help": "Weight of inter-candidate diversity in generation reward."},
+    )
+    se_reward_contradiction_weight: float = field(
+        default=0.20,
+        metadata={"help": "Penalty weight for yes/no contradictions in generation reward."},
+    )
+    se_min_spec_quality_for_update: float = field(
+        default=0.35,
+        metadata={"help": "Minimum proposer spec quality required for G-step updates."},
+    )
+    se_min_spec_qa_pairs: int = field(
+        default=2,
+        metadata={"help": "Minimum valid QA pairs required for generation specs."},
+    )
+    se_max_expected_words: int = field(
+        default=8,
+        metadata={"help": "Maximum allowed words in a generation spec expected answer."},
+    )
+    se_max_question_words: int = field(
+        default=24,
+        metadata={"help": "Maximum allowed words in a generation spec question."},
     )
     se_lr: float = field(
         default=1e-6,

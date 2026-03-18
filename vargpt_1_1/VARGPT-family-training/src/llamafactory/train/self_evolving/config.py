@@ -35,7 +35,7 @@ class SelfEvolvingConfig:
     lr: float = 1e-6
     weight_decay: float = 0.01
     grad_clip: float = 1.0
-    grad_accum_steps: int = 4
+    grad_accum_steps: int = 1
     proposer_update_freq: int = 1
     generator_update_freq: int = 1
     enable_solver_updates: bool = True
@@ -59,7 +59,7 @@ class SelfEvolvingConfig:
     var_top_k: int = 900                 # top-k for VAR sampling
     var_top_p: float = 0.97              # top-p for VAR sampling
     var_sampling_per_bits: int = 1       # sampling resolution for BSQ
-    num_generations: int = 4             # K candidate images per G-step
+    num_generations: int = 3             # K candidate images per G-step
     image_gen_grpo_group_size: int = 4   # candidates for generation GRPO
     image_gen_loss_lambda: float = 3.0   # weight of image gen loss (matches get_gen_loss_1_1)
     gen_reward_mode: str = "clip"        # "clip", "nll", or "embedding"
@@ -259,14 +259,14 @@ class SelfEvolvingConfig:
     baseline_momentum: float = 0.6
 
     # ── Replay Buffer ────────────────────────────────────────────────────
-    replay_buffer_size: int = 1000
-    replay_min_reward: float = 0.5
-    replay_max_staleness: int = 500
+    replay_buffer_size: int = 1
+    replay_min_reward: float = 1.10
+    replay_max_staleness: int = 1
 
     # ── Gen-Mix Ratio (understanding step: mix generated images) ─────────
-    gen_mix_ratio_start: float = 0.02
-    gen_mix_ratio_max: float = 0.25
-    gen_mix_ratio_warmup_steps: int = 1000
+    gen_mix_ratio_start: float = 0.0
+    gen_mix_ratio_max: float = 0.0
+    gen_mix_ratio_warmup_steps: int = 1
 
     # ── Reward EMA ───────────────────────────────────────────────────────
     reward_ema_momentum: float = 0.95

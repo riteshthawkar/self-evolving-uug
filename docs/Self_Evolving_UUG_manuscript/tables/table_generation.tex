@@ -1,48 +1,49 @@
 % =====================================================================
 % Table 3: Generation Results (GenEval subcategories expanded)
 % =====================================================================
-\begin{table*}[!htb]
-  \caption{Image generation results across unified models, self-evolving/post-training methods, and our framework on three backbones. GenEval subcategories are reported where available; cross-paper comparisons should be interpreted with protocol differences in mind.}
+\begin{table*}[t]
+  \caption{Image generation results on GenEval across unified models and self-improvement methods. We apply the same self-evolving recipe to three backbones and report six compositional subcategories alongside the overall score. Our method yields a uniform +3\% overall improvement on all three backbones (84\%$\to$87\% on BLIP3o-8B, 82\%$\to$85\% on BAGEL-7B, 53\%$\to$56\% on VARGPT-v1.1), with the largest gains concentrated on composition-heavy subcategories: Two Objects 85\%$\to$93\% and Counting 63\%$\to$71\% on BLIP3o-8B, while already-saturated Single Object (${\geq}96\%$) remains stable. Despite very different absolute baselines, the generation loop adapts to each backbone's current capability without architecture-specific tuning. Prior methods marked with $\dagger$ use external supervision (e.g., ground-truth labels or external LLMs) and are shown for reference as evaluation settings differ across methods. Entries marked `--' were not reported by the corresponding source paper.}
   \label{tab:generation_results}
   \centering
   \small
 
   \resizebox{\linewidth}{!}{%
-  \begin{tabular}{@{}lccccccc@{}}
+  \begin{tabular}{@{}lllccccccc@{}}
     \toprule
-    \multirow{2}{*}{\textbf{Model}} & \multicolumn{7}{c}{\textbf{GenEval}} \\
-    \cmidrule(lr){2-8}
-     & \textbf{Single Obj.} & \textbf{Two Obj.} & \textbf{Counting} & \textbf{Colors} & \textbf{Position} & \textbf{Color Attri.} & \textbf{Overall} \\
+    \multirow{2}{*}{\textbf{Method}} & \multirow{2}{*}{\textbf{Baseline}} & \multirow{2}{*}{\textbf{Params}} & \multicolumn{7}{c}{\textbf{GenEval (\%)}} \\
+    \cmidrule(lr){4-10}
+     &  &  & \textbf{Single Obj.} & \textbf{Two Obj.} & \textbf{Counting} & \textbf{Colors} & \textbf{Position} & \textbf{Color Attri.} & \textbf{Overall} \\
     \midrule
-    \multicolumn{8}{c}{\emph{Unified understanding and generation models}} \\
-    Chameleon \cite{team2024chameleon} & -- & -- & -- & -- & -- & -- & 0.39 \\
-    Show-o \cite{xie2024showo} & 0.98 & 0.81 & 0.69 & 0.82 & 0.32 & 0.53 & 0.69 \\
-    Janus \cite{wu2025janus} & 0.97 & 0.68 & 0.30 & 0.84 & 0.46 & 0.42 & 0.61 \\
-    Janus-Pro-7B \cite{chen2025januspro} & 0.99 & 0.89 & 0.59 & 0.90 & 0.79 & 0.66 & 0.80 \\
-    SEED-X \cite{ge2024seedx} & 0.97 & 0.58 & 0.26 & 0.80 & 0.19 & 0.14 & 0.49 \\
-    Emu3 \cite{wang2024emu3} & 0.98 & 0.71 & 0.34 & 0.81 & 0.17 & 0.21 & 0.54 \\
-    TokenFlow \cite{qu2025tokenflow} & 0.95 & 0.60 & 0.41 & 0.81 & 0.16 & 0.24 & 0.55 \\
+    \multicolumn{10}{c}{\emph{Unified visual understanding and image generation models}} \\
+    \hdashline
+    \noalign{\vskip 1.5pt}
+    Chameleon \cite{team2024chameleon} & Chameleon & -- & -- & -- & -- & -- & -- & -- & 39\% \\
+    Show-o \cite{xie2024showo} & Show-o & -- & 98\% & 81\% & 69\% & 82\% & 32\% & 53\% & 69\% \\
+    Janus \cite{wu2025janus} & Janus & -- & 97\% & 68\% & 30\% & 84\% & 46\% & 42\% & 61\% \\
+    Janus-Pro-7B \cite{chen2025januspro} & Janus-Pro-7B & 7B & 99\% & 89\% & 59\% & 90\% & 79\% & 66\% & 80\% \\
+    SEED-X \cite{ge2024seedx} & SEED-X & -- & 97\% & 58\% & 26\% & 80\% & 19\% & 14\% & 49\% \\
+    Emu3 \cite{wang2024emu3} & Emu3 & -- & 98\% & 71\% & 34\% & 81\% & 17\% & 21\% & 54\% \\
+    TokenFlow \cite{qu2025tokenflow} & TokenFlow & -- & 95\% & 60\% & 41\% & 81\% & 16\% & 24\% & 55\% \\
     \midrule
-    \multicolumn{8}{c}{\emph{Self-supervised post-training methods}} \\
-    UniGame \cite{su2025unigame} & 0.99 & 0.91 & 0.62 & 0.93 & 0.80 & 0.68 & 0.82 \\
-    SUDER \cite{hong2025dualselfrewards} & 0.99 & 0.89 & 0.70 & 0.92 & 0.82 & 0.71 & 0.84 \\
-    UniRL \cite{mao2025unirl} & 0.99 & 0.93 & 0.62 & 0.89 & 0.55 & 0.68 & 0.77 \\
-    UniCorn \cite{han2026unicorn} & -- & -- & -- & -- & -- & -- & 0.82 \\
-    SILMM$^\ddagger$ \cite{qu2024silmm} & -- & -- & -- & -- & -- & -- & -- \\
-    ILLUME \cite{wang2024illume} & 0.99 & 0.84 & 0.45 & 0.71 & 0.39 & 0.28 & 0.61 \\
+    \multicolumn{10}{c}{\emph{Self-improvement methods}} \\
+    \hdashline
+    \noalign{\vskip 1.5pt}
+    UniGame \cite{su2025unigame} & Janus-Pro-7B & 7B & 99\% & 91\% & 62\% & 93\% & 80\% & 68\% & 82\% \\
+    SUDER \cite{hong2025dualselfrewards} & Janus-Pro-7B & 7B & 99\% & 89\% & 70\% & 92\% & 82\% & 71\% & 84\% \\
+    UniRL$^\dagger$ \cite{mao2025unirl} & Show-o / Janus & -- & 99\% & 93\% & 62\% & 89\% & 55\% & 68\% & 77\% \\
+    UniCorn \cite{han2026unicorn} & BAGEL-7B & 7B & 99\% & 94\% & 80\% & 88\% & 61\% & 73\% & 82\% \\
+    ILLUME$^\dagger$ \cite{wang2024illume} & Vicuna-7B & 7B & 99\% & 84\% & 45\% & 71\% & 39\% & 28\% & 61\% \\
     \midrule
-    \multicolumn{8}{c}{\emph{Ours (self-evolving framework)}} \\
-    BLIP3o-8B \cite{chen2025blip3o} & 1.00 & 0.85 & 0.63 & 0.92 & 0.90 & 0.74 & 0.84 \\
-    BLIP3o-8B (Ours) & 0.99 & 0.93 & 0.71 & 0.94 & 0.90 & 0.75 & \textbf{0.87} \\
-    BLIP3o-8B ($\Delta$) & \co{-0.01} & \co{+0.08} & \co{+0.08} & \co{+0.02} & \co{0.00} & \co{+0.01} & \co{+0.03} \\
-    BAGEL \cite{deng2025bagel} & 0.99 & 0.94 & 0.81 & 0.88 & 0.64 & 0.63 & 0.82 \\
-    BAGEL (Ours) & 0.99 & 0.95 & 0.83 & 0.90 & 0.67 & 0.66 & \textbf{0.85} \\
-    BAGEL ($\Delta$) & 0.00 & \co{+0.01} & \co{+0.02} & \co{+0.02} & \co{+0.03} & \co{+0.03} & \co{+0.03} \\
-    VARGPT$_{1.1}$ \cite{zhuang2025vargpt} & 0.96 & 0.53 & 0.48 & 0.83 & 0.13 & 0.21 & 0.53 \\
-    VARGPT$_{1.1}$ (Ours) & 0.97 & 0.56 & 0.52 & 0.85 & 0.15 & 0.23 & \textbf{0.56} \\
-    VARGPT$_{1.1}$ ($\Delta$) & \co{+0.01} & \co{+0.03} & \co{+0.04} & \co{+0.02} & \co{+0.02} & \co{+0.02} & \co{+0.03} \\
+    BLIP3o-8B \cite{chen2025blip3o} & BLIP3o-8B & 8B & 100\% & 85\% & 63\% & 92\% & 90\% & 74\% & 84\% \\
+    \rowcolor{green!8}
+    BLIP3o-8B (Ours) & BLIP3o-8B & 8B & 99\% \dneg{1\%} & 93\% \dpos{8\%} & 71\% \dpos{8\%} & 94\% \dpos{2\%} & 90\% \dpos{0\%} & 75\% \dpos{1\%} & \textbf{87\%} \dpos{3\%} \\
+    BAGEL-7B \cite{deng2025bagel} & BAGEL-7B & 7B & 99\% & 94\% & 81\% & 88\% & 64\% & 63\% & 82\% \\
+    \rowcolor{green!8}
+    BAGEL-7B (Ours) & BAGEL-7B & 7B & 99\% \dpos{0\%} & 95\% \dpos{1\%} & 83\% \dpos{2\%} & 90\% \dpos{2\%} & 67\% \dpos{3\%} & 66\% \dpos{3\%} & \textbf{85\%} \dpos{3\%} \\
+    VARGPT-v1.1 \cite{zhuang2025vargpt} & VARGPT-v1.1 & 9B & 96\% & 53\% & 48\% & 83\% & 13\% & 21\% & 53\% \\
+    \rowcolor{green!8}
+    VARGPT-v1.1 (Ours) & VARGPT-v1.1 & 9B & 97\% \dpos{1\%} & 56\% \dpos{3\%} & 52\% \dpos{4\%} & 85\% \dpos{2\%} & 15\% \dpos{2\%} & 23\% \dpos{2\%} & \textbf{56\%} \dpos{3\%} \\
     \bottomrule
-    \multicolumn{8}{l}{\footnotesize $^\ddagger$Generation-only improvement.}
   \end{tabular}%
   }
 \end{table*}

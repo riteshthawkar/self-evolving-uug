@@ -25,7 +25,7 @@ OUT_DIR  = Path(__file__).resolve().parent
 # ──────────────── understanding examples ──────────────────────
 UND_EXAMPLES = [
     {
-        "title": "(a) Object Identification",
+        "title": "(a) Secondary-support grounding",
         "image": BASE_SRC / "vsr/000132.jpg",
         "question": "What is the suitcase lid\nresting on?",
         "greedy": "bed",
@@ -33,7 +33,7 @@ UND_EXAMPLES = [
         "sc_votes": "6/7",
     },
     {
-        "title": "(b) Spatial Reasoning",
+        "title": "(b) Local relation disambiguation",
         "image": BASE_SRC / "realworldqa/000405.jpg",
         "question": "What is immediately beside\nthe signpost?",
         "greedy": "tree trunk",
@@ -41,7 +41,7 @@ UND_EXAMPLES = [
         "sc_votes": "6/7",
     },
     {
-        "title": "(c) Action Recognition",
+        "title": "(c) Fine-grained action parsing",
         "image": BASE_SRC / "open_images/000063.jpg",
         "question": "What is the man at the\ncutting board doing?",
         "greedy": "preparing food",
@@ -49,7 +49,7 @@ UND_EXAMPLES = [
         "sc_votes": "5/7",
     },
     {
-        "title": "(d) Hallucination Correction",
+        "title": "(d) Function hallucination correction",
         "image": BASE_SRC / "flickr30k/000961.jpg",
         "question": "Function of the tree part\nthe child is touching?",
         "greedy": "transport of nutrients",
@@ -61,7 +61,7 @@ UND_EXAMPLES = [
 # ────────────────── generation examples ───────────────────────
 GEN_EXAMPLES = [
     {
-        "title": "(e) Counting + Text",
+        "title": "(e) Text fidelity + object count",
         "prompt": "Lufthansa airplane on tarmac,\nfour engines, blue tail",
         "src":  BASE_SRC / "nocaps/000008.jpg",
         "gen":  BASE_GEN / "step_001884_000008_cand0.png",
@@ -71,7 +71,7 @@ GEN_EXAMPLES = [
         ],
     },
     {
-        "title": "(f) Counting + Semantic",
+        "title": "(f) Count + interaction binding",
         "prompt": "Three people in restaurant,\nwoman pointing at menu",
         "src":  BASE_SRC / "flickr30k/001864.jpg",
         "gen":  BASE_GEN / "step_001865_001864_cand0.png",
@@ -82,7 +82,7 @@ GEN_EXAMPLES = [
         ],
     },
     {
-        "title": "(g) Color Attribution",
+        "title": "(g) Attribute binding",
         "prompt": "White duck, red face;\nblack dog nearby",
         "src":  BASE_SRC / "flickr30k/000188.jpg",
         "gen":  BASE_GEN / "step_000189_000188_cand0.png",
@@ -92,7 +92,7 @@ GEN_EXAMPLES = [
         ],
     },
     {
-        "title": "(h) Object Count",
+        "title": "(h) Multi-object counting",
         "prompt": "Three dogs playing with\na ball outdoors",
         "src":  BASE_SRC / "flickr30k/000008.jpg",
         "gen":  BASE_GEN / "step_000009_000008_cand0.png",
@@ -346,12 +346,16 @@ for col, ex in enumerate(GEN_EXAMPLES):
 
 
 # ──────────────────────────── save ─────────────────────────────
-out_pdf = OUT_DIR / "qualitative_comparison.pdf"
-out_png = OUT_DIR / "qualitative_comparison.png"
+out_files = [
+    OUT_DIR / "qualitative_comparison.pdf",
+    OUT_DIR / "qualitative_comparison.png",
+    OUT_DIR / "qualitative_figure.pdf",
+    OUT_DIR / "qualitative_figure.png",
+]
 
-fig.savefig(str(out_pdf), dpi=300, bbox_inches="tight", pad_inches=0.04)
-fig.savefig(str(out_png), dpi=300, bbox_inches="tight", pad_inches=0.04)
+for out_path in out_files:
+    fig.savefig(str(out_path), dpi=300, bbox_inches="tight", pad_inches=0.04)
 plt.close(fig)
 
-print(f"Saved: {out_pdf}")
-print(f"Saved: {out_png}")
+for out_path in out_files:
+    print(f"Saved: {out_path}")

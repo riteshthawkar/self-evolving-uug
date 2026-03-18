@@ -3,10 +3,6 @@
 \providecommand{\urlprefix}{URL }
 \providecommand{\doi}[1]{https://doi.org/#1}
 
-\bibitem{flux2024}
-{Black Forest Labs}: {FLUX}: Fast latent unified expression.
-  https://blackforestlabs.ai  (2024)
-
 \bibitem{team2024chameleon}
 {Chameleon Team}: Chameleon: Mixed-modal early-fusion foundation models. arXiv
   preprint arXiv:2405.09818  (2024), \url{https://arxiv.org/abs/2405.09818}
@@ -30,11 +26,21 @@ Deng, C., Zhu, D., Li, K., Gou, C., Li, F., Wang, Z., Zhong, S., Yu, W., Nie,
   pretraining. arXiv preprint arXiv:2505.14683  (2025),
   \url{https://arxiv.org/abs/2505.14683}
 
+\bibitem{fu2024mme}
+Fu, C., Chen, P., Shen, Y., Qin, Y., Zhang, M., Lin, X., Yang, J., Zheng, X.,
+  Li, K., Sun, X., et~al.: {MME}: A comprehensive evaluation benchmark for
+  multimodal large language models. arXiv preprint arXiv:2306.13394  (2024)
+
 \bibitem{ge2024seedx}
 Ge, Y., Zhao, S., Zhu, J., Ge, Y., Yi, K., Song, L., Li, C., Ding, X., Shan,
   Y.: {SEED-X}: Multimodal models with unified multi-granularity comprehension
   and generation. arXiv preprint arXiv:2404.14396  (2024),
   \url{https://arxiv.org/abs/2404.14396}
+
+\bibitem{ghosh2024geneval}
+Ghosh, D., Hajishirzi, H., Schmidt, L.: {GenEval}: An object-focused framework
+  for evaluating text-to-image alignment. arXiv preprint arXiv:2310.11513
+  (2024)
 
 \bibitem{han2026unicorn}
 Han, R., Fang, Z., Sun, X., Ma, Y., Wang, Z., Zeng, Y., Chen, Z., Chen, L.,
@@ -43,9 +49,9 @@ Han, R., Fang, Z., Sun, X., Ma, Y., Wang, Z., Zeng, Y., Chen, Z., Chen, L.,
   arXiv:2601.03193  (2026), \url{https://arxiv.org/abs/2601.03193}
 
 \bibitem{han2025internalgap}
-Han, Y., He, Y., Lin, C., Wang, Z., Wang, K., Ma, Y., Xiang, Y., Yang, X., Ye,
-  H., Song, L., Feng, J.: Turning internal gap into self-improvement: Promoting
-  the generation-understanding unification in mllms. arXiv preprint
+Han, Y., Chen, H., Han, A., Wang, Z., Liu, X., Zhang, Y., Zhang, S., Zou, D.:
+  Turning internal gap into self-improvement: Promoting the
+  generation-understanding unification in mllms. arXiv preprint
   arXiv:2507.16663  (2025), \url{https://arxiv.org/abs/2507.16663}
 
 \bibitem{hong2025dualselfrewards}
@@ -69,6 +75,16 @@ Jin, W., Niu, Y., Liao, J., Duan, C., Li, A., Gao, S., Liu, X.: {SRUM}:
   Fine-grained self-rewarding for unified multimodal models. arXiv preprint
   arXiv:2510.12784  (2025), \url{https://arxiv.org/abs/2510.12784}
 
+\bibitem{li2024seedbench}
+Li, B., Wang, R., Wang, G., Ge, Y., Ge, Y., Shan, Y.: {SEED-Bench}:
+  Benchmarking multimodal large language models. arXiv preprint
+  arXiv:2307.16125  (2024)
+
+\bibitem{liu2024mmbench}
+Liu, Y., Duan, H., Zhang, Y., Li, B., Zhang, S., Zhao, W., Yuan, Y., Wang, J.,
+  He, C., Liu, Z., et~al.: {MMBench}: Is your multi-modal model an all-around
+  player? arXiv preprint arXiv:2307.06281  (2024)
+
 \bibitem{mao2025unirl}
 Mao, W., Yang, Z., Shou, M.Z.: {UniRL}: Self-improving unified multimodal
   models via supervised and reinforcement learning. arXiv preprint
@@ -85,21 +101,27 @@ Qu, L., Zhang, H., Liu, Y., Wang, X., Jiang, Y., Gao, Y., Ye, H., Du, D.K.,
   understanding and generation. In: CVPR (2025),
   \url{https://arxiv.org/abs/2412.03069}
 
+\bibitem{shao2024deepseekmath}
+Shao, Z., Wang, P., Zhu, Q., Xu, R., Song, J., Zhang, M., Li, Y., Wu, Y., Guo,
+  D.: Deepseekmath: Pushing the limits of mathematical reasoning in open
+  language models. arXiv preprint arXiv:2402.03300  (2024)
+
+\bibitem{singh2019textvqa}
+Singh, A., Natarajan, V., Shah, M., Jiang, Y., Chen, X., Batra, D., Parikh, D.,
+  Rohrbach, M.: {TextVQA}: Towards reading text in images for visual question
+  answering. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition
+  (2019)
+
 \bibitem{su2025unigame}
 Su, Z., Lu, W., Chen, H., Li, S., Wang, J.: Unigame: Turning a unified
   multimodal model into its own adversary. arXiv preprint arXiv:2511.19413
   (2025), \url{https://arxiv.org/abs/2511.19413}
 
-\bibitem{su2026unimrg}
-Su, Z., Wang, X., Wei, F., Shan, Y.: Generation enhances understanding in
-  unified multimodal models via multi-representation generation. arXiv preprint
-  arXiv:2601.21406  (2026), \url{https://arxiv.org/abs/2601.21406}
-
 \bibitem{tang2026endogenous}
-Tang, J., Zhou, Y., Li, Z., Ma, J., Wang, X., Wang, Q., Lu, X., Xu, C., Wang,
-  Z., Dai, J., et~al.: Endogenous reprompting: Self-evolving cognitive
-  alignment for unified multimodal models. arXiv preprint arXiv:2601.20305
-  (2026), \url{https://arxiv.org/abs/2601.20305}
+Tang, Z., Yang, S., Wang, Z., Peng, B., Li, Y., Dong, B., Dong, J.: Endogenous
+  reprompting: Self-evolving cognitive alignment for unified multimodal models.
+  arXiv preprint arXiv:2601.20305  (2026),
+  \url{https://arxiv.org/abs/2601.20305}
 
 \bibitem{thawakar2025evolmm}
 Thawakar, O., Venkatraman, S., Thawkar, R., Shaker, A.M., Cholakkal, H., Anwer,
@@ -125,12 +147,6 @@ Wang, X., Cui, Y., Wang, J., Zhang, F., Wang, Y., Zhang, X., Luo, Z., Sun, Q.,
   multimodal models. Nature  \textbf{650}(8101),  327--333 (2026).
   \doi{10.1038/s41586-025-10041-x},
   \url{https://www.nature.com/articles/s41586-025-10041-x}
-
-\bibitem{wei2025skyworkunipic2}
-Wei, C., Wang, Z., Xu, J., Lu, G., Xu, M., Yi, P., Ma, J., Yang, J., Lin, J.,
-  Hu, H., et~al.: Skywork unipic 2.0: Building kontext model with online rl for
-  unified multimodal model. arXiv preprint arXiv:2509.04548  (2025),
-  \url{https://arxiv.org/abs/2509.04548}
 
 \bibitem{wu2025janus}
 Wu, C., Chen, X., Wu, Z., Ma, Y., Liu, X., Pan, Z., Liu, W., Xie, Z., Yu, X.,
@@ -163,16 +179,26 @@ Yan, Y., Feng, Y., Liu, Y., Liu, T., Liu, Y., Chen, W., Chen, J., Wu, Y., Yang,
   auto-encoder. arXiv preprint arXiv:2509.09666  (2025),
   \url{https://arxiv.org/abs/2509.09666}
 
+\bibitem{yu2023mmvet}
+Yu, W., Yao, Z., Liang, L., Li, Z., Wang, L.: {MM-Vet}: Evaluating large
+  multimodal models for integrated capabilities. arXiv preprint
+  arXiv:2308.02490  (2023)
+
+\bibitem{yue2024mmmu}
+Yue, X., Ni, Y., Zhang, K., Zheng, T., Liu, R., Zhang, G., Stevens, S., Jiang,
+  D., Ren, W., Sun, Y., et~al.: {MMMU}: A massive multi-discipline multimodal
+  understanding and reasoning benchmark for expert {AGI}. In: IEEE/CVF
+  Conference on Computer Vision and Pattern Recognition (2024)
+
+\bibitem{lmmseval2024}
+Zhang, K., Li, B., Bai, P., Lin, F., Chen, G., Ye, J., Ge, Y., Ge, Y., Shan,
+  Y., Liu, Z.: Lmms-eval: Reality check on the evaluation of large multimodal
+  models. arXiv preprint arXiv:2407.12772  (2024)
+
 \bibitem{zhuang2025vargpt}
 Zhuang, B., Hu, T., Hou, B., Miao, J., Guo, Z., Liu, F., Li, Z., Chen, Z., Shi,
   Z., Wu, C., et~al.: Vargpt-v1.1: Improve visual autoregressive large unified
   model via iterative instruction tuning and reinforcement learning. arXiv
   preprint arXiv:2504.02949  (2025), \url{https://arxiv.org/abs/2504.02949}
-
-\bibitem{xianwei2025vargpt}
-Zhuang, X., Xie, Y., Deng, Y., Liang, L., Ru, J., Yin, Y., Zou, Y.: {VARGPT}:
-  Unified understanding and generation in a visual autoregressive multimodal
-  large language model. arXiv preprint arXiv:2501.12327  (2025),
-  \url{https://arxiv.org/abs/2501.12327}
 
 \end{thebibliography}

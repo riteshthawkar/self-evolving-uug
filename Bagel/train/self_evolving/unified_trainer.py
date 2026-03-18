@@ -97,7 +97,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         # - BAGEL_OUTPUT_DIR_MODE=direct: write logs/checkpoints directly in output_root
         # - BAGEL_OUTPUT_DIR_MODE=timestamp (default): create per-run timestamp folder
         mode = str(os.environ.get("BAGEL_OUTPUT_DIR_MODE", "timestamp")).strip().lower()
-        per_rank_output = str(os.environ.get("BAGEL_DIST_PER_RANK_OUTPUT", "1")).strip().lower() in {"1", "true", "yes", "on"}
+        per_rank_output = str(os.environ.get("BAGEL_DIST_PER_RANK_OUTPUT", "0")).strip().lower() in {"1", "true", "yes", "on"}
         rank_suffix = ""
         if self.dist_enabled and self.dist_world_size > 1 and per_rank_output:
             rank_suffix = f"rank_{int(self.dist_rank):02d}"
@@ -1150,7 +1150,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         questions = questions[:n]
         answers = answers[:n]
 
-        reward = float(rec.get("proposer_gen_reward", 0.0))
+        reward = float(rec.get("best_total_reward", rec.get("proposer_gen_reward", 0.0)))
         if reward < float(self.ucfg.generated_mix_min_reward):
             return
 
@@ -1187,7 +1187,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         image_path = Path(image_path_raw)
         if not image_path.exists():
             return
-        reward = float(rec.get("proposer_gen_reward", 0.0))
+        reward = float(rec.get("best_total_reward", rec.get("proposer_gen_reward", 0.0)))
         qa_pairs = rec.get("qa_pairs", [])
         if not isinstance(qa_pairs, list):
             return
@@ -2121,6 +2121,9 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         )
         selected_idx = int(selected.get("candidate_index", 0))
         selected_reward = float(selected.get("proposer_gen_reward", 0.0))
+        selected_generator_reward = float(
+            selected.get("best_total_reward", selected.get("total_reward", selected_reward))
+        )
         proposer_baseline_before = float(self.proposer_gen_baseline)
         generator_baseline_before = float(self.generator_baseline)
         baseline_momentum = _clamp01(float(self.cfg.proposer_gen_baseline_momentum))
@@ -2229,7 +2232,10 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         if generator_policy_train_ready:
             generator_policy_update_attempted = True
             if update_method == "grpo" and len(valid_candidates) > 1:
-                group_rewards = [float(c.get("proposer_gen_reward", 0.0)) for c in valid_candidates]
+                group_rewards = [
+                    float(c.get("best_total_reward", c.get("total_reward", c.get("proposer_gen_reward", 0.0))))
+                    for c in valid_candidates
+                ]
                 per_candidate_stats: List[Dict[str, Any]] = []
                 for cand, cand_reward in zip(valid_candidates, group_rewards):
                     if max_generator_candidates > 0 and generator_policy_attempted >= max_generator_candidates:
@@ -2284,7 +2290,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                     stats = self.generator_updater.step(
                         image=generated_img,
                         prompt=gen_prompt,
-                        reward=float(selected_reward),
+                        reward=float(selected_generator_reward),
                         baseline=generator_baseline_before,
                     )
                     generator_policy_attempted = 1
@@ -2411,7 +2417,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         )
         self.generator_baseline = (
             baseline_momentum * self.generator_baseline
-            + (1.0 - baseline_momentum) * float(selected_reward)
+            + (1.0 - baseline_momentum) * float(selected_generator_reward)
         )
 
         policy_update_attempted = bool(
@@ -2443,6 +2449,10 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         rec["generation_candidate_group_size"] = int(group_size)
         rec["generation_candidate_valid_count"] = int(len(valid_candidates))
         rec["generation_candidate_rewards"] = [
+            float(c.get("best_total_reward", c.get("total_reward", c.get("proposer_gen_reward", 0.0))))
+            for c in valid_candidates
+        ]
+        rec["generation_candidate_proposer_rewards"] = [
             float(c.get("proposer_gen_reward", 0.0)) for c in valid_candidates
         ]
         rec["generation_candidate_statuses"] = [str(c.get("status", "skipped")) for c in candidates]
@@ -2453,7 +2463,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         rec["proposer_gen_advantage"] = float(selected_reward - proposer_baseline_before)
         rec["generator_baseline_before"] = float(generator_baseline_before)
         rec["generator_baseline_after"] = float(self.generator_baseline)
-        rec["generator_advantage"] = float(selected_reward - generator_baseline_before)
+        rec["generator_advantage"] = float(selected_generator_reward - generator_baseline_before)
         rec["policy_update_attempted"] = bool(policy_update_attempted)
         rec["policy_update_applied"] = bool(policy_update_applied)
         rec["policy_update_reason"] = str(policy_update_reason)
@@ -2488,7 +2498,7 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
             "record": rec,
             "valid": 1,
             "skipped": 0,
-            "reward_sum": float(selected_reward),
+            "reward_sum": float(selected_generator_reward),
             "entropy_sum": float(rec.get("mean_entropy_nats", 0.0)),
             "quality_sum": float(rec.get("quality_component", 0.0)),
             "policy_attempted": int(generation_policy_attempted_count + gen_solver_update_attempted),

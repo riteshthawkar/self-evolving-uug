@@ -1,0 +1,1407 @@
+EvoLMM: Self-Evolving Large Multimodal Models with
+Continuous Rewards
+
+arXiv:2511.16672v2 [cs.CV] 21 Nov 2025
+
+Omkar Thawakar1† Shravan Venkatraman1† Ritesh Thawkar1† Abdelrahman M Shaker1
+Hisham Cholakkal1 Rao Muhammad Anwer1,2 Salman Khan1,3 Fahad Khan1,4
+1
+
+3
+
+Mohamed bin Zayed University of AI, 2 Aalto University,
+
+Australian National University, 4 Linköping University
+
+Q {omkar.thawakar, shravan.venkatraman, ritesh.thawkar}@mbzuai.ac.ae
+
+https://mbzuai-oryx.github.io/EvoLMM/
+
+Abstract
+
+Inference
+
+Question: Which point in the labyrinth
+can we get to, starting at point $O$?
+
+Recent advances in large multimodal models (LMMs) have
+enabled impressive reasoning and perception abilities, yet
+most existing training pipelines still depend on humancurated data or externally verified reward models, limiting
+their autonomy and scalability. In this work, we strive to
+improve LMM reasoning capabilities in a purely unsupervised fashion (without any annotated data or reward distillation). To this end, we propose a self-evolving framework,
+named EvoLMM, that instantiates two cooperative agents
+from a single backbone model: a Proposer, which generates
+diverse, image-grounded questions, and a Solver, which
+solves them through internal consistency, where learning
+proceeds through a continuous self-rewarding process. This
+dynamic feedback encourages both the generation of informative queries and the refinement of structured reasoning without relying on ground-truth or human judgments.
+When using the popular Qwen2.5-VL as the base model,
+our EvoLMM yields consistent gains upto ∼3% on multimodal math-reasoning benchmarks, including ChartQA,
+MathVista, and MathVision, using only raw training images. We hope our simple yet effective approach will serve
+as a solid baseline easing future research in self-improving
+LMMs in a fully-unsupervised fashion. Our code and models are available at https://github.com/mbzuaioryx/EvoLMM .
+
+Qwen2.5-VL-7B (Baseline): “B”
+Qwen2.5-VL-7B (Ours) : “C”
+From raw images to reasoning -> our model evolves through self-play.
+
+Trying to solve
+questions
+
+1.
+2.
+3.
+4.
+5.
+“Solver”
+
+Proposing questions
+
+In a different circular maze, starting at S, which
+labeled goal is reachable without crossing walls?
+Another maze: from the center node, which exit
+(A/B/C/D) can be reached?
+New maze: starting at K, which labeled point is not “Proposer”
+reachable?
+Different maze: which destination from the start
+requires passing through exactly one gate?
+……
+
+Continuous Reward-based Self Play Training
+
+Figure 1. Illustration of our fully unsupervised self-evolving
+LMM framework (EvoLMM). Our EvoLMM enables a base
+LMM to improve its reasoning ability without any human labels,
+metadata, or external reward models. Given only raw images, a
+proposer first generates visually grounded questions, and a solver
+attempts to answer them multiple times. The degree of agreement
+among solver responses produces a continuous self-consistency reward, forming a closed-loop training signal that drives both modules to co-evolve.
+
+29], visual question answering [13, 28, 42, 51], and multimodal reasoning [30, 34, 37, 43, 46] by leveraging largescale pre-training and fine-tuning on annotated datasets.
+However, despite these advances, two fundamental dependencies remain: (i) the dependence on human-curated annotations or metadata [1, 8, 11, 19, 50], and (ii) the dependency on externally defined reward models or evaluators (e.g., human-labeled correctness, knowledge-distilled
+reward networks) [4, 12, 17, 32, 36]. These dependencies
+
+1. Introduction
+Large multimodal models (LMMs) that jointly handle vision and language have made substantial progress in recent
+years. They excel at tasks like image captioning [14, 16, 22,
+† Equal contribution.
+
+1
+
+pose scalability limitations, hinder domain generalization,
+and restrict deployment in settings where annotations or reward models are unavailable.
+Recent research in large language models (LLMs) explores the idea of self-evolving models that not only solve
+tasks but also generate the tasks they learn from. For instance, few works [5, 6] aim to improve base LLM by generating its own questions and attempting to answer them,
+using the agreement among multiple sampled answers as
+a self-reward signal. Such a technique can be further improved [6] by splitting the model into interacting roles
+such as Proposer, Solver, and Judge that co-exist and train
+themselves through reinforcement learning. This research
+direction is pushed further [45] by incorporating openended scheme where the system incorporates an open-ended
+evolution to continually refine internal behaviors. However, these research efforts are largely constrained to the
+language-only domain, where reasoning is explicit and correctness can be inferred through textual consistency or symbolic execution. Moreover, these approaches still either rely
+on implicit evaluators (e.g., external Judge module, execution feedback) or explicit evaluators, implying that the
+learning signal is not yet fully free of external priors.
+In the multimodal (LMM) domain, few recent works
+aim to improve LMMs through self-rewarding training signals, thereby reducing human supervision. For instance, the
+work of [18] proposes a self-rewarding reasoning strategy
+where the model decomposes each task into a perception
+step and a reasoning step, and then evaluates with internal
+bootstrapping. Similarly, ViPER [47] introduces a closedloop framework that gradually strengthens visual perception
+ability through image-level and instance-level reconstruction, combined with reinforcement style updates driven by
+internally synthesized data. While these approaches represent progress in self-improving LMMs, they still rely on
+structured intermediate signals such as reconstruction objectives, heuristic quality filtering, or semantic similaritybased scoring. Consequently, their self-evolution remains
+partially guided by external priors rather than emerging
+purely from the model’s own reasoning dynamics.
+In this work, we investigate a more fundamental form of
+autonomy: Can a large multimodal model (LMM) enhance
+its own reasoning capability without relying on humanannotated supervision or any external reward signals? To
+this end, we propose a purely unsupervised self-evolving
+framework, named EvoLMM, that learns entirely through
+internal consistency (see Figure. 1). Our approach instantiates two cooperative roles from a single backbone
+model: a Proposer, which generates diverse and visually
+grounded mathematical questions from unlabeled images,
+and a Solver, which attempts to solve these questions. The
+framework evolves through a continuous self-reward mechanism, where the Solver is rewarded by the fraction of con-
+
+sistent or correct answers within its own generations. It is
+worth mentioning that no ground-truth labels, metadata, or
+external reward models are used at any stage. This simple
+yet effective design enables the model to construct, evaluate, and refine its own training signal directly from raw
+multimodal inputs. The framework naturally scales to large
+models and domains where ground-truth supervision is unavailable or expensive. Despite training exclusively on raw
+images, we show consistent improvements across multiple multimodal math reasoning benchmarks over the base
+model. Further, our qualitative analysis reveals that the Proposer learns to generate increasingly complex visual problems, while the Solver develops more structured reasoning
+chains over time, suggesting emergent self-evolution.
+In summary, our main contributions are:
+• We introduce a self-evolving multimodal framework,
+named EvoLMM, that enables a base LMM to improve
+without human labels, metadata, or external reward models. The framework decomposes the model into two internal roles, Proposer and Solver, forming a closed-loop
+propose-solve cycle trained solely through internal consistency feedback.
+• We develop a continuous self-rewarding mechanism
+based on multi-sample answer consistency, which replaces both learned discrete reward models and semantic similarity scoring used in prior LMM self-evolution
+approaches. This continuous internal reward signal provides smooth gradients and stable optimization, enabling
+consistent improvement in performance.
+• We empirically validate EvoLMM on mathematical visual reasoning benchmarks, with absolute gains of ∼
+2–3% over the Qwen-2.5-VL-7B baseline using only raw
+images during training. We further analyze the evolution
+of our propose-solve mechanism where the difficulty level
+gradually progresses and maintains stable learning, showing that the model naturally develops more structured and
+grounded reasoning behaviors over time. Furthermore,
+we show that internal consistency can serve as a viable
+supervision signal for open-ended multimodal learning.
+
+2. Related Work
+In the context of large language models (LLMs), several
+recent works [5, 6, 31] aim to self-improve the model capabilities (e.g., scientific reasoning) without significant human
+annotations. The work of [5] proposes an approach to improve the implicit reasoning capabilities of the base model
+through self-play and majority-vote reward signals. Sheikh
+Shafayat et al. [31] explores self-consistency as a training reward within an reinforcement learning (RL) framework, demonstrating performance on synthetic reasoning
+task. Recently, the work of [6] introduces a self-play based
+method where three roles (Proposer, Solver, and Judge) are
+instantiated from the same base LLM and trained via RL to
+2
+
+external reward models are available. Let X = {x} denote
+an unlabeled collection of images. Our goal is to enable
+a single pre-trained base large multimodal model (LMM)
+improve itself by generating its own training signal directly
+from these images. To this end, we instantiate two policies:
+• Proposer πϕ (q | x) that produces a visually grounded
+question q for image x, and
+• Solver πθ (y | x, q) that attempts to answer q.
+For each proposed question, we draw N independent answer samples y1:N ∼ πθ (· | x, q) and compute the empirical
+answer distribution p(a | x, q). Let â = arg maxa p(a | x, q)
+denote the majority answer, and let
+X
+H(x, q) = −
+p(a | x, q) log p(a | x, q)
+(1)
+
+construct questions, answers, and the evaluation inter-play
+between them. While achieving promising results, these approaches assume a certain form of verifiable environment
+in the form of a judge [6] or heuristic and discrete rewards
+(e.g., majority vote) [5, 31] which can likely struggle with
+model collapse.
+In the context of large multimodal models (LMMs), Li
+et al. [18] introduces a self-rewarding technique to improve
+visual understanding by decomposing it into perception and
+language-reasoning via explicit perception reward by the
+LMM itself. However, the self-reward mechanism relies
+on the SFT cold-start dataset to learn the desired format.
+The work of Zhang et al. [47] leverages image-level and
+instance-level reconstructions in a two-stage RL loop to
+iteratively improve perceptual capabilities. However, this
+image-and instance-level reconstruction of meta-data relies
+on an external model (e.g., OmniGen2 [40] and QwenImage [39]). Additionally, a recent work Vision-Zero [36],
+trains LMMs through a multi-agent social deduction game
+(“Who is the Spy?”) played directly on images. The framework introduces adversarial roles (spy vs. civilians), iterative clue and voting rounds, and alternates between selfplay and verifiable reinforcement learning (RLVR) depending on whether the identity of the spy is known. Although
+Vision-Zero does not require explicit human annotations, it
+relies on constructing image pairs with subtle, controlled
+differences produced through automated rendering, image
+editing, or regeneration pipelines relying on external generative systems (GPT-4o [27] and Gemini [7]).
+Our Approach. Different to aforementioned approaches,
+our approach aims to self-improve the multimodal capabilities (e.g., multimodal math reasoning) of a base LMM without any annotations and external reward-model based selfevolution loop. Specifically, our framework uses only raw
+images (without metadata, bounding-boxes, and human labels) and employs a Proposer–Solver pair where (i) the Proposer generates questions from images and (ii) the Solver
+attempts answers over multiple attempts, where the reward
+signal is the fraction of correct answers among the model’s
+own outputs, effectively scaling with the degree of answer
+agreement. In this way, the proposed scheme avoids external judge, human annotated datasets (e.g., SFT cold-start),
+knowledge-distillation, and discrete rewards. By leveraging
+a continuous reward design, our training process systematically induces a curriculum, where the Proposer gradually
+explores questions that are neither trivial nor impractical,
+thereby stabilizing the Solver learning and mitigating the
+Proposer to degenerate to zero-rewards.
+
+a
+
+be the Solver-consensus entropy. This quantity serves as a
+proxy for question difficulty: trivial questions lead to low
+entropy, whereas ambiguous or poorly grounded questions
+produce high entropy.
+
+3.1. Unsupervised Self-Evolving LMM
+In this work, we design an unsupervised self-evolving
+LMM approach (EvoLMM) motivated by the recent selfquestion-based technique (SQLM) [5] in the LLM domain.
+The SQLM improves an LLM by generating its own questions and reinforcing answer agreement. However, SQLM
+relies on a discrete majority-vote reward, which we empirically show to be sub-optimal in the multimodal setting
+where the LMM is required to ground its questions based
+on the input image and perform complex multimodal reasoning (e.g., visual math reasoning). We observe that earlystage Solver outputs over images are highly variable, leading to frequent zero-reward updates and unstable optimization. This prevents the model from making gradual progress
+when using discrete majority-vote reward.
+In our EvoLMM approach, we replace the discrete reward with a continuous self-consistency signal that scales
+with the degree of answer-agreement, as shown in Figure 2.
+The continuous self-consistency signal provides meaningful
+gradient feedback even when visual reasoning is only partially correct. We observe this to stabilize the learning in the
+presence of visual uncertainty that requires domain knowledge. Our continuous self-consistency reward enables the
+Proposer and Solver to co-evolve smoothly, forming a curriculum in which question difficulty and reasoning quality
+improve gradually using only raw images.
+Continuous Self-Consistency Reward. We reward the
+Solver using a continuous self-supervised signal that scales
+smoothly with self-consistency and gently penalizes verbosity. For each sample yi , we define
+
+γ 
+risol = p(yi | x, q) · 1−λlen ·max{0, (wi −τ )/τ } (2)
+
+3. Method
+Problem Formulation. We consider the unsupervised
+self-evolving vision–language (multimodal) reasoning setting, where no question–answer annotations, metadata, or
+3
+
+’’’ Generate Question
+for given <image> ‘’’
+
+“Proposer”
+
+“Input-Image”
+
+‘’’
+triangle ABC$ is an
+isosceles triangle with
+base $BC$. What is the
+perimeter of the
+triangle?
+‘’’
+“q”
+
+1
+0.5
+0
+0
+
+1
+
+Entropy H (nats)
+
+exp −
+
+𝐻 𝑥, 𝑞 − 𝜇! "
+2𝜎!"
+
+“Proposer-Reward
+(𝑟 !"#! )”
+
+“q”
+
+“Input-Image”
+
+‘’’
+A1: 38
+A2: 40
+A3: 42
+A4: 40
+A5: 36
+‘’’
+”𝑦$:& ”
+
+“Solver”
+
+Answer Histogram (N=5)
+2.0
+
+𝑝 𝑦# 𝑥, 𝑞 \𝑏𝑖𝑔 $ ⋅
+1 − 𝜆len ⋅ max{ 0, 𝑤# − 𝜏 /𝜏}
+
+1.5
+
+Count
+
+‘’’
+triangle ABC$ is an isosceles
+triangle with base $BC$. What
+is the perimeter of the triangle?
+‘’’
+
+1.0
+
+0.5
+
+0.0
+
+38
+
+40
+
+𝑝 𝑎Answer
+𝑥, 𝑞
+
+42
+
+36
+
+“Solver-Reward
+(𝑟 sol )”
+
+Figure 2. Overview of our Proposer–Solver based self-evolving framework (EvoLMM). Given only a raw visual input (e.g., multimodal
+chart), the Proposer module generates a question q about the image content. The Solver then produces multiple answer samples y1:N ,
+forming an empirical answer distribution p(a | x, q). The Solver reward rsol is a continuous, self-supervised signal based on the likelihood
+of each answer sample, modulated by a length penalty that constrains the Solver’s response format. The Proposer reward rprop is an
+entropy-based band-pass function that encourages moderate difficulty questions where Solver is not completely correct and certain. By
+rewarding this moderate-entropy window, the Proposer gradually learns to generate questions that are challenging enough to stimulate
+reasoning while remaining solvable, forming an automatic curriculum without external supervision. Both modules are optimized with
+standard REINFORCE objectives regularized by token-level KL constraints to reference policies. This closed-loop training enables jointly
+refining question generation and reasoning using only images, without any annotated Q&A pairs, discrete rewards, or external verifiers.
+
+where p(yi | x, q) is the Solver’s own agreement score,
+γ ∈ (0, 1] controls reward softness (lower values accentuate mid-confidence differences), wi counts the number of
+words preceding the <answer> tag, and τ is target brevity
+threshold. This yields dense, bounded rewards that preserve
+gradient flow even without clear majority, encouraging both
+stable reasoning (high agreement among outputs) and concise format, as shown in Figure 4. Unlike discrete majorityvote rewards, it provides a continuous signal that better separates mid-probability outcomes (see Figure 3).
+Entropy-Guided Continuous Proposer Reward. To avoid
+trivial or unsolvable questions, the Proposer receives a
+smooth band-pass reward based on the Solver’s answer entropy:
+
+
+(H(x, q) − µH )2
+rprop = exp −
+(3)
+2
+2σH
+which peaks when the Solver’s uncertainty lies within a
+moderate range—neither overly certain (H ≈ 0, trivial or
+leading) nor overly uncertain (ambiguous or unsolvable), as
+shown in Figure 3. This encourages the Proposer to operate
+near the Solver’s decision boundary, inducing an adaptive
+curriculum: as the Solver improves, the Proposer must generate slightly harder yet still solvable questions to remain
+within the entropy band (see Figure 6).
+Training Optimization. In our framework, the Proposer
+and Solver are trained jointly in an online reinforcementlearning loop. Since no ground-truth labels or external scoring functions are available, both policies rely entirely on internally generated reward signals. To ensure stable learning,
+
+we adopt a REINFORCE policy gradient [38] with two key
+components: (i) moving-average baselines to reduce variance, and (ii) token-level KL regularization to monitor deviation from the pretrained base LMM.
+Both policies share the same optimization form,
+"
+#
+TA
+1 X
+LA = − E (rA − bA )
+log πA (yt | ht ) +βA KLA ,
+TA t=1
+(4)
+where A ∈ {Solver, Proposer}, ht denotes the text–image
+context up to token t whereas,
+X
+
+ref
+KLA = T1A
+KL πA (· | ht ) ∥ πA
+(· | ht )
+(5)
+t
+
+measures per-token divergence from a frozen reference
+model.
+Each policy employs an exponential moving-average baseline bA for variance reduction and a dynamic KL controller
+that adjusts βA to maintain a target divergence budget:
+
+
+
+βA ← clip βA · exp η KLAτA−τA , βmin , βmax . (6)
+For the Solver, this controller stabilizes the learning while
+allowing gradual adaptation towards better visual reasoning and consistent answer generation. For the Proposer,
+the KL term is not tightly constrained: as it explores new
+question spaces, its divergence from the backbone (base
+LMM) increases, reflecting the emergence of more challenging queries. Please refer to Algorithm 1 for our endto-end training optimization process.
+4
+
+Reward
+
+    
+
+  
+
+
+
+
+
+ 
+
+
+
+      
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Majority Count 𝒎 (out of 𝑵 = 𝟓)
+
+Majority Count 𝒎 (out of 𝑵 = 𝟓)
+
+Majority Count 𝒎 (out of 𝑵 = 𝟓)
+
+Majority Count 𝒎 (out of 𝑵 = 𝟓)
+
+(a) Proposer (Discrete)
+
+(b) Proposer (Continuous)
+
+(c) Solver (Discrete)
+
+(d) Solver (Continuous)
+
+Figure 3. Comparison of Proposer and Solver rewards under discrete and our continuous formulations for a single iteration. Each
+panel shows rewards for low-entropy (high-agreement) and high-entropy (diverse-answer) cases for a single iteration for number of Solver
+responses N =5. In case of Proposer (left), discrete rewards collapse them into identical plateaus, providing weaker learning signals. In
+contrast, our continuous reward varies smoothly and distinguishes Solver response patterns. In case of Solver (right), the discrete reward
+increases linearly only with majority count and does not reflect partial progress, leading to sparse and unstable learning signals during early
+training. Instead, our continuous Solver reward scales smoothly with agreement, enabling the Solver to improve reasoning consistency
+gradually. Collectively, our continuous reward formulation creates a more stable self-evolution loop, where the Proposer and Solver coadapt toward more grounded and consistent reasoning behavior.
+
+Steps 102
+
+Continuous Reward
+
+Proposer Reward
+
+Discrete Reward
+
+Proposer: Which lunar phase is directly opposite the new moon?
+Solver: ["Full Moon", "FULL MOON", "Full Moon", "Full moon", "FULL
+MOON"]
+Proposer_Reward = 0.0366
+Solver _Rewards = [1.0, 1.0, 1.0, 1.0, 1.0]
+
+Solver Reward
+
+Steps 2018
+
+Proposer: How many carnivores have H2 as their sole herbivore
+source?
+Solver: ["1", "1", ”2", "1", ”2"]
+Proposer_Reward = 0.8103
+Solver _Rewards = [0.6990, 0.6990, 0.5270, 0.6990, 0.5270]
+
+Proposer: Which state has the highest number of charitable organizations?
+Solver: ["2", "3", "3", ”1", "2"]
+Proposer_Reward = 0.9072
+Solver _Rewards = [0. 5270, 0. 5270, 0. 5270, 0.3241, 0. 5270]
+Proposer: Which environmental issue ranks third in frequency according to
+the chart?
+Solver: ["Climate Change", ”Water Pollution", "Waste Management",
+"Waste Management", "Climate Change"]
+Proposer_Reward = 0.9072
+Solver _Rewards = [0. 5270, 0.3241, 0.5270, 0.5270, 0.5270]
+
+Steps 5122
+
+Training Steps
+
+Figure 4. Comparison between the discrete vs. our continuous reward progression during training. Top: The discrete
+majority-vote reward (red) remains low and unstable during training, providing a weak learning signal due to Solver output variability in early stages. In contrast, our continuous self-consistency
+reward (green) produces stable and valuable feedback, enabling
+the Proposer to consistently generate moderate difficulty, informative questions. Bottom: Guided by our Proposer with continuous
+reward, we observe the Solver (green) to be more consistent and
+stable compared to its discrete (red) counterpart.
+
+Proposer: What is the maximum number of paths from point A to B that
+do not pass through J?
+Solver: ["2", "3", ”1", "2", ”4"]
+Proposer_Reward = 0.4672
+Solver _Rewards = [0.5270, 0.3241, 0.3241, 0.5270, 0.3241]
+
+Figure 5. Example showing progression of our continuous
+reward-based Proposer questions generation along with rewards. From top (step 102) to bottom (step 5122), Proposer increases question complexity, which in turn enhances the reasoning
+capabilities of Solver. Refer suppl. material for more examples.
+
+guide the learning.
+To present further insights into our continuous selfconsistency reward-based training, we conduct an experiment to post-train Qwen2.5-VL-7B [3] on ChartQA [23]
+training images (without any question-answer pairs or metadata). As shown in Figure 5, our self-consistency reward
+yields a graded score proportional to the empirical agreement among Solver outputs. Even partial agreement (e.g.,
+2 out of 5 consistent samples) produces a meaningful pos-
+
+3.2. EvoLMM Training Insights
+As discussed earlier, our Proposer-Solver training loop produces a joint self-evolving learning dynamics in which both
+question generation and answer reasoning gradually improve over the time using only images. In the absence of
+human annotations or external reward models, our model
+learns to rely entirely on the structure of its own outputs to
+5
+
+Easy
+
+Moderate
+
+Hard
+
+Percentages
+
+Algorithm 1: EvoLMM: Self-Evolving Training
+strategy with continious rewards.
+Input: Unlabeled images X ; pretrained LMM
+backbone πref
+Output: Trained Proposer πϕ and Solver πθ
+// Initialize Proposer, Solver
+Initialize Proposer πϕ ← LoRA(πref )
+Initialize Solver πθ ← LoRA(πref )
+Initialize EMA baselines bprop , bsol
+Set number of answer samples N , entropy targets
+(µH , σH )
+for each training step do
+Sample image x ∼ X
+// Step 1: Proposer generates a
+question
+Generate question q ∼ πϕ (q|x)
+// Step 2: Solver answers the
+question multiple times
+Sample N answers {yi }N
+i=1 ∼ πθ (·|x, q)
+// Step 3: Compute empirical
+answer distribution
+Estimate p(a|x, q) and entropy H(x, q)
+// Step 4: Continuous Solver
+Reward
+for i = 1 to N do
+Compute agreement score p(yi |x, q)
+Compute reward:
+
+Training Steps
+
+Figure 6. Evolution of proposer question difficulty over training. As self-evolution progresses, the proposer shifts from mostly
+easy or overly hard questions to a stable distribution dominated by
+moderate-difficulty ones. This reflects the emergence of an implicit curriculum: mid-entropy questions provide the most informative signal for the solver, leading to more stable and effective
+learning.
+
+itive reward. Furthermore, our continuous feedback reduces collapse and accelerates Solver improvement (see
+Figure 4). The continuous Solver reward changes smoothly
+and slightly dips at partial consensus, while the Proposer
+peaks at moderate difficulty (see step 5122 in Figure 5).
+In summary, our proposed continuous self-evolving design provides a non-zero learning signal even when the
+model is uncertain, avoiding stagnation observed in the
+discrete-reward self-questioning scheme. Further, our design enables the Proposer to continuously adjust question
+γ
+sol
+ri = [p(yi |x, q)] ·(1 − λlen max{0, (wi − τ )/τ })
+difficulty to match the Solver’s evolving capability, thereby
+mitigating model collapse.
+// Step 5: Entropy-Based
+Proposer Reward
+4. Experiments
+
+
+2
+(H(x, q) − µH )
+4.1. Dataset
+rprop = exp −
+2
+2σH
+We train and evaluate our method in the mathematical
+// Step 6: Policy Gradient
+and visually grounded reasoning domain, which naturally
+Updates
+requires integrating perception with structured, multi-step
+Update Solver using REINFORCE:
+reasoning making it a strong testbed for self-evolving multimodal learning. These datasets contain rich visual patterns
+∇θ ∼ (risol − bsol )∇ log πθ
+(trends, proportions, spatial relations, geometric structures)
+that allow models to generate meaningful questions directly
+Update Proposer every K steps:
+from images without human annotations.
+Our training uses only raw images, with no ques∇ϕ ∼ (rprop − bprop )∇ log πϕ
+tion–answer pairs or metadata. We sample roughly 1,000
+images each from six widely used benchmarks such as
+Apply KL-regularization controller:
+ChartQA [23], AI2D [15], InfographicVQA [24], PlotQA
+
+
+[26], ChartX [41], and Geometry3K [2] totaling ∼6k imKL − τ
+β ← β · exp η
+ages. These datasets cover charts, plots, scientific diagrams,
+τ
+and geometric figures, providing diverse visual contexts
+for the Proposer to generate grounded mathematical questions. This diversity encourages the Solver to develop stable, structured reasoning as the system self-evolves using
+internal consistency alone.
+6
+
+Model
+
+ChartQA MathVista MathVision MathVerse InfoGraphic-VQAval
+
+AI2D
+
+ScienceQA MMMUval
+
+Vision-Zero† (CLEVR) [36]
+
+84.24
+
+68.43
+
+23.96
+
+43.86
+
+80.35
+
+82.64
+
+88.50
+
+51.44
+
+Qwen2.5-VL-7B (Baseline) [3]
+Qwen2.5-VL-7B + Discrete Reward
+Qwen2.5-VL-7B + Cont. Reward
+∆ Improvement
+
+84.00
+84.62
+86.70
++2.7%
+
+68.46
+68.88
+70.52
++2.06%
+
+23.91
+22.52
+24.81
++0.9%
+
+43.78
+42.10
+44.88
++1.1%
+
+80.44
+80.52
+81.06
++0.62%
+
+82.61
+82.18
+83.41
++0.8%
+
+88.30
+87.98
+89.50
++1.2%
+
+51.11
+50.84
+52.01
++0.9%
+
+Table 1. Evaluation results across eight multimodal mathematical and visual reasoning benchmarks. We compare the pretrained
+Qwen2.5-VL-7B baseline, a discrete self-questioning adaptation, and our continuous self-evolving framework. The discrete reward provides little to no improvement, reflecting its instability in multimodal settings. In contrast, our continuous self-consistency reward yields
+consistent gains across all benchmarks, such as 84.00% → 86.70% on ChartQA and 88.30% → 89.50% on ScienceQA, demonstrating
+stable self-improvement from raw images without external supervision. Methods marked with an (†) uses external supervision.
+Model
+Qwen2.5-VL-7B (Baseline)
+Qwen2.5-VL-7B + LoRA
+Qwen2.5-VL-7B + QLoRA
+Qwen2.5-VL-7B + Full-Finetune
+
+ChartQA MathVista MathVision MathVerse InfoGraphic-VQAval AI2D ScienceQA MMMUval
+84.00
+86.70
+85.32
+84.20
+
+68.46
+70.52
+68.92
+68.41
+
+23.91
+24.81
+23.97
+23.37
+
+43.78
+44.88
+43.82
+43.77
+
+80.44
+81.06
+80.83
+80.37
+
+82.61
+83.41
+82.75
+82.64
+
+88.30
+89.50
+88.73
+88.12
+
+51.11
+52.01
+51.71
+51.23
+
+Table 2. Comparison of our EvoLMM self-evolving framework under different parameter update strategies. We evaluate LoRA,
+QLoRA, and full-parameter fine-tuning on Qwen2.5-VL-7B while keeping the same self-evolving training setup. LoRA achieves the
+strongest improvements, e.g., 84.00% → 86.70% on ChartQA and 88.30% → 89.50% on ScienceQA, demonstrating stable and effective
+adaptation while preserving pretrained multimodal grounding. QLoRA also improves performance but is slightly limited by quantization
+noise, while full fine-tuning yields minimal gains and in some cases regresses, likely due to overfitting without external supervision. These
+results highlight that parameter-efficient update schemes are better suited for continuous self-evolution without labeled data.
+
+4.2. Training Details
+
+sion [35], MathVerse [49], InfoGraphic-VQA [24], AI2D
+[15], ScienceQA [20], and MMMU [44]. These datasets
+test a range of capabilities from chart interpretation and
+symbolic math to diagram understanding—and all metrics
+follow their standard accuracy protocols. We use the official evaluation splits and apply identical inference settings across models, ensuring that performance differences
+arise solely from our self-evolving training rather than taskspecific tuning. All evaluations are run on AMD MI250X
+GPUs using the lmms-eval framework [48], with HuggingFace Transformers v4.38 and bfloat16 precision for consistency with training.
+
+We fine-tune the pretrained Qwen-2.5-VL-7B model using
+two lightweight LoRA adapters for the Proposer and Solver
+roles, keeping the backbone frozen to retain general multimodal capability. Training runs on a single node with 8×
+AMD MI250X GPUs using bfloat16 precision. The solver
+is optimized with our continuous self-consistency reward
+computed from N = 5 sampled answers, while the proposer receives an entropy-based band-pass reward encouraging mid-difficulty questions. Both policies are trained using KL-regularized REINFORCE with adaptive KL control
+for stability. The proposer is updated every 5 iterations following [5], while the solver receives gradients at each step.
+We apply AdamW with a 1e−6 learning rate, weight decay
+of 0.01, and gradient clipping at 1.0. The continuous rewards use a length penalty of 0.10 toward a 6-word target,
+solver softness exponent γ = 0.7, and a Gaussian entropy
+reward for the proposer centered at µ = 0.90 with σ = 0.35
+(more details and comparisons on the update schedule and
+reward design are provided in the suppl. material.). Training is performed for 6000 steps with a batch size of 1 using a constant learning rate schedule. No QA annotations,
+metadata, or external reward models are used at any stage.
+
+4.4. Main Results
+In Table 1, we compare our proposed EvoLMM framework against two baselines: (1) the original pretrained
+Qwen2.5-VL-7B model [3] without any additional training,
+and (2) a direct multimodal adaptation [5] that uses a discrete majority-vote reward during training. Qwen2.5-VL7B (Baseline). The baseline model performs well on visually grounded reasoning tasks that require direct reading or
+surface-level interpretation (e.g., ChartQA trend identification, InfoGraphic-VQA object recognition). However, the
+model’s performance drops on tasks requiring multi-step
+inference or symbolic reasoning (e.g., MathVista, MathVerse), indicating that pretrained multimodal alignment
+alone is insufficient for deeper reasoning. We also report results from recent Vision-Zero [36], whose self-play formulation bears partial similarity to ours through autonomous
+
+4.3. Evaluation
+We evaluate our self-evolving framework on a broad suite
+of mathematical and visually grounded reasoning benchmarks, including ChartQA [23], MathVista [21], MathVi7
+
+Model
+
+ChartQA MathVista MathVision MathVerse InfoGraphic-VQAval AI2D ScienceQA MMMUval
+
+Qwen2.5-VL-7B (Base) [3]
+Qwen2.5-VL-7B (Ours)
+
+84.00
+86.70
+
+68.46
+70.52
+
+23.91
+24.81
+
+43.78
+44.88
+
+80.44
+81.06
+
+82.61
+83.41
+
+88.30
+89.50
+
+51.11
+52.01
+
+InternVL3-8B-Instruct (Base) [52]
+InternVL3-8B-Instruct (Ours)
+
+82.40
+84.97
+
+65.2
+67.20
+
+25.36
+26.44
+
+31.62
+32.92
+
+68.77
+69.39
+
+83.19
+83.95
+
+97.77
+98.13
+
+52.78
+53.77
+
+Gemma3-12B-It (Base) [33]
+Gemma3-12B-It (Ours)
+
+55.64
+58.61
+
+60.13
+62.13
+
+24.53
+25.61
+
+28.96
+30.26
+
+50.69
+51.37
+
+79.05
+79.85
+
+83.89
+84.97
+
+48.11
+49.10
+
+Llama-3.2-11B-Vision-Instruct (Base) [25]
+Llama-3.2-11B-Vision-Instruct (Ours)
+
+29.24
+32.24
+
+46.59
+48.59
+
+23.47
+24.55
+
+37.23
+38.53
+
+56.69
+57.37
+
+46.44
+47.32
+
+56.87
+58.07
+
+47.93
+48.92
+
+Table 3. Effectiveness of our EvoLMM self-evolving framework across different large multimodal backbones. We apply the same
+Proposer–Solver continuous self-consistency training to four LMM families without changing architecture, data, or supervision. On
+Qwen2.5-VL-7B, our method improves visual math reasoning performance consistently across all benchmarks (e.g., 84.00% → 86.70%
+on ChartQA and 88.30% → 89.50% on ScienceQA). We observe similar trends when transferring to, InternVL3-8B, and Llama-3.2-11BVision-Instruct: each model benefits from continuous self-evolution, typically gaining +1–3 accuracy points on chart/diagram reasoning
+tasks and +1–2 points on math and science QA. These improvements occur without annotations, handcrafted curriculum, image editing,
+or external verifiers, demonstrating that our continuous reward mechanism is model-agnostic and transferable across diverse LMMs.
+Model
+
+ChartQA
+
+MathVista
+
+MathVision
+
+MathVerse
+
+InfoGraphic-VQAval
+
+AI2D
+
+ScienceQA
+
+MMMUval
+
+Qwen2.5-VL-7B (base)
+Qwen2.5-VL-7B (Ours)
+
+84.00
+86.70
+
+68.20
+70.52
+
+23.91
+24.81
+
+43.78
+44.88
+
+80.44
+81.06
+
+82.61
+83.41
+
+88.30
+89.50
+
+51.11
+52.01
+
+Qwen2.5-VL-72B (base)
+Qwen2.5-VL-72B (Ours)
+
+88.20
+91.04
+
+73.93
+76.44
+
+36.92
+38.31
+
+54.09
+55.45
+
+85.97
+86.63
+
+87.34
+88.19
+
+93.36
+94.63
+
+65.86
+67.02
+
+Table 4. Scaling behaviour of our EvoLMM self-evolving framework across model sizes in the Qwen2.5-VL family. We apply the
+same Proposer–Solver continuous self-consistency training on 7B and 72B variants without changing data, reward design, or optimization
+settings. Across all scales, our method consistently improves multimodal mathematical reasoning, scientific diagram understanding, and
+chart interpretation accuracy. Notably, larger models exhibit stronger absolute gains, reflecting their greater capacity to refine internal
+reasoning when guided by continuous agreement feedback. For example, we observe progressively increasing improvements on MathVista
+as model size increases, and similar upward trends on ScienceQA and AI2D. Please refer suppl. material for additional experiments.
+
+multi-agent learning. However, Vision-Zero leverages synthetic image pairs generated using external models such as
+GPT-4o [27] and Gemini [7], introducing implicit supervision that falls outside our unsupervised setting. VisionSR1 [18] differs entirely from our constraints, as it relies on
+paired question–answer supervision across both perception
+and reasoning stages.
+Discrete-Reward Adaptation. We first test a direct multimodal adaptation of the discrete self-questioning reward,
+where the Solver is rewarded only when multiple sampled
+answers exactly match. In practice, the reward quickly becomes sparse as Solver outputs remain highly diverse in
+early training, leading to unstable optimization. The discrete variant yields only marginal gains (+0.3 − 0.6%)
+and occasionally degrades performance, confirming that
+majority-vote rewards are too brittle and unstable for multimodal reasoning.
+Continuous-Reward (Ours). Replacing the discrete signal with our continuous self-consistency reward provides
+a smoother and more informative gradient. Training progresses steadily even under uncertainty, leading to consistent improvements of +2–3% across major benchmarks. For
+instance, accuracy rises from 68.4% → 70.5% on MathVista
+and 84.0% → 86.7% on ChartQA. Other than mathemati-
+
+cal reasoning, our method also keep competitive improvement of +1.2% on ScienceQA. These results demonstrate
+that continuous internal rewards yield stable, annotationfree self-evolution, strengthening both reasoning reliability
+and answer consistency.
+
+4.5. Comparison Across Training Settings
+We evaluate the self-evolving framework under three finetuning strategies such as LoRA [10], QLoRA [9], and fullparameter fine-tuning—while keeping the Proposer–Solver
+pipeline and continuous reward formulation identical across
+settings (see Table 2).
+LoRA (default). LoRA [10] achieves the best trade-off
+between stability and adaptability. By updating only a
+small fraction of parameters, it preserves pretrained multimodal alignment while enabling effective Proposer–Solver
+co-evolution. LoRA delivers consistent and stable gains,
+improving accuracy from 68.4%→70.5% on MathVista and
+84.0%→86.7% on ChartQA, without any supervised data.
+QLoRA. The quantized variant QLoRA [9] (4-bit base +
+high-precision adapters) reduces memory usage by nearly
+3×, making it suitable for limited hardware. However, quantization noise slightly weakens solver consistency, yielding smaller but still positive gains (e.g.,
+8
+
+5. Conclusion
+
+68.4%→68.92% on MathVista). It indicates that highprecision activations are important when learning from finegrained continuous rewards.
+Full Fine-Tuning. Full-parameter updates lead to faster
+initial learning but exhibit reduced stability in the selfevolving setting. Without explicit supervision, the Solver
+tends to overfit early biases, and the Proposer occasionally
+collapses into repetitive or low-diversity question modes.
+Moreover, because our reward formulation includes a KL
+regularization term that constrains divergence from the pretrained base model, full fine-tuning interacts unfavorably
+with this objective causing the model to drift away from its
+original alignment and degrade baseline performance. Consequently, full fine-tuning yields lower final accuracy than
+LoRA, despite higher compute cost and greater instability.
+
+We introduced EvoLMM, a self-evolving training framework for large multimodal models that improves visual reasoning ability without relying on human-annotated supervision, metadata, or external reward models. By coupling a
+Proposer and Solver within a shared backbone and optimizing them using a continuous self-consistency reward, the
+model learns to generate informative, mid-difficulty questions and to refine its reasoning through stable internal feedback. Our experiments show consistent gains across multiple mathematical and scientific visual reasoning benchmarks, and ablations demonstrate that the approach is robust across different multimodal backbones. The results
+highlight that continuous self-reward is essential for enabling autonomous learning in multimodal settings, where
+discrete majority-vote rewards are insufficient due to earlystage uncertainty and perception noise. This work takes a
+step toward open-ended, fully self-improving multimodal
+intelligence and suggests promising future directions in curriculum emergence, self-generated data scaling, and longhorizon reasoning without supervision.
+
+4.6. Self Evolution Across Different Backbones
+To evaluate the generality of our approach, we apply
+the same Proposer–Solver training setup to several large
+multimodal models, including Qwen3-VL-8B-Instruct [3],
+InternVL3-8B [52], Gemma-3-12B-it [33], and Llama-3.211B-Vision-Instruct [25]. As shown in Table 3, in all cases,
+the models are trained without question–answer supervision, using only the proposed continuous self-consistency
+reward. We observe consistent improvements of roughly
++2 − 3% across all backbones, confirming that our method
+is architecture-agnostic and does not rely on specific
+dataset alignments or handcrafted supervision. Models
+with stronger visual grounding (e.g., InternVL3-8B [52])
+show faster convergence in early training, while those with
+stronger linguistic reasoning (e.g., Gemma-3-12B [33]) display larger late-stage gains as solver reasoning stabilizes.
+These results demonstrate that continuous self-reward effectively generalizes across diverse LMM families. This
+shows that our reward mechanism enhances structured visual reasoning rather than surface-level pattern matching,
+providing a scalable and backbone-independent path toward
+autonomous multimodal reasoning.
+
+References
+[1] Haider Al-Tahan, Q. Garrido, Randall Balestriero, Diane
+Bouchacourt, C. Hazirbas, and Mark Ibrahim. Unibench:
+Visual reasoning requires rethinking vision-language beyond
+scaling. ArXiv, abs/2408.04810, 2024. 1
+[2] Avinash Anand, Raj Jaiswal, Abhishek Dharmadhikari,
+Atharva Marathe, Harsh Popat, Harshil Mital, Ashwin R
+Nair, Kritarth Prasad, Sidharth Kumar, Astha Verma, et al.
+Geovqa: A comprehensive multimodal geometry dataset for
+secondary education. In 2024 IEEE 7th International Conference on Multimedia Information Processing and Retrieval
+(MIPR), pages 102–108. IEEE, 2024. 6
+[3] Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin
+Ge, Sibo Song, Kai Dang, Peng Wang, Shijie Wang, Jun
+Tang, Humen Zhong, Yuanzhi Zhu, Mingkun Yang, Zhaohai Li, Jianqiang Wan, Pengfei Wang, Wei Ding, Zheren Fu,
+Yiheng Xu, Jiabo Ye, Xi Zhang, Tianbao Xie, Zesen Cheng,
+Hang Zhang, Zhibo Yang, Haiyang Xu, and Junyang Lin.
+Qwen2.5-vl technical report, 2025. 5, 7, 8, 9
+[4] Yuxuan Cai, Jiangning Zhang, Haoyang He, Xinwei He, Ao
+Tong, Zhenye Gan, Chengjie Wang, Zhucun Xue, Yong Liu,
+and Xiang Bai. Llava-kd: A framework of distilling multimodal large language models, 2025. 1
+[5] Lili Chen, Mihir Prabhudesai, Katerina Fragkiadaki, Hao
+Liu, and Deepak Pathak. Self-questioning language models.
+arXiv preprint arXiv:2508.03682, 2025. 2, 3, 7
+[6] Yixing Chen, Yiding Wang, Siqi Zhu, Haofei Yu, Tao Feng,
+Muhan Zhang, Mostofa Patwary, and Jiaxuan You. Multiagent evolve: Llm self-improve through co-evolution. arXiv
+preprint arXiv:2510.23595, 2025. 2, 3
+[7] Gheorghe Comanici, Eric Bieber, Mike Schaekermann, Ice
+Pasupat, Noveen Sachdeva, Inderjit Dhillon, Marcel Blistein, Ori Ram, Dan Zhang, Evan Rosen, et al. Gemini 2.5:
+
+4.7. Scaling Behavior Across Model Sizes
+We evaluate our self-evolving framework across the
+Qwen2.5-VL family (7B & 72B) using the same Proposer–Solver setup and continuous reward, without modifying data or optimization settings (refer Table 4). Consistent gains are observed at all scales, with the 7B model
+improving from 84.0% → 86.7% on ChartQA and 68.4%
+→ 70.5% on MathVista, while larger variants (e.g., 72B)
+achieve stronger absolute performance 88.20% → 91.04%
+on ChartQA and 93.36% → 94.63%. Overall, these results confirm our continuous self-consistency reward scales
+reliably across model sizes, enabling stable improvements
+without task-specific supervision or external verifiers.
+9
+
+[20] Pan Lu, Swaroop Mishra, Tony Xia, Liang Qiu, Kai-Wei
+Chang, Song-Chun Zhu, Oyvind Tafjord, Peter Clark, and
+Ashwin Kalyan. Learn to explain: Multimodal reasoning via
+thought chains for science question answering, 2022. 7
+[21] Pan Lu, Hritik Bansal, Tony Xia, Jiacheng Liu, Chunyuan Li,
+Hannaneh Hajishirzi, Hao Cheng, Kai-Wei Chang, Michel
+Galley, and Jianfeng Gao. Mathvista: Evaluating mathematical reasoning of foundation models in visual contexts. arXiv
+preprint arXiv:2310.02255, 2023. 7
+[22] Yiting Lu, Jiakang Yuan, Zhen Li, Shitian Zhao, Qi Qin,
+Xinyue Li, Le Zhuo, Licheng Wen, Dongyang Liu, Yuewen
+Cao, Xiangchao Yan, Xin Li, Botian Shi, Tao Chen, Zhibo
+Chen, Lei Bai, Bo Zhang, and Peng Gao. Omnicaptioner:
+One captioner to rule them all. ArXiv, abs/2504.07089, 2025.
+1
+[23] Ahmed Masry, Xuan Long Do, Jia Qing Tan, Shafiq Joty, and
+Enamul Hoque. Chartqa: A benchmark for question answering about charts with visual and logical reasoning. In Findings of the association for computational linguistics: ACL
+2022, pages 2263–2279, 2022. 5, 6, 7
+[24] Minesh Mathew, Viraj Bagal, Rubèn Tito, Dimosthenis
+Karatzas, Ernest Valveny, and CV Jawahar. Infographicvqa.
+In Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision, pages 1697–1706, 2022. 6,
+7
+[25] Meta AI. Llama 3.2: Revolutionizing edge ai and vision
+with open, customizable models. https://ai.meta.
+com/blog/llama-3-2-connect-2024-visionedge-mobile-devices/, 2024. Accessed: 2025-1113. 8, 9
+[26] Nitesh Methani, Pritha Ganguly, Mitesh M Khapra, and
+Pratyush Kumar. Plotqa: Reasoning over scientific plots.
+In Proceedings of the ieee/cvf winter conference on applications of computer vision, pages 1527–1536, 2020. 6
+[27] OpenAI, Josh Achiam, Steven Adler, Sandhini Agarwal,
+Lama Ahmad, Ilge Akkaya, Florencia Leoni Aleman, Diogo
+Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, Red Avila, Igor Babuschkin, Suchir Balaji, Valerie Balcom, Paul Baltescu, Haiming Bao, Mohammad Bavarian,
+Jeff Belgum, Irwan Bello, Jake Berdine, Gabriel BernadettShapiro, Christopher Berner, Lenny Bogdonoff, Oleg Boiko,
+Madelaine Boyd, Anna-Luisa Brakman, Greg Brockman,
+Tim Brooks, Miles Brundage, Kevin Button, Trevor Cai,
+Rosie Campbell, Andrew Cann, Brittany Carey, Chelsea
+Carlson, Rory Carmichael, Brooke Chan, Che Chang, Fotis Chantzis, Derek Chen, Sully Chen, Ruby Chen, Jason Chen, Mark Chen, Ben Chess, Chester Cho, Casey
+Chu, Hyung Won Chung, Dave Cummings, Jeremiah Currier, Yunxing Dai, Cory Decareaux, Thomas Degry, Noah
+Deutsch, Damien Deville, Arka Dhar, David Dohan, Steve
+Dowling, Sheila Dunning, Adrien Ecoffet, Atty Eleti,
+Tyna Eloundou, David Farhi, Liam Fedus, Niko Felix,
+Simón Posada Fishman, Juston Forte, Isabella Fulford, Leo
+Gao, Elie Georges, Christian Gibson, Vik Goel, Tarun Gogineni, Gabriel Goh, Rapha Gontijo-Lopes, Jonathan Gordon,
+Morgan Grafstein, Scott Gray, Ryan Greene, Joshua Gross,
+Shixiang Shane Gu, Yufei Guo, Chris Hallacy, Jesse Han,
+Jeff Harris, Yuchen He, Mike Heaton, Johannes Heidecke,
+
+Pushing the frontier with advanced reasoning, multimodality,
+long context, and next generation agentic capabilities. arXiv
+preprint arXiv:2507.06261, 2025. 3, 8
+[8] Dawei Dai, Xu Long, Yutang Li, Yuanhui Zhang, and
+Shuy Xia. Humanvlm: Foundation for human-scene visionlanguage model. ArXiv, abs/2411.03034, 2024. 1
+[9] Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke
+Zettlemoyer. Qlora: Efficient finetuning of quantized llms.
+Advances in neural information processing systems, 36:
+10088–10115, 2023. 8
+[10] Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan AllenZhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen.
+LoRA: Low-rank adaptation of large language models. In International Conference on Learning Representations, 2022.
+8
+[11] Drew A. Hudson and Christopher D. Manning. Gqa: A new
+dataset for real-world visual reasoning and compositional
+question answering. 2019 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 6693–
+6702, 2019. 1
+[12] Jinseong Jang, Chunfei Ma, and Byeongwon Lee. Vl2lite:
+Task-specific knowledge distillation from large visionlanguage models to lightweight networks.
+In 2025
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 30073–30083, 2025. 1
+[13] Songtao Jiang, Chenyi Zhou, Yan Zhang, Yeying Jin, and
+Zuozhu Liu. Fast or slow? integrating fast intuition and deliberate thinking for enhancing visual question answering. In
+Annual Meeting of the Association for Computational Linguistics, 2025. 1
+[14] Mingi Jung, Saehuyng Lee, Eunji Kim, and Sungroh Yoon.
+Visual attention never fades: Selective progressive attention
+recalibration for detailed image captioning in multimodal
+large language models. ArXiv, abs/2502.01419, 2025. 1
+[15] Aniruddha Kembhavi, Mike Salvato, Eric Kolve, Minjoon
+Seo, Hannaneh Hajishirzi, and Ali Farhadi. A diagram is
+worth a dozen images. In European conference on computer
+vision, pages 235–251. Springer, 2016. 6, 7
+[16] Kaiyu Li, Zixuan Jiang, Xiangyong Cao, Jiayu Wang,
+Yuchen Xiao, Deyu Meng, and Zhi Wang. Describeearth:
+Describe anything for remote sensing images. ArXiv,
+abs/2509.25654, 2025. 1
+[17] Xinwei Li, Li Lin, Shuai Wang, and Chen Qian. Selfimproving teacher cultivates better student: Distillation calibration for multimodal large language models. In Proceedings of the 47th International ACM SIGIR Conference on
+Research and Development in Information Retrieval, pages
+882–892, 2024. 1
+[18] Zongxia Li, Wenhao Yu, Chengsong Huang, Rui Liu,
+Zhenwen Liang, Fuxiao Liu, Jingxi Che, Dian Yu, Jordan Boyd-Graber, Haitao Mi, et al. Self-rewarding visionlanguage model via reasoning decomposition. arXiv preprint
+arXiv:2508.19652, 2025. 2, 3, 8
+[19] Ziyu Liu, Tao Chu, Yuhang Zang, Xilin Wei, Xiao wen
+Dong, Pan Zhang, Zijian Liang, Yuanjun Xiong, Yu Qiao,
+Dahua Lin, and Jiaqi Wang. Mmdu: A multi-turn multiimage dialog understanding benchmark and instructiontuning dataset for lvlms. ArXiv, abs/2406.11833, 2024. 1
+
+10
+
+Di Hu. Matters: Training-free fine-grained image caption
+enhancement via local perception. 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),
+pages 3963–3973, 2025. 1
+[30] Yi Peng, Peiyu Wang, Xiaokun Wang, Yichen Wei, Jiangbo
+Pei, Weijie Qiu, Ai Jian, Yunzhuo Hao, Jiachun Pan, Tianyidan Xie, Li Ge, Rongxian Zhuang, Xuchen Song, Yang Liu,
+and Yahui Zhou. Skywork r1v: Pioneering multimodal reasoning with chain-of-thought. ArXiv, abs/2504.05599, 2025.
+1
+[31] Sheikh Shafayat, Fahim Tajwar, Ruslan Salakhutdinov, Jeff
+Schneider, and Andrea Zanette. Can large reasoning models
+self-train? arXiv preprint arXiv:2505.21444, 2025. 2, 3
+[32] Fangxun Shu, Yue Liao, Le Zhuo, Chenning Xu, Lei Zhang,
+Guanghao Zhang, Haonan Shi, Long Chen, Tao Zhong,
+Wanggui He, Siming Fu, et al. Llava-mod: Making
+llava tiny via moe knowledge distillation. arXiv preprint
+arXiv:2408.15881, 2024. 1
+[33] Gemma Team, Aishwarya Kamath, Johan Ferret, Shreya
+Pathak, Nino Vieillard, Ramona Merhej, Sarah Perrin, Tatiana Matejovicova, Alexandre Ramé, Morgane Rivière,
+et al.
+Gemma 3 technical report.
+arXiv preprint
+arXiv:2503.19786, 2025. 8, 9
+[34] Omkar Thawakar, Dinura Dissanayake, Ketan Pravin More,
+Ritesh Thawkar, Ahmed Heakl, Noor Ahsan, Yuhao Li, Ilmuz Zaman Mohammed Zumri, Jean Lahoud, Rao Muhammad Anwer, et al. Llamav-o1: Rethinking step-by-step visual reasoning in llms. In Findings of the Association for
+Computational Linguistics: ACL 2025, pages 24290–24315,
+2025. 1
+[35] Ke Wang, Junting Pan, Weikang Shi, Zimu Lu, Houxing
+Ren, Aojun Zhou, Mingjie Zhan, and Hongsheng Li. Measuring multimodal mathematical reasoning with math-vision
+dataset. Advances in Neural Information Processing Systems, 37:95095–95169, 2024. 7
+[36] Qinsi Wang, Bo Liu, Tianyi Zhou, Jing Shi, Yueqian Lin,
+Yiran Chen, Hai Helen Li, Kun Wan, and Wentian Zhao.
+Vision-zero: Scalable vlm self-improvement via strategic
+gamified self-play. arXiv preprint arXiv:2509.25541, 2025.
+1, 3, 7
+[37] Weiyun Wang, Zhangwei Gao, Lianjie Chen, Zhe Chen, Jinguo Zhu, Xiangyu Zhao, Yangzhou Liu, Yue Cao, Shenglong Ye, Xizhou Zhu, Lewei Lu, Haodong Duan, Yu Qiao,
+Jifeng Dai, and Wenhai Wang. Visualprm: An effective
+process reward model for multimodal reasoning. ArXiv,
+abs/2503.10291, 2025. 1
+[38] Ronald J Williams. Simple statistical gradient-following algorithms for connectionist reinforcement learning. Machine
+learning, 8(3):229–256, 1992. 4
+[39] Chenfei Wu, Jiahao Li, Jingren Zhou, Junyang Lin, Kaiyuan
+Gao, Kun Yan, Sheng-ming Yin, Shuai Bai, Xiao Xu, Yilei
+Chen, et al. Qwen-image technical report. arXiv preprint
+arXiv:2508.02324, 2025. 3
+[40] Chenyuan Wu, Pengfei Zheng, Ruiran Yan, Shitao Xiao, Xin
+Luo, Yueze Wang, Wanli Li, Xiyan Jiang, Yexin Liu, Junjie
+Zhou, et al. Omnigen2: Exploration to advanced multimodal
+generation. arXiv preprint arXiv:2506.18871, 2025. 3
+
+Chris Hesse, Alan Hickey, Wade Hickey, Peter Hoeschele,
+Brandon Houghton, Kenny Hsu, Shengli Hu, Xin Hu, Joost
+Huizinga, Shantanu Jain, Shawn Jain, Joanne Jang, Angela
+Jiang, Roger Jiang, Haozhun Jin, Denny Jin, Shino Jomoto,
+Billie Jonn, Heewoo Jun, Tomer Kaftan, Łukasz Kaiser,
+Ali Kamali, Ingmar Kanitscheider, Nitish Shirish Keskar,
+Tabarak Khan, Logan Kilpatrick, Jong Wook Kim, Christina
+Kim, Yongjik Kim, Jan Hendrik Kirchner, Jamie Kiros,
+Matt Knight, Daniel Kokotajlo, Łukasz Kondraciuk, Andrew Kondrich, Aris Konstantinidis, Kyle Kosic, Gretchen
+Krueger, Vishal Kuo, Michael Lampe, Ikai Lan, Teddy Lee,
+Jan Leike, Jade Leung, Daniel Levy, Chak Ming Li, Rachel
+Lim, Molly Lin, Stephanie Lin, Mateusz Litwin, Theresa
+Lopez, Ryan Lowe, Patricia Lue, Anna Makanju, Kim Malfacini, Sam Manning, Todor Markov, Yaniv Markovski,
+Bianca Martin, Katie Mayer, Andrew Mayne, Bob McGrew, Scott Mayer McKinney, Christine McLeavey, Paul
+McMillan, Jake McNeil, David Medina, Aalok Mehta, Jacob
+Menick, Luke Metz, Andrey Mishchenko, Pamela Mishkin,
+Vinnie Monaco, Evan Morikawa, Daniel Mossing, Tong Mu,
+Mira Murati, Oleg Murk, David Mély, Ashvin Nair, Reiichiro Nakano, Rajeev Nayak, Arvind Neelakantan, Richard
+Ngo, Hyeonwoo Noh, Long Ouyang, Cullen O’Keefe, Jakub
+Pachocki, Alex Paino, Joe Palermo, Ashley Pantuliano, Giambattista Parascandolo, Joel Parish, Emy Parparita, Alex
+Passos, Mikhail Pavlov, Andrew Peng, Adam Perelman, Filipe de Avila Belbute Peres, Michael Petrov, Henrique Ponde
+de Oliveira Pinto, Michael, Pokorny, Michelle Pokrass,
+Vitchyr H. Pong, Tolly Powell, Alethea Power, Boris Power,
+Elizabeth Proehl, Raul Puri, Alec Radford, Jack Rae, Aditya
+Ramesh, Cameron Raymond, Francis Real, Kendra Rimbach, Carl Ross, Bob Rotsted, Henri Roussez, Nick Ryder,
+Mario Saltarelli, Ted Sanders, Shibani Santurkar, Girish Sastry, Heather Schmidt, David Schnurr, John Schulman, Daniel
+Selsam, Kyla Sheppard, Toki Sherbakov, Jessica Shieh,
+Sarah Shoker, Pranav Shyam, Szymon Sidor, Eric Sigler,
+Maddie Simens, Jordan Sitkin, Katarina Slama, Ian Sohl,
+Benjamin Sokolowsky, Yang Song, Natalie Staudacher, Felipe Petroski Such, Natalie Summers, Ilya Sutskever, Jie
+Tang, Nikolas Tezak, Madeleine B. Thompson, Phil Tillet,
+Amin Tootoonchian, Elizabeth Tseng, Preston Tuggle, Nick
+Turley, Jerry Tworek, Juan Felipe Cerón Uribe, Andrea Vallone, Arun Vijayvergiya, Chelsea Voss, Carroll Wainwright,
+Justin Jay Wang, Alvin Wang, Ben Wang, Jonathan Ward,
+Jason Wei, CJ Weinmann, Akila Welihinda, Peter Welinder, Jiayi Weng, Lilian Weng, Matt Wiethoff, Dave Willner,
+Clemens Winter, Samuel Wolrich, Hannah Wong, Lauren
+Workman, Sherwin Wu, Jeff Wu, Michael Wu, Kai Xiao,
+Tao Xu, Sarah Yoo, Kevin Yu, Qiming Yuan, Wojciech
+Zaremba, Rowan Zellers, Chong Zhang, Marvin Zhang,
+Shengjia Zhao, Tianhao Zheng, Juntang Zhuang, William
+Zhuk, and Barret Zoph. Gpt-4 technical report, 2024. 3,
+8
+[28] Jingwei Peng, Jiehao Chen, Mateo Alejandro Rojas, and
+Meilin Zhang. Mv-core: Multimodal visual-conceptual
+reasoning for complex visual question answering. ArXiv,
+abs/2508.07023, 2025. 1
+[29] Ruotian Peng, Haiying He, Yake Wei, Yandong Wen, and
+
+11
+
+[52] Jinguo Zhu, Weiyun Wang, Zhe Chen, Zhaoyang Liu, Shenglong Ye, Lixin Gu, Hao Tian, Yuchen Duan, Weijie Su,
+Jie Shao, et al. Internvl3: Exploring advanced training and
+test-time recipes for open-source multimodal models. arXiv
+preprint arXiv:2504.10479, 2025. 8, 9
+
+[41] Renqiu Xia, Hancheng Ye, Xiangchao Yan, Qi Liu, Hongbin
+Zhou, Zijun Chen, Botian Shi, Junchi Yan, and Bo Zhang.
+Chartx & chartvlm: A versatile benchmark and foundation
+model for complicated chart reasoning. IEEE Transactions
+on Image Processing, 2025. 6
+[42] Shuo Yang, Siwen Luo, S. Han, and Eduard Hovy. Magicvqa: Multimodal and grounded inference with commonsense knowledge for visual question answering. ArXiv,
+abs/2503.18491, 2025. 1
+[43] Yi Yang, Xiaoxuan He, Hongkun Pan, Xiyan Jiang, Yan
+Deng, Xingtao Yang, Haoyu Lu, Dacheng Yin, Fengyun
+Rao, Minfeng Zhu, Bo Zhang, and Wei Chen. R1-onevision:
+Advancing generalized multimodal reasoning through crossmodal formalization. ArXiv, abs/2503.10615, 2025. 1
+[44] Xiang Yue, Yuansheng Ni, Kai Zhang, Tianyu Zheng, Ruoqi
+Liu, Ge Zhang, Samuel Stevens, Dongfu Jiang, Weiming
+Ren, Yuxuan Sun, Cong Wei, Botao Yu, Ruibin Yuan, Renliang Sun, Ming Yin, Boyuan Zheng, Zhenzhu Yang, Yibo
+Liu, Wenhao Huang, Huan Sun, Yu Su, and Wenhu Chen.
+Mmmu: A massive multi-discipline multimodal understanding and reasoning benchmark for expert agi. In Proceedings
+of CVPR, 2024. 7
+[45] Jenny Zhang, Shengran Hu, Cong Lu, Robert Lange, and
+Jeff Clune. Darwin godel machine: Open-ended evolution
+of self-improving agents. arXiv preprint arXiv:2505.22954,
+2025. 2
+[46] Jingyi Zhang, Jiaxing Huang, Huanjin Yao, Shunyu Liu,
+Xikun Zhang, Shijian Lu, and Dacheng Tao.
+R1-vl:
+Learning to reason with multimodal large language models via step-wise group relative policy optimization. ArXiv,
+abs/2503.12937, 2025. 1
+[47] Juntian Zhang, Song Jin, Chuanqi Cheng, Yuhan Liu, Yankai
+Lin, Xun Zhang, Yufei Zhang, Fei Jiang, Guojun Yin, Wei
+Lin, et al. Viper: Empowering the self-evolution of visual
+perception abilities in vision-language model. arXiv preprint
+arXiv:2510.24285, 2025. 2, 3
+[48] Kaichen Zhang, Bo Li, Peiyuan Zhang, Fanyi Pu,
+Joshua Adrian Cahyono, Kairui Hu, Shuai Liu, Yuanhan
+Zhang, Jingkang Yang, Chunyuan Li, and Ziwei Liu. Lmmseval: Reality check on the evaluation of large multimodal
+models, 2024. 7
+[49] Renrui Zhang, Dongzhi Jiang, Yichi Zhang, Haokun Lin,
+Ziyu Guo, Pengshuo Qiu, Aojun Zhou, Pan Lu, Kai-Wei
+Chang, Yu Qiao, et al. Mathverse: Does your multi-modal
+llm truly see the diagrams in visual math problems? In
+European Conference on Computer Vision, pages 169–186.
+Springer, 2024. 7
+[50] Haozhe Zhao, Zefan Cai, Shuzheng Si, Xiaojian Ma,
+Kaikai An, Liang Chen, Zixuan Liu, Sheng Wang, Wenjuan Han, and Baobao Chang.
+Mmicl: Empowering
+vision-language model with multi-modal in-context learning. ArXiv, abs/2309.07915, 2023. 1
+[51] Ao Zhou, Zebo Gu, Tenghao Sun, Jiawen Chen, Mingsheng
+Tu, Zifeng Cheng, Yafeng Yin, Zhiwei Jiang, and Qing
+Gu. Hierarchical vision-language reasoning for multimodal
+multiple-choice question answering. Proceedings of the 33rd
+ACM International Conference on Multimedia, 2025. 1
+
+12
+
+

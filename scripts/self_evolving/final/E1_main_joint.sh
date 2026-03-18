@@ -35,16 +35,20 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_3k/images}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/final/E1_main_joint}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E1_main_joint}"
 RUN_NAME="E1_main_joint_s42"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
 RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+MASTER_PORT="${MASTER_PORT:-29523}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 TRAIN_ENTRY="${TRAIN_ENTRY:-$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py}"
 TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+LOG_EVERY="${LOG_EVERY:-1}"
+SAVE_EVERY="${SAVE_EVERY:-50}"
+SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-50}"
 UNDERSTANDING_STEPS_PER_CYCLE="${UNDERSTANDING_STEPS_PER_CYCLE:-3}"
 GENERATION_STEPS_PER_CYCLE="${GENERATION_STEPS_PER_CYCLE:-2}"
 GENERATOR_UPDATE_FREQ="${GENERATOR_UPDATE_FREQ:-1}"
@@ -225,7 +229,16 @@ export TORCH_NCCL_BLOCKING_WAIT=1
 export TORCH_NCCL_TRACE_BUFFER_SIZE=1048576
 export TORCH_DISTRIBUTED_DEBUG="OFF"
 export NCCL_DEBUG="WARN"
-export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+if [[ -z "${HIP_VISIBLE_DEVICES:-}" && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  export HIP_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
+fi
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" && -n "${HIP_VISIBLE_DEVICES:-}" ]]; then
+  export CUDA_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
+fi
+if [[ -z "${HIP_VISIBLE_DEVICES:-}" && -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+  export CUDA_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
+fi
 
 # ── Pre-flight checks ────────────────────────────────────────────────────────
 if [[ ! -d "$DATA_DIR" ]]; then
@@ -245,8 +258,10 @@ echo "[E1]   Run name:    $RUN_NAME"
 echo "[E1]   Output dir:  $OUTPUT_DIR"
 echo "[E1]   Data dir:    $DATA_DIR"
 echo "[E1]   GPUs:        $NPROC_PER_NODE"
+echo "[E1]   Port:        $MASTER_PORT"
 echo "[E1]   Attn impl:   $ATTN_IMPL"
 echo "[E1]   Total steps: $TOTAL_STEPS"
+echo "[E1]   Logging:     log_every=$LOG_EVERY save_every=$SAVE_EVERY save_images_every=$SAVE_GENERATED_IMAGES_EVERY"
 echo "[E1]   Cycle:       U=$UNDERSTANDING_STEPS_PER_CYCLE, G=$GENERATION_STEPS_PER_CYCLE"
 echo "[E1]   Gen freq:    $GENERATOR_UPDATE_FREQ, DiT enabled: $DIT_UPDATE_ENABLED (freq=$DIT_UPDATE_FREQ)"
 echo "[E1]   Gen->U aux:  proposer_reward=$PROPOSER_GEN_REWARD_ENABLED, solver_update=$GEN_STEP_SOLVER_UPDATE_ENABLED"
@@ -258,7 +273,7 @@ fi
 "$PYTHON_BIN" -m torch.distributed.run \
   --standalone \
   --nproc_per_node "$NPROC_PER_NODE" \
-  --master_port 29523 \
+  --master_port "$MASTER_PORT" \
   "$TRAIN_ENTRY" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
@@ -273,10 +288,10 @@ fi
   \
   `# ── Training schedule ──────────────────────────────────────────────────` \
   --total_steps "$TOTAL_STEPS" \
-  --save_every 50 \
-  --log_every 1 \
+  --save_every "$SAVE_EVERY" \
+  --log_every "$LOG_EVERY" \
   --max_checkpoints "${MAX_CHECKPOINTS:-10000}" \
-  --save_generated_images_every 50 \
+  --save_generated_images_every "$SAVE_GENERATED_IMAGES_EVERY" \
   --deterministic \
   \
   `# ── Model / LoRA ───────────────────────────────────────────────────────` \

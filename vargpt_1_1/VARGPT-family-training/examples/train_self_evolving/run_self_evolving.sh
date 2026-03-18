@@ -233,6 +233,29 @@ if [ -z "${CUDA_VISIBLE_DEVICES:-}" ] && [ -n "${HIP_VISIBLE_DEVICES:-}" ]; then
     export CUDA_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
 fi
 
+ROCM_RUNTIME="$(
+    python - <<'PY' 2>/dev/null || true
+import torch
+try:
+    print(1 if getattr(torch.version, "hip", None) else 0)
+except Exception:
+    print(0)
+PY
+)"
+ROCM_RUNTIME="$(echo "${ROCM_RUNTIME}" | tr -d '[:space:]')"
+if ! [[ "${ROCM_RUNTIME}" =~ ^[0-9]+$ ]]; then
+    ROCM_RUNTIME=0
+fi
+
+FLASH_ATTN_MODE="${FLASH_ATTN_MODE:-}"
+if [ -z "${FLASH_ATTN_MODE}" ]; then
+    if [ "${ROCM_RUNTIME}" = "1" ]; then
+        FLASH_ATTN_MODE="sdpa"
+    else
+        FLASH_ATTN_MODE="disabled"
+    fi
+fi
+
 if ! resolve_launcher; then
     echo "[ERROR] Could not find LlamaFactory launcher." >&2
     echo "Install with: pip install -e ${REPO_ROOT} --no-deps" >&2
@@ -352,12 +375,12 @@ echo "=============================================="
 DATASET_DIR="${DATASET_DIR:-data_temp}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 if [ -z "${OUTPUT_DIR}" ]; then
-    OUTPUT_DIR="${REPO_ROOT}/saves/vargpt_se_${EXPERIMENT}_$(date +%Y%m%d_%H%M%S)"
+    OUTPUT_DIR="${REPO_ROOT}/outputs/vargpt/${EXPERIMENT}"
 fi
 if [ -n "${RESUME_FROM:-}" ]; then
     OVERWRITE_OUTPUT_DIR="${OVERWRITE_OUTPUT_DIR:-false}"
 else
-    OVERWRITE_OUTPUT_DIR="${OVERWRITE_OUTPUT_DIR:-true}"
+    OVERWRITE_OUTPUT_DIR="${OVERWRITE_OUTPUT_DIR:-false}"
 fi
 TMP_CONFIG="$(mktemp "/tmp/vargpt_se_${EXPERIMENT}_XXXX.yaml")"
 RUN_CONFIG="${TMP_CONFIG}"
@@ -416,6 +439,7 @@ yaml_delete_key "resume_from_checkpoint"
 yaml_delete_key "overwrite_output_dir"
 yaml_delete_key "output_dir"
 yaml_delete_key "se_image_folder"
+yaml_delete_key "flash_attn"
 yaml_delete_key "se_solver_use_forced_choice_from_proposer"
 yaml_delete_key "se_solver_skip_update_on_easy"
 yaml_delete_key "se_save_every"
@@ -431,6 +455,7 @@ yaml_delete_key "se_generat_trainion_failfast_min_success_rate"
     echo ""
     echo "# --- auto overrides from run_self_evolving.sh ---"
     echo "dataset_dir: \"$(yaml_quote "${DATASET_DIR}")\""
+    echo "flash_attn: ${FLASH_ATTN_MODE}"
     append_se_override "se_total_steps" "${SE_TOTAL_STEPS:-10000}"
     append_se_override "se_save_every" "${SE_SAVE_EVERY:-200}"
     echo "save_steps: ${SAVE_STEPS:-200}"
@@ -526,7 +551,17 @@ echo "  Effective total_steps : ${EFFECTIVE_TOTAL_STEPS}"
 echo "  Effective se_image_folder: ${EFFECTIVE_IMAGE_FOLDER}"
 echo "  Effective output_dir  : ${EFFECTIVE_OUTPUT_DIR}"
 echo "  Effective overwrite_output_dir: ${EFFECTIVE_OVERWRITE_OUTPUT_DIR}"
+echo "  Effective flash_attn  : ${FLASH_ATTN_MODE}"
 echo "  Run config : ${RUN_CONFIG}"
+
+if [ -z "${RESUME_FROM:-}" ] && [ "${EFFECTIVE_OVERWRITE_OUTPUT_DIR}" != "true" ]; then
+    if [ -f "${EFFECTIVE_OUTPUT_DIR}/summary.json" ] || [ -f "${EFFECTIVE_OUTPUT_DIR}/status.json" ] || [ -d "${EFFECTIVE_OUTPUT_DIR}/checkpoints" ]; then
+        echo "[ERROR] OUTPUT_DIR already contains an existing self-evolving run:" >&2
+        echo "[ERROR]   ${EFFECTIVE_OUTPUT_DIR}" >&2
+        echo "[ERROR] Set RESUME_FROM to continue, choose a new OUTPUT_DIR, or set OVERWRITE_OUTPUT_DIR=true." >&2
+        exit 1
+    fi
+fi
 
 # ── Launch ───────────────────────────────────────────────────────────────────
 if [ "$NUM_GPUS" -gt 1 ]; then

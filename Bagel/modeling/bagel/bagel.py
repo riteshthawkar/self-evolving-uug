@@ -208,6 +208,9 @@ class Bagel(PreTrainedModel):
         packed_vae_token_indexes: Optional[torch.LongTensor] = None,
         packed_timesteps: Optional[torch.LongTensor] = None,
         mse_loss_indexes: Optional[torch.BoolTensor] = None,
+        packed_noise: Optional[torch.Tensor] = None,
+        return_ce_logits: bool = False,
+        return_mse_preds: bool = False,
     ) -> torch.Tensor:
         """
         Args:
@@ -275,7 +278,13 @@ class Bagel(PreTrainedModel):
                 packed_latent.append(latent)
             packed_latent_clean = torch.cat(packed_latent, dim=0)
 
-            noise = torch.randn_like(packed_latent_clean)
+            if packed_noise is None:
+                noise = torch.randn_like(packed_latent_clean)
+            else:
+                noise = packed_noise.to(
+                    device=packed_latent_clean.device,
+                    dtype=packed_latent_clean.dtype,
+                )
             packed_timesteps = torch.sigmoid(packed_timesteps)
             packed_timesteps = self.timestep_shift * packed_timesteps / (1 + (self.timestep_shift - 1) * packed_timesteps)
             packed_latent = (1 - packed_timesteps[:, None]) * packed_latent_clean + packed_timesteps[:, None] * noise
@@ -303,6 +312,7 @@ class Bagel(PreTrainedModel):
         )
 
         mse = None
+        packed_mse_preds = None
         if self.config.visual_gen:
             packed_mse_preds = self.llm2vae(last_hidden_state[mse_loss_indexes])
             target = noise - packed_latent_clean # NOTE: v_t=dx_t/dt=x_1-x_0, pointing from data to noise
@@ -310,11 +320,17 @@ class Bagel(PreTrainedModel):
             mse = (packed_mse_preds - target[has_mse]) ** 2
 
         ce = None
+        packed_ce_preds = None
         if ce_loss_indexes is not None:
             packed_ce_preds = self._lm_causal_model().lm_head(last_hidden_state[ce_loss_indexes])
             ce = F.cross_entropy(packed_ce_preds, packed_label_ids, reduction="none")
 
-        return dict(mse=mse, ce=ce)
+        outputs = dict(mse=mse, ce=ce)
+        if return_mse_preds:
+            outputs["mse_preds"] = packed_mse_preds
+        if return_ce_logits:
+            outputs["ce_logits"] = packed_ce_preds
+        return outputs
 
 
     def prepare_prompts(self, curr_kvlens, curr_rope, prompts, tokenizer, new_token_ids):

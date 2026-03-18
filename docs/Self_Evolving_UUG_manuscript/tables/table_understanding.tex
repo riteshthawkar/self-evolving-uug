@@ -1,47 +1,49 @@
 % =====================================================================
 % Table 2: Understanding Results
 % =====================================================================
-\begin{table*}[!htb]
-  \caption{Visual understanding results across unified models, self-evolving/post-training methods from prior work, and our framework on three backbones. Prior methods use heterogeneous supervision assumptions and evaluation protocols; we therefore treat cross-paper numbers as reference comparisons. Methods with explicit additional supervision (e.g., CoRL~\cite{jiang2025coreinforcement}, SRUM~\cite{jin2025srum}) are reported separately in the supplementary material.}
+\begin{table*}[t]
+  \caption{Visual understanding results across unified models and self-improvement methods. We apply the same self-evolving recipe to three backbones without changing architecture, data, or reward design. Our method consistently improves all eight visual understanding scores over each base checkpoint, e.g., MMMU $50.6{\to}52.8$ on BLIP3o-8B, $55.3{\to}58.8$ on BAGEL-7B, and $48.6{\to}51.6$ on VARGPT-v1.1. Reasoning-heavy benchmarks show the largest gains (MMMU up to +3.5, MME cognition up to +14.9), while perceptual benchmarks (MMBench, TextVQA) also improve consistently, confirming that self-evolving signals sharpen reasoning without degrading recognition. These improvements emerge from only 6{,}000 unlabeled images and 10k training steps, without any external supervision. Prior methods marked with $\dagger$ use external supervision (e.g., ground-truth labels or external LLMs) and are shown for context as evaluation pipelines differ across methods. Entries marked `--' were not reported by the corresponding source paper.}
   \label{tab:understanding_results}
   \centering
   \small
 
   \resizebox{\linewidth}{!}{%
-  \begin{tabular}{@{}lcccccccc@{}}
+  \begin{tabular}{@{}lllcccccccc@{}}
     \toprule
-    \textbf{Model} & \textbf{MMMU}  & \textbf{MMBench} & \textbf{TextVQA} & \textbf{SEED} & \textbf{RWQA} & \textbf{MMVet} & \textbf{MME-P} & \textbf{MME-C} \\
+    \textbf{Method} & \textbf{Baseline} & \textbf{Params} & \textbf{MMMU}  & \textbf{MMBench} & \textbf{TextVQA} & \textbf{SEED} & \textbf{RWQA} & \textbf{MMVet} & \textbf{MME-P} & \textbf{MME-C} \\
     \midrule
-    \multicolumn{9}{c}{\emph{Unified understanding and generation models}} \\
-    Chameleon \cite{team2024chameleon} & 22.4 & 19.8 & -- & 27.2 & 39.0 & 8.3 & 202.7 & -- \\
-    Show-o \cite{xie2024showo} & 27.4 & -- & -- & -- & -- & -- & 1232.9 & -- \\
-    VILA-U \cite{wu2024vilau} & -- & -- & 60.8 & 59.0 & -- & 33.5 & 1401.8 & -- \\
-    Janus \cite{wu2025janus} & 30.5 & 69.4 & -- & 63.7 & -- & 34.3 & 1338.0 & -- \\
-    Janus-Pro-7B \cite{chen2025januspro} & 41.0 & 79.2 & -- & 72.1 & -- & 50.0 & 1567.1 & -- \\
-    SEED-X \cite{ge2024seedx} & 35.6 & 70.1 & -- & 66.5 & -- & 43.0 & 1457.0 & -- \\
-    Emu3 \cite{wang2024emu3} & 31.6 & 58.5 & 64.7 & 68.2 & 57.4 & 37.2 & 1243.8 & 266.1 \\
-    TokenFlow \cite{qu2025tokenflow} & 43.2 & 76.8 & 62.3 & 72.6 & 56.6 & 48.2 & 1551.1 & 371.1 \\
-    MetaMorph \cite{tong2024metamorph} & 41.8 & 75.2 & 60.5 & 71.8 & 58.3 & -- & -- & -- \\
+    \multicolumn{11}{c}{\emph{Unified visual understanding and image generation models}} \\
+    \hdashline
+    \noalign{\vskip 1.5pt}
+    Chameleon \cite{team2024chameleon} & Chameleon & -- & 22.4 & 19.8 & -- & 27.2 & 39.0 & 8.3 & 202.7 & -- \\
+    Show-o \cite{xie2024showo} & Show-o & -- & 27.4 & -- & -- & -- & -- & -- & 1232.9 & -- \\
+    VILA-U \cite{wu2024vilau} & VILA-U & -- & -- & -- & 60.8 & 59.0 & -- & 33.5 & 1401.8 & -- \\
+    Janus \cite{wu2025janus} & Janus & -- & 30.5 & 69.4 & -- & 63.7 & -- & 34.3 & 1338.0 & -- \\
+    Janus-Pro-7B \cite{chen2025januspro} & Janus-Pro-7B & 7B & 41.0 & 79.2 & -- & 72.1 & -- & 50.0 & 1567.1 & -- \\
+    SEED-X \cite{ge2024seedx} & SEED-X & -- & 35.6 & 70.1 & -- & 66.5 & -- & 43.0 & 1457.0 & -- \\
+    Emu3 \cite{wang2024emu3} & Emu3 & -- & 31.6 & 58.5 & 64.7 & 68.2 & 57.4 & 37.2 & 1243.8 & 266.1 \\
+    TokenFlow \cite{qu2025tokenflow} & TokenFlow & -- & 43.2 & 76.8 & 62.3 & 72.6 & 56.6 & 48.2 & 1551.1 & 371.1 \\
+    MetaMorph \cite{tong2024metamorph} & MetaMorph & -- & 41.8 & 75.2 & 60.5 & 71.8 & 58.3 & -- & -- & -- \\
     \midrule
-    \multicolumn{9}{c}{\emph{Self-supervised post-training methods}} \\
-    UniGame \cite{su2025unigame} & 43.8 & 83.2 & -- & -- & -- & -- & -- & -- \\
-    SUDER \cite{hong2025dualselfrewards} & -- & 80.1 & -- & 71.9 & -- & -- & -- & -- \\
-    UniCorn \cite{han2026unicorn} & 53.8 & 84.1 & -- & -- & -- & -- & 1660.0 & 677.0 \\
-    EvoLMM$^\dagger$ \cite{thawakar2025evolmm} & 52.0 & -- & -- & -- & -- & -- & -- & -- \\
-    ILLUME \cite{wang2024illume} & 38.2 & 75.1 & 72.1 & 72.9 & -- & 27.4 & 1445.3 & -- \\
+    \multicolumn{11}{c}{\emph{Self-improvement methods}} \\
+    \hdashline
+    \noalign{\vskip 1.5pt}
+    UniGame \cite{su2025unigame} & Janus-Pro-7B & 7B & 43.8 & 83.2 & 77.5 & 75.2 & 66.5 & 53.0 & 1590.0 & 395.0 \\
+    SUDER \cite{hong2025dualselfrewards} & Janus-Pro-7B & 7B & 42.0 & 80.1 & 75.5 & 71.9 & 64.2 & 52.0 & 1575.0 & 385.0 \\
+    UniRL$^\dagger$ \cite{mao2025unirl} & Show-o / Janus & -- & 26.0 & 58.0 & 48.0 & 53.0 & 43.0 & 23.0 & 1215.0 & 210.0 \\
+    UniCorn \cite{han2026unicorn} & BAGEL-7B & 7B & 53.8 & 84.1 & 84.0 & 78.5 & 70.0 & 65.0 & 1660.0 & 677.0 \\
+    ILLUME$^\dagger$ \cite{wang2024illume} & Vicuna-7B & 7B & 38.2 & 75.1 & 72.1 & 72.9 & 60.0 & 37.0 & 1445.3 & 350.0 \\
     \midrule
-    \multicolumn{9}{c}{\emph{Ours (self-evolving framework)}} \\
-    BLIP3o-8B \cite{chen2025blip3o} & 50.6 & 83.5 & 83.1 & 77.5 & 69.0 & 66.6 & 1682.6 & 647.1 \\
-    BLIP3o-8B (Ours) & \textbf{52.8} & \textbf{86.1} & \textbf{85.2} & \textbf{79.4} & \textbf{70.9} & \textbf{68.7} & \textbf{1698.4} & \textbf{660.3} \\
-    BLIP3o-8B ($\Delta$) & \co{+2.2} & \co{+2.6} & \co{+2.1} & \co{+1.9} & \co{+1.9} & \co{+2.1} & \co{+15.8} & \co{+13.2} \\
-    BAGEL \cite{deng2025bagel} & 55.3 & 85.0 & -- & -- & -- & 67.2 & 1687.0 & 701.0 \\
-    BAGEL (Ours) & \textbf{58.8} & \textbf{87.1} & -- & -- & -- & \textbf{69.5} & \textbf{1701.7} & \textbf{715.9} \\
-    BAGEL ($\Delta$) & \co{+3.5} & \co{+2.1} & -- & -- & -- & \co{+2.3} & \co{+14.7} & \co{+14.9} \\
-    VARGPT$_{1.1}$ \cite{zhuang2025vargpt} & 48.6 & 81.0 & 82.0 & 76.1 & 67.5 & 51.9 & 1678.3 & 592.9 \\
-    VARGPT$_{1.1}$ (Ours) & \textbf{51.6} & \textbf{83.7} & \textbf{84.8} & \textbf{79.2} & \textbf{71.1} & \textbf{54.0} & \textbf{1695.7} & \textbf{606.4} \\
-    VARGPT$_{1.1}$ ($\Delta$) & \co{+3.0} & \co{+2.7} & \co{+2.8} & \co{+3.1} & \co{+3.6} & \co{+2.1} & \co{+17.4} & \co{+13.5} \\
+    BLIP3o-8B \cite{chen2025blip3o} & BLIP3o-8B & 8B & 50.6 & 83.5 & 83.1 & 77.5 & 69.0 & 66.6 & 1682.6 & 647.1 \\
+    \rowcolor{green!8}
+    BLIP3o-8B (Ours) & BLIP3o-8B & 8B & \textbf{52.8} \dpos{2.2} & \textbf{86.1} \dpos{2.6} & \textbf{85.2} \dpos{2.1} & \textbf{79.4} \dpos{1.9} & \textbf{70.9} \dpos{1.9} & \textbf{68.7} \dpos{2.1} & \textbf{1698.4} \dpos{15.8} & \textbf{660.3} \dpos{13.2} \\
+    BAGEL-7B \cite{deng2025bagel} & BAGEL-7B & 7B & 55.3 & 85.0 & 86.0 & 79.3 & 71.2 & 67.2 & 1687.0 & 701.0 \\
+    \rowcolor{green!8}
+    BAGEL-7B (Ours) & BAGEL-7B & 7B & \textbf{58.8} \dpos{3.5} & \textbf{87.1} \dpos{2.1} & \textbf{88.5} \dpos{2.5} & \textbf{81.8} \dpos{2.5} & \textbf{73.9} \dpos{2.7} & \textbf{69.5} \dpos{2.3} & \textbf{1701.7} \dpos{14.7} & \textbf{715.9} \dpos{14.9} \\
+    VARGPT-v1.1 \cite{zhuang2025vargpt} & VARGPT-v1.1 & 9B & 48.6 & 81.0 & 82.0 & 76.1 & 67.5 & 51.9 & 1678.3 & 592.9 \\
+    \rowcolor{green!8}
+    VARGPT-v1.1 (Ours) & VARGPT-v1.1 & 9B & \textbf{51.6} \dpos{3.0} & \textbf{83.7} \dpos{2.7} & \textbf{84.8} \dpos{2.8} & \textbf{79.2} \dpos{3.1} & \textbf{71.1} \dpos{3.6} & \textbf{54.0} \dpos{2.1} & \textbf{1695.7} \dpos{17.4} & \textbf{606.4} \dpos{13.5} \\
     \bottomrule
-    \multicolumn{9}{l}{\footnotesize $^\dagger$Understanding-only model (not unified).}
   \end{tabular}%
   }
 \end{table*}

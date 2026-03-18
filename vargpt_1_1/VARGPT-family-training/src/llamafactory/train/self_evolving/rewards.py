@@ -7,6 +7,7 @@ Ported from BLIP3o's rewards.py with adaptations:
   - Embedding similarity adapted for Qwen2-VL processor
 """
 
+import contextlib
 import logging
 import math
 from collections.abc import Sequence
@@ -19,13 +20,24 @@ from PIL import Image
 
 from .utils import (
     _build_chat_text,
+    _build_text_only_chat,
     _decode_tokens,
     _prepare_mm_inputs,
+    _prepare_text_only_inputs,
     _unwrap_model,
+    majority_vote,
     normalize_answer,
+    shannon_entropy_nats,
     use_adapter,
 )
-from .generation_helpers import _soft_match
+from .generation_helpers import (
+    GEN_CYCLE_CAPTION_PROMPT,
+    GenerationQAPair,
+    _jaccard_similarity,
+    _per_candidate_diversity_scores,
+    _soft_match,
+    _yes_no_polarity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -400,6 +412,95 @@ def embedding_similarity(
 # ---------------------------------------------------------------------------
 
 
+def _adapter_disabled(base_model: torch.nn.Module):
+    if hasattr(base_model, "disable_adapter"):
+        return base_model.disable_adapter()
+    return contextlib.nullcontext()
+
+
+def _text_embedding(
+    model: torch.nn.Module,
+    processor,
+    text: str,
+    device: torch.device,
+) -> torch.Tensor:
+    base_model = _unwrap_model(model)
+    was_training = base_model.training
+    try:
+        base_model.eval()
+        chat_text = _build_text_only_chat(processor, text)
+        text_inputs = _prepare_text_only_inputs(processor, device, chat_text)
+        text_inputs["use_cache"] = False
+        text_inputs["output_hidden_states"] = True
+
+        with torch.no_grad():
+            with _adapter_disabled(base_model):
+                outputs = base_model(**text_inputs)
+
+        hidden = outputs.hidden_states[-1]
+        attention_mask = text_inputs.get("attention_mask")
+        if attention_mask is not None:
+            mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
+            embedding = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+        else:
+            embedding = hidden.mean(dim=1)
+        return F.normalize(embedding.squeeze(0), dim=-1)
+    finally:
+        if was_training:
+            base_model.train(True)
+
+
+def text_embedding_similarity(
+    model: torch.nn.Module,
+    processor,
+    text_a: str,
+    text_b: str,
+    device: torch.device,
+) -> float:
+    try:
+        emb_a = _text_embedding(model, processor, text_a, device)
+        emb_b = _text_embedding(model, processor, text_b, device)
+        return float(torch.dot(emb_a, emb_b).item())
+    except Exception:
+        return _jaccard_similarity(text_a, text_b)
+
+
+def generate_cycle_caption(
+    model: torch.nn.Module,
+    processor,
+    image: Image.Image,
+    device: torch.device,
+    max_new_tokens: int = 96,
+    solver_adapter_name: str = "solver",
+) -> str:
+    base_model = _unwrap_model(model)
+    was_training = base_model.training
+    try:
+        base_model.eval()
+        chat_text = _build_chat_text(processor, image, GEN_CYCLE_CAPTION_PROMPT)
+        mm_inputs = _prepare_mm_inputs(processor, device, image, chat_text, model=model)
+        with torch.no_grad():
+            with use_adapter(base_model, solver_adapter_name):
+                gen_ids = base_model.generate(
+                    **mm_inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    temperature=0.4,
+                    top_p=1.0,
+                )
+        input_len = mm_inputs["input_ids"].shape[1]
+        new_ids = gen_ids[0, input_len:]
+        tokenizer = getattr(processor, "tokenizer", processor)
+        caption = _decode_tokens(tokenizer, new_ids)
+        return " ".join(str(caption or "").split())
+    except Exception as e:
+        logger.warning(f"[Rewards] Caption generation failed: {e}")
+        return ""
+    finally:
+        if was_training:
+            base_model.train(True)
+
+
 def solver_verification_reward(
     model: torch.nn.Module,
     processor,
@@ -411,20 +512,7 @@ def solver_verification_reward(
     max_new_tokens: int = 64,
     solver_adapter_name: str = "solver",
 ) -> Tuple[float, Dict[str, float]]:
-    """Score a generated image by having the solver answer verification QA.
-
-    For each QA pair, generate solver answers and compare with expected.
-    The reward combines:
-      - Accuracy: soft_match(solver_answer, expected_answer)
-      - Consistency: entropy of solver answers (lower = more consistent)
-
-    Returns
-    -------
-    reward : float
-        Combined verification reward in [0, 1].
-    details : dict
-        Per-QA statistics.
-    """
+    """Score a generated image by having the solver answer verification QA."""
     if not questions or not expected_answers:
         return 0.0, {"no_qa_pairs": True}
 
@@ -435,21 +523,17 @@ def solver_verification_reward(
         base_model.eval()
 
         qa_scores = []
+        qa_logs = []
         for q, exp_a in zip(questions, expected_answers):
-            # Build solver prompt
             from .prompts import build_solver_prompt
             solver_prompt = build_solver_prompt(q)
-
-            # Build chat text with image
             chat_text = _build_chat_text(processor, image, solver_prompt)
-
-            # Prepare inputs
             mm_inputs = _prepare_mm_inputs(
                 processor, device, image, chat_text, model=model
             )
 
-            # Generate solver answers
             answers = []
+            raw_answers = []
             with torch.no_grad():
                 with use_adapter(base_model, solver_adapter_name):
                     for _ in range(num_samples):
@@ -461,7 +545,6 @@ def solver_verification_reward(
                                 temperature=1.0,
                                 top_p=0.9,
                             )
-                            # Decode only new tokens
                             input_len = mm_inputs["input_ids"].shape[1]
                             new_ids = gen_ids[0, input_len:]
                             answer_text = _decode_tokens(
@@ -470,31 +553,61 @@ def solver_verification_reward(
                             )
                             from .utils import _parse_answer
                             answer = _parse_answer(answer_text)
+                            raw_answers.append(answer_text)
                             answers.append(normalize_answer(answer))
                         except Exception:
+                            raw_answers.append("")
                             answers.append("")
 
-            # Score this QA pair
             if not answers or all(a == "" for a in answers):
                 qa_scores.append(0.0)
+                qa_logs.append(
+                    {
+                        "question": q,
+                        "expected": normalize_answer(exp_a),
+                        "status": "skipped",
+                        "skip_reason": "empty_solver_answers",
+                        "solver_answers_norm": answers,
+                        "solver_outputs_raw": raw_answers,
+                    }
+                )
                 continue
 
-            # Accuracy: best match among answers
-            match_scores = [_soft_match(a, exp_a) for a in answers if a]
-            accuracy = max(match_scores) if match_scores else 0.0
-
-            # Consistency: how much answers agree
-            unique_answers = set(a for a in answers if a)
-            consistency = 1.0 / max(len(unique_answers), 1)
-
-            qa_score = 0.7 * accuracy + 0.3 * consistency
-            qa_scores.append(qa_score)
+            entropy_nats, majority_fraction, majority_answer = _entropy_majority(answers)
+            expected = normalize_answer(exp_a)
+            match_score = _soft_match(majority_answer, expected)
+            contradiction = 1.0 if (
+                _yes_no_polarity(expected) != 0
+                and _yes_no_polarity(majority_answer) != 0
+                and _yes_no_polarity(expected) != _yes_no_polarity(majority_answer)
+            ) else 0.0
+            qa_score = 0.7 * float(match_score) + 0.3 * float(majority_fraction)
+            qa_scores.append(float(qa_score))
+            qa_logs.append(
+                {
+                    "question": q,
+                    "expected": expected,
+                    "status": "ok",
+                    "majority_answer": majority_answer,
+                    "majority_fraction": float(majority_fraction),
+                    "entropy_nats": float(entropy_nats),
+                    "match_score": float(match_score),
+                    "combined_score": float(qa_score),
+                    "contradiction": float(contradiction),
+                    "solver_answers_norm": answers,
+                    "solver_outputs_raw": raw_answers,
+                }
+            )
 
         reward = sum(qa_scores) / max(len(qa_scores), 1)
         details = {
             "num_qa": len(qa_scores),
             "mean_qa_score": reward,
             "qa_scores": qa_scores,
+            "qa_logs": qa_logs,
+            "contradiction_score": _mean(
+                [float(log.get("contradiction", 0.0)) for log in qa_logs if str(log.get("status", "")) == "ok"]
+            ),
         }
         return reward, details
 
@@ -511,6 +624,152 @@ def solver_verification_reward(
 # ---------------------------------------------------------------------------
 
 
+def _mean(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    return float(sum(values) / float(len(values)))
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _entropy_majority(answers: List[str]) -> Tuple[float, float, str]:
+    majority_answer, majority_count = majority_vote(answers)
+    n = max(1, len([answer for answer in answers if str(answer or "").strip()]))
+    majority_fraction = float(majority_count) / float(n)
+    hist = {}
+    for answer in answers:
+        if not str(answer or "").strip():
+            continue
+        hist[answer] = hist.get(answer, 0) + 1
+    probs = [float(count) / float(max(1, n)) for count in hist.values()] if hist else [1.0]
+    entropy_nats = shannon_entropy_nats(probs)
+    return float(entropy_nats), float(majority_fraction), str(majority_answer)
+
+
+def cycle_reward(
+    model: torch.nn.Module,
+    processor,
+    image: Image.Image,
+    prompt: str,
+    device: torch.device,
+    config,
+    solver_adapter_name: str = "solver",
+) -> Tuple[float, str]:
+    caption = generate_cycle_caption(
+        model=model,
+        processor=processor,
+        image=image,
+        device=device,
+        max_new_tokens=int(getattr(config, "max_new_tokens_caption", 96)),
+        solver_adapter_name=solver_adapter_name,
+    )
+    caption_similarity = 0.0
+    if caption:
+        caption_similarity = text_embedding_similarity(
+            model=model,
+            processor=processor,
+            text_a=prompt,
+            text_b=caption,
+            device=device,
+        )
+    image_text_similarity = embedding_similarity(
+        model=model,
+        processor=processor,
+        image=image,
+        text=prompt,
+        device=device,
+    )
+    score = 0.5 * float(caption_similarity) + 0.5 * float(image_text_similarity)
+    return _clamp01(score), caption
+
+
+def score_generated_candidates(
+    model: torch.nn.Module,
+    processor,
+    images: List[Image.Image],
+    prompt: str,
+    questions: List[str],
+    expected_answers: List[str],
+    device: torch.device,
+    config,
+    spec_quality: float = 1.0,
+    solver_adapter_name: str = "solver",
+) -> List[Dict[str, float]]:
+    if not images:
+        return []
+
+    diversity_scores = _per_candidate_diversity_scores(images)
+    positive_weight_sum = (
+        float(getattr(config, "reward_spec_weight", 0.65))
+        + float(getattr(config, "reward_cycle_weight", 0.20))
+        + float(getattr(config, "reward_diversity_weight", 0.10))
+    )
+    if positive_weight_sum <= 0.0:
+        positive_weight_sum = 1.0
+    weight_spec = float(getattr(config, "reward_spec_weight", 0.65)) / positive_weight_sum
+    weight_cycle = float(getattr(config, "reward_cycle_weight", 0.20)) / positive_weight_sum
+    weight_diversity = float(getattr(config, "reward_diversity_weight", 0.10)) / positive_weight_sum
+
+    scored_candidates: List[Dict[str, float]] = []
+    for idx, image in enumerate(images):
+        spec_score, spec_details = solver_verification_reward(
+            model=model,
+            processor=processor,
+            image=image,
+            questions=questions,
+            expected_answers=expected_answers,
+            device=device,
+            num_samples=int(getattr(config, "num_solver_samples_spec", 3)),
+            max_new_tokens=int(getattr(config, "max_new_tokens_solver", 64)),
+            solver_adapter_name=solver_adapter_name,
+        )
+        contradiction_score = float(spec_details.get("contradiction_score", 0.0))
+        qa_logs = list(spec_details.get("qa_logs", []))
+        cycle_score, cycle_caption = cycle_reward(
+            model=model,
+            processor=processor,
+            image=image,
+            prompt=prompt,
+            device=device,
+            config=config,
+            solver_adapter_name=solver_adapter_name,
+        )
+        diversity_score = float(diversity_scores[idx]) if idx < len(diversity_scores) else 0.0
+        base_reward = (
+            weight_spec * float(spec_score)
+            + weight_cycle * float(cycle_score)
+            + weight_diversity * float(diversity_score)
+            - float(getattr(config, "reward_contradiction_weight", 0.20)) * contradiction_score
+        )
+        base_reward = _clamp01(base_reward)
+        total_reward = _clamp01(float(spec_quality) * float(base_reward))
+        qa_confidence = _mean(
+            [float(log.get("majority_fraction", 0.0)) for log in qa_logs if str(log.get("status", "")) == "ok"]
+        )
+        mean_entropy_nats = _mean(
+            [float(log.get("entropy_nats", 0.0)) for log in qa_logs if str(log.get("status", "")) == "ok"]
+        )
+        scored_candidates.append(
+            {
+                "candidate_idx": int(idx),
+                "spec_score": float(spec_score),
+                "contradiction_score": float(contradiction_score),
+                "cycle_score": float(cycle_score),
+                "cycle_caption": cycle_caption,
+                "diversity_score": float(diversity_score),
+                "base_reward": float(base_reward),
+                "spec_quality": float(spec_quality),
+                "total_reward": float(total_reward),
+                "qa_confidence": float(qa_confidence),
+                "mean_entropy_nats": float(mean_entropy_nats),
+                "qa_logs": qa_logs,
+            }
+        )
+    return scored_candidates
+
+
 def score_generated_image(
     model: torch.nn.Module,
     processor,
@@ -521,65 +780,19 @@ def score_generated_image(
     device: torch.device,
     config,
 ) -> Tuple[float, Dict[str, float]]:
-    """Compute a combined reward for a generated image.
-
-    Combines multiple reward signals based on config.gen_reward_mode:
-      - "clip": CLIP text-image similarity
-      - "nll": Model's own generation NLL
-      - "embedding": Model's embedding similarity
-      - "combined": All signals combined
-
-    Also includes solver verification if QA pairs are available.
-
-    Returns
-    -------
-    total_reward : float
-        Combined reward in [0, 1].
-    details : dict
-        Component-level scores.
-    """
-    details = {}
-    components = []
-
-    mode = getattr(config, "gen_reward_mode", "clip")
-
-    # CLIP similarity
-    if mode in ("clip", "combined"):
-        clip_score = clip_similarity(image, prompt)
-        # Normalize CLIP score to [0, 1] (typical range is [0.15, 0.35])
-        clip_reward = min(1.0, max(0.0, (clip_score - 0.1) / 0.25))
-        details["clip_score"] = clip_score
-        details["clip_reward"] = clip_reward
-        components.append(("clip", clip_reward, 0.4))
-
-    # NLL reward
-    if mode in ("nll", "combined"):
-        tokenizer = getattr(processor, "tokenizer", processor)
-        nll_score = vargpt_nll_reward(model, tokenizer, image, prompt, device)
-        # Normalize: typical NLL range is [-10, -2], map to [0, 1]
-        nll_reward = min(1.0, max(0.0, (nll_score + 10.0) / 8.0))
-        details["nll_score"] = nll_score
-        details["nll_reward"] = nll_reward
-        components.append(("nll", nll_reward, 0.3))
-
-    # Solver verification
-    if questions and expected_answers:
-        solver_reward, solver_details = solver_verification_reward(
-            model, processor, image, questions, expected_answers,
-            device, num_samples=getattr(config, "num_solver_samples_spec", 3),
-        )
-        details["solver_reward"] = solver_reward
-        details.update({f"solver_{k}": v for k, v in solver_details.items()
-                       if isinstance(v, (int, float))})
-        components.append(("solver", solver_reward, 0.5))
-
-    # Compute weighted total
-    if not components:
-        return 0.5, details  # neutral reward if no scoring available
-
-    total_weight = sum(w for _, _, w in components)
-    total_reward = sum(score * w for _, score, w in components) / total_weight
-
-    details["total_reward"] = total_reward
-    details["reward_mode"] = mode
-    return total_reward, details
+    scored = score_generated_candidates(
+        model=model,
+        processor=processor,
+        images=[image],
+        prompt=prompt,
+        questions=questions,
+        expected_answers=expected_answers,
+        device=device,
+        config=config,
+        spec_quality=1.0,
+    )
+    if not scored:
+        return 0.0, {}
+    details = dict(scored[0])
+    reward = float(details.get("total_reward", 0.0))
+    return reward, details
