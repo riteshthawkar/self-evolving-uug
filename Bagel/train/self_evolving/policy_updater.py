@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from modeling.bagel.runtime_precision import autocast_context
@@ -457,6 +458,12 @@ def _build_generation_train_batch(
         dtype=torch.float32,
         device=mask_device,
     )
+    latent_token_dim = int(model.latent_patch_size) * int(model.latent_patch_size) * int(model.latent_channel)
+    packed_noise = torch.randn(
+        (num_latent_tokens, latent_token_dim),
+        dtype=padded_latent.dtype,
+        device=runtime.device,
+    )
     mse_loss_indexes = packed_vae_token_indexes.clone()
 
     return {
@@ -473,6 +480,7 @@ def _build_generation_train_batch(
         "packed_latent_position_ids": vae_inputs["packed_vae_position_ids"],
         "packed_vae_token_indexes": packed_vae_token_indexes,
         "packed_timesteps": packed_timesteps,
+        "packed_noise": packed_noise,
         "mse_loss_indexes": mse_loss_indexes,
     }
 
@@ -522,6 +530,7 @@ class BagelRolePolicyUpdater:
         self.adapter_name = str(adapter_name or "")
         self.update_method = cfg.normalized_update_method()
         self.grad_accum_steps = max(1, int(cfg.policy_grad_accum_steps))
+        self.kl_coef = float(cfg.kl_coef)
         self.step_id = 0
         self._accum_count = 0
         self._has_grad_window = False
@@ -563,6 +572,7 @@ class BagelRolePolicyUpdater:
     def state_dict(self) -> Dict:
         return {
             "optimizer": self.optimizer.state_dict(),
+            "kl_coef": float(self.kl_coef),
             "step_id": int(self.step_id),
             "accum_count": int(self._accum_count),
             "has_grad_window": bool(self._has_grad_window),
@@ -577,6 +587,8 @@ class BagelRolePolicyUpdater:
             return
         if "optimizer" in state:
             self.optimizer.load_state_dict(state["optimizer"])
+        if "kl_coef" in state:
+            self.kl_coef = float(state["kl_coef"])
         self.step_id = int(state.get("step_id", self.step_id))
         self._accum_count = int(state.get("accum_count", self._accum_count))
         self._has_grad_window = bool(state.get("has_grad_window", self._has_grad_window))
@@ -593,6 +605,13 @@ class BagelRolePolicyUpdater:
         self.optimizer.zero_grad(set_to_none=True)
         self._accum_count = 0
         self._has_grad_window = False
+
+    def _adapt_beta(self, kl_val: float) -> None:
+        target = max(float(self.cfg.kl_target), 1e-8)
+        delta = (float(kl_val) - target) / target
+        beta = float(self.kl_coef) * math.exp(float(self.cfg.kl_adapt_rate) * delta)
+        beta = max(float(self.cfg.kl_min), min(float(self.cfg.kl_max), beta))
+        self.kl_coef = float(beta)
 
     def finalize(self) -> bool:
         """Flush pending accumulated gradients; returns whether optimizer stepped."""
@@ -791,10 +810,26 @@ class BagelRolePolicyUpdater:
                 loss_value = 0.0
 
                 try:
+                    ref_logits = None
+                    model.config.visual_und = bool(include_image)
+                    model.train(False)
+                    with torch.no_grad():
+                        with use_adapter(self.runtime.model.language_model, None):
+                            with autocast_context(self.runtime.device, enabled=autocast_enabled):
+                                ref_outputs = model(
+                                    **batch,
+                                    return_ce_logits=True,
+                                )
+                                ref_logits = ref_outputs.get("ce_logits", None)
+
+                    model.train(True)
                     with use_adapter(self.runtime.model.language_model, self.adapter_name):
                         model.config.visual_und = bool(include_image)
                         with autocast_context(self.runtime.device, enabled=autocast_enabled):
-                            outputs = model(**batch)
+                            outputs = model(
+                                **batch,
+                                return_ce_logits=True,
+                            )
                             ce_loss = outputs.get("ce", None)
                             if ce_loss is None or int(ce_loss.numel()) <= 0:
                                 return PolicyStepResult(
@@ -810,9 +845,24 @@ class BagelRolePolicyUpdater:
                                     token_count=token_count,
                                 ).to_dict()
                             ce_mean = ce_loss.mean()
-                            loss = ce_mean * float(advantage)
+                            pi_logits = outputs.get("ce_logits", None)
+                            if (
+                                ref_logits is not None
+                                and pi_logits is not None
+                                and int(ref_logits.numel()) > 0
+                                and int(pi_logits.numel()) > 0
+                            ):
+                                logp_pi = F.log_softmax(pi_logits, dim=-1)
+                                logp_ref = F.log_softmax(ref_logits, dim=-1)
+                                kl_loss = (logp_pi.exp() * (logp_pi - logp_ref)).sum(dim=-1).mean()
+                                kl_loss = kl_loss.to(dtype=ce_mean.dtype)
+                            else:
+                                kl_loss = torch.zeros((), device=ce_mean.device, dtype=ce_mean.dtype)
+                            beta_before = float(self.kl_coef)
+                            loss = (-float(advantage)) * ce_mean + beta_before * kl_loss
 
                         if not bool(torch.isfinite(loss.detach()).all().item()):
+                            kl_value = float(kl_loss.detach().item()) if "kl_loss" in locals() else 0.0
                             return PolicyStepResult(
                                 skipped=True,
                                 reason="non_finite_loss",
@@ -824,9 +874,14 @@ class BagelRolePolicyUpdater:
                                 grad_norm=0.0,
                                 optimizer_step_applied=False,
                                 token_count=token_count,
-                            ).to_dict()
+                            ).to_dict() | {
+                                "kl_loss": float(kl_value),
+                                "kl_coef_before": float(beta_before),
+                                "kl_coef_after": float(self.kl_coef),
+                            }
 
                         ce_value = float(ce_mean.detach().item())
+                        kl_value = float(kl_loss.detach().item())
                         loss_value = float(loss.detach().item())
                         scaled_loss = loss / float(self.grad_accum_steps)
                         scaled_loss.backward()
@@ -844,6 +899,7 @@ class BagelRolePolicyUpdater:
                             opt_step = True
                             self._reset_grad_window()
 
+                    self._adapt_beta(kl_value)
                     self._consecutive_oom = 0
                     self._consecutive_runtime_fail = 0
                     return PolicyStepResult(
@@ -857,7 +913,11 @@ class BagelRolePolicyUpdater:
                         grad_norm=float(grad_norm),
                         optimizer_step_applied=bool(opt_step),
                         token_count=token_count,
-                    ).to_dict()
+                    ).to_dict() | {
+                        "kl_loss": float(kl_value),
+                        "kl_coef_before": float(beta_before),
+                        "kl_coef_after": float(self.kl_coef),
+                    }
                 except RuntimeError as exc:
                     msg = str(exc).lower()
                     oom_like = _is_oom_like_error(msg)
@@ -946,7 +1006,11 @@ class BagelRolePolicyUpdater:
                         grad_norm=0.0,
                         optimizer_step_applied=False,
                         token_count=token_count,
-                    ).to_dict()
+                    ).to_dict() | {
+                        "kl_loss": 0.0,
+                        "kl_coef_before": float(self.kl_coef),
+                        "kl_coef_after": float(self.kl_coef),
+                    }
         finally:
             model.config.visual_gen = prev_visual_gen
             model.config.visual_und = prev_visual_und
@@ -966,7 +1030,11 @@ class BagelRolePolicyUpdater:
             grad_norm=0.0,
             optimizer_step_applied=False,
             token_count=token_count,
-        ).to_dict()
+        ).to_dict() | {
+            "kl_loss": 0.0,
+            "kl_coef_before": float(self.kl_coef),
+            "kl_coef_after": float(self.kl_coef),
+        }
 
 
 class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
@@ -1109,9 +1177,24 @@ class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
                 opt_step = False
 
                 try:
+                    ref_preds = None
+                    model.train(False)
+                    with torch.no_grad():
+                        with use_adapter(self.runtime.model.language_model, None):
+                            with autocast_context(self.runtime.device, enabled=autocast_enabled):
+                                ref_outputs = model(
+                                    **batch,
+                                    return_mse_preds=True,
+                                )
+                                ref_preds = ref_outputs.get("mse_preds", None)
+
+                    model.train(True)
                     with use_adapter(self.runtime.model.language_model, self.adapter_name):
                         with autocast_context(self.runtime.device, enabled=autocast_enabled):
-                            outputs = model(**batch)
+                            outputs = model(
+                                **batch,
+                                return_mse_preds=True,
+                            )
                             mse = outputs.get("mse", None)
                             if mse is None or int(mse.numel()) <= 0:
                                 out = PolicyStepResult(
@@ -1127,10 +1210,25 @@ class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
                                     token_count=token_count,
                                 ).to_dict()
                                 out["mse_loss"] = 0.0
+                                out["kl_loss"] = 0.0
+                                out["kl_coef_before"] = float(self.kl_coef)
+                                out["kl_coef_after"] = float(self.kl_coef)
                                 out["objective"] = "mse"
                                 return out
                             mse_mean = mse.mean()
-                            loss = mse_mean * float(advantage)
+                            pi_preds = outputs.get("mse_preds", None)
+                            if (
+                                ref_preds is not None
+                                and pi_preds is not None
+                                and int(ref_preds.numel()) > 0
+                                and int(pi_preds.numel()) > 0
+                            ):
+                                kl_loss = F.mse_loss(pi_preds, ref_preds, reduction="mean")
+                                kl_loss = kl_loss.to(dtype=mse_mean.dtype)
+                            else:
+                                kl_loss = torch.zeros((), device=mse_mean.device, dtype=mse_mean.dtype)
+                            beta_before = float(self.kl_coef)
+                            loss = mse_mean * float(advantage) + beta_before * kl_loss
 
                         if not bool(torch.isfinite(loss.detach()).all().item()):
                             out = PolicyStepResult(
@@ -1146,10 +1244,14 @@ class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
                                 token_count=token_count,
                             ).to_dict()
                             out["mse_loss"] = float(mse_mean.detach().item())
+                            out["kl_loss"] = float(kl_loss.detach().item())
+                            out["kl_coef_before"] = float(beta_before)
+                            out["kl_coef_after"] = float(self.kl_coef)
                             out["objective"] = "mse"
                             return out
 
                         mse_value = float(mse_mean.detach().item())
+                        kl_value = float(kl_loss.detach().item())
                         loss_value = float(loss.detach().item())
                         scaled_loss = loss / float(self.grad_accum_steps)
                         scaled_loss.backward()
@@ -1167,6 +1269,7 @@ class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
                             opt_step = True
                             self._reset_grad_window()
 
+                    self._adapt_beta(kl_value)
                     self._consecutive_oom = 0
                     self._consecutive_runtime_fail = 0
                     out = PolicyStepResult(
@@ -1182,6 +1285,9 @@ class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
                         token_count=token_count,
                     ).to_dict()
                     out["mse_loss"] = float(mse_value)
+                    out["kl_loss"] = float(kl_value)
+                    out["kl_coef_before"] = float(beta_before)
+                    out["kl_coef_after"] = float(self.kl_coef)
                     out["objective"] = "mse"
                     return out
                 except RuntimeError as exc:
@@ -1240,6 +1346,9 @@ class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
                         token_count=token_count,
                     ).to_dict()
                     out["mse_loss"] = float(mse_value)
+                    out["kl_loss"] = 0.0
+                    out["kl_coef_before"] = float(self.kl_coef)
+                    out["kl_coef_after"] = float(self.kl_coef)
                     out["objective"] = "mse"
                     return out
         finally:
@@ -1260,5 +1369,8 @@ class BagelGeneratorPolicyUpdater(BagelRolePolicyUpdater):
             token_count=token_count,
         ).to_dict()
         out["mse_loss"] = 0.0
+        out["kl_loss"] = 0.0
+        out["kl_coef_before"] = float(self.kl_coef)
+        out["kl_coef_after"] = float(self.kl_coef)
         out["objective"] = "mse"
         return out

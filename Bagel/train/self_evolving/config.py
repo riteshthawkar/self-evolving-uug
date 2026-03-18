@@ -78,15 +78,16 @@ class RolloutConfig:
     # Persist all raw generations for debugging.
     save_raw_generations: bool = True
 
-    # SUDER-style generation phase (proposer joint reward on generated images).
+    # Generation phase (BLIP-style candidate scoring on generated images).
     suder_generation_enabled: bool = False
     max_new_tokens_gen_spec: int = 384
     gen_spec_temperature: float = 0.9
     gen_spec_min_qa_pairs: int = 2
     proposer_gen_entropy_weight: float = 0.7
     proposer_gen_baseline_momentum: float = 0.6
+    generation_num_candidates: int = 3
 
-    # Generation inference controls for SUDER rollout.
+    # Generation inference controls.
     generation_cfg_text_scale: float = 4.0
     generation_cfg_img_scale: float = 1.5
     generation_num_timesteps: int = 50
@@ -94,17 +95,32 @@ class RolloutConfig:
     generation_image_size: int = 1024
     save_generated_images: bool = False
 
+    # BLIP-style generation reward weights / gates.
+    reward_spec_weight: float = 0.65
+    reward_cycle_weight: float = 0.20
+    reward_diversity_weight: float = 0.10
+    reward_contradiction_weight: float = 0.20
+    min_spec_quality_for_update: float = 0.35
+    min_spec_qa_pairs: int = 2
+    max_expected_words: int = 8
+    max_question_words: int = 24
+
     # Policy update (phase-2 training) knobs.
     policy_updates_enabled: bool = False
-    policy_update_method: str = "reinforce"  # reinforce|grpo
+    policy_update_method: str = "grpo"  # reinforce|grpo
     policy_use_bf16: bool = True
-    policy_lr: float = 2e-5
-    policy_weight_decay: float = 0.0
+    policy_lr: float = 1e-6
+    policy_weight_decay: float = 0.01
     policy_max_grad_norm: float = 1.0
     policy_grad_accum_steps: int = 1
     policy_reward_scale: float = 1.0
-    baseline_momentum: float = 0.9
+    baseline_momentum: float = 0.6
     grpo_eps: float = 1e-6
+    kl_coef: float = 0.01
+    kl_target: float = 0.02
+    kl_adapt_rate: float = 0.10
+    kl_min: float = 0.001
+    kl_max: float = 1e2
     solver_reward_mix_gamma: float = 0.7
     solver_skip_easy_updates: bool = False
     solver_easy_update_majority_threshold: float = 0.98
@@ -121,18 +137,18 @@ class RolloutConfig:
     generation_steps_per_cycle: int = 2
 
     # Generation -> understanding feedback loop.
-    replay_buffer_size: int = 1000
-    replay_min_reward: float = 0.5
-    replay_max_staleness: int = 500
+    replay_buffer_size: int = 1
+    replay_min_reward: float = 1.10
+    replay_max_staleness: int = 1
     gen_mix_source_mode: str = "buffer"  # buffer|folder
     generated_mix_dir: str = ""
     generated_mix_min_reward: float = 0.5
     generated_mix_max_files: int = 5000
     generated_mix_refresh_every: int = 10
     understanding_generated_only: bool = False
-    gen_mix_ratio_start: float = 0.02
-    gen_mix_ratio_max: float = 0.25
-    gen_mix_ratio_warmup_steps: int = 1000
+    gen_mix_ratio_start: float = 0.0
+    gen_mix_ratio_max: float = 0.0
+    gen_mix_ratio_warmup_steps: int = 1
     reward_ema_momentum: float = 0.95
 
     # Proposer framework parity knobs (progressively wired in trainer updates).

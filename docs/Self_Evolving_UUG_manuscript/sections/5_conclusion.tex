@@ -1,6 +1,29 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-We presented a self-evolving framework for unified understanding and generation models that uses only unlabeled images and no external supervision. The method decomposes a frozen backbone into three LoRA-based roles (Proposer, Solver, Generator), uses STE for continuous difficulty-aware understanding feedback, and uses Solver-driven QA fidelity with cycle-consistent captioning for generation training. Across BLIP3o, BAGEL, and VARGPT$_{1.1}$, this single framework improves understanding metrics by +2.0 to +3.6 points over base checkpoints and improves GenEval by +0.03 on every backbone. These results support the central objective of this work: model-agnostic, unsupervised self-evolution for jointly improving understanding and generation.
+We introduced a self-evolving framework for unified visual understanding and image generation that uses only unlabeled images and no external reward model. By decomposing a frozen backbone into three LoRA-based roles (Proposer, Solver, and Generator) and deriving all training signals from internal consistency, the framework achieves +1.9 to +3.6 on visual understanding benchmarks and +3\% GenEval across BLIP3o-8B, BAGEL-7B, and VARGPT-v1.1, with one matched training recipe and no architecture-specific tuning. Ablations confirm that both visual understanding signals (STE, self-consistency) and both image generation signals (QA fidelity, cycle-consistency) contribute independently, while loop coupling analysis shows that the Solver's dual role produces genuine cross-task synergy exceeding either loop in isolation.
 
-\noindent\textbf{Limitations.} The framework uses understanding as the sole evaluator for generation, bounding assessment by the Solver's perceptual capability. Investigating longer training horizons and conditions under which self-improvement saturates, as well as extending to additional modalities such as video, remain important future directions.
+Image generation supervision is inherently bounded by Solver quality, and GenEval does not fully capture perceptual dimensions such as texture fidelity or aesthetic preference. These results suggest that unsupervised self-evolution provides a principled and generalizable pathway toward improving unified models, with longer training horizons, stronger internal evaluators, and extension to video and 3D settings as natural next steps.
+
+% =====================================================================
+% COMMENTED-OUT: Extended conclusion content for journal version.
+% =====================================================================
+%
+% \paragraph{Broader implications.}
+% The self-evolving framework demonstrates that post-training improvement
+% is achievable without additional human annotation, which has implications
+% for democratizing model improvement: teams without access to large-scale
+% annotation pipelines can still improve model capabilities. However, this
+% same property means that the framework could be applied without oversight
+% to models with biased pretraining data, potentially amplifying existing
+% biases. Future work should investigate bias propagation dynamics under
+% self-evolving training.
+%
+% Additional experiment ideas for future work:
+% - Scaling analysis (2x, 5x, 10x steps) to show saturation curves
+% - Data diversity ablation (domain-specific subsets)
+% - Adapter rank ablation {4, 8, 16, 32, 64}
+% - Prompt perturbation count N in {3, 5, 7, 9, 11}
+% - Additional generation benchmarks (DPG-Bench, T2I-CompBench)
+% - Human evaluation study comparing base vs. self-evolved generations
+% - Cross-task correlation analysis (understanding category vs. GenEval subcategory)

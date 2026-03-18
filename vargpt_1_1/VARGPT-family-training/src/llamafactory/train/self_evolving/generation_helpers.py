@@ -390,6 +390,72 @@ def _parse_generation_spec(raw_text: str) -> GenerationSpec:
     )
 
 
+def sanitize_and_score_generation_spec(
+    spec: GenerationSpec,
+    *,
+    min_spec_qa_pairs: int,
+    max_question_words: int,
+    max_expected_words: int,
+) -> Tuple[GenerationSpec, float, Dict[str, float]]:
+    filtered: List[GenerationQAPair] = []
+    seen_questions = set()
+
+    for qa in spec.qa_pairs:
+        question = " ".join((qa.question or "").split())
+        expected = " ".join((qa.expected or "").split())
+        if question and not question.endswith("?"):
+            question = f"{question}?"
+
+        q_words = len(_tokenize_words(question))
+        e_words = len(_tokenize_words(expected))
+        is_valid = bool(
+            question
+            and expected
+            and q_words <= int(max_question_words)
+            and 1 <= e_words <= int(max_expected_words)
+        )
+        if not is_valid:
+            continue
+
+        q_key = normalize_answer(question)
+        if q_key in seen_questions:
+            continue
+        seen_questions.add(q_key)
+        filtered.append(GenerationQAPair(question=question, expected=expected))
+
+    filtered = filtered[:3]
+    qa_count = len(filtered)
+    raw_count = len(spec.qa_pairs)
+
+    count_score = min(1.0, qa_count / float(max(1, int(min_spec_qa_pairs))))
+    validity_score = qa_count / float(max(1, raw_count))
+    uniqueness_score = len({normalize_answer(qa.question) for qa in filtered}) / float(max(1, qa_count))
+    all_yes_no = qa_count > 0 and all(_yes_no_polarity(qa.expected) != 0 for qa in filtered)
+    yes_no_penalty = 0.2 if all_yes_no and qa_count >= int(min_spec_qa_pairs) else 0.0
+
+    quality = 0.5 * count_score + 0.3 * validity_score + 0.2 * uniqueness_score - yes_no_penalty
+    quality = float(max(0.0, min(1.0, quality)))
+
+    sanitized = GenerationSpec(
+        prompt=" ".join((spec.prompt or "").split()),
+        qa_pairs=tuple(filtered),
+        raw_output=spec.raw_output,
+        fallback_used=spec.fallback_used or (qa_count < int(min_spec_qa_pairs)),
+    )
+    details = {
+        "raw_qa_count": float(raw_count),
+        "filtered_qa_count": float(qa_count),
+        "count_score": float(count_score),
+        "validity_score": float(validity_score),
+        "uniqueness_score": float(uniqueness_score),
+        "yes_no_penalty": float(yes_no_penalty),
+        "spec_quality": float(quality),
+        "raw_prompt_words": float(len(_tokenize_words(spec.prompt))),
+        "sanitized_prompt_words": float(len(_tokenize_words(sanitized.prompt))),
+    }
+    return sanitized, quality, details
+
+
 def _prepare_text_inputs(processor, device: torch.device, text: str):
     inputs = processor(text=[text], return_tensors="pt", padding=True)
     return inputs.to(device)

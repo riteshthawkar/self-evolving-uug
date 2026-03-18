@@ -38,11 +38,17 @@ from .prompts import (
 )
 from .rewards import (
     answer_match_score,
+    clip_similarity,
+    clip_text_similarity,
     compute_dual_track_reward,
-    compute_suder_joint_reward,
+    compute_generation_spec_quality,
+    gaussian_reward,
     majority_vote,
     normalize_answer,
+    per_candidate_diversity_scores,
     shannon_entropy_nats,
+    soft_match_score,
+    yes_no_polarity,
 )
 from .rollout_adapter import BagelRolloutAdapter
 
@@ -65,6 +71,13 @@ def _list_images(image_dir: str) -> List[str]:
 
 
 def _write_jsonl(path: str, record: Dict) -> None:
+    world_size = int(os.environ.get("WORLD_SIZE", "1") or "1")
+    if world_size > 1:
+        per_rank_output = str(os.environ.get("BAGEL_DIST_PER_RANK_OUTPUT", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        if not per_rank_output:
+            rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")) or "0")
+            if rank != 0:
+                return
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -146,7 +159,7 @@ class SelfEvolvingUnderstandingTrainer:
         # - BAGEL_OUTPUT_DIR_MODE=direct: write logs/checkpoints directly in output_root
         # - BAGEL_OUTPUT_DIR_MODE=timestamp (default): create per-run timestamp folder
         mode = str(os.environ.get("BAGEL_OUTPUT_DIR_MODE", "timestamp")).strip().lower()
-        per_rank_output = str(os.environ.get("BAGEL_DIST_PER_RANK_OUTPUT", "1")).strip().lower() in {"1", "true", "yes", "on"}
+        per_rank_output = str(os.environ.get("BAGEL_DIST_PER_RANK_OUTPUT", "0")).strip().lower() in {"1", "true", "yes", "on"}
         rank_suffix = ""
         if self.dist_enabled and self.dist_world_size > 1 and per_rank_output:
             rank_suffix = f"rank_{int(self.dist_rank):02d}"
@@ -163,7 +176,17 @@ class SelfEvolvingUnderstandingTrainer:
         os.makedirs(run_dir, exist_ok=True)
         return run_dir
 
+    def _should_write_artifacts(self) -> bool:
+        if not self.dist_enabled or self.dist_world_size <= 1:
+            return True
+        per_rank_output = str(os.environ.get("BAGEL_DIST_PER_RANK_OUTPUT", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        if per_rank_output:
+            return True
+        return int(self.dist_rank) == 0
+
     def _persist_config(self) -> None:
+        if not self._should_write_artifacts():
+            return
         payload = asdict(self.cfg)
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -201,9 +224,13 @@ class SelfEvolvingUnderstandingTrainer:
         }
 
     def _append_metrics(self, record: Dict) -> None:
+        if not self._should_write_artifacts():
+            return
         _write_jsonl(self.metrics_log_path, record)
 
     def _write_status(self, *, state: str, progress: Dict, metrics: Dict, last_error: str = "") -> None:
+        if not self._should_write_artifacts():
+            return
         payload = {
             "state": str(state),
             "output_dir": str(self.output_dir),
@@ -265,6 +292,186 @@ class SelfEvolvingUnderstandingTrainer:
         entropy = shannon_entropy_nats(probs)
         return float(entropy), float(maj_frac), str(maj_answer)
 
+    def _mean_entropy_from_qa_logs(self, qa_logs: List[Dict]) -> float:
+        entropy_vals = []
+        for qa_log in qa_logs:
+            if str(qa_log.get("status", "")) != "ok":
+                continue
+            entropy = qa_log.get("entropy_nats")
+            if entropy is not None:
+                entropy_vals.append(float(entropy))
+        return _mean(entropy_vals)
+
+    def _qa_confidence_from_logs(self, qa_logs: List[Dict]) -> float:
+        confidences = []
+        for qa_log in qa_logs:
+            if str(qa_log.get("status", "")) != "ok":
+                continue
+            majority_fraction = qa_log.get("majority_fraction")
+            if majority_fraction is not None:
+                confidences.append(float(majority_fraction))
+        return _mean(confidences)
+
+    def _cycle_reward(self, *, prompt: str, image: Image.Image) -> Tuple[float, str]:
+        caption_out = self.adapter.caption_image(
+            image=image,
+            max_new_tokens=int(getattr(self.cfg, "max_new_tokens_solver", 96)),
+            temperature=max(0.2, min(float(self.cfg.proposer_temperature), 0.8)),
+            do_sample=False,
+        )
+        caption = " ".join(str(caption_out.text or "").split())
+        caption_sim = clip_text_similarity(prompt, caption) if caption else 0.0
+        image_text_sim = clip_similarity(image, prompt)
+        score = 0.5 * float(caption_sim) + 0.5 * float(image_text_sim)
+        return _clamp01(score), caption
+
+    def _score_generation_candidate(
+        self,
+        *,
+        generated: Image.Image,
+        spec,
+        solver_temps: List[float],
+    ) -> Tuple[float, float, List[Dict]]:
+        qa_logs: List[Dict] = []
+        score_values: List[float] = []
+        contradiction_values: List[float] = []
+
+        for qa_idx, qa in enumerate(spec.qa_pairs):
+            solver_outputs_raw: List[str] = []
+            solver_answers_norm: List[str] = []
+            for temp in solver_temps:
+                out = self.adapter.solve_question(
+                    image=generated,
+                    question=qa.question,
+                    max_new_tokens=self.cfg.max_new_tokens_solver,
+                    temperature=float(temp),
+                    do_sample=True,
+                )
+                solver_outputs_raw.append(out.text)
+                answer = normalize_answer(parse_answer(out.text))
+                if answer:
+                    solver_answers_norm.append(answer)
+
+            expected_answer = normalize_answer(qa.answer)
+            if not solver_answers_norm:
+                qa_logs.append(
+                    {
+                        "qa_index": int(qa_idx),
+                        "status": "skipped",
+                        "skip_reason": "empty_solver_answers",
+                        "question": qa.question,
+                        "expected_answer": expected_answer,
+                        "solver_outputs_raw": solver_outputs_raw if self.cfg.save_raw_generations else [],
+                    }
+                )
+                continue
+
+            entropy_nats, majority_fraction, majority_answer = self._compute_solver_entropy_and_majority(
+                solver_answers_norm
+            )
+            match_score = soft_match_score(majority_answer, expected_answer)
+            combined_score = 0.7 * float(match_score) + 0.3 * float(majority_fraction)
+            contradiction = 1.0 if (
+                yes_no_polarity(expected_answer) != 0
+                and yes_no_polarity(majority_answer) != 0
+                and yes_no_polarity(expected_answer) != yes_no_polarity(majority_answer)
+            ) else 0.0
+
+            score_values.append(float(combined_score))
+            contradiction_values.append(float(contradiction))
+            qa_logs.append(
+                {
+                    "qa_index": int(qa_idx),
+                    "status": "ok",
+                    "question": qa.question,
+                    "expected_answer": expected_answer,
+                    "majority_answer": majority_answer,
+                    "majority_fraction": float(majority_fraction),
+                    "entropy_nats": float(entropy_nats),
+                    "match_score": float(match_score),
+                    "combined_score": float(combined_score),
+                    "contradiction": float(contradiction),
+                    "solver_answers_norm": solver_answers_norm,
+                    "solver_outputs_raw": solver_outputs_raw if self.cfg.save_raw_generations else [],
+                }
+            )
+
+        spec_score = _mean(score_values)
+        contradiction_score = _mean(contradiction_values)
+        return float(spec_score), float(contradiction_score), qa_logs
+
+    def _run_generation_solver_policy_updates(
+        self,
+        *,
+        generated: Image.Image,
+        spec,
+        solver_temps: List[float],
+    ) -> Tuple[int, int, List[Dict], List[float]]:
+        gen_solver_update_enabled = bool(
+            getattr(self.cfg, "gen_step_solver_update_enabled", False)
+            and self.policy_updates_enabled
+            and self.cfg.train_solver
+            and self.solver_updater is not None
+        )
+        max_gen_solver_updates = max(
+            0,
+            int(
+                os.environ.get(
+                    "BAGEL_GEN_SOLVER_POLICY_MAX_SAMPLES",
+                    os.environ.get("BAGEL_SOLVER_POLICY_MAX_SAMPLES", "0"),
+                )
+                or "0"
+            ),
+        )
+        if not gen_solver_update_enabled:
+            return 0, 0, [], []
+
+        attempts = 0
+        applied = 0
+        update_stats: List[Dict] = []
+        reward_values: List[float] = []
+
+        for qa in spec.qa_pairs:
+            solver_samples: List[Tuple[str, str]] = []
+            for temp in solver_temps:
+                out = self.adapter.solve_question(
+                    image=generated,
+                    question=qa.question,
+                    max_new_tokens=self.cfg.max_new_tokens_solver,
+                    temperature=float(temp),
+                    do_sample=True,
+                )
+                answer = normalize_answer(parse_answer(out.text))
+                if answer:
+                    solver_samples.append((out.text, answer))
+            if not solver_samples:
+                continue
+
+            expected_answer = normalize_answer(qa.answer)
+            solver_prompt = build_solver_prompt(qa.question)
+            group_rewards = [
+                float(answer_match_score(sample_answer, expected_answer))
+                for _, sample_answer in solver_samples
+            ]
+            for idx, (sample_raw, _) in enumerate(solver_samples):
+                if max_gen_solver_updates > 0 and int(attempts) >= int(max_gen_solver_updates):
+                    break
+                sample_reward = float(group_rewards[idx]) if idx < len(group_rewards) else 0.0
+                stats = self.solver_updater.step(
+                    image=generated,
+                    prompt=solver_prompt,
+                    completion=sample_raw,
+                    reward=sample_reward,
+                    baseline=self.solver_baseline,
+                    group_rewards=group_rewards,
+                )
+                update_stats.append(stats)
+                attempts += 1
+                if not bool(stats.get("skipped", True)):
+                    applied += 1
+                reward_values.append(sample_reward)
+        return int(attempts), int(applied), update_stats, reward_values
+
     def _init_policy_updaters(self) -> None:
         if not bool(self.runtime.lora_enabled):
             raise RuntimeError(
@@ -300,6 +507,9 @@ class SelfEvolvingUnderstandingTrainer:
         if p.is_file():
             return str(p)
         if p.is_dir():
+            trainer_state = p / "trainer_state.pt"
+            if trainer_state.is_file():
+                return str(trainer_state)
             if p.name.endswith("_lora"):
                 base_name = p.name[: -len("_lora")]
                 sibling = p.with_name(f"{base_name}.pt")
@@ -397,6 +607,8 @@ class SelfEvolvingUnderstandingTrainer:
     def _save_checkpoint(self, step: int) -> str:
         if not self.policy_updates_enabled:
             return ""
+        if not self._should_write_artifacts():
+            return self.last_checkpoint_path
 
         role_ckpt_dir = self._save_role_adapter_checkpoint(step)
 
@@ -423,9 +635,61 @@ class SelfEvolvingUnderstandingTrainer:
         path = os.path.join(self.checkpoint_dir, f"step_{int(step):06d}.pt")
         torch.save(payload, path)
         self.last_checkpoint_path = path
+        standardized_dir = self._sync_standard_checkpoint_dir(step=step, checkpoint_path=Path(path), lora_dir=Path(role_ckpt_dir) if role_ckpt_dir else None)
         with open(os.path.join(self.checkpoint_dir, "latest.txt"), "w", encoding="utf-8") as f:
-            f.write(path + "\n")
+            f.write((standardized_dir or path) + "\n")
         return path
+
+    @staticmethod
+    def _remove_path(path: Path) -> None:
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+
+    @staticmethod
+    def _link_or_copy(src: Path, dst: Path) -> None:
+        try:
+            rel_src = os.path.relpath(str(src), str(dst.parent))
+            os.symlink(rel_src, str(dst), target_is_directory=src.is_dir())
+            return
+        except Exception:
+            pass
+
+        if src.is_dir():
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+
+    def _sync_standard_checkpoint_dir(
+        self,
+        *,
+        step: int,
+        checkpoint_path: Path,
+        lora_dir: Optional[Path],
+    ) -> str:
+        alias_dir = Path(self.checkpoint_dir) / f"step_{int(step):06d}"
+        tmp_dir = Path(self.checkpoint_dir) / f".{alias_dir.name}.tmp"
+        self._remove_path(tmp_dir)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        self._link_or_copy(checkpoint_path, tmp_dir / "trainer_state.pt")
+        if lora_dir is not None and lora_dir.exists():
+            self._link_or_copy(lora_dir, tmp_dir / "lora_roles")
+        with (tmp_dir / "checkpoint_target.json").open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "step": int(step),
+                    "trainer_state_path": str(checkpoint_path),
+                    "lora_roles_dir": str(lora_dir) if lora_dir is not None else "",
+                },
+                f,
+                indent=2,
+            )
+
+        self._remove_path(alias_dir)
+        os.replace(str(tmp_dir), str(alias_dir))
+        return str(alias_dir)
 
     def _load_checkpoint(self, path: str) -> int:
         ckpt_path = self._resolve_checkpoint_path(path)
@@ -555,6 +819,13 @@ class SelfEvolvingUnderstandingTrainer:
                 "spec_retry_count": int(spec_retry_count),
             }
 
+        spec_quality, spec_quality_details = compute_generation_spec_quality(
+            qa_pairs=list(spec.qa_pairs),
+            min_spec_qa_pairs=int(getattr(self.cfg, "min_spec_qa_pairs", self.cfg.gen_spec_min_qa_pairs)),
+            max_question_words=int(getattr(self.cfg, "max_question_words", 24)),
+            max_expected_words=int(getattr(self.cfg, "max_expected_words", 8)),
+        )
+
         max_spec_prompt_chars = max(
             64,
             int(os.environ.get("BAGEL_MAX_SPEC_PROMPT_CHARS", "384") or "384"),
@@ -567,15 +838,21 @@ class SelfEvolvingUnderstandingTrainer:
             clipped_ws = clipped.rsplit(" ", 1)[0].strip()
             gen_spec_prompt = clipped_ws if clipped_ws else clipped.strip()
 
-        generated = self.adapter.generate_image_from_spec(
-            spec=gen_spec_prompt,
-            cfg_text_scale=float(self.cfg.generation_cfg_text_scale),
-            cfg_img_scale=float(self.cfg.generation_cfg_img_scale),
-            num_timesteps=int(self.cfg.generation_num_timesteps),
-            timestep_shift=float(self.cfg.generation_timestep_shift),
-            image_size=int(self.cfg.generation_image_size),
-        )
-        if generated is None:
+        candidate_images: List[Image.Image] = []
+        generation_num_candidates = max(1, int(getattr(self.cfg, "generation_num_candidates", 1)))
+        for _ in range(generation_num_candidates):
+            generated = self.adapter.generate_image_from_spec(
+                spec=gen_spec_prompt,
+                cfg_text_scale=float(self.cfg.generation_cfg_text_scale),
+                cfg_img_scale=float(self.cfg.generation_cfg_img_scale),
+                num_timesteps=int(self.cfg.generation_num_timesteps),
+                timestep_shift=float(self.cfg.generation_timestep_shift),
+                image_size=int(self.cfg.generation_image_size),
+            )
+            if generated is not None:
+                candidate_images.append(generated)
+
+        if not candidate_images:
             return {
                 "step": int(step),
                 "status": "skipped",
@@ -585,22 +862,131 @@ class SelfEvolvingUnderstandingTrainer:
                 "qa_pair_count": len(spec.qa_pairs),
                 "proposer_spec_raw": spec_out.text if self.cfg.save_raw_generations else "",
                 "spec_prompt_truncated": bool(spec_prompt_truncated),
+                "spec_quality": float(spec_quality),
+                "spec_quality_details": spec_quality_details,
                 "policy_update_attempted": False,
                 "policy_update_applied": False,
                 "policy_update_reason": "generation_failed",
             }
 
-        generated_image_path = ""
+        generated_image_paths: List[str] = []
         if self.cfg.save_generated_images:
-            generated_image_path = os.path.join(
-                self.generated_images_dir,
-                f"step_{step:06d}_{_safe_filename(Path(image_path).stem)}.png",
-            )
-            generated.save(generated_image_path)
+            for cand_idx, generated in enumerate(candidate_images):
+                generated_image_path = os.path.join(
+                    self.generated_images_dir,
+                    f"step_{step:06d}_{_safe_filename(Path(image_path).stem)}_cand_{cand_idx:02d}.png",
+                )
+                generated.save(generated_image_path)
+                generated_image_paths.append(generated_image_path)
 
-        qa_logs: List[Dict] = []
-        entropy_vals: List[float] = []
-        match_vals: List[float] = []
+        diversity_scores = per_candidate_diversity_scores(candidate_images)
+        positive_weight_sum = (
+            float(getattr(self.cfg, "reward_spec_weight", 0.65))
+            + float(getattr(self.cfg, "reward_cycle_weight", 0.20))
+            + float(getattr(self.cfg, "reward_diversity_weight", 0.10))
+        )
+        if positive_weight_sum <= 0.0:
+            positive_weight_sum = 1.0
+        weight_spec = float(getattr(self.cfg, "reward_spec_weight", 0.65)) / positive_weight_sum
+        weight_cycle = float(getattr(self.cfg, "reward_cycle_weight", 0.20)) / positive_weight_sum
+        weight_diversity = float(getattr(self.cfg, "reward_diversity_weight", 0.10)) / positive_weight_sum
+
+        scored_candidates: List[Dict] = []
+        for cand_idx, generated in enumerate(candidate_images):
+            spec_score, contradiction_score, qa_logs = self._score_generation_candidate(
+                generated=generated,
+                spec=spec,
+                solver_temps=solver_temps,
+            )
+            cycle_score, cycle_caption = self._cycle_reward(
+                prompt=gen_spec_prompt,
+                image=generated,
+            )
+            diversity_score = float(diversity_scores[cand_idx]) if cand_idx < len(diversity_scores) else 0.0
+            base_reward = (
+                weight_spec * float(spec_score)
+                + weight_cycle * float(cycle_score)
+                + weight_diversity * float(diversity_score)
+                - float(getattr(self.cfg, "reward_contradiction_weight", 0.20)) * float(contradiction_score)
+            )
+            base_reward = _clamp01(base_reward)
+            total_reward = _clamp01(float(spec_quality) * float(base_reward))
+            scored_candidates.append(
+                {
+                    "candidate_idx": int(cand_idx),
+                    "image": generated,
+                    "generated_image_path": (
+                        generated_image_paths[cand_idx] if cand_idx < len(generated_image_paths) else ""
+                    ),
+                    "spec_score": float(spec_score),
+                    "contradiction_score": float(contradiction_score),
+                    "cycle_score": float(cycle_score),
+                    "cycle_caption": cycle_caption,
+                    "diversity_score": float(diversity_score),
+                    "base_reward": float(base_reward),
+                    "total_reward": float(total_reward),
+                    "qa_confidence": float(self._qa_confidence_from_logs(qa_logs)),
+                    "mean_entropy_nats": float(self._mean_entropy_from_qa_logs(qa_logs)),
+                    "qa_logs": qa_logs,
+                }
+            )
+
+        valid_candidates = [
+            candidate for candidate in scored_candidates
+            if any(str(log.get("status", "")) == "ok" for log in candidate.get("qa_logs", []))
+        ]
+        if not valid_candidates:
+            return {
+                "step": int(step),
+                "status": "skipped",
+                "skip_reason": "empty_generation_qa_entropy",
+                "image_path": image_path,
+                "spec_prompt": spec.prompt,
+                "qa_pair_count": len(spec.qa_pairs),
+                "generated_image_path": generated_image_paths[0] if generated_image_paths else "",
+                "generated_image_paths": generated_image_paths,
+                "spec_quality": float(spec_quality),
+                "spec_quality_details": spec_quality_details,
+                "policy_update_attempted": False,
+                "policy_update_applied": False,
+                "policy_update_reason": "empty_generation_qa_entropy",
+                "generation_candidate_rewards": [float(c["total_reward"]) for c in scored_candidates],
+            }
+
+        best = max(
+            valid_candidates,
+            key=lambda candidate: (
+                float(candidate.get("total_reward", 0.0)),
+                float(candidate.get("spec_score", 0.0)),
+                float(candidate.get("cycle_score", 0.0)),
+            ),
+        )
+        best_reward = float(best.get("total_reward", 0.0))
+        mean_entropy = float(best.get("mean_entropy_nats", 0.0))
+        entropy_component = gaussian_reward(
+            mean_entropy,
+            float(self.cfg.proposer_entropy_mu),
+            float(self.cfg.proposer_entropy_sigma),
+        )
+        if mean_entropy <= float(self.cfg.zero_entropy_eps):
+            entropy_component = -max(0.0, float(self.cfg.zero_entropy_reward_cap))
+        quality_component = _clamp01(best_reward)
+        alpha = _clamp01(float(self.cfg.proposer_gen_entropy_weight))
+        proposer_reward = max(
+            -1.0,
+            min(1.0, alpha * float(entropy_component) + (1.0 - alpha) * float(quality_component)),
+        )
+
+        quality_gate_ok = bool(
+            float(spec_quality) >= float(getattr(self.cfg, "min_spec_quality_for_update", 0.35))
+            and len(spec.qa_pairs) >= int(getattr(self.cfg, "min_spec_qa_pairs", self.cfg.gen_spec_min_qa_pairs))
+        )
+
+        proposer_baseline_before = float(self.proposer_gen_baseline)
+        generator_baseline_before = float(self.generator_baseline)
+        proposer_baseline_after = float(self.proposer_gen_baseline)
+        generator_baseline_after = float(self.generator_baseline)
+
         gen_solver_update_enabled = bool(
             getattr(self.cfg, "gen_step_solver_update_enabled", False)
             and self.policy_updates_enabled
@@ -621,136 +1007,25 @@ class SelfEvolvingUnderstandingTrainer:
         gen_solver_update_applied = 0
         gen_solver_update_stats: List[Dict] = []
         gen_solver_reward_values: List[float] = []
-        for qa_idx, qa in enumerate(spec.qa_pairs):
-            solver_outputs_raw: List[str] = []
-            solver_answers_norm: List[str] = []
-            solver_samples: List[Tuple[str, str]] = []
-            for temp in solver_temps:
-                out = self.adapter.solve_question(
-                    image=generated,
-                    question=qa.question,
-                    max_new_tokens=self.cfg.max_new_tokens_solver,
-                    temperature=float(temp),
-                    do_sample=True,
-                )
-                solver_outputs_raw.append(out.text)
-                ans = normalize_answer(parse_answer(out.text))
-                if ans:
-                    solver_answers_norm.append(ans)
-                    solver_samples.append((out.text, ans))
-            if not solver_answers_norm:
-                qa_logs.append(
-                    {
-                        "qa_index": int(qa_idx),
-                        "status": "skipped",
-                        "skip_reason": "empty_solver_answers",
-                        "question": qa.question,
-                        "expected_answer": normalize_answer(qa.answer),
-                        "solver_outputs_raw": solver_outputs_raw if self.cfg.save_raw_generations else [],
-                    }
-                )
-                continue
-
-            entropy_nats, majority_fraction, majority_answer = self._compute_solver_entropy_and_majority(
-                solver_answers_norm
-            )
-            expected_answer = normalize_answer(qa.answer)
-            match_score = answer_match_score(majority_answer, expected_answer)
-            entropy_vals.append(float(entropy_nats))
-            match_vals.append(float(match_score))
-
-            if gen_solver_update_enabled and solver_samples:
-                solver_prompt = build_solver_prompt(qa.question)
-                group_rewards = [
-                    float(answer_match_score(sample_ans, expected_answer))
-                    for _, sample_ans in solver_samples
-                ]
-                for idx, (sample_raw, _) in enumerate(solver_samples):
-                    if (
-                        max_gen_solver_updates > 0
-                        and int(gen_solver_update_attempted) >= int(max_gen_solver_updates)
-                    ):
-                        break
-                    sample_reward = float(group_rewards[idx]) if idx < len(group_rewards) else 0.0
-                    stats = self.solver_updater.step(
-                        image=generated,
-                        prompt=solver_prompt,
-                        completion=sample_raw,
-                        reward=sample_reward,
-                        baseline=self.solver_baseline,
-                        group_rewards=group_rewards,
-                    )
-                    gen_solver_update_stats.append(stats)
-                    gen_solver_update_attempted += 1
-                    if not bool(stats.get("skipped", True)):
-                        gen_solver_update_applied += 1
-                    gen_solver_reward_values.append(sample_reward)
-
-            qa_logs.append(
-                {
-                    "qa_index": int(qa_idx),
-                    "status": "ok",
-                    "question": qa.question,
-                    "expected_answer": expected_answer,
-                    "majority_answer": majority_answer,
-                    "majority_fraction": float(majority_fraction),
-                    "entropy_nats": float(entropy_nats),
-                    "match_score": float(match_score),
-                    "solver_answers_norm": solver_answers_norm,
-                    "solver_outputs_raw": solver_outputs_raw if self.cfg.save_raw_generations else [],
-                }
+        if quality_gate_ok and gen_solver_update_enabled:
+            (
+                gen_solver_update_attempted,
+                gen_solver_update_applied,
+                gen_solver_update_stats,
+                gen_solver_reward_values,
+            ) = self._run_generation_solver_policy_updates(
+                generated=best["image"],
+                spec=spec,
+                solver_temps=solver_temps,
             )
 
-        if gen_solver_update_enabled and gen_solver_reward_values:
+        if gen_solver_reward_values:
             momentum_solver = _clamp01(float(self.cfg.baseline_momentum))
             mean_solver_reward = float(sum(gen_solver_reward_values) / float(len(gen_solver_reward_values)))
             self.solver_baseline = (
                 momentum_solver * float(self.solver_baseline)
                 + (1.0 - momentum_solver) * mean_solver_reward
             )
-
-        if not entropy_vals:
-            return {
-                "step": int(step),
-                "status": "skipped",
-                "skip_reason": "empty_generation_qa_entropy",
-                "image_path": image_path,
-                "spec_prompt": spec.prompt,
-                "qa_pair_count": len(spec.qa_pairs),
-                "generated_image_path": generated_image_path,
-                "qa_logs": qa_logs,
-                "policy_update_attempted": False,
-                "policy_update_applied": False,
-                "policy_update_reason": "empty_generation_qa_entropy",
-                "gen_solver_policy_update_enabled": bool(gen_solver_update_enabled),
-                "gen_solver_policy_update_budget": int(max_gen_solver_updates),
-                "gen_solver_policy_update_attempts": int(gen_solver_update_attempted),
-                "gen_solver_policy_update_applied": int(gen_solver_update_applied),
-            }
-
-        mean_entropy = float(sum(entropy_vals) / float(len(entropy_vals)))
-        quality_component = float(sum(match_vals) / float(max(1, len(match_vals))))
-        joint = compute_suder_joint_reward(
-            mean_entropy_nats=mean_entropy,
-            quality_component=quality_component,
-            entropy_mu=self.cfg.proposer_entropy_mu,
-            entropy_sigma=self.cfg.proposer_entropy_sigma,
-            entropy_weight_alpha=self.cfg.proposer_gen_entropy_weight,
-            zero_entropy_eps=self.cfg.zero_entropy_eps,
-            zero_entropy_reward_cap=self.cfg.zero_entropy_reward_cap,
-        )
-
-        proposer_baseline_before = float(self.proposer_gen_baseline)
-        generator_baseline_before = float(self.generator_baseline)
-        momentum = max(0.0, min(1.0, float(self.cfg.proposer_gen_baseline_momentum)))
-        self.proposer_gen_baseline = (
-            momentum * self.proposer_gen_baseline
-            + (1.0 - momentum) * float(joint.reward)
-        )
-        self.generator_baseline = (
-            momentum * self.generator_baseline
-            + (1.0 - momentum) * float(joint.reward)
-        )
 
         proposer_policy_update_attempted = False
         proposer_policy_update_applied = False
@@ -760,17 +1035,30 @@ class SelfEvolvingUnderstandingTrainer:
             self.policy_updates_enabled
             and self.cfg.train_generation_proposer
             and self.proposer_updater is not None
+            and quality_gate_ok
         ):
             proposer_policy_update_attempted = True
+            proposer_baseline_after = (
+                _clamp01(float(self.cfg.proposer_gen_baseline_momentum)) * float(self.proposer_gen_baseline)
+                + (1.0 - _clamp01(float(self.cfg.proposer_gen_baseline_momentum))) * float(proposer_reward)
+            )
+            self.proposer_gen_baseline = float(proposer_baseline_after)
             proposer_policy_update_stats = self.proposer_updater.step(
                 image=image,
                 prompt=build_generation_spec_prompt(min_qa_pairs=int(self.cfg.gen_spec_min_qa_pairs)),
                 completion=spec_out.text,
-                reward=float(joint.reward),
+                reward=float(proposer_reward),
                 baseline=proposer_baseline_before,
             )
             proposer_policy_update_applied = bool(not proposer_policy_update_stats.get("skipped", True))
             proposer_policy_update_reason = str(proposer_policy_update_stats.get("reason", "unknown"))
+        elif (
+            self.policy_updates_enabled
+            and self.cfg.train_generation_proposer
+            and self.proposer_updater is not None
+            and not quality_gate_ok
+        ):
+            proposer_policy_update_reason = "low_spec_quality"
 
         generator_policy_update_attempted = False
         generator_policy_update_applied = False
@@ -780,16 +1068,30 @@ class SelfEvolvingUnderstandingTrainer:
             self.policy_updates_enabled
             and self.cfg.train_generator
             and self.generator_updater is not None
+            and quality_gate_ok
         ):
             generator_policy_update_attempted = True
+            generator_baseline_after = (
+                _clamp01(float(self.cfg.proposer_gen_baseline_momentum)) * float(self.generator_baseline)
+                + (1.0 - _clamp01(float(self.cfg.proposer_gen_baseline_momentum))) * float(best_reward)
+            )
+            self.generator_baseline = float(generator_baseline_after)
             generator_policy_update_stats = self.generator_updater.step(
-                image=generated,
+                image=best["image"],
                 prompt=gen_spec_prompt,
-                reward=float(joint.reward),
+                reward=float(best_reward),
                 baseline=generator_baseline_before,
+                group_rewards=[float(candidate.get("total_reward", 0.0)) for candidate in valid_candidates],
             )
             generator_policy_update_applied = bool(not generator_policy_update_stats.get("skipped", True))
             generator_policy_update_reason = str(generator_policy_update_stats.get("reason", "unknown"))
+        elif (
+            self.policy_updates_enabled
+            and self.cfg.train_generator
+            and self.generator_updater is not None
+            and not quality_gate_ok
+        ):
+            generator_policy_update_reason = "low_spec_quality"
 
         policy_update_attempted = bool(
             proposer_policy_update_attempted or generator_policy_update_attempted
@@ -798,9 +1100,9 @@ class SelfEvolvingUnderstandingTrainer:
             proposer_policy_update_applied or generator_policy_update_applied
         )
         policy_update_reasons: List[str] = []
-        if proposer_policy_update_attempted:
+        if proposer_policy_update_attempted or proposer_policy_update_reason == "low_spec_quality":
             policy_update_reasons.append(f"proposer:{proposer_policy_update_reason}")
-        if generator_policy_update_attempted:
+        if generator_policy_update_attempted or generator_policy_update_reason == "low_spec_quality":
             policy_update_reasons.append(f"generator:{generator_policy_update_reason}")
         policy_update_reason = "ok" if policy_update_applied else (
             ";".join(policy_update_reasons) if policy_update_reasons else "disabled"
@@ -819,22 +1121,51 @@ class SelfEvolvingUnderstandingTrainer:
             "spec_prompt": spec.prompt,
             "spec_prompt_for_generation": gen_spec_prompt,
             "spec_prompt_truncated": bool(spec_prompt_truncated),
+            "spec_quality": float(spec_quality),
+            "spec_quality_details": spec_quality_details,
             "qa_pair_count": len(spec.qa_pairs),
             "qa_pairs": [{"question": qa.question, "answer": normalize_answer(qa.answer)} for qa in spec.qa_pairs],
             "proposer_spec_raw": spec_out.text if self.cfg.save_raw_generations else "",
-            "generated_image_path": generated_image_path,
-            "qa_logs": qa_logs,
-            "mean_entropy_nats": float(joint.mean_entropy_nats),
-            "entropy_component": float(joint.entropy_component),
-            "quality_component": float(joint.quality_component),
-            "proposer_gen_reward": float(joint.reward),
-            "entropy_weight_alpha": float(joint.entropy_weight_alpha),
+            "generated_image_path": str(best.get("generated_image_path", "")),
+            "generated_image_paths": generated_image_paths,
+            "best_candidate_idx": int(best.get("candidate_idx", 0)),
+            "generation_candidate_rewards": [float(candidate.get("total_reward", 0.0)) for candidate in scored_candidates],
+            "generation_candidate_details": [
+                {
+                    "candidate_idx": int(candidate.get("candidate_idx", 0)),
+                    "generated_image_path": str(candidate.get("generated_image_path", "")),
+                    "spec_score": float(candidate.get("spec_score", 0.0)),
+                    "cycle_score": float(candidate.get("cycle_score", 0.0)),
+                    "diversity_score": float(candidate.get("diversity_score", 0.0)),
+                    "contradiction_score": float(candidate.get("contradiction_score", 0.0)),
+                    "base_reward": float(candidate.get("base_reward", 0.0)),
+                    "total_reward": float(candidate.get("total_reward", 0.0)),
+                    "mean_entropy_nats": float(candidate.get("mean_entropy_nats", 0.0)),
+                    "qa_confidence": float(candidate.get("qa_confidence", 0.0)),
+                }
+                for candidate in scored_candidates
+            ],
+            "qa_logs": list(best.get("qa_logs", [])),
+            "mean_entropy_nats": float(mean_entropy),
+            "entropy_component": float(entropy_component),
+            "quality_component": float(quality_component),
+            "proposer_gen_reward": float(proposer_reward),
+            "best_total_reward": float(best_reward),
+            "best_spec_score": float(best.get("spec_score", 0.0)),
+            "best_cycle_score": float(best.get("cycle_score", 0.0)),
+            "best_diversity_score": float(best.get("diversity_score", 0.0)),
+            "best_contradiction_score": float(best.get("contradiction_score", 0.0)),
+            "best_base_reward": float(best.get("base_reward", 0.0)),
+            "best_cycle_caption": str(best.get("cycle_caption", "")),
+            "best_qa_confidence": float(best.get("qa_confidence", 0.0)),
+            "entropy_weight_alpha": float(alpha),
             "proposer_gen_baseline_before": float(proposer_baseline_before),
             "proposer_gen_baseline_after": float(self.proposer_gen_baseline),
-            "proposer_gen_advantage": float(joint.reward - proposer_baseline_before),
+            "proposer_gen_advantage": float(proposer_reward - proposer_baseline_before),
             "generator_baseline_before": float(generator_baseline_before),
             "generator_baseline_after": float(self.generator_baseline),
-            "generator_advantage": float(joint.reward - generator_baseline_before),
+            "generator_advantage": float(best_reward - generator_baseline_before),
+            "quality_gate_ok": bool(quality_gate_ok),
             "policy_update_attempted": bool(policy_update_attempted),
             "policy_update_applied": bool(policy_update_applied),
             "policy_update_reason": policy_update_reason,

@@ -5458,8 +5458,37 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"generated_mix_dir={self._generated_mix_dir}"
             )
 
+        run_started_at = float(time.time())
         last_completed_step = self.start_step
         last_attempted_step = self.start_step
+
+        def _emit_training_logs(step_id: int, *, phase: str, step_time_sec: float):
+            progress = self._progress_core(
+                step=int(step_id),
+                phase=str(phase),
+                run_started_at=run_started_at,
+            )
+            metrics = self._release_metrics(step_time_sec=step_time_sec)
+            if self._gen_reward_ema_initialized:
+                metrics["generator_reward_ema"] = float(self._gen_reward_ema)
+            metrics["replay_buffer_size"] = int(len(self.replay_buffer) if self.replay_buffer is not None else 0)
+            self._write_status(state="running", progress=progress, metrics=metrics)
+            if int(step_id) % max(1, int(cfg.log_every)) == 0:
+                self._append_metrics({"kind": "heartbeat", **progress, **metrics})
+
+        init_metrics = self._release_metrics(step_time_sec=0.0)
+        if self._gen_reward_ema_initialized:
+            init_metrics["generator_reward_ema"] = float(self._gen_reward_ema)
+        init_metrics["replay_buffer_size"] = int(len(self.replay_buffer) if self.replay_buffer is not None else 0)
+        self._write_status(
+            state="running",
+            progress=self._progress_core(
+                step=int(self.start_step),
+                phase="init",
+                run_started_at=run_started_at,
+            ),
+            metrics=init_metrics,
+        )
         try:
             for step in range(self.start_step + 1, cfg.total_steps + 1):
                 step_t0 = time.perf_counter()
@@ -5668,6 +5697,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         f"[Step {step:05d}] phase={phase_tag}"
                         f"{_mix_info}{_ema_info} dt={step_dt:.1f}s"
                     )
+                _emit_training_logs(step, phase=phase_name, step_time_sec=time.perf_counter() - step_t0)
 
                 if cfg.save_every > 0 and step % cfg.save_every == 0:
                     self._dist_barrier()
@@ -5692,7 +5722,18 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 self._dist_barrier()
                 self._save_checkpoint(cfg.total_steps)
                 self._dist_barrier()
-            self._write_ablation_summary(cfg.total_steps, status="completed")
+            summary = self._write_ablation_summary(cfg.total_steps, status="completed")
+            final_progress = self._progress_core(
+                step=int(cfg.total_steps),
+                phase="completed",
+                run_started_at=run_started_at,
+            )
+            final_metrics = self._release_metrics(step_time_sec=0.0)
+            if self._gen_reward_ema_initialized:
+                final_metrics["generator_reward_ema"] = float(self._gen_reward_ema)
+            final_metrics["replay_buffer_size"] = int(len(self.replay_buffer) if self.replay_buffer is not None else 0)
+            self._append_metrics({"kind": "final_summary", **final_progress, **summary})
+            self._write_status(state="completed", progress=final_progress, metrics=final_metrics)
             if self.is_main_process:
                 print(f"[Unified] Training complete. Final checkpoint at step {cfg.total_steps:05d}.")
 
@@ -5721,11 +5762,27 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             except Exception:
                 pass
 
-            self._write_ablation_summary(
+            summary = self._write_ablation_summary(
                 max(last_completed_step, emergency_step),
                 status="interrupted",
                 interrupted_at_step=interrupted_step,
                 error=error_text,
+            )
+            interrupted_progress = self._progress_core(
+                step=max(last_completed_step, emergency_step),
+                phase="interrupted",
+                run_started_at=run_started_at,
+            )
+            interrupted_metrics = self._release_metrics(step_time_sec=0.0)
+            if self._gen_reward_ema_initialized:
+                interrupted_metrics["generator_reward_ema"] = float(self._gen_reward_ema)
+            interrupted_metrics["replay_buffer_size"] = int(len(self.replay_buffer) if self.replay_buffer is not None else 0)
+            self._append_metrics({"kind": "interrupted", **interrupted_progress, **summary})
+            self._write_status(
+                state="interrupted",
+                progress=interrupted_progress,
+                metrics=interrupted_metrics,
+                last_error=error_text,
             )
             raise
         finally:

@@ -113,7 +113,24 @@ def setup_lora_role_adapters(
 @contextlib.contextmanager
 def use_adapter(model, adapter_name: Optional[str]):
     """Temporarily switch active adapter if PEFT adapters are available."""
-    if not adapter_name or not hasattr(model, "set_adapter"):
+    if not hasattr(model, "set_adapter"):
+        yield
+        return
+
+    if adapter_name is None:
+        disable_adapter = getattr(model, "disable_adapter", None)
+        if callable(disable_adapter):
+            try:
+                with disable_adapter():
+                    yield
+                return
+            except Exception:
+                yield
+                return
+        yield
+        return
+
+    if not adapter_name:
         yield
         return
 

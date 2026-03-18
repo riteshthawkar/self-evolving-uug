@@ -1,37 +1,39 @@
 % =====================================================================
-% Table 1: Structured Qualitative Comparison (5 Axes from Related Work)
+% Table: Structured Comparison of Self-Evolving Methods (4 Axes)
 % =====================================================================
-\begin{table}[!htb]
-  \caption{Structured comparison of post-training approaches for unified understanding and generation models along five design axes. Methods are grouped by supervision requirements: the upper group operates without curated labels or external reward models, while the lower group requires some form of external supervision. ``Ext. Sup.'' denotes reliance on external supervision such as curated labels, SFT data, or reward models. ``Bidir.'' denotes whether both understanding and generation are jointly optimized. ``Reward'' indicates the nature of the training signal. ``Stability'' denotes the presence of explicit collapse prevention mechanisms. ``Arch. Dep.'' denotes whether the method is tied to a specific model architecture.}
+\begin{table}[t]
+  \caption{Structured comparison of self-evolving methods for unified understanding and generation. We group methods by supervision, tasks improved (U\,=\,understanding, G\,=\,generation), architecture dependence, and cross-paradigm generalizability. Our method is the only fully self-supervised, architecture-agnostic U+G approach validated with one unchanged recipe across diffusion, flow matching, and autoregressive paradigms.}
   \label{tab:qualitative_comparison}
   \centering
-  \small
+  \setlength{\aboverulesep}{3pt}
+  \setlength{\belowrulesep}{3pt}
+  \renewcommand{\arraystretch}{0.92}
   \resizebox{\linewidth}{!}{%
-  \begin{tabular}{@{}lccccc@{}}
+  \begin{tabular}{@{}lcccc@{}}
     \toprule
-    Method & Ext. Sup. & Bidir. & Reward & Stability & Arch. Dep. \\
+    \textbf{Method} & \textbf{Ext.\ Sup.} & \textbf{Tasks} & \textbf{Arch.-Specific} & \textbf{Generalizability} \\
     \midrule
-    \multicolumn{6}{l}{\emph{Self-supervised methods (no curated data or external reward models)}} \\
+    \multicolumn{5}{l}{\emph{Self-supervised (no curated data or external reward models)}} \\
+    \hdashline
+    UniGame \cite{su2025unigame}           & None           & U+G            & Yes (token-interface perturber)   & No  \\
+    SUDER \cite{hong2025dualselfrewards}   & None           & U+G            & Yes (dual likelihood formulation) & No  \\
+    UniCorn \cite{han2026unicorn}          & None           & U+G            & No                               & Yes \\
+    EvoLMM \cite{thawakar2025evolmm}       & None           & U only         & No                               & Yes \\
+    SILMM \cite{qu2024silmm}               & None           & G only         & No                               & Yes \\
+    RecA \cite{xie2025reconstruction}      & None           & G$\leftarrow$U & Yes (hidden embeddings)          & No  \\
+    Internal Gap \cite{han2025internalgap} & None           & U+G            & No                               & Yes \\
     \midrule
-    UniGame \cite{su2025unigame}               & None           & Yes & Single (adversarial)     & Perturbation norm & Architecture-specific \\
-    SUDER \cite{hong2025dualselfrewards}       & None           & Yes & Single (dual likelihood) & Not reported      & Reversible interface \\
-    EvoLMM \cite{thawakar2025evolmm}           & None           & U only & Single (self-consistency)& Curriculum        & Single family \\
-    SILMM \cite{qu2024silmm}                  & Self-feedback  & G only & Single (DPO pref.)      & Iterative         & Single family \\
-    ILLUME \cite{wang2024illume}               & Self-assessment & Yes & Single (consistency)    & Not reported      & Single family \\
-    RecA \cite{xie2025reconstruction}          & None           & G from U & Single (reconstruction) & Not reported  & Architecture-specific \\
+    \multicolumn{5}{l}{\emph{Methods with external supervision}} \\
+    \hdashline
+    ILLUME \cite{wang2024illume}            & External LLM    & U+G            & No                               & Yes \\
+    SEER \cite{tang2026endogenous}         & Proxy task      & G$\leftarrow$U & No                               & Yes \\
+    UniRL \cite{mao2025unirl}              & GT labels       & U+G            & No                               & Yes \\
+    CoRL \cite{jiang2025coreinforcement}   & Task rewards    & U+G            & No                               & Yes \\
+    UAE \cite{yan2025understandinggeneration} & Supervised init. & U+G         & Yes (enc-dec symmetry)           & No  \\
+    SRUM \cite{jin2025srum}                & Reward design   & G$\leftarrow$U & Yes (spatial reward maps)        & No  \\
     \midrule
-    \multicolumn{6}{l}{\emph{Methods with external supervision (curated data, reward models, or supervised stages)}} \\
-    \midrule
-    UniCorn \cite{han2026unicorn}              & Judge training & Yes & Single (judge)           & Not reported      & Single family \\
-    SEER \cite{tang2026endogenous}             & Reward activation & G from U & Single (evaluator)  & Reprompter loop   & Single family \\
-    SRUM \cite{jin2025srum}                    & Reward design  & G from U & Multi (global-local)& Manual granularity& Single family \\
-    UAE \cite{yan2025understandinggeneration}   & Supervised init. & Yes & Single (reconstruction) & Multi-stage       & Encoder-decoder \\
-    Internal Gap \cite{han2025internalgap}     & SFT + DPO data & Yes & Single (gap score)       & Curriculum SFT    & Single family \\
-    UniRL \cite{mao2025unirl}                  & SFT data       & Yes & Task-specific            & Iterative SFT     & Single family \\
-    CoRL \cite{jiang2025coreinforcement}       & Task-specific rewards & Yes & Task-specific       & Multi-stage RL    & Single family \\
-    UnifiedReward \cite{wang2025unifiedreward} & Reward model data & Enabler & Multi (cross-task) & Not reported      & Model-agnostic \\
-    \midrule
-    \textbf{Ours}                              & \textbf{None}  & \textbf{Yes} & \textbf{Multi (SC+STE+QA+Cyc)} & \textbf{EMA + buckets + filter} & \textbf{3 families} \\
+    \rowcolor{green!8}
+    \textbf{Ours}                          & \textbf{None}   & \textbf{U+G}   & \textbf{No}                      & \textbf{Yes} \\
     \bottomrule
   \end{tabular}%
   }
