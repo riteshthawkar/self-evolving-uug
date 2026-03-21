@@ -503,18 +503,47 @@ class SelfEvolvingUnderstandingTrainer:
         )
 
     def _resolve_checkpoint_path(self, path: str) -> str:
-        p = Path(path)
+        def _read_pointer(pointer_file: Path) -> Optional[str]:
+            try:
+                raw = pointer_file.read_text(encoding="utf-8").strip()
+            except Exception:
+                return None
+            if not raw:
+                return None
+            target = Path(raw)
+            if not target.is_absolute():
+                target = (pointer_file.parent / target).resolve()
+            return str(target)
+
+        p = Path(path).expanduser()
         if p.is_file():
             return str(p)
         if p.is_dir():
             trainer_state = p / "trainer_state.pt"
             if trainer_state.is_file():
                 return str(trainer_state)
+            checkpoint_target = p / "checkpoint_target.json"
+            if checkpoint_target.is_file():
+                try:
+                    payload = json.loads(checkpoint_target.read_text(encoding="utf-8"))
+                except Exception:
+                    payload = {}
+                target = str(payload.get("trainer_state_path", "") or "").strip()
+                if target:
+                    return self._resolve_checkpoint_path(target)
+            for latest_file in (p / "latest.txt", p / "checkpoints" / "latest.txt"):
+                if latest_file.is_file():
+                    target = _read_pointer(latest_file)
+                    if target:
+                        return self._resolve_checkpoint_path(target)
             if p.name.endswith("_lora"):
                 base_name = p.name[: -len("_lora")]
                 sibling = p.with_name(f"{base_name}.pt")
                 if sibling.is_file():
                     return str(sibling)
+            alias_dirs = sorted(d for d in p.glob("step_*") if d.is_dir())
+            if alias_dirs:
+                return self._resolve_checkpoint_path(str(alias_dirs[-1]))
             candidates = sorted(p.glob("step_*.pt"))
             if candidates:
                 return str(candidates[-1])
