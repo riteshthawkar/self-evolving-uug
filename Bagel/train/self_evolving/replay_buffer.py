@@ -110,3 +110,66 @@ class ReplayBuffer:
             "replay_buffer_min_step": float(min(steps)),
             "replay_buffer_max_step": float(max(steps)),
         }
+
+    def state_dict(self) -> Dict[str, object]:
+        entries: List[Dict[str, object]] = []
+        for entry in self._entries:
+            image_path = str(entry.meta.get("image_path", "")).strip()
+            if not image_path:
+                continue
+            entries.append(
+                {
+                    "image_path": image_path,
+                    "prompt": str(entry.prompt),
+                    "questions": list(entry.questions),
+                    "reference_answers": list(entry.reference_answers),
+                    "reward": float(entry.reward),
+                    "step_generated": int(entry.step_generated),
+                    "meta": dict(entry.meta),
+                }
+            )
+        return {
+            "max_size": int(self.max_size),
+            "min_reward": float(self.min_reward),
+            "max_staleness": int(self.max_staleness),
+            "entries": entries,
+        }
+
+    def load_state_dict(self, state: Dict[str, object]) -> int:
+        if not isinstance(state, dict):
+            return 0
+
+        restored: List[ReplayEntry] = []
+        entries = state.get("entries")
+        if isinstance(entries, list):
+            max_keep = max(1, int(self.max_size))
+            for payload in entries[-max_keep:]:
+                if not isinstance(payload, dict):
+                    continue
+                image_path = str(payload.get("image_path", "")).strip()
+                if not image_path:
+                    continue
+                try:
+                    with Image.open(image_path) as img:
+                        image = img.convert("RGB")
+                except Exception:
+                    continue
+                questions = [str(v).strip() for v in payload.get("questions", []) if str(v).strip()]
+                answers = [str(v).strip() for v in payload.get("reference_answers", []) if str(v).strip()]
+                n = min(len(questions), len(answers))
+                if n <= 0:
+                    continue
+                restored.append(
+                    ReplayEntry(
+                        image=image,
+                        prompt=str(payload.get("prompt", "")),
+                        questions=questions[:n],
+                        reference_answers=answers[:n],
+                        reward=float(payload.get("reward", 0.0)),
+                        step_generated=int(payload.get("step_generated", 0)),
+                        meta=dict(payload.get("meta", {})),
+                    )
+                )
+
+        self._entries = restored[-max(1, int(self.max_size)) :]
+        return len(self._entries)

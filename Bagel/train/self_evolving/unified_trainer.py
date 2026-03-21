@@ -115,14 +115,8 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         return run_dir
 
     def __init__(self, runtime, cfg) -> None:
-        super().__init__(runtime=runtime, cfg=cfg)
         self.ucfg = cfg
         self._gen_mix_source_mode = cfg.normalized_gen_mix_source_mode()
-        self._generated_mix_dir = (
-            Path(str(cfg.generated_mix_dir).strip()).expanduser().resolve()
-            if str(cfg.generated_mix_dir or "").strip()
-            else Path(self.output_dir).resolve() / "generated_mix_pool"
-        )
         self._generated_mix_cache: List[Dict[str, Any]] = []
         self._generated_mix_last_refresh_step = -10**9
         self._gen_reward_ema = 0.0
@@ -160,9 +154,21 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         self._proposer_reward_clipped_window: Deque[float] = deque(maxlen=failfast_window)
         self._selected_non_easy_window: Deque[float] = deque(maxlen=failfast_window)
         self._solver_update_applied_window: Deque[float] = deque(maxlen=failfast_window)
-
         self.replay_buffer: Optional[ReplayBuffer] = None
         if self._gen_mix_source_mode == "buffer":
+            self.replay_buffer = ReplayBuffer(
+                max_size=max(1, int(cfg.replay_buffer_size)),
+                min_reward=float(cfg.replay_min_reward),
+                max_staleness=max(0, int(cfg.replay_max_staleness)),
+            )
+
+        super().__init__(runtime=runtime, cfg=cfg)
+        self._generated_mix_dir = (
+            Path(str(cfg.generated_mix_dir).strip()).expanduser().resolve()
+            if str(cfg.generated_mix_dir or "").strip()
+            else Path(self.output_dir).resolve() / "generated_mix_pool"
+        )
+        if self._gen_mix_source_mode == "buffer" and self.replay_buffer is None:
             self.replay_buffer = ReplayBuffer(
                 max_size=max(1, int(cfg.replay_buffer_size)),
                 min_reward=float(cfg.replay_min_reward),
@@ -2509,6 +2515,8 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         state = dict(super()._checkpoint_extra_state())
         state.update(
             {
+                "unified_gen_reward_ema": float(self._gen_reward_ema),
+                "unified_gen_reward_ema_initialized": bool(self._gen_reward_ema_initialized),
                 "unified_difficulty_window": list(self._difficulty_window),
                 "unified_entropy_easy_window": list(self._entropy_easy_window),
                 "unified_warm_start_entropy_window": list(self._warm_start_entropy_window),
@@ -2532,6 +2540,8 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
                 "unified_ste_window": [float(v) for v in self._ste_window],
             }
         )
+        if self.replay_buffer is not None:
+            state["unified_replay_buffer"] = self.replay_buffer.state_dict()
         return state
 
     def _load_checkpoint_extra_state(self, state: Dict[str, object]) -> None:
@@ -2575,28 +2585,51 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
         )
         _restore_float_deque("_selected_non_easy_window", "unified_selected_non_easy_window")
         _restore_float_deque("_solver_update_applied_window", "unified_solver_update_applied_window")
+        ste_vals = state.get("unified_ste_window")
+        if isinstance(ste_vals, list):
+            self._ste_window = []
+            max_keep = max(1, int(getattr(self, "_ste_window_size", len(ste_vals) or 1)))
+            for v in ste_vals[-max_keep:]:
+                try:
+                    self._ste_window.append(float(v))
+                except Exception:
+                    continue
 
-        self._warm_start_exit_streak = int(state.get("unified_warm_start_exit_streak", self._warm_start_exit_streak))
-        self._warm_start_completed = bool(state.get("unified_warm_start_completed", self._warm_start_completed))
-        self._hardness_debt = float(state.get("unified_hardness_debt", self._hardness_debt))
+        self._gen_reward_ema = float(state.get("unified_gen_reward_ema", getattr(self, "_gen_reward_ema", 0.0)))
+        self._gen_reward_ema_initialized = bool(
+            state.get(
+                "unified_gen_reward_ema_initialized",
+                getattr(self, "_gen_reward_ema_initialized", False),
+            )
+        )
+
+        self._warm_start_exit_streak = int(
+            state.get("unified_warm_start_exit_streak", getattr(self, "_warm_start_exit_streak", 0))
+        )
+        self._warm_start_completed = bool(
+            state.get("unified_warm_start_completed", getattr(self, "_warm_start_completed", False))
+        )
+        self._hardness_debt = float(
+            state.get("unified_hardness_debt", getattr(self, "_hardness_debt", 0.0))
+        )
         self._hardness_debt_cap_streak = int(
-            state.get("unified_hardness_debt_cap_streak", self._hardness_debt_cap_streak)
+            state.get("unified_hardness_debt_cap_streak", getattr(self, "_hardness_debt_cap_streak", 0))
         )
         self._hardness_debt_escape_steps_left = int(
             state.get(
                 "unified_hardness_debt_escape_steps_left",
-                self._hardness_debt_escape_steps_left,
+                getattr(self, "_hardness_debt_escape_steps_left", 0),
             )
         )
         self._forced_explore_steps_left = int(
-            state.get("unified_forced_explore_steps_left", self._forced_explore_steps_left)
+            state.get("unified_forced_explore_steps_left", getattr(self, "_forced_explore_steps_left", 0))
         )
-        self._all_easy_streak = int(state.get("unified_all_easy_streak", self._all_easy_streak))
+        self._all_easy_streak = int(state.get("unified_all_easy_streak", getattr(self, "_all_easy_streak", 0)))
         self._understanding_u_step = int(
-            state.get("unified_understanding_u_step", self._understanding_u_step)
+            state.get("unified_understanding_u_step", getattr(self, "_understanding_u_step", 0))
         )
         self._proposer_collapse_streak = int(
-            state.get("unified_proposer_collapse_streak", self._proposer_collapse_streak)
+            state.get("unified_proposer_collapse_streak", getattr(self, "_proposer_collapse_streak", 0))
         )
 
         strategy_hist = state.get("unified_strategy_hist")
@@ -2627,6 +2660,15 @@ class UnifiedSelfEvolvingTrainer(SelfEvolvingUnderstandingTrainer):
 
         _restore_set_deque("_contrastive_pos_replay", "unified_contrastive_pos_replay")
         _restore_set_deque("_contrastive_neg_replay", "unified_contrastive_neg_replay")
+
+        replay_state = state.get("unified_replay_buffer")
+        if self.replay_buffer is not None and isinstance(replay_state, dict):
+            try:
+                restored = self.replay_buffer.load_state_dict(replay_state)
+                if restored <= 0:
+                    self._refresh_generated_mix_cache(step=max(0, int(self.start_step)), force=True)
+            except Exception:
+                pass
 
         ste_vals = state.get("unified_ste_window")
         if isinstance(ste_vals, list):
