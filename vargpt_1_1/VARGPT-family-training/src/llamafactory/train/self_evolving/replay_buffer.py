@@ -118,11 +118,12 @@ class ReplayBuffer:
         self._entries.append(entry)
         return True
 
-    def sample(self) -> Optional[ReplayEntry]:
+    def sample(self, rng: Optional[random.Random] = None) -> Optional[ReplayEntry]:
         """Return a uniformly random entry, or ``None`` if empty."""
         if not self._entries:
             return None
-        return random.choice(self._entries)
+        chooser = rng if rng is not None else random
+        return chooser.choice(self._entries)
 
     def sample_batch(self, n: int) -> List[ReplayEntry]:
         """Return up to *n* random entries (without replacement)."""

@@ -555,6 +555,10 @@ class VARImageGenPolicyUpdater:
                 scaled_loss.backward()
         except Exception as e:
             logger.warning(f"[VARImageGenPolicyUpdater] Backward failed: {e}")
+            if ddp_no_sync and dist.is_available() and dist.is_initialized():
+                raise RuntimeError(
+                    f"[VARImageGenPolicyUpdater] Backward failed under DDP at step {self.step_id}: {e}"
+                ) from e
             return {
                 "gen_grpo_loss": 0.0,
                 "gen_grpo_skipped": True,

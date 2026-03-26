@@ -245,6 +245,36 @@ class SelfEvolvingTrainer(Trainer):
         tensor /= float(dist.get_world_size())
         return float(tensor.item())
 
+    @staticmethod
+    def _dist_all_true(flag: bool, *, device: Optional[torch.device] = None) -> bool:
+        if not (dist.is_available() and dist.is_initialized()):
+            return bool(flag)
+        dev = device
+        if dev is None:
+            if torch.cuda.is_available():
+                local_rank = int(os.environ.get("LOCAL_RANK", "0") or "0")
+                dev = torch.device(f"cuda:{local_rank}")
+            else:
+                dev = torch.device("cpu")
+        tensor = torch.tensor([1 if flag else 0], dtype=torch.int32, device=dev)
+        dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
+        return bool(int(tensor.item()) == 1)
+
+    @staticmethod
+    def _dist_any_true(flag: bool, *, device: Optional[torch.device] = None) -> bool:
+        if not (dist.is_available() and dist.is_initialized()):
+            return bool(flag)
+        dev = device
+        if dev is None:
+            if torch.cuda.is_available():
+                local_rank = int(os.environ.get("LOCAL_RANK", "0") or "0")
+                dev = torch.device(f"cuda:{local_rank}")
+            else:
+                dev = torch.device("cpu")
+        tensor = torch.tensor([1 if flag else 0], dtype=torch.int32, device=dev)
+        dist.all_reduce(tensor, op=dist.ReduceOp.MAX)
+        return bool(int(tensor.item()) == 1)
+
     def _sync_distributed_step_state(self) -> None:
         if not self._is_ddp:
             return
@@ -791,7 +821,10 @@ class SelfEvolvingTrainer(Trainer):
                 break
             # Otherwise retry with a new proposer pass
 
-        if not question_text:
+        have_question = bool(question_text)
+        if self._is_ddp and not self._dist_all_true(have_question, device=self.device):
+            return {"u_skipped": True, "reason": "ddp_question_mismatch"}
+        if not have_question:
             return {"u_skipped": True, "reason": "no_question"}
 
         # ── 4. Full solver rollout on selected candidate ────────────────
@@ -808,7 +841,10 @@ class SelfEvolvingTrainer(Trainer):
             answers, solver_completions = self._generate_solver_answers(
                 image, solver_rollout_question, num_samples=cfg.num_solver_samples,
             )
-        if not answers:
+        have_answers = bool(answers)
+        if self._is_ddp and not self._dist_all_true(have_answers, device=self.device):
+            return {"u_skipped": True, "reason": "ddp_answers_mismatch"}
+        if not have_answers:
             return {"u_skipped": True, "reason": "no_answers"}
 
         stats["question"] = question_text[:100]
@@ -851,7 +887,10 @@ class SelfEvolvingTrainer(Trainer):
                     norm_answers.append(normalize_answer(selected_choice_option_b))
         else:
             norm_answers = [normalize_answer(a) for a in answers]
-        if not norm_answers:
+        have_norm_answers = bool(norm_answers)
+        if self._is_ddp and not self._dist_all_true(have_norm_answers, device=self.device):
+            return {"u_skipped": True, "reason": "ddp_normalized_answers_mismatch"}
+        if not have_norm_answers:
             return {"u_skipped": True, "reason": "no_answers"}
 
         # Majority vote and entropy
@@ -1008,7 +1047,11 @@ class SelfEvolvingTrainer(Trainer):
         # ── 6. Update proposer ──────────────────────────────────────────
         proposer_prompt = build_proposer_prompt(target_difficulty=desired_difficulty_bucket)
         update_rule = str(getattr(cfg, "proposer_update_rule", "reinforce")).strip().lower()
-        if update_rule == "grpo" and len(candidate_records) > 1:
+        use_prop_grpo = update_rule == "grpo" and len(candidate_records) > 1
+        if self._is_ddp and (update_rule == "grpo"):
+            use_prop_grpo = self._dist_all_true(use_prop_grpo, device=self.device)
+
+        if use_prop_grpo:
             group_rewards: List[float] = []
             group_buckets: List[str] = []
             for c in candidate_records:
@@ -1112,7 +1155,9 @@ class SelfEvolvingTrainer(Trainer):
                 ddp_no_sync=self._is_ddp,
             )
             stats.update({f"prop_{k}": v for k, v in prop_stats.items()})
-            stats["prop_update_rule"] = "reinforce"
+            stats["prop_update_rule"] = (
+                "reinforce_ddp_fallback" if update_rule == "grpo" and len(candidate_records) > 1 else "reinforce"
+            )
 
         self.proposer_baseline = (
             cfg.baseline_momentum * self.proposer_baseline
@@ -1130,7 +1175,12 @@ class SelfEvolvingTrainer(Trainer):
         stats["solver_update_skipped"] = skip_solver
         solver_update_applied = False
 
-        if not skip_solver:
+        do_solver_update = not skip_solver
+        if self._is_ddp:
+            do_solver_update = self._dist_all_true(do_solver_update, device=self.device)
+            if (not do_solver_update) and (not skip_solver):
+                stats["solver_update_skipped_reason"] = "ddp_solver_skip_mismatch"
+        if do_solver_update:
             solver_prompt = build_solver_prompt(question_text)
             solver_completion = f"\n<answer>{majority_answer}</answer>"
             sol_stats = self.solver_updater.step(
@@ -1148,6 +1198,8 @@ class SelfEvolvingTrainer(Trainer):
             )
             stats.update({f"sol_{k}": v for k, v in sol_stats.items()})
             solver_update_applied = not bool(sol_stats.get("skipped_reason"))
+        elif skip_solver:
+            stats["solver_update_skipped_reason"] = "easy_question"
         stats["solver_update_applied"] = bool(solver_update_applied)
 
         # ── 8. Update controller state & fail-fast diagnostics ─────────
@@ -1241,12 +1293,18 @@ class SelfEvolvingTrainer(Trainer):
         else:
             # Sample a source image for spec generation
             image, source = self._sample_image(step)
+            have_source_image = image is not None
+            if self._is_ddp and not self._dist_all_true(have_source_image, device=self.device):
+                return {"g_skipped": True, "reason": "ddp_source_image_mismatch", **stats}
             if image is None:
                 return {"g_skipped": True, "reason": "no_source_image"}
             spec, spec_completion = self._generate_spec(image, step)
             stats["image_source"] = source
 
-        if spec is None or not spec.prompt:
+        have_spec = spec is not None and bool(getattr(spec, "prompt", ""))
+        if self._is_ddp and not self._dist_all_true(have_spec, device=self.device):
+            return {"g_skipped": True, "reason": "ddp_spec_mismatch", **stats}
+        if not have_spec:
             return {"g_skipped": True, "reason": "no_spec"}
 
         spec, spec_quality, spec_quality_details = sanitize_and_score_generation_spec(
@@ -1255,7 +1313,10 @@ class SelfEvolvingTrainer(Trainer):
             max_question_words=int(getattr(cfg, "max_question_words", 24)),
             max_expected_words=int(getattr(cfg, "max_expected_words", 8)),
         )
-        if not spec.prompt or not spec.qa_pairs:
+        have_valid_spec = bool(spec.prompt) and bool(spec.qa_pairs)
+        if self._is_ddp and not self._dist_all_true(have_valid_spec, device=self.device):
+            return {"g_skipped": True, "reason": "ddp_sanitized_spec_mismatch", **stats}
+        if not have_valid_spec:
             return {"g_skipped": True, "reason": "invalid_spec_after_sanitize"}
 
         stats["gen_prompt"] = spec.prompt[:100]
@@ -1285,6 +1346,9 @@ class SelfEvolvingTrainer(Trainer):
         stats["generation_success_rate"] = (
             float(len(candidates)) / float(max(1, K))
         )
+        have_candidates = bool(candidates)
+        if self._is_ddp and not self._dist_all_true(have_candidates, device=self.device):
+            return {"g_skipped": True, "reason": "ddp_generation_candidate_mismatch", **stats}
         if not candidates:
             return {
                 "g_skipped": True,
@@ -1321,6 +1385,9 @@ class SelfEvolvingTrainer(Trainer):
             spec_quality=float(spec_quality),
         )
         rewards = [float(details.get("total_reward", 0.0)) for details in reward_details_list]
+        have_rewards = bool(rewards)
+        if self._is_ddp and not self._dist_all_true(have_rewards, device=self.device):
+            return {"g_skipped": True, "reason": "ddp_reward_scoring_mismatch", **stats}
         if not rewards:
             return {"g_skipped": True, "reason": "reward_scoring_failed", **stats}
 
@@ -1329,6 +1396,9 @@ class SelfEvolvingTrainer(Trainer):
             for idx, details in enumerate(reward_details_list)
             if any(str(log.get("status", "")) == "ok" for log in details.get("qa_logs", []))
         ]
+        have_valid_reward_indices = bool(valid_reward_indices)
+        if self._is_ddp and not self._dist_all_true(have_valid_reward_indices, device=self.device):
+            return {"g_skipped": True, "reason": "ddp_valid_reward_mismatch", **stats}
         if not valid_reward_indices:
             return {"g_skipped": True, "reason": "empty_generation_qa_entropy", **stats}
 
@@ -1392,7 +1462,17 @@ class SelfEvolvingTrainer(Trainer):
         ]
 
         # ── 4. GRPO update on generator ─────────────────────────────────
-        if len(candidates) >= 2 and quality_gate_ok:
+        local_gen_update_ready = (
+            len(candidates) >= 2
+            and quality_gate_ok
+            and (len(rewards) >= 2)
+            and (float(torch.tensor(rewards, dtype=torch.float32).std().item()) >= float(self.generator_updater.config.grpo_min_group_std))
+        )
+        gen_update_ready = local_gen_update_ready
+        if self._is_ddp:
+            gen_update_ready = self._dist_all_true(local_gen_update_ready, device=self.device)
+
+        if gen_update_ready:
             # Prepare inputs for GRPO
             gen_prompt = build_generator_prompt(spec.prompt)
             chat_text = _build_text_only_chat(self.processor, gen_prompt)
@@ -1417,12 +1497,19 @@ class SelfEvolvingTrainer(Trainer):
             stats.update({f"gen_{k}": v for k, v in gen_stats.items()})
         elif len(candidates) < 2:
             stats["gen_update_skipped_reason"] = "insufficient_candidates"
+        elif self._is_ddp and not local_gen_update_ready:
+            stats["gen_update_skipped_reason"] = "ddp_generator_update_mismatch"
+        elif len(rewards) >= 2 and float(torch.tensor(rewards, dtype=torch.float32).std().item()) < float(self.generator_updater.config.grpo_min_group_std):
+            stats["gen_update_skipped_reason"] = "low_reward_std"
         else:
             stats["gen_update_skipped_reason"] = "low_spec_quality"
 
         # ── 5. Update proposer with generation quality ──────────────────
         if cfg.proposer_gen_reward_enabled:
-            if quality_gate_ok:
+            prop_gen_update_ready = bool(quality_gate_ok)
+            if self._is_ddp:
+                prop_gen_update_ready = self._dist_all_true(prop_gen_update_ready, device=self.device)
+            if prop_gen_update_ready:
                 if cfg.imageless_proposer_mode:
                     prop_prompt = build_imageless_spec_prompt(
                         topic or "",
@@ -1456,6 +1543,8 @@ class SelfEvolvingTrainer(Trainer):
                     + (1 - cfg.proposer_gen_baseline_momentum) * proposer_gen_reward
                 )
                 stats.update({f"prop_gen_{k}": v for k, v in prop_stats.items()})
+            elif self._is_ddp and quality_gate_ok:
+                stats["prop_gen_skipped_reason"] = "ddp_proposer_gen_gate_mismatch"
             else:
                 stats["prop_gen_skipped_reason"] = "low_spec_quality"
 
@@ -1551,6 +1640,7 @@ class SelfEvolvingTrainer(Trainer):
     def _sample_image(self, step: int) -> Tuple[Optional[Image.Image], str]:
         """Sample an image: image folder, replay buffer, or dataset."""
         cfg = self.se_config
+        step_rng = random.Random(int(cfg.seed) + int(step) * 104729)
 
         # Gen-mix ratio: linearly ramp from start to max
         warmup = max(1, cfg.gen_mix_ratio_warmup_steps)
@@ -1559,14 +1649,14 @@ class SelfEvolvingTrainer(Trainer):
         ) * min(1.0, step / warmup)
 
         # Try replay buffer first (for generated image mixing)
-        if random.random() < ratio and self.replay_buffer:
-            entry = self.replay_buffer.sample()
+        if step_rng.random() < ratio and self.replay_buffer:
+            entry = self.replay_buffer.sample(rng=step_rng)
             if entry is not None:
                 return entry.image, "replay_buffer"
 
         # ── Image folder mode (preferred when set) ────────────────────
         if self._image_folder_paths:
-            path = random.choice(self._image_folder_paths)
+            path = self._image_folder_paths[step_rng.randrange(len(self._image_folder_paths))]
             try:
                 pil_img = Image.open(path).convert("RGB")
                 return pil_img, "image_folder"
@@ -1580,7 +1670,7 @@ class SelfEvolvingTrainer(Trainer):
         try:
             ds_len = len(self.train_dataset) if self.train_dataset is not None else 0
             if ds_len > 0:
-                idx = random.randint(0, ds_len - 1)
+                idx = step_rng.randrange(ds_len)
                 sample = self.train_dataset[idx]
                 image_obj = None
                 for key in ("images", "image", "pixel_values"):

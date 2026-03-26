@@ -576,6 +576,10 @@ if [ -z "${RESUME_FROM:-}" ] && [ "${EFFECTIVE_OVERWRITE_OUTPUT_DIR}" != "true" 
     fi
 fi
 
+mkdir -p "${EFFECTIVE_OUTPUT_DIR}"
+TORCHRUN_LOG_DIR="${EFFECTIVE_OUTPUT_DIR}/torchrun_logs"
+mkdir -p "${TORCHRUN_LOG_DIR}"
+
 # ── Launch ───────────────────────────────────────────────────────────────────
 if [ "$NUM_GPUS" -gt 1 ]; then
     if ! command -v torchrun >/dev/null 2>&1; then
@@ -589,6 +593,8 @@ if [ "$NUM_GPUS" -gt 1 ]; then
       --nproc_per_node "${NUM_GPUS}" \
       --master_addr 127.0.0.1 \
       --master_port "${MASTER_PORT}" \
+      --log-dir "${TORCHRUN_LOG_DIR}" \
+      --tee 3 \
       "${LLAMAFACTORY_LAUNCHER_PY}" \
       "${RUN_CONFIG}"
 else
