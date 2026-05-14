@@ -9,6 +9,7 @@ cd "$REPO_ROOT"
 MODEL="${MODEL:-Qwen/Qwen3-VL-30B-A3B-Instruct}"
 SOURCE_DIR="${SOURCE_DIR:-data/high_utility_pool_10k/images}"
 OUTPUT_DIR="${OUTPUT_DIR:-data/high_utility_pool_10k_h200_qwen3vl30b_a3b_bf16}"
+VLM_BACKEND="${VLM_BACKEND:-openai_compatible}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8000/v1}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8000}"
@@ -32,15 +33,26 @@ DRY_RUN="${DRY_RUN:-0}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-1}"
 VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-2400}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
+SKIP_MM_PROFILING="${SKIP_MM_PROFILING:-1}"
+DISABLE_ASYNC_SCHEDULING="${DISABLE_ASYNC_SCHEDULING:-1}"
+LIMIT_MM_PER_PROMPT="${LIMIT_MM_PER_PROMPT:-{\"image\":{\"count\":1,\"width\":768,\"height\":768}}}"
+MM_PROCESSOR_CACHE_GB="${MM_PROCESSOR_CACHE_GB:-1}"
+GENERATION_CONFIG="${GENERATION_CONFIG:-vllm}"
+DTYPE="${DTYPE:-bfloat16}"
+STARTUP_STALL_TIMEOUT_S="${STARTUP_STALL_TIMEOUT_S:-900}"
+HEALTH_POLL_SECONDS="${HEALTH_POLL_SECONDS:-10}"
 # Some vLLM wheels do not ship a compatible DeepGEMM build. This is mainly
 # needed for FP8 checkpoints, but keeping it off is harmless for BF16 models.
 VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 
 # Set START_SERVER=0 if you already started vLLM manually.
 START_SERVER="${START_SERVER:-1}"
+if [[ "$VLM_BACKEND" != "openai_compatible" ]]; then
+  START_SERVER=0
+fi
 
 SOURCE_DIR="$(to_abs_path "$SOURCE_DIR")"
 OUTPUT_DIR="$(to_abs_path "$OUTPUT_DIR")"
@@ -137,15 +149,38 @@ mkdir -p \
 if [[ "$START_SERVER" == "1" ]]; then
   echo "[h200] starting vLLM server: $MODEL"
   echo "[h200] source images: $SOURCE_DIR ($SOURCE_COUNT files)"
+  echo "[h200] VLM backend: $VLM_BACKEND"
   echo "[h200] cache root: $EXP_CACHE_ROOT"
   echo "[h200] HOME redirected to: $HOME"
   echo "[h200] VLLM_RPC_BASE_PATH: $VLLM_RPC_BASE_PATH"
   echo "[h200] VLLM_USE_DEEP_GEMM: $VLLM_USE_DEEP_GEMM"
   echo "[h200] ENFORCE_EAGER: $ENFORCE_EAGER"
+  echo "[h200] SKIP_MM_PROFILING: $SKIP_MM_PROFILING"
+  echo "[h200] DISABLE_ASYNC_SCHEDULING: $DISABLE_ASYNC_SCHEDULING"
+  echo "[h200] LIMIT_MM_PER_PROMPT: $LIMIT_MM_PER_PROMPT"
+  echo "[h200] MM_PROCESSOR_CACHE_GB: $MM_PROCESSOR_CACHE_GB"
   echo "[h200] server log: $SERVER_LOG"
   VLLM_ARGS=()
   if [[ "$ENFORCE_EAGER" == "1" ]]; then
     VLLM_ARGS+=(--enforce-eager)
+  fi
+  if [[ "$SKIP_MM_PROFILING" == "1" ]]; then
+    VLLM_ARGS+=(--skip-mm-profiling)
+  fi
+  if [[ "$DISABLE_ASYNC_SCHEDULING" == "1" ]]; then
+    VLLM_ARGS+=(--no-async-scheduling)
+  fi
+  if [[ -n "$LIMIT_MM_PER_PROMPT" ]]; then
+    VLLM_ARGS+=(--limit-mm-per-prompt "$LIMIT_MM_PER_PROMPT")
+  fi
+  if [[ -n "$MM_PROCESSOR_CACHE_GB" ]]; then
+    VLLM_ARGS+=(--mm-processor-cache-gb "$MM_PROCESSOR_CACHE_GB")
+  fi
+  if [[ -n "$GENERATION_CONFIG" ]]; then
+    VLLM_ARGS+=(--generation-config "$GENERATION_CONFIG")
+  fi
+  if [[ -n "$DTYPE" ]]; then
+    VLLM_ARGS+=(--dtype "$DTYPE")
   fi
   VLLM_IMAGE_FETCH_TIMEOUT=60 \
   vllm serve "$MODEL" \
@@ -162,9 +197,11 @@ if [[ "$START_SERVER" == "1" ]]; then
   trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
   echo "[h200] waiting for server at $HEALTH_URL"
+  LAST_LOG_SUM=""
+  LAST_LOG_CHANGE_TS="$(date +%s)"
   for i in $(seq 1 240); do
     if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
-      echo "[h200] vLLM server healthy after $((i * 10))s"
+      echo "[h200] vLLM server healthy after $((i * HEALTH_POLL_SECONDS))s"
       break
     fi
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -172,15 +209,34 @@ if [[ "$START_SERVER" == "1" ]]; then
       tail -n 160 "$SERVER_LOG" >&2 || true
       exit 1
     fi
-    if (( i % 3 == 0 )); then
-      echo "[h200] waiting $((i * 10))s for vLLM startup; latest server log:"
-      tail -n 1 "$SERVER_LOG" || true
+    if [[ -f "$SERVER_LOG" ]]; then
+      CURRENT_LOG_SUM="$(tail -n 20 "$SERVER_LOG" | cksum 2>/dev/null | awk '{print $1}' || true)"
+      if [[ -n "$CURRENT_LOG_SUM" && "$CURRENT_LOG_SUM" != "$LAST_LOG_SUM" ]]; then
+        LAST_LOG_SUM="$CURRENT_LOG_SUM"
+        LAST_LOG_CHANGE_TS="$(date +%s)"
+      fi
+      NOW_TS="$(date +%s)"
+      if (( NOW_TS - LAST_LOG_CHANGE_TS > STARTUP_STALL_TIMEOUT_S )); then
+        echo "[h200] ERROR: vLLM startup log has not advanced for $STARTUP_STALL_TIMEOUT_S seconds." >&2
+        echo "[h200] This usually means the server is stuck in multimodal profiling/warmup, not checkpoint loading." >&2
+        echo "[h200] Last log lines:" >&2
+        tail -n 160 "$SERVER_LOG" >&2 || true
+        kill "$SERVER_PID" 2>/dev/null || true
+        exit 1
+      fi
     fi
-    sleep 10
+    if (( i % 3 == 0 )); then
+      echo "[h200] waiting $((i * HEALTH_POLL_SECONDS))s for vLLM startup; latest server log:"
+      tail -n 8 "$SERVER_LOG" || true
+      if command -v nvidia-smi >/dev/null 2>&1; then
+        nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits || true
+      fi
+    fi
+    sleep "$HEALTH_POLL_SECONDS"
   done
 fi
 
-if ! curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
+if [[ "$VLM_BACKEND" == "openai_compatible" ]] && ! curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
   echo "[h200] ERROR: vLLM server is not healthy after waiting. Last log lines:" >&2
   tail -n 160 "$SERVER_LOG" >&2 || true
   exit 1
@@ -198,8 +254,9 @@ python3 data_pipeline/high_utility_pool/build_high_utility_pool.py \
   --target_count 10000 \
   --no_openimages \
   --min_heuristic_score 0.1 \
-  --vlm_backend openai_compatible \
+  --vlm_backend "$VLM_BACKEND" \
   --vlm_model "$MODEL" \
+  --vlm_dtype "$DTYPE" \
   --vlm_base_url "$BASE_URL" \
   --vlm_timeout 240 \
   --vlm_max_images "$VLM_MAX_IMAGES" \

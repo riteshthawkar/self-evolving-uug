@@ -152,11 +152,35 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument(
         "--vlm_backend",
-        choices=["none", "openai", "openai_compatible", "gemini", "mlx_vlm"],
+        choices=["none", "openai", "openai_compatible", "gemini", "mlx_vlm", "transformers_vlm"],
         default="none",
         help="Optional expensive VLM judge. Use after heuristic prefiltering.",
     )
     p.add_argument("--vlm_model", type=str, default="")
+    p.add_argument(
+        "--vlm_dtype",
+        type=str,
+        default=os.environ.get("VLM_DTYPE", "auto"),
+        help="Local Transformers VLM dtype: auto, bfloat16, float16, or float32.",
+    )
+    p.add_argument(
+        "--vlm_device_map",
+        type=str,
+        default=os.environ.get("VLM_DEVICE_MAP", "auto"),
+        help="Local Transformers VLM device_map, usually auto on a large GPU node.",
+    )
+    p.add_argument(
+        "--vlm_attn_implementation",
+        type=str,
+        default=os.environ.get("VLM_ATTN_IMPLEMENTATION", ""),
+        help="Optional local Transformers attention implementation, e.g. flash_attention_2 or sdpa.",
+    )
+    p.add_argument(
+        "--vlm_trust_remote_code",
+        action="store_true",
+        default=os.environ.get("VLM_TRUST_REMOTE_CODE", "0") == "1",
+        help="Pass trust_remote_code=True when loading a local Transformers VLM.",
+    )
     p.add_argument(
         "--vlm_base_url",
         type=str,
@@ -805,6 +829,7 @@ def judge_gemini(img: Image.Image, *, model: str) -> Dict[str, Any]:
 
 
 _MLX_VLM_STATE: Dict[str, Any] = {}
+_TRANSFORMERS_VLM_STATE: Dict[str, Any] = {}
 
 
 def judge_mlx_vlm(image_path: Path, *, model: str) -> Dict[str, Any]:
@@ -851,6 +876,139 @@ def judge_mlx_vlm(image_path: Path, *, model: str) -> Dict[str, Any]:
     payload["_local_vlm_model"] = model_id
     payload["_generation_tokens"] = int(getattr(result, "generation_tokens", 0) or 0)
     payload["_peak_memory_gb"] = float(getattr(result, "peak_memory", 0.0) or 0.0)
+    return payload
+
+
+def _resolve_torch_dtype(torch_module: Any, dtype_name: str) -> Any:
+    name = (dtype_name or "auto").strip().lower()
+    if name in {"", "auto"}:
+        return "auto"
+    aliases = {
+        "bf16": "bfloat16",
+        "bfloat16": "bfloat16",
+        "fp16": "float16",
+        "float16": "float16",
+        "half": "float16",
+        "fp32": "float32",
+        "float32": "float32",
+    }
+    attr = aliases.get(name)
+    if attr is None or not hasattr(torch_module, attr):
+        raise ValueError(f"Unsupported --vlm_dtype '{dtype_name}'")
+    return getattr(torch_module, attr)
+
+
+def _move_batch_to_device(batch: Any, device: Any) -> Any:
+    if hasattr(batch, "to"):
+        return batch.to(device)
+    for key, value in list(batch.items()):
+        if hasattr(value, "to"):
+            batch[key] = value.to(device)
+    return batch
+
+
+def judge_transformers_vlm(
+    image_path: Path,
+    *,
+    model: str,
+    dtype: str,
+    device_map: str,
+    attn_implementation: str,
+    trust_remote_code: bool,
+) -> Dict[str, Any]:
+    """Judge one image with a Hugging Face Transformers VLM loaded once."""
+    model_id = model or "Qwen/Qwen3-VL-30B-A3B-Instruct"
+    state_key = "::".join(
+        [
+            "transformers",
+            model_id,
+            dtype or "auto",
+            device_map or "auto",
+            attn_implementation or "",
+            str(bool(trust_remote_code)),
+        ]
+    )
+    state = _TRANSFORMERS_VLM_STATE.get(state_key)
+    if state is None:
+        import torch
+        from transformers import AutoModelForImageTextToText, AutoProcessor
+
+        torch_dtype = _resolve_torch_dtype(torch, dtype)
+        load_kwargs: Dict[str, Any] = {
+            "device_map": device_map or "auto",
+            "trust_remote_code": trust_remote_code,
+            "low_cpu_mem_usage": True,
+        }
+        if attn_implementation:
+            load_kwargs["attn_implementation"] = attn_implementation
+
+        try:
+            local_model = AutoModelForImageTextToText.from_pretrained(
+                model_id,
+                dtype=torch_dtype,
+                **load_kwargs,
+            )
+        except TypeError:
+            local_model = AutoModelForImageTextToText.from_pretrained(
+                model_id,
+                torch_dtype=torch_dtype,
+                **load_kwargs,
+            )
+        local_model.eval()
+        processor = AutoProcessor.from_pretrained(
+            model_id,
+            trust_remote_code=trust_remote_code,
+        )
+        first_param = next(local_model.parameters(), None)
+        input_device = first_param.device if first_param is not None else torch.device("cuda:0")
+        state = {
+            "model": local_model,
+            "processor": processor,
+            "torch": torch,
+            "input_device": input_device,
+        }
+        _TRANSFORMERS_VLM_STATE[state_key] = state
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": str(image_path)},
+                {"type": "text", "text": VLM_PROMPT},
+            ],
+        }
+    ]
+    processor = state["processor"]
+    local_model = state["model"]
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_dict=True,
+        return_tensors="pt",
+    )
+    inputs = _move_batch_to_device(inputs, state["input_device"])
+    torch = state["torch"]
+    with torch.inference_mode():
+        generated_ids = local_model.generate(
+            **inputs,
+            max_new_tokens=384,
+            do_sample=False,
+        )
+    prompt_len = int(inputs["input_ids"].shape[-1])
+    generated_ids_trimmed = generated_ids[:, prompt_len:]
+    text = processor.batch_decode(
+        generated_ids_trimmed,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0]
+    payload = _parse_jsonish(text)
+    payload["_local_vlm_backend"] = "transformers_vlm"
+    payload["_local_vlm_model"] = model_id
+    payload["_local_vlm_dtype"] = dtype or "auto"
+    payload["_local_vlm_device_map"] = device_map or "auto"
+    if attn_implementation:
+        payload["_local_vlm_attn_implementation"] = attn_implementation
     return payload
 
 
@@ -1004,6 +1162,10 @@ def run_vlm_judge(
     *,
     backend: str,
     model: str,
+    dtype: str,
+    device_map: str,
+    attn_implementation: str,
+    trust_remote_code: bool,
     base_url: str,
     api_key_env: str,
     max_images: int,
@@ -1085,6 +1247,17 @@ def run_vlm_judge(
                 if local_path is None:
                     raise RuntimeError("mlx_vlm backend requires a local image path")
                 vlm = judge_mlx_vlm(local_path, model=model)
+            elif backend == "transformers_vlm":
+                if local_path is None:
+                    raise RuntimeError("transformers_vlm backend requires a local image path")
+                vlm = judge_transformers_vlm(
+                    local_path,
+                    model=model,
+                    dtype=dtype,
+                    device_map=device_map,
+                    attn_implementation=attn_implementation,
+                    trust_remote_code=trust_remote_code,
+                )
             else:
                 raise ValueError(f"unsupported VLM backend {backend}")
             vlm = _normalize_vlm_score(vlm)
@@ -1339,6 +1512,10 @@ def main() -> int:
         scored,
         backend=str(args.vlm_backend),
         model=str(args.vlm_model or ""),
+        dtype=str(args.vlm_dtype or "auto"),
+        device_map=str(args.vlm_device_map or "auto"),
+        attn_implementation=str(args.vlm_attn_implementation or ""),
+        trust_remote_code=bool(args.vlm_trust_remote_code),
         base_url=str(args.vlm_base_url or ""),
         api_key_env=str(args.vlm_api_key_env or "OPENAI_COMPATIBLE_API_KEY"),
         max_images=int(args.vlm_max_images),
