@@ -1,0 +1,116 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+\usepackage[rebuttal]{cvpr}
+\usepackage{eccvabbrv}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{colortbl}
+\usepackage{wrapfig}
+\usepackage{microtype}
+\usepackage[accsupp]{axessibility}
+
+\definecolor{eccvblue}{rgb}{0.12,0.49,0.85}
+\definecolor{revone}{RGB}{0,150,0}
+\definecolor{revtwo}{RGB}{230,120,0}
+\definecolor{revthree}{RGB}{180,0,80}
+\definecolor{pointblue}{RGB}{0,45,210}
+\usepackage[pagebackref,breaklinks,colorlinks,linkcolor=eccvblue,citecolor=eccvblue,urlcolor=eccvblue]{hyperref}
+
+\def\paperID{2837}
+\def\confName{ECCV}
+\def\confYear{2026}
+\title{}
+
+\newcommand{\rOne}{\textcolor{revone}{\textbf{Reviewer ksp6:}}}
+\newcommand{\rTwo}{\textcolor{revtwo}{\textbf{Reviewer 2eb3:}}}
+\newcommand{\rThree}{\textcolor{revthree}{\textbf{Reviewer BxGH:}}}
+\newcommand{\pt}[1]{\textcolor{pointblue}{\textbf{#1}}}
+\newcommand{\run}{\textit{Running Exp}}
+\newcommand{\uavg}{Und. Avg.}
+\newcommand{\gen}{GenEval}
+\newcommand{\pdel}[1]{\textcolor{green!50!black}{#1}}
+\newcommand{\ndel}[1]{\textcolor{red!70!black}{#1}}
+\newcommand{\zdel}[1]{\textcolor{black!50}{#1}}
+\renewcommand{\thetable}{A\arabic{table}}
+\renewcommand{\thefigure}{A\arabic{figure}}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+\setlength{\tabcolsep}{1.5pt}
+\renewcommand{\arraystretch}{0.88}
+\setlength{\textfloatsep}{2pt}
+\setlength{\floatsep}{2pt}
+\setlength{\intextsep}{1pt}
+\setlength{\columnsep}{7pt}
+\setlength{\abovecaptionskip}{1pt}
+\setlength{\belowcaptionskip}{0pt}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+%We thank the reviewers for their thoughtful feedback. We will revise ambiguous ``bidirectional'' wording, add the requested controls, and make missing details/citations explicit. All changes will be incorporated in the final version.
+
+We thank the reviewers for their constructive feedback. We will incorporate all requested changes and publicly release \textbf{well-documented code and models}.
+
+\rOne{} \pt{On coupling:} We agree that ``bidirectional'' may imply symmetric gradient exchange; our intended mechanism is \emph{solver-mediated asymmetric coupling}: Proposer/Solver updates improve the Solver, and the evolving Solver supplies generation rewards. Unlike EvoLMM~[23], our Solver is reused as an image-generation evaluator; unlike UniCorn-style fixed judging~[8], our evaluator itself improves (see Tab.~\ref{tab:coupling}) and is shared across BLIP3o/BAGEL/VARGPT \textit{without} any external learned reward models; unlike UniRL~[16], no GT rewards are used. Our multi-scale reward does not use a 10-point external judge: local question-answering, cycle consistency, diversity, and contradiction are computed from internal model responses and frozen similarity backends. Thus, the contribution is not a serial reuse of prior components, but a shared evaluator/learner loop whose reward source evolves during training. As suggested, Tab.~\ref{tab:coupling} compares single-loop variants, self-generated-image training, the requested frozen two-stage EvoLMM$\to$UniCorn baseline, and joint training. \emph{In all cases}, joint training gives the best Und. Avg./GenEval trade-off: 73.9/87 for BLIP3o and 76.6/85 for BAGEL, whereas single-loop training improves one task while maintaining or degrading the other. \pt{Loop coupling visualization:} The 10k trace shows directional lagged coupling: understanding predicts later generation more strongly than the reverse (peak $\rho{\approx}.16$ vs.\ $.10$), supporting solver-mediated asymmetric coupling.
+
+\pt{STE design:} Max-over-token entropy targets decisive uncertain semantic tokens (count/color/relation/negation), not function words; Supp. Fig.~S2 shows sample-level consistency failing on consistent errors under reward saturation. We are running the requested mean/top-$k$ aggregation control; existing evidence supports the design: Supp. Table~S2 shows stable $W{=}64/128/256$ and prompt-count sweeps, while the main ablation shows temperature sampling underperforms prompt perturbation. STE is not cross-prompt probability matching: self-consistency uses answer votes, while STE uses the Solver's scalar uncertainty; no cross-answer token alignment is required. Rolling quantiles use recent accepted training samples, not benchmark datasets; $W{=}64/256$ tests this local normalization. \pt{Prompts and length:} Prompt-perturbed sampling changes only the instruction preamble; the free-form question is inserted verbatim, so no template mapping is needed. BLIP3o logs show median answer length 2 tokens, with 90.0\% $\leq$5 and 99.4\% $\leq$10; thus STE acts on short answer-local spans, not unaligned long captions. We will exclude punctuation/EOS tokens from the max operator, cite adaptive target normalization, and include exact prompt preambles for reproducibility.
+
+\begin{table}[h]
+  \centering
+  \tiny
+  \caption{Coupling controls; entries report six-benchmark Und. Avg. and GenEval. Best results are bolded.}
+  \label{tab:coupling}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    \multirow{2}{*}{Setting} & \multirow{2}{*}{Learnable} & \multicolumn{2}{c}{BLIP3o} & \multicolumn{2}{c}{BAGEL} \\
+    \cmidrule(lr){3-4}\cmidrule(l){5-6}
+     & & Und. Avg. & GenEval & Und. Avg. & GenEval \\
+    \midrule
+    Base & -- & 71.7 & 84 & 74.0 & 82 \\
+    Understanding-only & Prop./Solver & 73.5 \pdel{(+1.8\%)} & 83 \ndel{(-1\%)} & 75.7 \pdel{(+1.7\%)} & 81 \ndel{(-1\%)} \\
+    Generation-only & Generator & 71.7 \zdel{(+0.0\%)} & 86 \pdel{(+2\%)} & 74.0 \zdel{(+0.0\%)} & 83 \pdel{(+1\%)} \\
+    Self-generated pool & All roles & 73.1 \pdel{(+1.4\%)} & 85 \pdel{(+1\%)} & 75.4 \pdel{(+1.4\%)} & 83 \pdel{(+1\%)} \\
+    Two-stage & Prop./Solver$\!\to$Generator & 72.9 \pdel{(+1.2\%)} & 85 \pdel{(+1\%)} & 75.7 \pdel{(+1.7\%)} & 83 \pdel{(+1\%)} \\
+    \rowcolor{green!8}
+    \textbf{Joint (ours)} & \textbf{All roles} & \textbf{73.9 \pdel{(+2.2\%)}} & \textbf{87 \pdel{(+3\%)}} & \textbf{76.6 \pdel{(+2.6\%)}} & \textbf{85 \pdel{(+3\%)}} \\
+    \bottomrule
+  \end{tabular}%
+  }
+  \vspace{-3pt}
+\end{table}
+
+\rTwo{} \pt{Metrics:} GenEval probes composition rather than perception alone. As requested, we show in Tab.~\ref{tab:t2i_eval} the results of DPG-Bench/WISE for BLIP3o/BAGEL vs. ours, and the improvements are consistent across all benchmarks. \pt{Schedule/data overlap:} Tab.~\ref{tab:coupling} addresses staged training: two-stage is competitive but below joint training under matched data, supporting alternating updates over concatenating two self-play pipelines. For TextVQA/GQA, labels, boxes, captions, and question-answering annotations are discarded; only raw images are used, so overlap is distributional rather than supervised. We will report GQA/source-removal checks.
+
+\begin{wraptable}[6]{r}{0.40\linewidth}
+  \centering
+  \tiny
+  \caption{Broader text-to-image scores, \textbf{Base$\rightarrow$Ours}.}
+  \label{tab:t2i_eval}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}lcc@{}}
+    \toprule
+    Metric & BLIP3o & BAGEL \\
+    \midrule
+    GenEval & 84$\rightarrow$\textbf{87} & 82$\rightarrow$\textbf{85} \\
+    DPG-Bench & 83.4$\rightarrow$\textbf{85.1} & 81.8$\rightarrow$\textbf{83.6} \\
+    WISE & 78.6$\rightarrow$\textbf{80.4} & 77.2$\rightarrow$\textbf{79.1} \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{wraptable}
+\pt{Reward implementation:} The question-answering references are Solver answers on the real/source image, not Proposer labels; hence a generated image cannot receive high reward merely by matching a bad Proposer answer. Low-confidence references are filtered by the consistency gates before any generator update is applied, reducing error propagation from the internal evaluator. Question-answering fidelity tests local attributes, counts, relations, cycle checks scene semantics, $S_{\text{div}}$ discourages duplicates, and $S_{\text{ctr}}$ penalizes prompt--caption/question-answering polarity conflicts (Supp. Sec.~3). Cycle similarity uses each backbone's own frozen embedding space and remains a fixed consistency metric rather than a learned reward/judge. Weights are QA .65, cycle .20, diversity .10, contradiction .20, with spec-quality gates before rewards; they are coefficients, not a simplex. The same weights are reused across backbones.
+
+\rThree{} \pt{Scaling:} We do not claim that a frozen backbone can learn unlimited new visual primitives from 1M images. Our claim is stable post-training that better aligns existing latent capabilities using unlabeled images and no external learned reward model.
+\begin{wrapfigure}[7]{r}{0.46\linewidth}
+  \centering
+  \refstepcounter{figure}\label{fig:evidence}
+  \includegraphics[width=\linewidth]{fig_rebuttal_evidence.pdf}
+\end{wrapfigure}
+Larger pools should broaden coverage until adapter capacity or Solver quality saturates; we will state this scope. LoRA+KL is deliberate: full fine-tuning lets high-variance self-generated rewards move both representation and policy, causing reward drift and forgetting, whereas constrained adapters preserve the pretrained manifold. \pt{Why real unlabeled images:} Self-generated images are allowed but alone underperform the real-image pool (Tab.~\ref{tab:coupling}); real images ground training and reduce self-reinforcing drift. \pt{Compute:} Each step samples $K{=}3$ questions, $N{=}7$ Solver framings, and $L{=}3$ images; 10k runs cost average $\sim$3.2k GPU-h across three backbones, while deployment is LoRA-only. 
+
+
+\end{document}

@@ -174,11 +174,17 @@ def _text_supervised_step(
             valid_token_count = int(valid_mask.sum().item())
 
     forward_inputs = {k: v for k, v in inputs_full.items() if k not in ("images", "image_sizes")}
-    forward_inputs["labels"] = labels
+    # Avoid undefined CE over an all-ignored label tensor.  Empty/invalid
+    # completions are handled as a finite zero-gradient no-op below.
+    if valid_token_count > 0:
+        forward_inputs["labels"] = labels
     forward_inputs["use_cache"] = False
     with use_adapter(updater.model, updater.adapter_name):
         out = updater.model(**forward_inputs)
-    ce_loss = out.loss
+    if valid_token_count > 0 and out.loss is not None:
+        ce_loss = out.loss
+    else:
+        ce_loss = torch.zeros((), device=out.logits.device, dtype=out.logits.dtype)
 
     skip_backward = False
     skipped_reason: Optional[str] = None
@@ -190,7 +196,12 @@ def _text_supervised_step(
         skipped_reason = "non_finite_ce_loss"
 
     if skip_backward:
-        total_loss = out.logits.sum() * 0.0
+        total_loss = torch.nan_to_num(
+            out.logits,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).sum() * 0.0
         if not torch.isfinite(total_loss):
             total_loss = torch.zeros((), device=out.logits.device, dtype=out.logits.dtype, requires_grad=True)
     else:
@@ -234,9 +245,12 @@ def _text_supervised_step(
     did_step = False
     if updater._accum_count >= updater.grad_accum_steps:
         if updater._has_real_grad_in_window:
-            _clip_grad_norm_multi_device(updater.params, updater.config.grad_clip)
-            updater.opt.step()
-            did_step = True
+            if _clip_grad_norm_multi_device(updater.params, updater.config.grad_clip):
+                updater.opt.step()
+                did_step = True
+            else:
+                skipped_reason = skipped_reason or "non_finite_gradient"
+                updater.opt.zero_grad(set_to_none=True)
         else:
             updater.opt.zero_grad(set_to_none=True)
         updater._accum_count = 0
@@ -312,8 +326,16 @@ class TextPolicyUpdater:
 
     def _adapt_beta(self, kl_val: float):
         target = max(self.config.kl_target, 1e-8)
-        delta = (kl_val - target) / target
-        beta = self.kl_coef * math.exp(self.config.kl_adapt_rate * delta)
+        if not math.isfinite(float(kl_val)):
+            return
+        rate = float(getattr(self.config, "kl_adapt_rate", 0.0))
+        if not math.isfinite(rate):
+            return
+        current = float(self.kl_coef)
+        if not math.isfinite(current) or current <= 0.0:
+            current = max(float(self.config.kl_min), 1e-8)
+        delta = max(-50.0, min(50.0, (float(kl_val) - target) / target))
+        beta = current * math.exp(max(-50.0, min(50.0, rate * delta)))
         beta = max(self.config.kl_min, min(self.config.kl_max, beta))
         self.kl_coef = float(beta)
 
@@ -444,7 +466,10 @@ class TextPolicyUpdater:
                     raise
         self.model.train(True)
         policy_inputs = dict(forward_full)
-        policy_inputs["labels"] = labels
+        # Only compute CE when there is a real completion-token target.
+        # All-ignored labels make CE undefined and can surface as NaN.
+        if valid_token_count > 0:
+            policy_inputs["labels"] = labels
         policy_inputs["use_cache"] = False
         def _run_policy_forward():
             with use_adapter(self.model, self.adapter_name):
@@ -459,7 +484,10 @@ class TextPolicyUpdater:
                 out_pi = _run_policy_forward()
             else:
                 raise
-        ce_loss = out_pi.loss
+        if valid_token_count > 0 and out_pi.loss is not None:
+            ce_loss = out_pi.loss
+        else:
+            ce_loss = torch.zeros((), device=out_pi.logits.device, dtype=out_pi.logits.dtype)
 
         # Check for non-finite ce_loss — mark for skip but do NOT return early
         # to keep DDP in sync across ranks.
@@ -500,7 +528,12 @@ class TextPolicyUpdater:
             # Use sum() so every parameter contributes; multiply by 0 so
             # the actual gradient is zero.  nan_to_num guards against the
             # (rare) case where logits contain NaN.
-            total_loss = (out_pi.logits.sum() * 0.0)
+            total_loss = torch.nan_to_num(
+                out_pi.logits,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).sum() * 0.0
             if not torch.isfinite(total_loss):
                 total_loss = torch.zeros((), device=out_pi.logits.device,
                                          dtype=out_pi.logits.dtype, requires_grad=True)
@@ -511,7 +544,12 @@ class TextPolicyUpdater:
             skipped_reason = None
             if not bool(torch.isfinite(total_loss.detach()).all().item()):
                 # Non-finite total_loss: backward zero instead.
-                total_loss = out_pi.logits.sum() * 0.0
+                total_loss = torch.nan_to_num(
+                    out_pi.logits,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                ).sum() * 0.0
                 skipped_reason = "non_finite_total_loss"
         has_real_grad = skipped_reason is None
         if dist.is_available() and dist.is_initialized():
@@ -554,9 +592,12 @@ class TextPolicyUpdater:
         did_step = False
         if self._accum_count >= self.grad_accum_steps:
             if self._has_real_grad_in_window:
-                _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
-                self.opt.step()
-                did_step = True
+                if _clip_grad_norm_multi_device(self.params, self.config.grad_clip):
+                    self.opt.step()
+                    did_step = True
+                else:
+                    skipped_reason = skipped_reason or "non_finite_gradient"
+                    self.opt.zero_grad(set_to_none=True)
             else:
                 # All microbatches in this accumulation window were effectively skipped.
                 # Do not step AdamW to avoid decoupled-weight-decay drift.
@@ -954,9 +995,12 @@ class TextPreferenceDPOUpdater:
         did_step = False
         if self._accum_count >= self.grad_accum_steps:
             if self._has_real_grad_in_window:
-                _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
-                self.opt.step()
-                did_step = True
+                if _clip_grad_norm_multi_device(self.params, self.config.grad_clip):
+                    self.opt.step()
+                    did_step = True
+                else:
+                    skipped_reason = skipped_reason or "non_finite_gradient"
+                    self.opt.zero_grad(set_to_none=True)
             else:
                 # All microbatches in this accumulation window were effectively skipped.
                 # Do not step AdamW to avoid decoupled-weight-decay drift.
@@ -1080,8 +1124,16 @@ class TextGRPOUpdater:
 
     def _adapt_beta(self, kl_val: float):
         target = max(self.config.kl_target, 1e-8)
-        delta = (kl_val - target) / target
-        beta = self.kl_coef * math.exp(self.config.kl_adapt_rate * delta)
+        if not math.isfinite(float(kl_val)):
+            return
+        rate = float(getattr(self.config, "kl_adapt_rate", 0.0))
+        if not math.isfinite(rate):
+            return
+        current = float(self.kl_coef)
+        if not math.isfinite(current) or current <= 0.0:
+            current = max(float(self.config.kl_min), 1e-8)
+        delta = max(-50.0, min(50.0, (float(kl_val) - target) / target))
+        beta = current * math.exp(max(-50.0, min(50.0, rate * delta)))
         beta = max(self.config.kl_min, min(self.config.kl_max, beta))
         self.kl_coef = float(beta)
 
@@ -1348,7 +1400,12 @@ class TextGRPOUpdater:
         if skip_backward:
             # DDP sync: backward zero gradient
             if last_logits is not None:
-                zero_loss = last_logits.sum() * 0.0
+                zero_loss = torch.nan_to_num(
+                    last_logits,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                ).sum() * 0.0
             else:
                 # No forward was run at all; run a dummy forward for DDP sync
                 dummy_inputs = _prepare_text_inputs(self.processor, device, prompt)
@@ -1359,7 +1416,12 @@ class TextGRPOUpdater:
                 forward_inputs["use_cache"] = False
                 with use_adapter(self.model, self.adapter_name):
                     dummy_out = self.model(**forward_inputs)
-                zero_loss = dummy_out.logits.sum() * 0.0
+                zero_loss = torch.nan_to_num(
+                    dummy_out.logits,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                ).sum() * 0.0
             total_loss = zero_loss
 
         has_real_grad = skipped_reason is None
@@ -1417,9 +1479,12 @@ class TextGRPOUpdater:
                         dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
                         p.grad /= float(dist.get_world_size())
             if self._has_real_grad_in_window:
-                _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
-                self.opt.step()
-                did_step = True
+                if _clip_grad_norm_multi_device(self.params, self.config.grad_clip):
+                    self.opt.step()
+                    did_step = True
+                else:
+                    skipped_reason = skipped_reason or "non_finite_gradient"
+                    self.opt.zero_grad(set_to_none=True)
             else:
                 self.opt.zero_grad(set_to_none=True)
             self._accum_count = 0

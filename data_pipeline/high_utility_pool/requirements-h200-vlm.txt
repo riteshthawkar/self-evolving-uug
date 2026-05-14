@@ -1,0 +1,3 @@
+# Install on the H200 inference machine, preferably in a fresh CUDA environment.
+openai>=1.0.0
+vllm

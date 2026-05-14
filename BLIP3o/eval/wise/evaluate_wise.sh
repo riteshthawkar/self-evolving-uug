@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 # Evaluate WISE benchmark using GPT-4o (WiScore)
 #
 # Usage:
@@ -20,12 +21,22 @@ done
 unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-WISE_DIR="${SCRIPT_DIR}/wise_repo"
+WISE_DIR="${WISE_DIR:-${SCRIPT_DIR}/wise_repo}"
+AUTO_CLONE_EVAL_REPOS="${AUTO_CLONE_EVAL_REPOS:-0}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 if [ ! -d "${WISE_DIR}" ]; then
+    if [ "${AUTO_CLONE_EVAL_REPOS}" = "1" ]; then
+        echo "WISE repo not found; cloning because AUTO_CLONE_EVAL_REPOS=1"
+        git clone https://github.com/PKU-YuanGroup/WISE.git "${WISE_DIR}"
+    fi
+fi
+
+if [ ! -f "${WISE_DIR}/gpt_eval.py" ]; then
     echo "ERROR: WISE repo not found at ${WISE_DIR}"
-    echo "Please clone it first:"
+    echo "Clone it with:"
     echo "  cd ${SCRIPT_DIR} && git clone https://github.com/PKU-YuanGroup/WISE.git wise_repo"
+    echo "or set WISE_DIR=/path/to/WISE. To let this script clone it, set AUTO_CLONE_EVAL_REPOS=1."
     exit 1
 fi
 
@@ -48,7 +59,7 @@ echo "  Workers: ${MAX_WORKERS}"
 for CATEGORY in cultural_common_sense spatio-temporal_reasoning natural_science; do
     echo ""
     echo "--- Evaluating: ${CATEGORY} ---"
-    python "${WISE_DIR}/gpt_eval.py" \
+    "${PYTHON_BIN}" "${WISE_DIR}/gpt_eval.py" \
         --json_path "${WISE_DIR}/data/${CATEGORY}.json" \
         --output_dir "${IMAGE_DIR}/Results/${CATEGORY}" \
         --image_dir "${IMAGE_DIR}" \
@@ -64,7 +75,7 @@ for CATEGORY in cultural_common_sense spatio-temporal_reasoning natural_science;
     if [ -f "$RESULTS_FILE" ]; then
         echo ""
         echo "--- ${CATEGORY} ---"
-        python "${WISE_DIR}/Calculate.py" "${RESULTS_FILE}" --category all
+        "${PYTHON_BIN}" "${WISE_DIR}/Calculate.py" "${RESULTS_FILE}" --category all
     else
         echo "WARNING: Results file not found: ${RESULTS_FILE}"
     fi

@@ -3181,7 +3181,14 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         # entropy ≈ ln(2) ≈ 0.69.  Genuinely hard open-ended questions
         # produce entropy >> 1.0.  No explicit forced-choice discount needed.
         _ste_difficulty = 0.0
-        _ste_raw_value = _intuitive_token_entropy_max  # max across K tokens
+        _ste_aggregation = str(
+            getattr(self.cfg, "solver_token_entropy_aggregation", "max")
+        ).strip().lower()
+        if _ste_aggregation == "mean":
+            _ste_raw_value = _intuitive_token_entropy_mean
+        else:
+            _ste_aggregation = "max"
+            _ste_raw_value = _intuitive_token_entropy_max
         if _ste_enabled and _ste_raw_value > 1e-6:
             self._ste_window.append(_ste_raw_value)
             _ste_window_size = max(
@@ -4443,6 +4450,8 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_logit_margin_mean": float(_intuitive_logit_mean_margin),
             "proposer_token_entropy_max": float(_intuitive_token_entropy_max),
             "proposer_token_entropy_mean": float(_intuitive_token_entropy_mean),
+            "proposer_ste_aggregation": _ste_aggregation,
+            "proposer_ste_raw_value": float(_ste_raw_value),
             "proposer_ste_difficulty": float(_ste_difficulty),
             "proposer_ste_window_size": len(self._ste_window),
             "proposer_pps_enabled": bool(_pps_enabled),
@@ -4520,6 +4529,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_early_triggered": bool(early_failfast_state.get("triggered", 0.0)),
         }
         self._append_jsonl(self.iter_log_path, record)
+        self._monitor_understanding_record(record)
 
         self._append_jsonl(
             self.rewards_log_path,
@@ -4721,7 +4731,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"C_NE={candidate_non_easy_rate:.2f} C_V={candidate_struct_valid_rate:.2f} "
                 f"ARM={curriculum_arm_score:.2f} "
                 f"WS={int(proposer_warm_start_active)} "
-                f"TE={_intuitive_token_entropy_max:.2f} "
+                f"TE[{_ste_aggregation}]={_ste_raw_value:.2f} "
                 f"SD={_ste_difficulty:.3f} "
                 f"D={float(hardness_debt_state.get('debt', 0.0)):.2f} "
                 f"E_L={easy_constraint_state.get('easy_lambda', 0.0):.3f} "
@@ -5540,16 +5550,23 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
 
                     if self._understanding_generated_only and not _used_generated:
                         _data_source = "generated_pool_empty_skip"
-                        self._append_jsonl(
-                            self.iter_log_path,
+                        skip_record = {
+                            "step": step,
+                            "phase": "understanding",
+                            "image_path": meta.get("path"),
+                            "skip_reason": "generated_pool_empty",
+                            "gen_mix_source_mode": self._gen_mix_source_mode,
+                            "understanding_generated_only": True,
+                        }
+                        self._append_jsonl(self.iter_log_path, skip_record)
+                        self._append_training_monitor(
                             {
-                                "step": step,
+                                "step": int(step),
                                 "phase": "understanding",
+                                "health": "skipped_or_waiting",
                                 "image_path": meta.get("path"),
-                                "skip_reason": "generated_pool_empty",
-                                "gen_mix_source_mode": self._gen_mix_source_mode,
-                                "understanding_generated_only": True,
-                            },
+                                "solver_skip": "generated_pool_empty",
+                            }
                         )
                     else:
                         if not _used_generated:

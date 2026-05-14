@@ -84,7 +84,44 @@ def _strip_peft_prefix(name):
     return name[len(prefix):] if name.startswith(prefix) else name
 
 
+def _find_adapter_config_dir(adapter_root):
+    if os.path.isfile(os.path.join(adapter_root, "adapter_config.json")):
+        return adapter_root
+    for subdir in os.listdir(adapter_root):
+        candidate = os.path.join(adapter_root, subdir)
+        if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "adapter_config.json")):
+            print(f"  Found nested DiT adapter: dit_lora/{subdir}/")
+            return candidate
+    raise FileNotFoundError(f"adapter_config.json not found under {adapter_root}")
+
+
+def _load_dit_lora_adapter(model, checkpoint_dir):
+    dit_lora_root = os.path.join(checkpoint_dir, "dit_lora")
+    if not os.path.isdir(dit_lora_root):
+        return False
+    from peft import PeftModel
+
+    adapter_path = _find_adapter_config_dir(dit_lora_root)
+    core_model_getter = getattr(model, "get_model", None)
+    core_model = core_model_getter() if callable(core_model_getter) else getattr(model, "model", None)
+    dit_module = getattr(core_model, "dit", None) if core_model is not None else None
+    if dit_module is None:
+        raise RuntimeError("Checkpoint contains dit_lora/, but the loaded model has no core_model.dit module.")
+    print(f"Loading DiT LoRA from {adapter_path}")
+    dit_model = PeftModel.from_pretrained(dit_module, adapter_path)
+    try:
+        core_model.dit = dit_model.merge_and_unload()
+        print("DiT LoRA merged.")
+    except Exception as exc:
+        core_model.dit = dit_model
+        print(f"WARNING: DiT LoRA merge failed; keeping PEFT-wrapped DiT. Reason: {exc}")
+    return True
+
+
 def load_dit_weights(model, checkpoint_dir):
+    if _load_dit_lora_adapter(model, checkpoint_dir):
+        return model
+
     dit_index_path = os.path.join(checkpoint_dir, "dit_trainable_index.json")
     dit_dir = os.path.join(checkpoint_dir, "dit_trainable")
     if not os.path.isfile(dit_index_path) or not os.path.isdir(dit_dir):

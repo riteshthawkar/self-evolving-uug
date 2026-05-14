@@ -1,0 +1,225 @@
+# High-Utility Image Pool Pipeline
+
+This folder builds a compact unlabeled image pool for the BLIP3o self-evolving
+framework. The goal is not generic image quality. The goal is high proposer
+utility: images should support hard, objective, visually grounded questions
+that create useful solver disagreement without becoming ambiguous.
+
+## What It Builds
+
+Default output:
+
+```text
+data/high_utility_pool_10k/
+  images/
+    relational/
+    spatial/
+    ocr/
+    chart_document/
+    openimages_dense/
+    natural/
+  manifest.jsonl
+  rejected.jsonl
+  audit_report.json
+  scores/
+    heuristic_scores.jsonl
+    vlm_scores.jsonl
+```
+
+Each manifest row stores source, domain, image path, quality features, utility
+score, duplicate hash, source URL/license when available, and optional VLM judge
+scores.
+
+## Sources
+
+The pipeline uses two low-space sources by default:
+
+1. Existing local pool: `data/joint_pool_10k/images`
+2. Open Images V7 validation metadata and annotations
+
+Open Images is used through its official metadata/annotation CSVs and selected
+thumbnail URLs, so we only download images that pass dense-scene filters. This
+avoids downloading full datasets.
+
+## Scoring Signal
+
+The heuristic score combines:
+
+- resolution and aspect ratio
+- blur/detail via Laplacian variance
+- pixel variance
+- edge-region density
+- color diversity
+- OCR/layout proxy
+- Open Images box, label, relationship, occlusion, and group annotations
+- predicted solver-disagreement proxy
+- domain balancing
+
+Optional VLM judging can refine accepted candidates with GPT/Gemini-style
+multimodal evaluation or a local Apple Silicon MLX VLM. The VLM is used only
+for filtering and metadata, not as training labels. The default VLM sampling
+strategy is stratified across domains and heuristic-score quantiles, so a small
+local judging budget audits obvious strong images plus mid/borderline cases.
+
+## Quick Smoke Test
+
+This runs locally without downloading Open Images and uses hardlinks, so it is
+cheap on disk.
+
+```bash
+python3 data_pipeline/high_utility_pool/build_high_utility_pool.py \
+  --local_source data/joint_pool_10k/images \
+  --output_dir data/high_utility_pool_smoke \
+  --target_count 64 \
+  --smoke_test
+```
+
+## Build The 10k Pool
+
+```bash
+python3 data_pipeline/high_utility_pool/build_high_utility_pool.py \
+  --config data_pipeline/high_utility_pool/config_high_utility_10k.json
+```
+
+The default config is capped at `max_output_gb=8.0`. Local images are hardlinked
+when possible. Downloaded Open Images thumbnails are resized to at most 896 px
+on the long side before final materialization. The config scores 10k Open
+Images candidates to keep the final 10k pool at the stricter default utility
+threshold. URL download and image scoring use `download_workers=8` by default;
+reduce it if your network is unstable.
+
+Explicit command-line flags override values from the JSON config.
+
+## Optional OpenAI VLM Judge
+
+Use this when you want a stronger final filter on the top heuristic candidates.
+Keep `vlm_max_images` modest because image inputs cost money.
+
+```bash
+OPENAI_API_KEY=... python3 data_pipeline/high_utility_pool/build_high_utility_pool.py \
+  --config data_pipeline/high_utility_pool/config_high_utility_10k.json \
+  --vlm_backend openai \
+  --vlm_model gpt-4.1-mini \
+  --vlm_max_images 1500 \
+  --vlm_candidate_top_k 4000
+```
+
+## Optional Gemini VLM Judge
+
+```bash
+GEMINI_API_KEY=... python3 data_pipeline/high_utility_pool/build_high_utility_pool.py \
+  --config data_pipeline/high_utility_pool/config_high_utility_10k.json \
+  --vlm_backend gemini \
+  --vlm_model gemini-2.0-flash \
+  --vlm_max_images 1500
+```
+
+This requires the `google-genai` package.
+
+## Optional Local Qwen3-VL Judge
+
+On Apple Silicon, use the MLX backend to run a local open VLM without API keys.
+The tested low-memory model is `mlx-community/Qwen3-VL-4B-Instruct-4bit`; it
+uses about 4 GB peak memory for the judge prompt on this machine.
+
+Install the optional runtime in an isolated Python 3.12 environment that can
+import MLX. Keep it separate from the BLIP3o training environment, because
+`mlx-vlm` may install a newer `transformers` stack than the trainer expects.
+
+```bash
+/usr/local/bin/python3.12 -m pip install -r data_pipeline/high_utility_pool/requirements-local-vlm.txt
+```
+
+Run a bounded local audit first:
+
+```bash
+HF_HUB_DISABLE_XET=1 /usr/local/bin/python3.12 \
+  data_pipeline/high_utility_pool/build_high_utility_pool.py \
+  --local_source data/high_utility_pool_10k/images \
+  --output_dir data/high_utility_pool_10k_qwen_audit \
+  --target_count 10000 \
+  --no_openimages \
+  --vlm_backend mlx_vlm \
+  --vlm_model mlx-community/Qwen3-VL-4B-Instruct-4bit \
+  --vlm_max_images 256 \
+  --vlm_candidate_top_k 10000 \
+  --vlm_selection_strategy stratified
+```
+
+For a full VLM-rescored pool, increase `--vlm_max_images` in stages. A full
+10k local VLM pass is possible, but it is intentionally not the default because
+it can take hours on a laptop.
+
+## H200 Large-VLM Judge
+
+For a 128 GB H200 machine, use a server-style backend instead of loading the VLM
+inside the data builder. Start a vLLM OpenAI-compatible server in one terminal:
+
+```bash
+cd /path/to/self-evolving-uug
+python3 -m venv .venv_h200_vlm
+source .venv_h200_vlm/bin/activate
+pip install -U -r data_pipeline/high_utility_pool/requirements-h200-vlm.txt
+
+VLM_MODEL=Qwen/Qwen2.5-VL-72B-Instruct-AWQ \
+  data_pipeline/high_utility_pool/serve_h200_qwen_vlm.sh
+```
+
+Recommended model choices:
+
+- `Qwen/Qwen2.5-VL-72B-Instruct-AWQ`: best practical single-H200 quality target
+  for full 10k filtering; the AWQ checkpoint is much smaller than BF16 and the
+  official model card reports near-BF16 benchmark retention.
+- `Qwen/Qwen3-VL-32B-Instruct-FP8`: faster latest-generation option; useful for
+  staged audits or if 72B throughput is too slow.
+
+Then run a small audit first:
+
+```bash
+VLM_MODEL=Qwen/Qwen2.5-VL-72B-Instruct-AWQ \
+VLM_MAX_IMAGES=512 \
+OUTPUT_DIR=data/high_utility_pool_10k_h200_audit512 \
+  data_pipeline/high_utility_pool/run_h200_vlm_audit.sh --dry_run
+```
+
+If the audit report has low schema failures and sensible score distribution,
+run the full 10k VLM-rescored pool:
+
+```bash
+VLM_MODEL=Qwen/Qwen2.5-VL-72B-Instruct-AWQ \
+VLM_MAX_IMAGES=10000 \
+OUTPUT_DIR=data/high_utility_pool_10k_h200_qwen72b \
+  data_pipeline/high_utility_pool/run_h200_vlm_audit.sh
+```
+
+The builder calls the server through `--vlm_backend openai_compatible`, stores
+every judgment in `scores/vlm_scores.jsonl`, and writes the final selected pool
+plus `audit_report.json` under the requested output directory. Re-running is
+resumable because completed VLM rows are read from the score cache.
+
+## Use With BLIP3o Training
+
+After the pool is built:
+
+```bash
+DATA_DIR=$PWD/data/high_utility_pool_10k/images \
+  bash scripts/self_evolving/final/E1_main_joint.sh
+```
+
+For the paper protocol, the readiness checker expects 6000 images at
+`data/joint_6k/images`. To use the curated pool for that path, create a copy or
+symlink after verifying the audit report.
+
+```bash
+mkdir -p data/joint_6k
+ln -sfn ../high_utility_pool_10k/images data/joint_6k/images
+```
+
+## Notes
+
+- If the run selects fewer than 10k images, lower `min_heuristic_score`, increase
+  `openimages_target`, or add more local sources.
+- If disk space is tight, lower `max_output_gb`, keep `link_mode=hardlink`, and
+  use fewer VLM/download candidates.
+- The pipeline is resumable at the source-cache level. Re-running reuses cached
+  Open Images CSVs, downloaded thumbnails, and VLM score cache.

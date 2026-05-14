@@ -21,12 +21,25 @@ EXPERIMENT_CHOICES = (
     "unified_self_evolving",
 )
 
+DEFAULT_TEXT_LORA_TARGETS = "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
+DEFAULT_SOLVER_MERGER_LORA_TARGETS = "visual.merger.mlp.0,visual.merger.mlp.2"
+DEFAULT_DIT_LORA_TARGETS = (
+    "attn2.to_q,attn2.to_k,attn2.to_v,attn2.to_out.0,"
+    "caption_projection.linear_1,caption_projection.linear_2"
+)
+
 
 def _parse_subfolders(value: Optional[str]) -> Optional[Tuple[str, ...]]:
     if not value:
         return None
     names = tuple(part.strip() for part in value.split(",") if part.strip())
     return names or None
+
+
+def _parse_csv_tuple(value: Optional[str]) -> Tuple[str, ...]:
+    if not value:
+        return tuple()
+    return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -61,8 +74,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lr", type=float, default=1e-6)
     p.add_argument("--weight_decay", type=float, default=0.01)
     p.add_argument("--grad_clip", type=float, default=1.0)
-    p.add_argument("--grad_accum_steps", type=int, default=4)
-    p.add_argument("--proposer_update_freq", type=int, default=5)
+    p.add_argument("--grad_accum_steps", type=int, default=1)
+    p.add_argument("--proposer_update_freq", type=int, default=1)
     p.add_argument("--generator_update_freq", type=int, default=1)
     p.add_argument("--enable_solver_updates", action="store_true", default=False)
     p.add_argument("--solver_update_freq", type=int, default=0)
@@ -76,7 +89,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max_new_tokens_generator", type=int, default=768)
     p.add_argument("--num_solver_samples", type=int, default=7)
     p.add_argument("--num_solver_samples_spec", type=int, default=3)
-    p.add_argument("--num_generations", type=int, default=4)
+    p.add_argument("--num_generations", type=int, default=3)
 
     # Reward shaping
     p.add_argument("--solver_soft_gamma", type=float, default=0.7)
@@ -203,6 +216,32 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--proposer_easy_reward_floor", type=float, default=-0.35)
     p.add_argument("--proposer_all_easy_rank_spread", type=float, default=0.08)
+    p.add_argument("--solver_token_entropy_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_solver_token_entropy",
+        dest="solver_token_entropy_enabled",
+        action="store_false",
+    )
+    p.add_argument("--solver_token_entropy_tokens", type=int, default=5)
+    p.add_argument("--solver_token_entropy_window_size", type=int, default=128)
+    p.add_argument("--solver_token_entropy_sigmoid_alpha", type=float, default=1.5)
+    p.add_argument("--solver_token_entropy_sigmoid_beta", type=float, default=2.0)
+    p.add_argument(
+        "--solver_token_entropy_aggregation",
+        type=str,
+        default="max",
+        choices=["max", "mean"],
+        help="Aggregate first-K answer-token entropies for STE difficulty.",
+    )
+    p.add_argument("--proposer_ste_primary_weight", type=float, default=0.70)
+    p.add_argument("--proposer_sample_entropy_weight", type=float, default=0.30)
+    p.add_argument("--proposer_ste_reward_weight", type=float, default=0.30)
+    p.add_argument("--solver_pps_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_solver_pps",
+        dest="solver_pps_enabled",
+        action="store_false",
+    )
     p.add_argument("--solver_skip_update_on_easy", action="store_true", default=False)
     p.add_argument(
         "--allow_solver_update_on_easy",
@@ -290,7 +329,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--kl_coef", type=float, default=0.01)
     p.add_argument("--kl_target", type=float, default=0.02)
     p.add_argument("--kl_adapt_rate", type=float, default=0.10)
-    p.add_argument("--kl_min", type=float, default=1e-8)
+    p.add_argument("--kl_min", type=float, default=0.001)
     p.add_argument("--kl_max", type=float, default=1e2)
     p.add_argument("--baseline_momentum", type=float, default=0.6)
 
@@ -303,23 +342,67 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--lora_targets",
         type=str,
-        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector",
+        default=DEFAULT_TEXT_LORA_TARGETS,
+    )
+    p.add_argument("--solver_merger_lora", dest="solver_merger_lora_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_solver_merger_lora",
+        dest="solver_merger_lora_enabled",
+        action="store_false",
+    )
+    p.add_argument("--solver_merger_lora_r", type=int, default=4)
+    p.add_argument("--solver_merger_lora_alpha", type=int, default=8)
+    p.add_argument("--solver_merger_lora_lr", type=float, default=2e-7)
+    p.add_argument(
+        "--solver_merger_lora_targets",
+        type=str,
+        default=DEFAULT_SOLVER_MERGER_LORA_TARGETS,
+        help="Comma-separated visual-language merger/projection modules trained only by the solver adapter.",
+    )
+    p.add_argument("--load_in_4bit", action="store_true", default=False)
+    p.add_argument("--bnb_4bit_quant_type", type=str, default="nf4", choices=["nf4", "fp4"])
+    p.add_argument("--bnb_4bit_use_double_quant", action="store_true", default=True)
+    p.add_argument(
+        "--disable_bnb_4bit_use_double_quant",
+        dest="bnb_4bit_use_double_quant",
+        action="store_false",
+    )
+    p.add_argument(
+        "--bnb_4bit_compute_dtype",
+        type=str,
+        default="bfloat16",
+        choices=["bfloat16", "bf16", "float16", "fp16", "float32", "fp32"],
     )
 
     # Logging + checkpoints
     p.add_argument("--log_every", type=int, default=1)
-    p.add_argument("--save_every", type=int, default=500)
+    p.add_argument("--save_every", type=int, default=50)
     p.add_argument("--max_checkpoints", type=int, default=5)
     p.add_argument("--clear_cache_every", type=int, default=25)
     p.add_argument("--save_generated_images_every", type=int, default=0)
+    p.add_argument(
+        "--code_run_registry_dir",
+        type=str,
+        default=os.environ.get("SELF_EVOLVING_CODE_RUN_REGISTRY", None),
+        help=(
+            "Directory for lightweight run metadata mirrored beside training code. "
+            "Defaults to blip3o/train/self_evolving/training_runs."
+        ),
+    )
+    p.add_argument("--code_run_registry", dest="code_run_registry_enabled", action="store_true", default=True)
+    p.add_argument(
+        "--disable_code_run_registry",
+        dest="code_run_registry_enabled",
+        action="store_false",
+    )
     p.add_argument("--resume_from", type=str, default=None)
     p.add_argument("--start_step", type=int, default=0)
 
     # Generation backend
-    p.add_argument("--generation_num_inference_steps", type=int, default=30)
+    p.add_argument("--generation_num_inference_steps", type=int, default=50)
     p.add_argument("--generation_guidance_scale", type=float, default=2.0)
-    p.add_argument("--generation_height", type=int, default=1024)
-    p.add_argument("--generation_width", type=int, default=1024)
+    p.add_argument("--generation_height", type=int, default=896)
+    p.add_argument("--generation_width", type=int, default=896)
     p.add_argument("--require_decoder_for_blip3o", action="store_true", default=True)
     p.add_argument("--allow_missing_decoder_for_blip3o", dest="require_decoder_for_blip3o", action="store_false")
     p.add_argument("--allow_latent_visualization_fallback", action="store_true", default=False)
@@ -388,6 +471,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dit_conditioning_dropout", type=float, default=0.10)
     p.add_argument("--dit_loss_weight", type=float, default=1.0)
     p.add_argument("--dit_prompt_suffix_token_id", type=int, default=151665)
+    p.add_argument("--dit_lora", dest="dit_lora_enabled", action="store_true", default=True,
+                   help="Train LoRA adapters inside the BLIP3o DiT instead of full DiT weights.")
+    p.add_argument("--disable_dit_lora", dest="dit_lora_enabled", action="store_false",
+                   help="Ablation: unfreeze full DiT weights for the DiT updater.")
+    p.add_argument("--dit_lora_r", type=int, default=16)
+    p.add_argument("--dit_lora_alpha", type=int, default=32)
+    p.add_argument("--dit_lora_dropout", type=float, default=0.0)
+    p.add_argument("--dit_lora_targets", type=str, default=DEFAULT_DIT_LORA_TARGETS)
     # Joint LLM+DiT training (Change 2+3)
     p.add_argument("--dit_joint_conditioning_train", action="store_true", default=False,
                    help="Remove no_grad from LLM conditioning; train generator LoRA jointly with DiT.")
@@ -456,7 +547,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Number of initial generation-only steps before the regular U/G cycle begins.",
     )
-    p.add_argument("--synthetic_solver_update_freq", type=int, default=1)
+    p.add_argument("--synthetic_solver_update_freq", type=int, default=0)
     p.add_argument("--synthetic_solver_hard_only", action="store_true", default=False)
     p.add_argument("--solver_hardness_min_entropy", type=float, default=0.2)
     p.add_argument("--min_spec_quality_for_update", type=float, default=0.35)
@@ -532,7 +623,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def _build_understanding_config(args):
     from blip3o.train.self_evolving.config import UnderstandingSelfEvolvingConfig
 
-    lora_targets = tuple(x.strip() for x in args.lora_targets.split(",") if x.strip())
+    lora_targets = _parse_csv_tuple(args.lora_targets)
+    solver_merger_lora_targets = _parse_csv_tuple(args.solver_merger_lora_targets)
     return UnderstandingSelfEvolvingConfig(
         run_name=args.run_name,
         output_dir=args.output_dir,
@@ -618,6 +710,16 @@ def _build_understanding_config(args):
         proposer_certificate_strict_struct=args.proposer_certificate_strict_struct,
         proposer_easy_reward_floor=args.proposer_easy_reward_floor,
         proposer_all_easy_rank_spread=args.proposer_all_easy_rank_spread,
+        solver_token_entropy_enabled=args.solver_token_entropy_enabled,
+        solver_token_entropy_tokens=args.solver_token_entropy_tokens,
+        solver_token_entropy_window_size=args.solver_token_entropy_window_size,
+        solver_token_entropy_sigmoid_alpha=args.solver_token_entropy_sigmoid_alpha,
+        solver_token_entropy_sigmoid_beta=args.solver_token_entropy_sigmoid_beta,
+        solver_token_entropy_aggregation=args.solver_token_entropy_aggregation,
+        proposer_ste_primary_weight=args.proposer_ste_primary_weight,
+        proposer_sample_entropy_weight=args.proposer_sample_entropy_weight,
+        proposer_ste_reward_weight=args.proposer_ste_reward_weight,
+        solver_pps_enabled=args.solver_pps_enabled,
         grpo_extra_sc_samples=args.grpo_extra_sc_samples,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
@@ -673,12 +775,23 @@ def _build_understanding_config(args):
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
         lora_target_modules=lora_targets,
+        solver_merger_lora_enabled=args.solver_merger_lora_enabled,
+        solver_merger_lora_r=args.solver_merger_lora_r,
+        solver_merger_lora_alpha=args.solver_merger_lora_alpha,
+        solver_merger_lora_lr=args.solver_merger_lora_lr,
+        solver_merger_lora_target_modules=solver_merger_lora_targets,
+        load_in_4bit=args.load_in_4bit,
+        bnb_4bit_quant_type=args.bnb_4bit_quant_type,
+        bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant,
+        bnb_4bit_compute_dtype=args.bnb_4bit_compute_dtype,
         seed=args.seed,
         deterministic=args.deterministic,
         log_every=args.log_every,
         save_every=args.save_every,
         max_checkpoints=args.max_checkpoints,
         clear_cache_every=args.clear_cache_every,
+        code_run_registry_enabled=args.code_run_registry_enabled,
+        code_run_registry_dir=args.code_run_registry_dir,
         resume_from=args.resume_from,
         start_step=args.start_step,
         wandb_mode=args.wandb_mode,
@@ -692,7 +805,9 @@ def _build_understanding_config(args):
 def _build_generation_config(args):
     from blip3o.train.self_evolving.config import GenerationSelfEvolvingConfig
 
-    lora_targets = tuple(x.strip() for x in args.lora_targets.split(",") if x.strip())
+    lora_targets = _parse_csv_tuple(args.lora_targets)
+    solver_merger_lora_targets = _parse_csv_tuple(args.solver_merger_lora_targets)
+    dit_lora_targets = _parse_csv_tuple(args.dit_lora_targets)
     return GenerationSelfEvolvingConfig(
         run_name=args.run_name,
         output_dir=args.output_dir,
@@ -766,6 +881,11 @@ def _build_generation_config(args):
         dit_conditioning_dropout=args.dit_conditioning_dropout,
         dit_loss_weight=args.dit_loss_weight,
         dit_prompt_suffix_token_id=args.dit_prompt_suffix_token_id,
+        dit_lora_enabled=args.dit_lora_enabled,
+        dit_lora_r=args.dit_lora_r,
+        dit_lora_alpha=args.dit_lora_alpha,
+        dit_lora_dropout=args.dit_lora_dropout,
+        dit_lora_target_modules=dit_lora_targets,
         dit_joint_conditioning_train=args.dit_joint_conditioning_train,
         dit_joint_conditioning_lr=args.dit_joint_conditioning_lr,
         dit_reward_loss_weight=args.dit_reward_loss_weight,
@@ -840,6 +960,16 @@ def _build_generation_config(args):
         proposer_certificate_strict_struct=args.proposer_certificate_strict_struct,
         proposer_easy_reward_floor=args.proposer_easy_reward_floor,
         proposer_all_easy_rank_spread=args.proposer_all_easy_rank_spread,
+        solver_token_entropy_enabled=args.solver_token_entropy_enabled,
+        solver_token_entropy_tokens=args.solver_token_entropy_tokens,
+        solver_token_entropy_window_size=args.solver_token_entropy_window_size,
+        solver_token_entropy_sigmoid_alpha=args.solver_token_entropy_sigmoid_alpha,
+        solver_token_entropy_sigmoid_beta=args.solver_token_entropy_sigmoid_beta,
+        solver_token_entropy_aggregation=args.solver_token_entropy_aggregation,
+        proposer_ste_primary_weight=args.proposer_ste_primary_weight,
+        proposer_sample_entropy_weight=args.proposer_sample_entropy_weight,
+        proposer_ste_reward_weight=args.proposer_ste_reward_weight,
+        solver_pps_enabled=args.solver_pps_enabled,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
@@ -902,6 +1032,15 @@ def _build_generation_config(args):
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
         lora_target_modules=lora_targets,
+        solver_merger_lora_enabled=args.solver_merger_lora_enabled,
+        solver_merger_lora_r=args.solver_merger_lora_r,
+        solver_merger_lora_alpha=args.solver_merger_lora_alpha,
+        solver_merger_lora_lr=args.solver_merger_lora_lr,
+        solver_merger_lora_target_modules=solver_merger_lora_targets,
+        load_in_4bit=args.load_in_4bit,
+        bnb_4bit_quant_type=args.bnb_4bit_quant_type,
+        bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant,
+        bnb_4bit_compute_dtype=args.bnb_4bit_compute_dtype,
         seed=args.seed,
         deterministic=args.deterministic,
         log_every=args.log_every,
@@ -909,6 +1048,8 @@ def _build_generation_config(args):
         max_checkpoints=args.max_checkpoints,
         clear_cache_every=args.clear_cache_every,
         save_generated_images_every=args.save_generated_images_every,
+        code_run_registry_enabled=args.code_run_registry_enabled,
+        code_run_registry_dir=args.code_run_registry_dir,
         resume_from=args.resume_from,
         start_step=args.start_step,
         wandb_mode=args.wandb_mode,
@@ -927,7 +1068,9 @@ def _build_generation_config(args):
 def _build_unified_config(args):
     from blip3o.train.self_evolving.config import UnifiedSelfEvolvingConfig
 
-    lora_targets = tuple(x.strip() for x in args.lora_targets.split(",") if x.strip())
+    lora_targets = _parse_csv_tuple(args.lora_targets)
+    solver_merger_lora_targets = _parse_csv_tuple(args.solver_merger_lora_targets)
+    dit_lora_targets = _parse_csv_tuple(args.dit_lora_targets)
     strict_imageless_mode = bool(args.strict_imageless_mode)
     imageless_proposer_mode = bool(args.imageless_proposer_mode) or strict_imageless_mode
     understanding_generated_only = bool(args.understanding_generated_only) or strict_imageless_mode
@@ -1035,6 +1178,11 @@ def _build_unified_config(args):
         dit_conditioning_dropout=args.dit_conditioning_dropout,
         dit_loss_weight=args.dit_loss_weight,
         dit_prompt_suffix_token_id=args.dit_prompt_suffix_token_id,
+        dit_lora_enabled=args.dit_lora_enabled,
+        dit_lora_r=args.dit_lora_r,
+        dit_lora_alpha=args.dit_lora_alpha,
+        dit_lora_dropout=args.dit_lora_dropout,
+        dit_lora_target_modules=dit_lora_targets,
         dit_joint_conditioning_train=args.dit_joint_conditioning_train,
         dit_joint_conditioning_lr=args.dit_joint_conditioning_lr,
         dit_reward_loss_weight=args.dit_reward_loss_weight,
@@ -1109,6 +1257,16 @@ def _build_unified_config(args):
         proposer_certificate_strict_struct=args.proposer_certificate_strict_struct,
         proposer_easy_reward_floor=args.proposer_easy_reward_floor,
         proposer_all_easy_rank_spread=args.proposer_all_easy_rank_spread,
+        solver_token_entropy_enabled=args.solver_token_entropy_enabled,
+        solver_token_entropy_tokens=args.solver_token_entropy_tokens,
+        solver_token_entropy_window_size=args.solver_token_entropy_window_size,
+        solver_token_entropy_sigmoid_alpha=args.solver_token_entropy_sigmoid_alpha,
+        solver_token_entropy_sigmoid_beta=args.solver_token_entropy_sigmoid_beta,
+        solver_token_entropy_aggregation=args.solver_token_entropy_aggregation,
+        proposer_ste_primary_weight=args.proposer_ste_primary_weight,
+        proposer_sample_entropy_weight=args.proposer_sample_entropy_weight,
+        proposer_ste_reward_weight=args.proposer_ste_reward_weight,
+        solver_pps_enabled=args.solver_pps_enabled,
         solver_skip_update_on_easy=args.solver_skip_update_on_easy,
         easy_update_majority_frac_threshold=args.easy_update_majority_frac_threshold,
         acceptance_require_non_easy=args.acceptance_require_non_easy,
@@ -1171,6 +1329,15 @@ def _build_unified_config(args):
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
         lora_target_modules=lora_targets,
+        solver_merger_lora_enabled=args.solver_merger_lora_enabled,
+        solver_merger_lora_r=args.solver_merger_lora_r,
+        solver_merger_lora_alpha=args.solver_merger_lora_alpha,
+        solver_merger_lora_lr=args.solver_merger_lora_lr,
+        solver_merger_lora_target_modules=solver_merger_lora_targets,
+        load_in_4bit=args.load_in_4bit,
+        bnb_4bit_quant_type=args.bnb_4bit_quant_type,
+        bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant,
+        bnb_4bit_compute_dtype=args.bnb_4bit_compute_dtype,
         seed=args.seed,
         deterministic=args.deterministic,
         log_every=args.log_every,
@@ -1178,6 +1345,8 @@ def _build_unified_config(args):
         max_checkpoints=args.max_checkpoints,
         clear_cache_every=args.clear_cache_every,
         save_generated_images_every=args.save_generated_images_every,
+        code_run_registry_enabled=args.code_run_registry_enabled,
+        code_run_registry_dir=args.code_run_registry_dir,
         resume_from=args.resume_from,
         start_step=args.start_step,
         wandb_mode=args.wandb_mode,
@@ -1219,6 +1388,8 @@ def _build_unified_config(args):
 def main():
     parser = _build_parser()
     args = parser.parse_args()
+    if args.load_in_4bit and not args.use_lora:
+        parser.error("--load_in_4bit is a QLoRA mode and requires --use_lora")
 
     if args.experiment == "understanding_self_evolving":
         cfg = _build_understanding_config(args)

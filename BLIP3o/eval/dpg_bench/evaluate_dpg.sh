@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 # Evaluate generated images using DPG-Bench (mplug VQA)
 #
 # Usage:
@@ -19,12 +20,21 @@ done
 unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ELLA_DIR="${SCRIPT_DIR}/ella_repo"
+ELLA_DIR="${ELLA_DIR:-${SCRIPT_DIR}/ella_repo}"
+AUTO_CLONE_EVAL_REPOS="${AUTO_CLONE_EVAL_REPOS:-0}"
 
 if [ ! -d "${ELLA_DIR}/dpg_bench" ]; then
+    if [ "${AUTO_CLONE_EVAL_REPOS}" = "1" ] && [ ! -d "${ELLA_DIR}" ]; then
+        echo "ELLA repo not found; cloning because AUTO_CLONE_EVAL_REPOS=1"
+        git clone https://github.com/TencentQQGYLab/ELLA.git "${ELLA_DIR}"
+    fi
+fi
+
+if [ ! -f "${ELLA_DIR}/dpg_bench/compute_dpg_bench.py" ]; then
     echo "ERROR: ELLA repo not found at ${ELLA_DIR}"
-    echo "Please clone it first:"
+    echo "Clone it with:"
     echo "  cd ${SCRIPT_DIR} && git clone https://github.com/TencentQQGYLab/ELLA.git ella_repo"
+    echo "or set ELLA_DIR=/path/to/ELLA. To let this script clone it, set AUTO_CLONE_EVAL_REPOS=1."
     exit 1
 fi
 

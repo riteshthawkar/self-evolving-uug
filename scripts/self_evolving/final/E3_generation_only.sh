@@ -25,10 +25,10 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 #   • Solver runs only as a frozen verifier (for spec/cycle rewards)
 #
 # What gets trained:
-#   • Generator LoRA — text-to-latent conditioning via GRPO
-#   • DiT weights — denoising via RWR (reward-weighted MSE)
+#   • Generator LoRA — text-to-latent conditioning via denoising gradients
+#   • DiT LoRA — denoising via RWR (reward-weighted MSE)
 #   • Generator LoRA also gets gradients from DiT joint conditioning
-#   • Proposer LoRA — but only from generation reward (no entropy reward)
+#   • Proposer/Solver LoRA are frozen during generation updates
 #
 # What this experiment proves:
 #   ✓ Generation improves when trained in isolation
@@ -43,16 +43,37 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_3k/images}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/final/E3_generation_only}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
+MIN_DATA_IMAGES="${MIN_DATA_IMAGES:-6000}"
+ALLOW_SMALL_DATA="${ALLOW_SMALL_DATA:-0}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E3_generation_only}"
 RUN_NAME="E3_generation_only_s42"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
 RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+MASTER_PORT="${MASTER_PORT:-29525}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 TRAIN_ENTRY="${TRAIN_ENTRY:-$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+MAX_IMAGES="${MAX_IMAGES:-}"
+INCLUDE_SUBFOLDERS="${INCLUDE_SUBFOLDERS:-}"
+LOG_EVERY="${LOG_EVERY:-1}"
+SAVE_EVERY="${SAVE_EVERY:-50}"
+SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-50}"
+UNDERSTANDING_STEPS_PER_CYCLE="${UNDERSTANDING_STEPS_PER_CYCLE:-0}"
+GENERATION_STEPS_PER_CYCLE="${GENERATION_STEPS_PER_CYCLE:-5}"
+PROPOSER_GEN_REWARD_ENABLED="${PROPOSER_GEN_REWARD_ENABLED:-0}"
+
+PROPOSER_GEN_REWARD_ARGS=()
+if [[ "$PROPOSER_GEN_REWARD_ENABLED" == "1" ]]; then
+  PROPOSER_GEN_REWARD_ARGS+=(
+    --proposer_gen_reward_enabled
+    --proposer_gen_entropy_weight 0.7
+    --proposer_gen_baseline_momentum 0.6
+  )
+fi
 
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
@@ -155,6 +176,14 @@ if [[ -n "${RESUME_FROM:-}" ]]; then
   fi
 fi
 
+DATA_SELECTION_ARGS=()
+if [[ -n "$MAX_IMAGES" ]]; then
+  DATA_SELECTION_ARGS+=(--max_images "$MAX_IMAGES")
+fi
+if [[ -n "$INCLUDE_SUBFOLDERS" ]]; then
+  DATA_SELECTION_ARGS+=(--include_subfolders "$INCLUDE_SUBFOLDERS")
+fi
+
 # ── Directory / cache setup ──────────────────────────────────────────────────
 cd "$REPO_ROOT"
 mkdir -p "$OUTPUT_DIR"
@@ -223,10 +252,13 @@ if [[ ! -d "$DATA_DIR" ]]; then
   echo "[E3] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
   exit 1
 fi
-if ! find "$DATA_DIR" -type f \
-    \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) \
-    -print -quit | grep -q .; then
-  echo "[E3] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
+IMAGE_COUNT="$(find "$DATA_DIR" -type f \
+  \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" -o -iname "*.bmp" -o -iname "*.tiff" \) \
+  | wc -l | tr -d '[:space:]')"
+if [[ "$IMAGE_COUNT" -lt "$MIN_DATA_IMAGES" && "$ALLOW_SMALL_DATA" != "1" ]]; then
+  echo "[E3] ERROR: DATA_DIR has $IMAGE_COUNT images; paper protocol requires at least $MIN_DATA_IMAGES." >&2
+  echo "[E3] Prepare data with: bash scripts/self_evolving/paper/prepare_data_6k.sh" >&2
+  echo "[E3] For smoke tests only, set ALLOW_SMALL_DATA=1." >&2
   exit 1
 fi
 
@@ -235,8 +267,11 @@ echo "[E3]   Stage:       $TRAIN_STAGE"
 echo "[E3]   Run name:    $RUN_NAME"
 echo "[E3]   Output dir:  $OUTPUT_DIR"
 echo "[E3]   Data dir:    $DATA_DIR"
+echo "[E3]   Max images:  ${MAX_IMAGES:-all}"
 echo "[E3]   GPUs:        $NPROC_PER_NODE"
 echo "[E3]   Attn impl:   $ATTN_IMPL"
+echo "[E3]   Steps:       $TOTAL_STEPS"
+echo "[E3]   Gen reward:  proposer=$PROPOSER_GEN_REWARD_ENABLED"
 echo "[E3]   NOTE: Understanding training DISABLED (solver frozen as verifier)"
 if [[ -n "${RESUME_FROM:-}" ]]; then
   echo "[E3]   Resume from: $RESUME_FROM"
@@ -246,11 +281,12 @@ fi
 "$PYTHON_BIN" -m torch.distributed.run \
   --standalone \
   --nproc_per_node "$NPROC_PER_NODE" \
-  --master_port 29525 \
+  --master_port "$MASTER_PORT" \
   "$TRAIN_ENTRY" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
   --data_split all \
+  "${DATA_SELECTION_ARGS[@]}" \
   --model_name BLIP3o/BLIP3o-Model-8B \
   --output_dir "$OUTPUT_DIR" \
   --run_name "$RUN_NAME" \
@@ -260,11 +296,11 @@ fi
   --cuda_device 0 \
   \
   `# ── Training schedule ──────────────────────────────────────────────────` \
-  --total_steps 10000 \
-  --save_every 50 \
-  --log_every 1 \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every "$LOG_EVERY" \
   --max_checkpoints "${MAX_CHECKPOINTS:-10000}" \
-  --save_generated_images_every 50 \
+  --save_generated_images_every "$SAVE_GENERATED_IMAGES_EVERY" \
   --deterministic \
   \
   `# ── Model / LoRA ───────────────────────────────────────────────────────` \
@@ -273,7 +309,7 @@ fi
   --lora_r 16 \
   --lora_alpha 32 \
   --lora_dropout 0.05 \
-  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
   \
   `# ── Optimiser (understanding-side GRPO) ────────────────────────────────` \
   --lr 1e-6 \
@@ -287,7 +323,7 @@ fi
   --generator_update_freq 1 \
   --solver_update_freq 0 \
   \
-  `# ── Generator GRPO ─────────────────────────────────────────────────────` \
+  `# ── Generator token policy path; BLIP3o routes to DiT denoising ────────` \
   --generator_update_rule grpo \
   --generator_missing_trace_strategy skip \
   --grpo_clip_ratio 0.2 \
@@ -347,8 +383,8 @@ fi
   --prop_entropy_sigma 0.25 \
   \
   `# ── Cycle scheduling: ALL generation, no understanding ─────────────────` \
-  --understanding_steps_per_cycle 0 \
-  --generation_steps_per_cycle 5 \
+  --understanding_steps_per_cycle "$UNDERSTANDING_STEPS_PER_CYCLE" \
+  --generation_steps_per_cycle "$GENERATION_STEPS_PER_CYCLE" \
   --synthetic_solver_update_freq 0 \
   \
   `# ── KL regularisation ───────────────────────────────────────────────────` \
@@ -397,10 +433,8 @@ fi
   --dit_joint_conditioning_lr 5e-7 \
   --dit_reward_loss_weight 0.5 \
   \
-  `# ── Proposer generation reward ONLY (no understanding reward) ──────────` \
-  --proposer_gen_reward_enabled \
-  --proposer_gen_entropy_weight 0.7 \
-  --proposer_gen_baseline_momentum 0.6 \
+  `# ── Optional generation-phase proposer ablation (off by default) ───────` \
+  "${PROPOSER_GEN_REWARD_ARGS[@]}" \
   \
   `# ── Logging / W&B ─────────────────────────────────────────────────────` \
   --wandb_mode disabled \

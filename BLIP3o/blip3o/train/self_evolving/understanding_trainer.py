@@ -36,6 +36,8 @@ from .prompts import (
 from .utils import (
     HAS_PEFT,
     HAS_WANDB,
+    _append_training_monitor_record,
+    _append_training_watch_record,
     _build_chat_text,
     _collect_git_info,
     _decode_tokens,
@@ -47,6 +49,7 @@ from .utils import (
     _prepare_mm_inputs,
     _resolve_attn_implementation,
     _safe_dtype,
+    _save_code_run_registry,
     _set_global_seed,
     gaussian_reward,
     majority_vote,
@@ -78,6 +81,34 @@ _META_PLACEHOLDER_RE = re.compile(
     r"\(\s*[^)]*(?:count|attribute|spatial relation|comparison|number of|color|shape|position)\s*[^)]*\)",
     flags=re.IGNORECASE,
 )
+_VISUAL_BRIDGE_TARGET_MARKERS = ("mm_projector", "visual.merger", "merger.mlp")
+
+
+def _target_tuple(value) -> Tuple[str, ...]:
+    if value is None:
+        return tuple()
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.split(",") if part.strip())
+    return tuple(str(part).strip() for part in value if str(part).strip())
+
+
+def _dedupe_targets(*groups: Tuple[str, ...]) -> Tuple[str, ...]:
+    seen = set()
+    merged = []
+    for group in groups:
+        for target in group:
+            if target and target not in seen:
+                seen.add(target)
+                merged.append(target)
+    return tuple(merged)
+
+
+def _text_only_lora_targets(targets: Tuple[str, ...]) -> Tuple[str, ...]:
+    return tuple(
+        target
+        for target in targets
+        if not any(marker in target for marker in _VISUAL_BRIDGE_TARGET_MARKERS)
+    )
 _QUESTION_START_RE = re.compile(
     r"^(?:what|which|how|where|when|who|is|are|was|were|does|do|did|can|could|should|would|has|have|had)\b",
     flags=re.IGNORECASE,
@@ -404,10 +435,14 @@ class UnderstandingSelfEvolvingTrainer:
         self.summary_path = self.run_dir / "ablation_summary.json"
         self.release_rollouts_log_path = self.run_dir / "rollouts.jsonl"
         self.metrics_log_path = self.run_dir / "metrics.jsonl"
+        self.monitor_log_path = self.logs_dir / "training_monitor.jsonl"
+        self.monitor_tsv_path = self.logs_dir / "training_monitor.tsv"
+        self.watch_log_path = self.logs_dir / "training_watch.log"
         self.status_path = self.run_dir / "status.json"
         self.release_summary_path = self.run_dir / "summary.json"
         self.checkpoint_root = self.run_dir / "checkpoints"
         self.last_checkpoint_dir = ""
+        self.code_run_registry_entry = ""
         self._save_run_metadata()
 
         self.model, self.processor = self._load_model()
@@ -554,20 +589,33 @@ class UnderstandingSelfEvolvingTrainer:
             return
         repo_root = pathlib.Path(__file__).resolve().parents[4]
         self.checkpoint_root.mkdir(parents=True, exist_ok=True)
-        _json_dump(self.run_dir / "config.json", dataclasses.asdict(self.cfg))
-        _json_dump(self.run_dir / "git_info.json", _collect_git_info(repo_root))
-        _json_dump(
-            self.run_dir / "environment.json",
-            {
-                "python": os.sys.version,
-                "torch": torch.__version__,
-                "cuda_available": torch.cuda.is_available(),
-                "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-                "rank": self.rank,
-                "world_size": self.world_size,
-                "distributed": self.distributed,
-            },
-        )
+        config_payload = dataclasses.asdict(self.cfg)
+        git_payload = _collect_git_info(repo_root)
+        env_payload = {
+            "python": os.sys.version,
+            "torch": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+            "rank": self.rank,
+            "world_size": self.world_size,
+            "distributed": self.distributed,
+        }
+        _json_dump(self.run_dir / "config.json", config_payload)
+        _json_dump(self.run_dir / "git_info.json", git_payload)
+        _json_dump(self.run_dir / "environment.json", env_payload)
+        if bool(getattr(self.cfg, "code_run_registry_enabled", True)):
+            try:
+                registry_entry = _save_code_run_registry(
+                    run_dir=self.run_dir,
+                    config=config_payload,
+                    git_info=git_payload,
+                    environment=env_payload,
+                    registry_dir=getattr(self.cfg, "code_run_registry_dir", None),
+                )
+                self.code_run_registry_entry = str(registry_entry)
+            except Exception as exc:
+                self.code_run_registry_entry = ""
+                print(f"[Understanding] WARNING: failed to write code run registry: {exc}")
         self._dist_barrier()
 
     # -------------------------------------------------------------------
@@ -579,7 +627,158 @@ class UnderstandingSelfEvolvingTrainer:
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    @staticmethod
+    def _monitor_float(value, default=None):
+        try:
+            val = float(value)
+        except Exception:
+            return default
+        return val if math.isfinite(val) else default
+
+    @classmethod
+    def _monitor_stat(cls, stats, key: str, default=None):
+        if not isinstance(stats, dict):
+            return default
+        return cls._monitor_float(stats.get(key), default=default)
+
+    @staticmethod
+    def _monitor_bool(stats, key: str, default=False) -> bool:
+        if not isinstance(stats, dict) or key not in stats:
+            return bool(default)
+        return bool(stats.get(key))
+
+    @staticmethod
+    def _monitor_skip(stats) -> str:
+        if isinstance(stats, dict):
+            reason = stats.get("skipped_reason")
+            if reason:
+                return str(reason)
+        return ""
+
+    @staticmethod
+    def _monitor_nonfinite_fields(record: Dict) -> List[str]:
+        fields: List[str] = []
+
+        def visit(prefix: str, value):
+            if isinstance(value, float):
+                if not math.isfinite(value):
+                    fields.append(prefix)
+            elif isinstance(value, dict):
+                for k, v in value.items():
+                    visit(f"{prefix}.{k}" if prefix else str(k), v)
+            elif isinstance(value, (list, tuple)):
+                for idx, v in enumerate(value[:16]):
+                    visit(f"{prefix}[{idx}]", v)
+
+        visit("", record)
+        return fields
+
+    @staticmethod
+    def _finite_mean_from_stats(stats_list: List[Dict], key: str) -> Optional[float]:
+        vals: List[float] = []
+        for stats in stats_list:
+            if not isinstance(stats, dict):
+                continue
+            try:
+                val = float(stats.get(key))
+            except Exception:
+                continue
+            if math.isfinite(val):
+                vals.append(val)
+        if not vals:
+            return None
+        return float(sum(vals) / len(vals))
+
+    def _append_training_monitor(self, record: Dict):
+        if not self.is_main_process:
+            return
+        payload = dict(record)
+        nonfinite_fields = self._monitor_nonfinite_fields(payload)
+        prior_fields = [
+            part.strip()
+            for part in str(payload.get("nonfinite_fields", "") or "").split(",")
+            if part.strip()
+        ]
+        merged_fields = prior_fields + [f for f in nonfinite_fields if f not in prior_fields]
+        payload["nan_detected"] = bool(payload.get("nan_detected")) or bool(merged_fields)
+        payload["nonfinite_fields"] = ",".join(merged_fields[:16])
+        if not payload.get("health"):
+            if merged_fields:
+                payload["health"] = "nonfinite_detected"
+            elif any(payload.get(k) for k in ("proposer_skip", "solver_skip")):
+                payload["health"] = "skipped_or_waiting"
+            elif any(bool(payload.get(k)) for k in ("proposer_did_step", "solver_did_step")):
+                payload["health"] = "optimizer_step"
+            else:
+                payload["health"] = "observed"
+        _append_training_monitor_record(self.monitor_log_path, self.monitor_tsv_path, payload)
+        _append_training_watch_record(self.watch_log_path, payload)
+
+    def _monitor_understanding_record(self, record: Dict):
+        solver_stats = record.get("solver_stats_per_sample") or record.get("solver_stats") or []
+        if not isinstance(solver_stats, list):
+            solver_stats = []
+        proposer_stats = record.get("proposer_stats")
+        solver_skip_reasons = sorted(
+            {
+                str(s.get("skipped_reason"))
+                for s in solver_stats
+                if isinstance(s, dict) and s.get("skipped_reason")
+            }
+        )
+        solver_did_step = any(
+            bool(s.get("did_step", False)) for s in solver_stats if isinstance(s, dict)
+        )
+        forced_tail = max(
+            [self._monitor_float(s.get("forced_tail_tokens"), 0.0) or 0.0 for s in solver_stats if isinstance(s, dict)]
+            + [self._monitor_stat(proposer_stats, "forced_tail_tokens", 0.0) or 0.0]
+        )
+        raw_nonfinite = self._monitor_nonfinite_fields(
+            {
+                "solver_stats": solver_stats,
+                "proposer_stats": proposer_stats,
+            }
+        )
+        self._append_training_monitor(
+            {
+                "step": int(record.get("step", 0)),
+                "phase": "understanding",
+                "image_path": record.get("image_path"),
+                "solver_reward_raw_mean": self._monitor_float(record.get("solver_rewards_raw_mean")),
+                "solver_reward_soft_mean": self._monitor_float(record.get("solver_rewards_soft_mean")),
+                "proposer_reward": self._monitor_float(record.get("proposer_reward")),
+                "entropy_nats": self._monitor_float(record.get("entropy_nats")),
+                "majority_fraction": self._monitor_float(record.get("majority_fraction")),
+                "proposer_did_step": self._monitor_bool(proposer_stats, "did_step"),
+                "proposer_skip": self._monitor_skip(proposer_stats),
+                "proposer_ce_loss": self._monitor_stat(proposer_stats, "ce_loss"),
+                "proposer_kl_loss": self._monitor_stat(proposer_stats, "kl_loss"),
+                "proposer_total_loss": self._monitor_stat(proposer_stats, "total_loss"),
+                "proposer_valid_tokens": self._monitor_stat(proposer_stats, "valid_token_count"),
+                "proposer_kl_coef": self._monitor_stat(proposer_stats, "kl_coef_after", record.get("proposer_kl_coef")),
+                "solver_did_step": solver_did_step,
+                "solver_skip": ",".join(solver_skip_reasons),
+                "solver_ce_loss": self._finite_mean_from_stats(solver_stats, "ce_loss"),
+                "solver_kl_loss": self._finite_mean_from_stats(solver_stats, "kl_loss"),
+                "solver_total_loss": self._finite_mean_from_stats(solver_stats, "total_loss"),
+                "solver_valid_tokens": self._finite_mean_from_stats(solver_stats, "valid_token_count"),
+                "solver_kl_coef": self._monitor_float(record.get("solver_kl_coef"), getattr(self.solver_updater, "kl_coef", None)),
+                "forced_tail_tokens": forced_tail,
+                "proposer_baseline": self._monitor_float(record.get("proposer_baseline_after", self.proposer_baseline)),
+                "solver_baseline": self._monitor_float(record.get("solver_baseline_after", self.solver_baseline)),
+                "step_duration_sec": self._monitor_float(record.get("step_duration_sec")),
+                "nan_detected": bool(raw_nonfinite),
+                "nonfinite_fields": ",".join(raw_nonfinite[:16]),
+            }
+        )
+
     def _update_metric(self, name: str, value: float):
+        try:
+            value = float(value)
+        except Exception:
+            return
+        if not math.isfinite(value):
+            return
         stat = self._metric_stats.setdefault(
             name,
             {"count": 0.0, "sum": 0.0, "sum_sq": 0.0, "min": value, "max": value},
@@ -670,6 +869,10 @@ class UnderstandingSelfEvolvingTrainer:
             "summary_path": str(self.release_summary_path),
             "rollouts_log_path": str(self.release_rollouts_log_path),
             "metrics_log_path": str(self.metrics_log_path),
+            "training_monitor_log_path": str(self.monitor_log_path),
+            "training_monitor_tsv_path": str(self.monitor_tsv_path),
+            "training_watch_log_path": str(self.watch_log_path),
+            "code_run_registry_entry": str(getattr(self, "code_run_registry_entry", "")),
             "last_error": str(last_error or ""),
             "progress": progress,
             "metrics": metrics,
@@ -913,6 +1116,10 @@ class UnderstandingSelfEvolvingTrainer:
             torch_dtype=dtype,
             device_map=device_map,
             attn_implementation=attn_impl,
+            load_in_4bit=bool(getattr(self.cfg, "load_in_4bit", False)),
+            bnb_4bit_quant_type=str(getattr(self.cfg, "bnb_4bit_quant_type", "nf4")),
+            bnb_4bit_use_double_quant=bool(getattr(self.cfg, "bnb_4bit_use_double_quant", True)),
+            bnb_4bit_compute_dtype=str(getattr(self.cfg, "bnb_4bit_compute_dtype", "bfloat16")),
         )
         if self.is_main_process:
             print(
@@ -922,12 +1129,58 @@ class UnderstandingSelfEvolvingTrainer:
 
         if self.cfg.use_lora:
             from peft import LoraConfig, TaskType, get_peft_model
+            try:
+                from peft import prepare_model_for_kbit_training
+            except Exception:
+                prepare_model_for_kbit_training = None
 
-            lcfg = LoraConfig(
+            if bool(getattr(self.cfg, "load_in_4bit", False)):
+                if prepare_model_for_kbit_training is None:
+                    raise RuntimeError("QLoRA requires peft.prepare_model_for_kbit_training")
+                model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
+
+            requested_targets = _target_tuple(self.cfg.lora_target_modules)
+            text_targets = _text_only_lora_targets(requested_targets)
+            if not text_targets:
+                raise ValueError(
+                    "No text LoRA targets configured. `lora_target_modules` should include Qwen targets "
+                    "such as q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj."
+                )
+            solver_merger_enabled = bool(getattr(self.cfg, "solver_merger_lora_enabled", False))
+            solver_merger_targets = (
+                _target_tuple(getattr(self.cfg, "solver_merger_lora_target_modules", tuple()))
+                if solver_merger_enabled
+                else tuple()
+            )
+            solver_targets = _dedupe_targets(text_targets, solver_merger_targets)
+            lcfg_kwargs = {
+                "r": self.cfg.lora_r,
+                "lora_alpha": self.cfg.lora_alpha,
+                "lora_dropout": self.cfg.lora_dropout,
+                "target_modules": list(solver_targets),
+                "bias": "none",
+                "task_type": TaskType.CAUSAL_LM,
+            }
+            if solver_merger_targets:
+                lcfg_kwargs["rank_pattern"] = {
+                    target: int(getattr(self.cfg, "solver_merger_lora_r", self.cfg.lora_r))
+                    for target in solver_merger_targets
+                }
+                lcfg_kwargs["alpha_pattern"] = {
+                    target: int(getattr(self.cfg, "solver_merger_lora_alpha", self.cfg.lora_alpha))
+                    for target in solver_merger_targets
+                }
+            try:
+                lcfg = LoraConfig(**lcfg_kwargs)
+            except TypeError:
+                lcfg_kwargs.pop("rank_pattern", None)
+                lcfg_kwargs.pop("alpha_pattern", None)
+                lcfg = LoraConfig(**lcfg_kwargs)
+            proposer_cfg = LoraConfig(
                 r=self.cfg.lora_r,
                 lora_alpha=self.cfg.lora_alpha,
                 lora_dropout=self.cfg.lora_dropout,
-                target_modules=list(self.cfg.lora_target_modules),
+                target_modules=list(text_targets),
                 bias="none",
                 task_type=TaskType.CAUSAL_LM,
             )
@@ -935,7 +1188,7 @@ class UnderstandingSelfEvolvingTrainer:
             # default adapter is solver; create proposer adapter explicitly
             if hasattr(model, "add_adapter"):
                 try:
-                    model.add_adapter("proposer", lcfg)
+                    model.add_adapter("proposer", proposer_cfg)
                 except Exception as exc:
                     raise RuntimeError(f"Failed to add proposer adapter: {exc}") from exc
 
@@ -946,7 +1199,14 @@ class UnderstandingSelfEvolvingTrainer:
                 else:
                     param.requires_grad_(False)
 
-            model.print_trainable_parameters()
+            if self.is_main_process:
+                print(
+                    "[Understanding] Role LoRA targets: "
+                    f"text={list(text_targets)}; "
+                    f"solver_merger_enabled={solver_merger_enabled}; "
+                    f"solver_merger={list(solver_merger_targets)}"
+                )
+                model.print_trainable_parameters()
 
         # Activation checkpointing significantly reduces training-time memory.
         gc_enabled = os.environ.get("SE_USE_GRADIENT_CHECKPOINTING", "1").strip().lower() not in {"0", "false", "no"}
@@ -1067,6 +1327,7 @@ class UnderstandingSelfEvolvingTrainer:
         payload.setdefault("phase", "understanding")
         self._append_jsonl(self.iter_log_path, payload)
         self._append_jsonl(self.release_rollouts_log_path, payload)
+        self._monitor_understanding_record(payload)
 
     # -------------------------------------------------------------------
     # Checkpointing
@@ -1883,20 +2144,26 @@ class UnderstandingSelfEvolvingTrainer:
                 pre_words_mean_global = self._dist_mean(pre_words_mean)
                 step_duration_sec_global = self._dist_mean(step_duration_sec)
 
-                solver_ce_mean = (
-                    sum(s["ce_loss"] for s in solver_step_stats) / max(1, len(solver_step_stats))
-                )
-                solver_kl_mean = (
-                    sum(s["kl_loss"] for s in solver_step_stats) / max(1, len(solver_step_stats))
-                )
-                solver_adv_mean = (
-                    sum(s["advantage"] for s in solver_step_stats)
-                    / max(1, len(solver_step_stats))
+                solver_ce_mean = self._finite_mean_from_stats(solver_step_stats, "ce_loss")
+                solver_kl_mean = self._finite_mean_from_stats(solver_step_stats, "kl_loss")
+                solver_adv_mean = self._finite_mean_from_stats(solver_step_stats, "advantage")
+                solver_nonfinite_count = sum(
+                    1
+                    for s in solver_step_stats
+                    if isinstance(s, dict)
+                    and self._monitor_float(s.get("ce_loss")) is None
+                    and "ce_loss" in s
                 )
                 solver_stats_mean = {
                     "ce_loss_mean": solver_ce_mean,
                     "kl_loss_mean": solver_kl_mean,
                     "advantage_mean": solver_adv_mean,
+                    "finite_solver_updates": sum(
+                        1
+                        for s in solver_step_stats
+                        if isinstance(s, dict) and self._monitor_float(s.get("ce_loss")) is not None
+                    ),
+                    "nonfinite_solver_updates": solver_nonfinite_count,
                 }
 
                 if self.is_main_process and step % cfg.log_every == 0:

@@ -25,11 +25,11 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 #
 # What still gets trained:
 #   • Solver LoRA — understanding via GRPO (same as E1)
-#   • Generator LoRA — via GRPO on token traces only (no denoising gradient)
-#   • Proposer LoRA — dual reward from both tasks (same as E1)
+#   • Generator text-conditioning LoRA only when valid generator traces exist
+#   • Proposer LoRA — visual-understanding curriculum (same as E1)
 #
 # What this experiment proves:
-#   ✓ DiT fine-tuning (RWR) is essential for generation quality
+#   ✓ Diffusion Generator LoRA/RWR is essential for generation quality
 #   ✓ Compare E4 vs E1: GenEval gap = DiT contribution
 #   ✓ Understanding should be similar to E1 (DiT doesn't affect understanding)
 #   ✓ This ablation is UNIQUE to our work — no competitor trains DiT jointly
@@ -48,16 +48,23 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_3k/images}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/final/E4_no_dit_rwr}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
+MIN_DATA_IMAGES="${MIN_DATA_IMAGES:-6000}"
+ALLOW_SMALL_DATA="${ALLOW_SMALL_DATA:-0}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E4_no_dit_rwr}"
 RUN_NAME="E4_no_dit_rwr_s42"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
 RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+MASTER_PORT="${MASTER_PORT:-29526}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 TRAIN_ENTRY="${TRAIN_ENTRY:-$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+LOG_EVERY="${LOG_EVERY:-1}"
+SAVE_EVERY="${SAVE_EVERY:-50}"
+SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-50}"
 
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
@@ -228,10 +235,13 @@ if [[ ! -d "$DATA_DIR" ]]; then
   echo "[E4] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
   exit 1
 fi
-if ! find "$DATA_DIR" -type f \
-    \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) \
-    -print -quit | grep -q .; then
-  echo "[E4] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
+IMAGE_COUNT="$(find "$DATA_DIR" -type f \
+  \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" -o -iname "*.bmp" -o -iname "*.tiff" \) \
+  | wc -l | tr -d '[:space:]')"
+if [[ "$IMAGE_COUNT" -lt "$MIN_DATA_IMAGES" && "$ALLOW_SMALL_DATA" != "1" ]]; then
+  echo "[E4] ERROR: DATA_DIR has $IMAGE_COUNT images; paper protocol requires at least $MIN_DATA_IMAGES." >&2
+  echo "[E4] Prepare data with: bash scripts/self_evolving/paper/prepare_data_6k.sh" >&2
+  echo "[E4] For smoke tests only, set ALLOW_SMALL_DATA=1." >&2
   exit 1
 fi
 
@@ -251,7 +261,7 @@ fi
 "$PYTHON_BIN" -m torch.distributed.run \
   --standalone \
   --nproc_per_node "$NPROC_PER_NODE" \
-  --master_port 29526 \
+  --master_port "$MASTER_PORT" \
   "$TRAIN_ENTRY" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
@@ -265,11 +275,11 @@ fi
   --cuda_device 0 \
   \
   `# ── Training schedule ──────────────────────────────────────────────────` \
-  --total_steps 10000 \
-  --save_every 50 \
-  --log_every 1 \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every "$LOG_EVERY" \
   --max_checkpoints "${MAX_CHECKPOINTS:-10000}" \
-  --save_generated_images_every 50 \
+  --save_generated_images_every "$SAVE_GENERATED_IMAGES_EVERY" \
   --deterministic \
   \
   `# ── Model / LoRA ───────────────────────────────────────────────────────` \
@@ -278,7 +288,7 @@ fi
   --lora_r 16 \
   --lora_alpha 32 \
   --lora_dropout 0.05 \
-  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
   \
   `# ── Optimiser (understanding-side GRPO) ────────────────────────────────` \
   --lr 1e-6 \
@@ -292,7 +302,7 @@ fi
   --enable_solver_updates \
   --solver_update_freq 1 \
   \
-  `# ── Generator GRPO ─────────────────────────────────────────────────────` \
+  `# ── Generator token policy path; BLIP3o has no image-token traces ──────` \
   --generator_update_rule grpo \
   --generator_missing_trace_strategy skip \
   --grpo_clip_ratio 0.2 \
@@ -398,11 +408,7 @@ fi
   --dit_loss_weight 1.0 \
   --dit_prompt_suffix_token_id 151665 \
   \
-  `# ── Proposer dual reward (same as E1) ──────────────────────────────────` \
-  --proposer_gen_reward_enabled \
-  --proposer_gen_entropy_weight 0.7 \
-  --proposer_gen_baseline_momentum 0.6 \
-  --gen_step_solver_update_enabled \
+  `# ── Main-method coupling only: no G-step proposer/solver updates ───────` \
   \
   `# ── Logging / W&B ─────────────────────────────────────────────────────` \
   --wandb_mode disabled \

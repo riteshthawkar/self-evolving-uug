@@ -1,0 +1,163 @@
+{
+  "step": 1356,
+  "phase": "understanding",
+  "image_path": "/workspace/self-evolving-uug/data/joint_pool_10k/images/vsr/000937.jpg",
+  "step_time_sec": 143.747414059937,
+  "question": "What is the tray of food being removed from the oven?",
+  "proposer_out": "<questions>\n  <question id=\"1\">\n    <task_card>C3</task_card>\n    <reasoning_domains>behavior,intent</reasoning_domains>\n    <reasoning_chain>The man's arm is extended towards the oven, indicating he is reaching for something inside. His body posture suggests he is focused on the task. The tattoo on his arm is detailed and visible, implying he is performing a specific action.</reasoning_chain>\n    <strategy_used>H14</strategy_used>\n    <visual_target>the tray of food being removed from the oven</visual_target>\n    <text>What is the man likely grabbing from the oven?</text>\n    <two_answer_test>chicken wings, broccoli florets</two_answer_test>\n    <rationale>The question requires reasoning about the man's action and the contents of the tray, making it hard because the exact food item cannot be seen clearly, but the context and the visible tray suggest a specific type of food.</rationale>\n  </question>\n  <question id=\"2\">\n    <task_card>C3</task_card>\n    <reasoning_domains>behavior,intent</reasoning_domains>\n    <reasoning_chain>The man's headband and focused posture indicate he is engaged in a task. The tattoo on his arm is detailed and visible, suggesting he is performing a specific action related to the food preparation process.</reasoning_chain>\n    <strategy_used>H14</strategy_used>\n    <visual_target>the tray of food being removed from the oven</visual_target>\n    <text>What is the man likely grabbing from the oven?</text>\n    <two_answer_test>chicken wings, broccoli florets</two_answer_test>\n    <rationale>The question requires reasoning about the man's action and the contents of the tray, making it hard because the exact food item cannot be seen clearly, but",
+  "proposer_rationale": "The question requires reasoning about the man's action and the contents of the tray, making it hard because the exact food item cannot be seen clearly, but the context and the visible tray suggest a specific type of food.",
+  "fallback_question_used": true,
+  "proposer_template_fallback_used": false,
+  "proposer_non_objective_question": false,
+  "question_rejected": false,
+  "question_reject_reason": "accepted",
+  "solver_answers_raw": [
+    "unidentifiable food",
+    "unidentifiable food",
+    "unidentifiable food",
+    "green food",
+    "unidentifiable",
+    "green food",
+    "unidentifiable food"
+  ],
+  "solver_answers_norm": [
+    "unidentifiable food",
+    "unidentifiable food",
+    "unidentifiable food",
+    "green food",
+    "unidentifiable",
+    "green food",
+    "unidentifiable food"
+  ],
+  "solver_vote_labels": [
+    "unidentifiable food",
+    "unidentifiable food",
+    "unidentifiable food",
+    "green food",
+    "unidentifiable",
+    "green food",
+    "unidentifiable food"
+  ],
+  "majority_answer": "unidentifiable food",
+  "majority_count": 4,
+  "majority_fraction": 0.5714285714285714,
+  "entropy_nats": 0.9556998911125343,
+  "proposer_token_entropy_max": 4.416291236877441,
+  "proposer_token_entropy_mean": 1.9396627813577652,
+  "proposer_ste_difficulty": 0.953125,
+  "proposer_reward": 0.6107474340850249,
+  "solver_update_due": true,
+  "solver_update_applied": true,
+  "solver_update_skip_reason": "none",
+  "proposer_update_due": true,
+  "proposer_skip_reason": "none",
+  "solver_ce_loss_mean": 0.33085199764796663,
+  "solver_total_loss_mean": 0.02453979424067906,
+  "solver_stats": [
+    {
+      "ce_loss": 0.27771392464637756,
+      "kl_loss": 0.0045980061404407024,
+      "advantage": 0.1944516583147152,
+      "kl_coef_before": 0.0010216478401200138,
+      "kl_coef_after": 0.001,
+      "total_loss": -0.053997237235307693,
+      "did_step": true,
+      "valid_token_count": 12.0,
+      "forced_tail_tokens": 0.0
+    },
+    {
+      "ce_loss": 0.28072622418403625,
+      "kl_loss": 0.004513813182711601,
+      "advantage": 0.1714968676830383,
+      "kl_coef_before": 0.001010823920060007,
+      "kl_coef_after": 0.001,
+      "total_loss": -0.04813910648226738,
+      "did_step": true,
+      "valid_token_count": 12.0,
+      "forced_tail_tokens": 0.0
+    },
+    {
+      "ce_loss": 0.2843274772167206,
+      "kl_loss": 0.004067881964147091,
+      "advantage": 0.16878553632607712,
+      "kl_coef_before": 0.0010054119600300037,
+      "kl_coef_after": 0.001,
+      "total_loss": -0.04798627644777298,
+      "did_step": true,
+      "valid_token_count": 12.0,
+      "forced_tail_tokens": 0.0
+    },
+    {
+      "ce_loss": 0.3551103472709656,
+      "kl_loss": 0.00523553229868412,
+      "advantage": -0.33591208528947253,
+      "kl_coef_before": 0.0010027059800150019,
+      "kl_coef_after": 0.001,
+      "total_loss": 0.11929110437631607,
+      "did_step": true,
+      "valid_token_count": 10.0,
+      "forced_tail_tokens": 0.0
+    },
+    {
+      "ce_loss": 0.47786763310432434,
+      "kl_loss": 0.005072723608464003,
+      "advantage": -0.31784385293593426,
+      "kl_coef_before": 0.001001352990007501,
+      "kl_coef_after": 0.001,
+      "total_loss": 0.15189237892627716,
+      "did_step": true,
+      "valid_token_count": 11.0,
+      "forced_tail_tokens": 0.0
+    },
+    {
+      "ce_loss": 0.3574717938899994,
+      "kl_loss": 0.0039009307511150837,
+      "advantage": -0.3132892852759982,
+      "kl_coef_before": 0.0010006764950037505,
+      "kl_coef_after": 0.001,
+      "total_loss": 0.11199598759412766,
+      "did_step": true,
+      "valid_token_count": 10.0,
+      "forced_tail_tokens": 0.0
+    },
+    {
+      "ce_loss": 0.2827465832233429,
+      "kl_loss": 0.0040346430614590645,
+      "advantage": 0.21673939707944903,
+      "kl_coef_before": 0.0010003382475018753,
+      "kl_coef_after": 0.001,
+      "total_loss": -0.061278291046619415,
+      "did_step": true,
+      "valid_token_count": 12.0,
+      "forced_tail_tokens": 0.0
+    }
+  ],
+  "proposer_stats": {
+    "grpo_loss": 0.8177083730697632,
+    "mean_reward": -0.3199136319601807,
+    "std_reward": 0.06259338424853303,
+    "mean_advantage": -0.8784640449839763,
+    "max_advantage": -0.6353921898707546,
+    "min_advantage": -0.9999999725405873,
+    "kl_loss": 0.0,
+    "kl_coef_before": 0.001,
+    "kl_coef_after": 0.001,
+    "did_step": true,
+    "skipped_reason": "none",
+    "valid_completions": 3,
+    "grpo_valid_completions": 3,
+    "grpo_bucket_labels": [
+      "hard",
+      "hard",
+      "hard"
+    ]
+  },
+  "curve_alignment": {
+    "nearest_curve_step": 1350,
+    "curve_normalized_loss": 0.812331,
+    "curve_lower_band": 0.779452,
+    "curve_upper_band": 0.845209,
+    "aligned_log_value": 0.8177083730697632,
+    "aligned_log_field": "proposer_stats.grpo_loss"
+  }
+}

@@ -20,12 +20,12 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 #
 # This is the PRIMARY result for the paper. All components are trained jointly:
 #   • Solver LoRA   — improves visual understanding via GRPO
-#   • Generator LoRA — improves text-to-image conditioning via GRPO + denoising
-#   • DiT weights   — improves image generation via RWR (reward-weighted MSE)
-#   • Proposer LoRA  — learns curriculum via dual reward from both tasks
+#   • Generator LoRA — improves text-to-image conditioning via denoising gradients
+#   • DiT LoRA       — improves image generation via RWR (reward-weighted MSE)
+#   • Proposer LoRA  — learns the visual-understanding curriculum
 #
 # Key differences from X09 (the easy-data pilot):
-#   • Uses natural-image pool (joint_3k) not chart-heavy 50k (charts break DiT)
+#   • Uses the paper natural-image pool (joint_6k), not chart-heavy 50k
 #   • Trains for 10k steps (was 650 in pilot)
 #
 # What this experiment proves:
@@ -47,7 +47,9 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_3k/images}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
+MIN_DATA_IMAGES="${MIN_DATA_IMAGES:-6000}"
+ALLOW_SMALL_DATA="${ALLOW_SMALL_DATA:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E1_main_joint}"
 RUN_NAME="E1_main_joint_s42"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
@@ -67,12 +69,74 @@ GENERATION_STEPS_PER_CYCLE="${GENERATION_STEPS_PER_CYCLE:-2}"
 GENERATOR_UPDATE_FREQ="${GENERATOR_UPDATE_FREQ:-1}"
 DIT_UPDATE_ENABLED="${DIT_UPDATE_ENABLED:-1}"
 DIT_UPDATE_FREQ="${DIT_UPDATE_FREQ:-1}"
-PROPOSER_GEN_REWARD_ENABLED="${PROPOSER_GEN_REWARD_ENABLED:-1}"
-GEN_STEP_SOLVER_UPDATE_ENABLED="${GEN_STEP_SOLVER_UPDATE_ENABLED:-1}"
+DIT_LORA="${DIT_LORA:-1}"
+DIT_LORA_R="${DIT_LORA_R:-16}"
+DIT_LORA_ALPHA="${DIT_LORA_ALPHA:-32}"
+DIT_LORA_DROPOUT="${DIT_LORA_DROPOUT:-0.0}"
+DIT_LORA_TARGETS="${DIT_LORA_TARGETS:-attn2.to_q,attn2.to_k,attn2.to_v,attn2.to_out.0,caption_projection.linear_1,caption_projection.linear_2}"
+PROPOSER_GEN_REWARD_ENABLED="${PROPOSER_GEN_REWARD_ENABLED:-0}"
+GEN_STEP_SOLVER_UPDATE_ENABLED="${GEN_STEP_SOLVER_UPDATE_ENABLED:-0}"
+LR="${LR:-1e-6}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-0.01}"
+GRAD_CLIP="${GRAD_CLIP:-1.0}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
+USE_LORA="${USE_LORA:-1}"
+LORA_R="${LORA_R:-16}"
+LORA_ALPHA="${LORA_ALPHA:-32}"
+LORA_DROPOUT="${LORA_DROPOUT:-0.05}"
+LORA_TARGETS="${LORA_TARGETS:-q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj}"
+SOLVER_MERGER_LORA="${SOLVER_MERGER_LORA:-1}"
+SOLVER_MERGER_LORA_R="${SOLVER_MERGER_LORA_R:-4}"
+SOLVER_MERGER_LORA_ALPHA="${SOLVER_MERGER_LORA_ALPHA:-8}"
+SOLVER_MERGER_LORA_LR="${SOLVER_MERGER_LORA_LR:-2e-7}"
+SOLVER_MERGER_LORA_TARGETS="${SOLVER_MERGER_LORA_TARGETS:-visual.merger.mlp.0,visual.merger.mlp.2}"
+LOAD_IN_4BIT="${LOAD_IN_4BIT:-0}"
+BNB_4BIT_QUANT_TYPE="${BNB_4BIT_QUANT_TYPE:-nf4}"
+BNB_4BIT_USE_DOUBLE_QUANT="${BNB_4BIT_USE_DOUBLE_QUANT:-1}"
+BNB_4BIT_COMPUTE_DTYPE="${BNB_4BIT_COMPUTE_DTYPE:-bfloat16}"
+NUM_SOLVER_SAMPLES="${NUM_SOLVER_SAMPLES:-7}"
+NUM_SOLVER_SAMPLES_SPEC="${NUM_SOLVER_SAMPLES_SPEC:-2}"
+NUM_GENERATIONS="${NUM_GENERATIONS:-3}"
+PROPOSER_NUM_CANDIDATES="${PROPOSER_NUM_CANDIDATES:-3}"
+PROPOSER_SPOT_CHECK_SAMPLES="${PROPOSER_SPOT_CHECK_SAMPLES:-3}"
+GRPO_EXTRA_SC_SAMPLES="${GRPO_EXTRA_SC_SAMPLES:-3}"
+GENERATION_NUM_INFERENCE_STEPS="${GENERATION_NUM_INFERENCE_STEPS:-50}"
+GENERATION_GUIDANCE_SCALE="${GENERATION_GUIDANCE_SCALE:-2.0}"
+REWARD_SPEC_WEIGHT="${REWARD_SPEC_WEIGHT:-0.65}"
+REWARD_CYCLE_WEIGHT="${REWARD_CYCLE_WEIGHT:-0.20}"
+REWARD_DIVERSITY_WEIGHT="${REWARD_DIVERSITY_WEIGHT:-0.10}"
+REWARD_CONTRADICTION_WEIGHT="${REWARD_CONTRADICTION_WEIGHT:-0.20}"
+MIN_SPEC_QUALITY_FOR_UPDATE="${MIN_SPEC_QUALITY_FOR_UPDATE:-0.35}"
+MIN_SPEC_QA_PAIRS="${MIN_SPEC_QA_PAIRS:-2}"
+KL_COEF="${KL_COEF:-0.01}"
+KL_TARGET="${KL_TARGET:-0.02}"
+KL_ADAPT_RATE="${KL_ADAPT_RATE:-0.10}"
+KL_MIN="${KL_MIN:-0.001}"
+KL_MAX="${KL_MAX:-1e2}"
+SOLVER_TOKEN_ENTROPY_ENABLED="${SOLVER_TOKEN_ENTROPY_ENABLED:-1}"
+SOLVER_TOKEN_ENTROPY_TOKENS="${SOLVER_TOKEN_ENTROPY_TOKENS:-5}"
+SOLVER_TOKEN_ENTROPY_WINDOW_SIZE="${SOLVER_TOKEN_ENTROPY_WINDOW_SIZE:-128}"
+SOLVER_TOKEN_ENTROPY_SIGMOID_ALPHA="${SOLVER_TOKEN_ENTROPY_SIGMOID_ALPHA:-1.5}"
+SOLVER_TOKEN_ENTROPY_SIGMOID_BETA="${SOLVER_TOKEN_ENTROPY_SIGMOID_BETA:-2.0}"
+SOLVER_TOKEN_ENTROPY_AGGREGATION="${SOLVER_TOKEN_ENTROPY_AGGREGATION:-max}"
+PROPOSER_STE_PRIMARY_WEIGHT="${PROPOSER_STE_PRIMARY_WEIGHT:-0.70}"
+PROPOSER_SAMPLE_ENTROPY_WEIGHT="${PROPOSER_SAMPLE_ENTROPY_WEIGHT:-0.30}"
+PROPOSER_STE_REWARD_WEIGHT="${PROPOSER_STE_REWARD_WEIGHT:-0.30}"
+SOLVER_PPS_ENABLED="${SOLVER_PPS_ENABLED:-1}"
+DIT_REWARD_LOSS_WEIGHT="${DIT_REWARD_LOSS_WEIGHT:-0.5}"
 
 DIT_ARGS=()
 if [[ "$DIT_UPDATE_ENABLED" == "1" ]]; then
-  DIT_ARGS+=(--dit_update_enabled)
+  DIT_ARGS+=(
+    --dit_update_enabled
+    --dit_lora_r "$DIT_LORA_R"
+    --dit_lora_alpha "$DIT_LORA_ALPHA"
+    --dit_lora_dropout "$DIT_LORA_DROPOUT"
+    --dit_lora_targets "$DIT_LORA_TARGETS"
+  )
+  if [[ "$DIT_LORA" != "1" ]]; then
+    DIT_ARGS+=(--disable_dit_lora)
+  fi
 fi
 
 PROPOSER_GEN_REWARD_ARGS=()
@@ -87,6 +151,63 @@ fi
 GEN_STEP_SOLVER_ARGS=()
 if [[ "$GEN_STEP_SOLVER_UPDATE_ENABLED" == "1" ]]; then
   GEN_STEP_SOLVER_ARGS+=(--gen_step_solver_update_enabled)
+fi
+
+STE_ARGS=(
+  --solver_token_entropy_tokens "$SOLVER_TOKEN_ENTROPY_TOKENS"
+  --solver_token_entropy_window_size "$SOLVER_TOKEN_ENTROPY_WINDOW_SIZE"
+  --solver_token_entropy_sigmoid_alpha "$SOLVER_TOKEN_ENTROPY_SIGMOID_ALPHA"
+  --solver_token_entropy_sigmoid_beta "$SOLVER_TOKEN_ENTROPY_SIGMOID_BETA"
+  --solver_token_entropy_aggregation "$SOLVER_TOKEN_ENTROPY_AGGREGATION"
+  --proposer_ste_primary_weight "$PROPOSER_STE_PRIMARY_WEIGHT"
+  --proposer_sample_entropy_weight "$PROPOSER_SAMPLE_ENTROPY_WEIGHT"
+  --proposer_ste_reward_weight "$PROPOSER_STE_REWARD_WEIGHT"
+)
+if [[ "$SOLVER_TOKEN_ENTROPY_ENABLED" != "1" ]]; then
+  STE_ARGS+=(--disable_solver_token_entropy)
+fi
+
+PPS_ARGS=()
+if [[ "$SOLVER_PPS_ENABLED" != "1" ]]; then
+  PPS_ARGS+=(--disable_solver_pps)
+fi
+
+LORA_ARGS=()
+if [[ "$USE_LORA" == "1" ]]; then
+  LORA_ARGS+=(
+    --use_lora
+    --lora_r "$LORA_R"
+    --lora_alpha "$LORA_ALPHA"
+    --lora_dropout "$LORA_DROPOUT"
+    --lora_targets "$LORA_TARGETS"
+  )
+  if [[ "$SOLVER_MERGER_LORA" == "1" ]]; then
+    LORA_ARGS+=(
+      --solver_merger_lora
+      --solver_merger_lora_r "$SOLVER_MERGER_LORA_R"
+      --solver_merger_lora_alpha "$SOLVER_MERGER_LORA_ALPHA"
+      --solver_merger_lora_lr "$SOLVER_MERGER_LORA_LR"
+      --solver_merger_lora_targets "$SOLVER_MERGER_LORA_TARGETS"
+    )
+  fi
+else
+  LORA_ARGS+=(--no_lora)
+fi
+
+QLORA_ARGS=()
+if [[ "$LOAD_IN_4BIT" == "1" ]]; then
+  if [[ "$USE_LORA" != "1" ]]; then
+    echo "[E1] ERROR: LOAD_IN_4BIT=1 is QLoRA mode and requires USE_LORA=1" >&2
+    exit 1
+  fi
+  QLORA_ARGS+=(
+    --load_in_4bit
+    --bnb_4bit_quant_type "$BNB_4BIT_QUANT_TYPE"
+    --bnb_4bit_compute_dtype "$BNB_4BIT_COMPUTE_DTYPE"
+  )
+  if [[ "$BNB_4BIT_USE_DOUBLE_QUANT" != "1" ]]; then
+    QLORA_ARGS+=(--disable_bnb_4bit_use_double_quant)
+  fi
 fi
 
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
@@ -179,6 +300,14 @@ else
   exit 1
 fi
 
+case "$SOLVER_TOKEN_ENTROPY_AGGREGATION" in
+  max|mean) ;;
+  *)
+    echo "[E1] ERROR: SOLVER_TOKEN_ENTROPY_AGGREGATION must be max or mean (got: $SOLVER_TOKEN_ENTROPY_AGGREGATION)" >&2
+    exit 1
+    ;;
+esac
+
 # ── Resume from checkpoint (optional) ───────────────────────────────────────
 RESUME_ARGS=()
 if [[ -n "${RESUME_FROM:-}" ]]; then
@@ -258,10 +387,13 @@ if [[ ! -d "$DATA_DIR" ]]; then
   echo "[E1] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
   exit 1
 fi
-if ! find "$DATA_DIR" -type f \
-    \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) \
-    -print -quit | grep -q .; then
-  echo "[E1] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
+IMAGE_COUNT="$(find "$DATA_DIR" -type f \
+  \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" -o -iname "*.bmp" -o -iname "*.tiff" \) \
+  | wc -l | tr -d '[:space:]')"
+if [[ "$IMAGE_COUNT" -lt "$MIN_DATA_IMAGES" && "$ALLOW_SMALL_DATA" != "1" ]]; then
+  echo "[E1] ERROR: DATA_DIR has $IMAGE_COUNT images; paper protocol requires at least $MIN_DATA_IMAGES." >&2
+  echo "[E1] Prepare data with: bash scripts/self_evolving/paper/prepare_data_6k.sh" >&2
+  echo "[E1] For smoke tests only, set ALLOW_SMALL_DATA=1." >&2
   exit 1
 fi
 
@@ -276,6 +408,10 @@ echo "[E1]   Attn impl:   $ATTN_IMPL"
 echo "[E1]   Total steps: $TOTAL_STEPS"
 echo "[E1]   Logging:     log_every=$LOG_EVERY save_every=$SAVE_EVERY save_images_every=$SAVE_GENERATED_IMAGES_EVERY"
 echo "[E1]   Cycle:       U=$UNDERSTANDING_STEPS_PER_CYCLE, G=$GENERATION_STEPS_PER_CYCLE"
+echo "[E1]   Params:      use_lora=$USE_LORA r=$LORA_R alpha=$LORA_ALPHA dropout=$LORA_DROPOUT qlora4=$LOAD_IN_4BIT"
+echo "[E1]   Samples:     PPS/solver=$NUM_SOLVER_SAMPLES, candidates K=$PROPOSER_NUM_CANDIDATES, generations L=$NUM_GENERATIONS"
+echo "[E1]   STE/PPS:     enabled=$SOLVER_TOKEN_ENTROPY_ENABLED aggregation=$SOLVER_TOKEN_ENTROPY_AGGREGATION window=$SOLVER_TOKEN_ENTROPY_WINDOW_SIZE pps=$SOLVER_PPS_ENABLED"
+echo "[E1]   Rewards:     qa=$REWARD_SPEC_WEIGHT cycle=$REWARD_CYCLE_WEIGHT diversity=$REWARD_DIVERSITY_WEIGHT contradiction=$REWARD_CONTRADICTION_WEIGHT"
 echo "[E1]   Gen freq:    $GENERATOR_UPDATE_FREQ, DiT enabled: $DIT_UPDATE_ENABLED (freq=$DIT_UPDATE_FREQ)"
 echo "[E1]   Gen->U aux:  proposer_reward=$PROPOSER_GEN_REWARD_ENABLED, solver_update=$GEN_STEP_SOLVER_UPDATE_ENABLED"
 if [[ -n "${RESUME_FROM:-}" ]]; then
@@ -309,17 +445,14 @@ fi
   \
   `# ── Model / LoRA ───────────────────────────────────────────────────────` \
   --require_decoder_for_blip3o \
-  --use_lora \
-  --lora_r 16 \
-  --lora_alpha 32 \
-  --lora_dropout 0.05 \
-  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  "${LORA_ARGS[@]}" \
+  ${QLORA_ARGS[@]+"${QLORA_ARGS[@]}"} \
   \
   `# ── Optimiser (understanding-side GRPO) ────────────────────────────────` \
-  --lr 1e-6 \
-  --weight_decay 0.01 \
-  --grad_clip 1.0 \
-  --grad_accum_steps 1 \
+  --lr "$LR" \
+  --weight_decay "$WEIGHT_DECAY" \
+  --grad_clip "$GRAD_CLIP" \
+  --grad_accum_steps "$GRAD_ACCUM_STEPS" \
   \
   `# ── Role update frequencies ─────────────────────────────────────────────` \
   --proposer_update_freq 1 \
@@ -327,7 +460,7 @@ fi
   --enable_solver_updates \
   --solver_update_freq 1 \
   \
-  `# ── Generator GRPO ─────────────────────────────────────────────────────` \
+  `# ── Generator token policy path; BLIP3o routes to DiT denoising ────────` \
   --generator_update_rule grpo \
   --generator_missing_trace_strategy skip \
   --grpo_clip_ratio 0.2 \
@@ -340,16 +473,16 @@ fi
   --max_new_tokens_proposer 384 \
   --max_new_tokens_caption 64 \
   --max_new_tokens_generator 512 \
-  --num_solver_samples 7 \
-  --num_solver_samples_spec 2 \
-  --num_generations 3 \
-  --proposer_num_candidates 3 \
-  --proposer_spot_check_samples 3 \
-  --grpo_extra_sc_samples 3 \
+  --num_solver_samples "$NUM_SOLVER_SAMPLES" \
+  --num_solver_samples_spec "$NUM_SOLVER_SAMPLES_SPEC" \
+  --num_generations "$NUM_GENERATIONS" \
+  --proposer_num_candidates "$PROPOSER_NUM_CANDIDATES" \
+  --proposer_spot_check_samples "$PROPOSER_SPOT_CHECK_SAMPLES" \
+  --grpo_extra_sc_samples "$GRPO_EXTRA_SC_SAMPLES" \
   \
   `# ── Image generation (BLIP3o diffusion) ─────────────────────────────────` \
-  --generation_num_inference_steps 50 \
-  --generation_guidance_scale 2.0 \
+  --generation_num_inference_steps "$GENERATION_NUM_INFERENCE_STEPS" \
+  --generation_guidance_scale "$GENERATION_GUIDANCE_SCALE" \
   --generation_height "$GENERATION_IMAGE_SIDE" \
   --generation_width  "$GENERATION_IMAGE_SIDE" \
   \
@@ -357,14 +490,14 @@ fi
   --difficulty_sampler_enabled \
   \
   `# ── Reward weights ──────────────────────────────────────────────────────` \
-  --reward_spec_weight 0.65 \
-  --reward_cycle_weight 0.20 \
-  --reward_diversity_weight 0.10 \
-  --reward_contradiction_weight 0.20 \
+  --reward_spec_weight "$REWARD_SPEC_WEIGHT" \
+  --reward_cycle_weight "$REWARD_CYCLE_WEIGHT" \
+  --reward_diversity_weight "$REWARD_DIVERSITY_WEIGHT" \
+  --reward_contradiction_weight "$REWARD_CONTRADICTION_WEIGHT" \
   \
   `# ── Spec quality gates ──────────────────────────────────────────────────` \
-  --min_spec_quality_for_update 0.35 \
-  --min_spec_qa_pairs 2 \
+  --min_spec_quality_for_update "$MIN_SPEC_QUALITY_FOR_UPDATE" \
+  --min_spec_qa_pairs "$MIN_SPEC_QA_PAIRS" \
   --max_expected_words 8 \
   --max_question_words 24 \
   \
@@ -392,11 +525,11 @@ fi
   --synthetic_solver_update_freq 0 \
   \
   `# ── KL regularisation ───────────────────────────────────────────────────` \
-  --kl_coef 0.01 \
-  --kl_target 0.02 \
-  --kl_adapt_rate 0.10 \
-  --kl_min 0.001 \
-  --kl_max 1e2 \
+  --kl_coef "$KL_COEF" \
+  --kl_target "$KL_TARGET" \
+  --kl_adapt_rate "$KL_ADAPT_RATE" \
+  --kl_min "$KL_MIN" \
+  --kl_max "$KL_MAX" \
   \
   `# ── Proposer optimization ──────────────────────────────────────────────` \
   --proposer_update_rule grpo \
@@ -435,11 +568,13 @@ fi
   --dit_prompt_suffix_token_id 151665 \
   --dit_joint_conditioning_train \
   --dit_joint_conditioning_lr 5e-7 \
-  --dit_reward_loss_weight 0.5 \
+  --dit_reward_loss_weight "$DIT_REWARD_LOSS_WEIGHT" \
   \
-  `# ── Proposer dual reward (understanding + generation) ──────────────────` \
+  `# ── Optional generation-phase Proposer/Solver ablations (off by default)` \
   ${PROPOSER_GEN_REWARD_ARGS[@]+"${PROPOSER_GEN_REWARD_ARGS[@]}"} \
   ${GEN_STEP_SOLVER_ARGS[@]+"${GEN_STEP_SOLVER_ARGS[@]}"} \
+  "${STE_ARGS[@]}" \
+  ${PPS_ARGS[@]+"${PPS_ARGS[@]}"} \
   \
   `# ── Logging / W&B ─────────────────────────────────────────────────────` \
   --wandb_mode disabled \

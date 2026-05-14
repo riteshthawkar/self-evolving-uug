@@ -46,17 +46,25 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_3k/images}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/final/E2_understanding_only}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
+MIN_DATA_IMAGES="${MIN_DATA_IMAGES:-6000}"
+ALLOW_SMALL_DATA="${ALLOW_SMALL_DATA:-0}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E2_understanding_only}"
 RUN_NAME="E2_understanding_only_s42_updated"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
 RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+MASTER_PORT="${MASTER_PORT:-29524}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 TRAIN_ENTRY="${TRAIN_ENTRY:-$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py}"
 TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+MAX_IMAGES="${MAX_IMAGES:-}"
+INCLUDE_SUBFOLDERS="${INCLUDE_SUBFOLDERS:-}"
+LOG_EVERY="${LOG_EVERY:-1}"
+SAVE_EVERY="${SAVE_EVERY:-50}"
+SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-50}"
 UNDERSTANDING_STEPS_PER_CYCLE="${UNDERSTANDING_STEPS_PER_CYCLE:-5}"
 GENERATION_STEPS_PER_CYCLE="${GENERATION_STEPS_PER_CYCLE:-0}"
 ALLOW_SOLVER_UPDATE_ON_EASY="${ALLOW_SOLVER_UPDATE_ON_EASY:-1}"
@@ -169,6 +177,14 @@ if [[ -n "${RESUME_FROM:-}" ]]; then
   fi
 fi
 
+DATA_SELECTION_ARGS=()
+if [[ -n "$MAX_IMAGES" ]]; then
+  DATA_SELECTION_ARGS+=(--max_images "$MAX_IMAGES")
+fi
+if [[ -n "$INCLUDE_SUBFOLDERS" ]]; then
+  DATA_SELECTION_ARGS+=(--include_subfolders "$INCLUDE_SUBFOLDERS")
+fi
+
 # ── Directory / cache setup ──────────────────────────────────────────────────
 cd "$REPO_ROOT"
 mkdir -p "$OUTPUT_DIR"
@@ -237,10 +253,13 @@ if [[ ! -d "$DATA_DIR" ]]; then
   echo "[E2] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
   exit 1
 fi
-if ! find "$DATA_DIR" -type f \
-    \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) \
-    -print -quit | grep -q .; then
-  echo "[E2] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
+IMAGE_COUNT="$(find "$DATA_DIR" -type f \
+  \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" -o -iname "*.bmp" -o -iname "*.tiff" \) \
+  | wc -l | tr -d '[:space:]')"
+if [[ "$IMAGE_COUNT" -lt "$MIN_DATA_IMAGES" && "$ALLOW_SMALL_DATA" != "1" ]]; then
+  echo "[E2] ERROR: DATA_DIR has $IMAGE_COUNT images; paper protocol requires at least $MIN_DATA_IMAGES." >&2
+  echo "[E2] Prepare data with: bash scripts/self_evolving/paper/prepare_data_6k.sh" >&2
+  echo "[E2] For smoke tests only, set ALLOW_SMALL_DATA=1." >&2
   exit 1
 fi
 
@@ -249,6 +268,7 @@ echo "[E2]   Stage:       $TRAIN_STAGE"
 echo "[E2]   Run name:    $RUN_NAME"
 echo "[E2]   Output dir:  $OUTPUT_DIR"
 echo "[E2]   Data dir:    $DATA_DIR"
+echo "[E2]   Max images:  ${MAX_IMAGES:-all}"
 echo "[E2]   GPUs:        $NPROC_PER_NODE"
 echo "[E2]   Attn impl:   $ATTN_IMPL"
 echo "[E2]   Total steps: $TOTAL_STEPS"
@@ -263,11 +283,12 @@ fi
 "$PYTHON_BIN" -m torch.distributed.run \
   --standalone \
   --nproc_per_node "$NPROC_PER_NODE" \
-  --master_port 29524 \
+  --master_port "$MASTER_PORT" \
   "$TRAIN_ENTRY" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
   --data_split all \
+  "${DATA_SELECTION_ARGS[@]}" \
   --model_name BLIP3o/BLIP3o-Model-8B \
   --output_dir "$OUTPUT_DIR" \
   --run_name "$RUN_NAME" \
@@ -278,10 +299,10 @@ fi
   \
   `# ── Training schedule ──────────────────────────────────────────────────` \
   --total_steps "$TOTAL_STEPS" \
-  --save_every 50 \
-  --log_every 1 \
+  --save_every "$SAVE_EVERY" \
+  --log_every "$LOG_EVERY" \
   --max_checkpoints "${MAX_CHECKPOINTS:-10000}" \
-  --save_generated_images_every 50 \
+  --save_generated_images_every "$SAVE_GENERATED_IMAGES_EVERY" \
   --deterministic \
   \
   `# ── Model / LoRA ───────────────────────────────────────────────────────` \
@@ -290,7 +311,7 @@ fi
   --lora_r 16 \
   --lora_alpha 32 \
   --lora_dropout 0.05 \
-  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
   \
   `# ── Optimiser (understanding-side GRPO) ────────────────────────────────` \
   --lr 1e-6 \
@@ -305,7 +326,7 @@ fi
   --enable_solver_updates \
   --solver_update_freq 1 \
   \
-  `# ── Generator GRPO (still needed for arg parsing but freq=0) ───────────` \
+  `# ── Generator policy args retained for parser compatibility; freq=0 ───` \
   --generator_update_rule grpo \
   --generator_missing_trace_strategy skip \
   --grpo_clip_ratio 0.2 \

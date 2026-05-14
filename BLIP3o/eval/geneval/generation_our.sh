@@ -34,6 +34,7 @@ ADAPTER="${ADAPTER:-generator}"
 STEPS="${STEPS:-50}"
 N_CHUNKS="${N_CHUNKS:-8}"
 OUTDIR="${OUTDIR:-${CHECKPOINT_DIR}/geneval_qwen}"
+PROMPT_FILE="${PROMPT_FILE:-${SCRIPT_DIR}/geneval_prompt.jsonl}"
 
 echo "============================================"
 echo "GenEval Generation (Self-Evolving)"
@@ -42,17 +43,19 @@ echo "  Checkpoint:      ${CHECKPOINT_DIR}"
 echo "  Adapter:         ${ADAPTER}"
 echo "  Diffusion steps: ${STEPS}"
 echo "  N_CHUNKS:        ${N_CHUNKS}"
+echo "  Prompt file:     ${PROMPT_FILE}"
 echo "  Output:          ${OUTDIR}"
 echo "============================================"
 
 # Launch processes in parallel for each GPU/chunk.
 for i in $(seq 0 $(($N_CHUNKS - 1))); do
     echo "Launching process for GPU $i (chunk index $i of $N_CHUNKS)"
-    CUDA_VISIBLE_DEVICES=$i python generate_our.py \
+    CUDA_VISIBLE_DEVICES=$i python "${SCRIPT_DIR}/generate_our.py" \
         --model "$MODEL" \
         --checkpoint_dir "$CHECKPOINT_DIR" \
         --adapter "$ADAPTER" \
         --steps "$STEPS" \
+        --prompt_file "$PROMPT_FILE" \
         --outdir "$OUTDIR" \
         --index $i \
         --n_chunks $N_CHUNKS &
