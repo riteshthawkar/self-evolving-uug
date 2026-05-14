@@ -34,6 +34,7 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
 VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-2400}"
+ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
 # Some vLLM wheels do not ship a compatible DeepGEMM build. This is mainly
 # needed for FP8 checkpoints, but keeping it off is harmless for BF16 models.
 VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
@@ -140,7 +141,12 @@ if [[ "$START_SERVER" == "1" ]]; then
   echo "[h200] HOME redirected to: $HOME"
   echo "[h200] VLLM_RPC_BASE_PATH: $VLLM_RPC_BASE_PATH"
   echo "[h200] VLLM_USE_DEEP_GEMM: $VLLM_USE_DEEP_GEMM"
+  echo "[h200] ENFORCE_EAGER: $ENFORCE_EAGER"
   echo "[h200] server log: $SERVER_LOG"
+  VLLM_ARGS=()
+  if [[ "$ENFORCE_EAGER" == "1" ]]; then
+    VLLM_ARGS+=(--enforce-eager)
+  fi
   VLLM_IMAGE_FETCH_TIMEOUT=60 \
   vllm serve "$MODEL" \
     --host "$HOST" \
@@ -150,19 +156,25 @@ if [[ "$START_SERVER" == "1" ]]; then
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_NUM_SEQS" \
+    "${VLLM_ARGS[@]}" \
     > "$SERVER_LOG" 2>&1 &
   SERVER_PID="$!"
   trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
   echo "[h200] waiting for server at $HEALTH_URL"
-  for _ in $(seq 1 240); do
+  for i in $(seq 1 240); do
     if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
+      echo "[h200] vLLM server healthy after $((i * 10))s"
       break
     fi
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then
       echo "[h200] ERROR: vLLM server exited during startup. Last log lines:" >&2
       tail -n 160 "$SERVER_LOG" >&2 || true
       exit 1
+    fi
+    if (( i % 3 == 0 )); then
+      echo "[h200] waiting $((i * 10))s for vLLM startup; latest server log:"
+      tail -n 1 "$SERVER_LOG" || true
     fi
     sleep 10
   done
