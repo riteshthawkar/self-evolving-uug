@@ -268,11 +268,18 @@ def _read_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
     if not path.exists():
         return
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
+        for line_no, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
-            yield json.loads(line)
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError as exc:
+                print(
+                    f"[jsonl] warning: skipping malformed line {line_no} in {path}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
 
 def _parse_domain_weights(text: str) -> Dict[str, float]:
@@ -1473,6 +1480,7 @@ def run_vlm_judge(
             cid = str(row.get("candidate_id", ""))
             if cid:
                 cache[cid] = row
+        print(f"[vlm] loaded {len(cache)} cached VLM judgments from {cache_path}", flush=True)
 
     selection_limit = min(
         max(candidate_top_k, max_images),

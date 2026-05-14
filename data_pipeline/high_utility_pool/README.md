@@ -215,6 +215,13 @@ final selected pool plus `audit_report.json` under the requested output
 directory. Re-running is resumable because completed VLM rows are read from the
 score cache.
 
+If a run is interrupted during VLM scoring, restart with the same `OUTPUT_DIR`.
+The builder will reload `scores/vlm_scores.jsonl`, skip candidate IDs that were
+already judged, and continue scoring the remaining candidates. If the final
+JSONL line was cut off by termination, it is skipped with a warning and all
+complete rows are still reused. To resume from a different output directory,
+pass `--vlm_cache_path /path/to/old/output/scores/vlm_scores.jsonl`.
+
 ## Use With BLIP3o Training
 
 After the pool is built:
