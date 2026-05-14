@@ -29,9 +29,15 @@ else:
 
 try:
     import xformers.ops as xops
-except ImportError:
+except Exception as exc:
     xops = None
-    # print("Please 'pip install xformers'")
+    logging.warning(
+        "xFormers ops are unavailable for dev EVA-CLIP; falling back to PyTorch "
+        "attention. This is expected when xformers was built for a different "
+        "PyTorch/CUDA/Triton stack. Import failure: %s: %s",
+        type(exc).__name__,
+        exc,
+    )
 
 
 class LayerNormFp32(nn.LayerNorm):
@@ -181,7 +187,7 @@ class Attention(nn.Module):
             self.head_scale = None
         self.out_proj = nn.Linear(dim, dim)
         self.out_drop = nn.Dropout(proj_drop)
-        self.xattn = xattn
+        self.xattn = bool(xattn and xops is not None)
         self.xattn_drop = attn_drop
         self.rope = rope
 
@@ -265,7 +271,7 @@ class CustomAttention(nn.Module):
             self.head_scale = None
         self.out_proj = nn.Linear(dim, dim)
         self.out_drop = nn.Dropout(proj_drop)
-        self.xattn = xattn
+        self.xattn = bool(xattn and xops is not None)
         self.xattn_drop = attn_drop
 
     def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
@@ -424,9 +430,10 @@ class ResidualAttentionBlock(nn.Module):
         xattn: bool = False,
     ):
         super().__init__()
+        use_xattn = bool(xattn and xops is not None)
 
         self.ln_1 = norm_layer(d_model)
-        if xattn:
+        if use_xattn:
             self.attn = Attention(d_model, n_head, xattn=True)
         else:
             self.attn = nn.MultiheadAttention(d_model, n_head)
@@ -437,7 +444,7 @@ class ResidualAttentionBlock(nn.Module):
         self.mlp = nn.Sequential(OrderedDict([("c_fc", nn.Linear(d_model, mlp_width)), ("gelu", act_layer()), ("c_proj", nn.Linear(mlp_width, d_model))]))
 
         self.ls_2 = LayerScale(d_model, ls_init_value) if ls_init_value is not None else nn.Identity()
-        self.xattn = xattn
+        self.xattn = use_xattn
 
     def attention(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
         attn_mask = attn_mask.to(x.dtype) if attn_mask is not None else None

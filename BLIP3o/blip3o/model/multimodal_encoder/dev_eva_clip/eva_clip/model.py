@@ -4,6 +4,7 @@ Adapted from https://github.com/openai/CLIP. Originally MIT License, Copyright (
 """
 
 import os
+import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 from functools import partial
@@ -30,9 +31,15 @@ except:
 
 try:
     import xformers.ops as xops
-except ImportError:
+except Exception as exc:
     xops = None
-    # print("Please 'pip install xformers'")
+    logging.warning(
+        "xFormers ops are unavailable for dev EVA-CLIP; falling back to PyTorch "
+        "attention. This is expected when xformers was built for a different "
+        "PyTorch/CUDA/Triton stack. Import failure: %s: %s",
+        type(exc).__name__,
+        exc,
+    )
 
 
 class RMSnorm(nn.Module):
@@ -135,6 +142,7 @@ def _build_vision_tower(embed_dim: int, vision_cfg: CLIPVisionCfg, quick_gelu: b
         vision_heads = vision_cfg.width // vision_cfg.head_width
 
         norm_layer = RMSnorm if vision_cfg.use_rms_norm else LayerNorm
+        use_xattn = bool(vision_cfg.xattn and xops is not None)
 
         visual = EVAVisionTransformer(
             img_size=vision_cfg.image_size,
@@ -150,7 +158,7 @@ def _build_vision_tower(embed_dim: int, vision_cfg: CLIPVisionCfg, quick_gelu: b
             qkv_bias=vision_cfg.qkv_bias,
             drop_path_rate=vision_cfg.drop_path_rate,
             norm_layer=partial(norm_layer, eps=1e-6),
-            xattn=vision_cfg.xattn,
+            xattn=use_xattn,
             rope=vision_cfg.rope,
             postnorm=vision_cfg.postnorm,
             pt_hw_seq_len=vision_cfg.pt_hw_seq_len,  # 224/14
@@ -201,6 +209,7 @@ def _build_text_tower(
     else:
         act_layer = QuickGELU if quick_gelu else nn.GELU
         norm_layer = LayerNorm
+        use_xattn = bool(text_cfg.xattn and xops is not None)
 
         text = TextTransformer(
             context_length=text_cfg.context_length,
@@ -212,7 +221,7 @@ def _build_text_tower(
             output_dim=embed_dim,
             act_layer=act_layer,
             norm_layer=FusedLayerNorm if text_cfg.fusedLN else norm_layer,
-            xattn=text_cfg.xattn,
+            xattn=use_xattn,
             attn_mask=text_cfg.attn_mask,
         )
     return text
