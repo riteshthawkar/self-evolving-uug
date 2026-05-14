@@ -20,10 +20,10 @@ from blip3o.constants import UND_IMAGE_TOKEN_IDX
 
 
 from diffusers.utils.torch_utils import randn_tensor
-from diffusers.pipelines.pipeline_utils import numpy_to_pil
 import numpy as np
 from diffusers.models import AutoencoderKL
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
+from blip3o.model.image_utils import numpy_to_pil
 
 
 class blip3oQwenConfig(Qwen2_5_VLConfig):
