@@ -25,6 +25,9 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
 VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-2400}"
+# Some vLLM wheels do not ship a compatible DeepGEMM build. The Qwen3-VL FP8
+# checkpoint can otherwise fail during post-load FP8 weight processing.
+VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 
 # Set START_SERVER=0 if you already started vLLM manually.
 START_SERVER="${START_SERVER:-1}"
@@ -78,6 +81,7 @@ export VLLM_ASSETS_CACHE="$EXP_CACHE_ROOT/vllm/assets"
 export VLLM_XLA_CACHE_PATH="$EXP_CACHE_ROOT/vllm/xla_cache"
 export VLLM_RPC_BASE_PATH="$EXP_CACHE_ROOT/vllm/rpc"
 export VLLM_ENGINE_READY_TIMEOUT_S
+export VLLM_USE_DEEP_GEMM
 export VLLM_NO_USAGE_STATS=1
 export VLLM_DO_NOT_TRACK=1
 
@@ -103,6 +107,7 @@ if [[ "$START_SERVER" == "1" ]]; then
   echo "[h200] cache root: $EXP_CACHE_ROOT"
   echo "[h200] HOME redirected to: $HOME"
   echo "[h200] VLLM_RPC_BASE_PATH: $VLLM_RPC_BASE_PATH"
+  echo "[h200] VLLM_USE_DEEP_GEMM: $VLLM_USE_DEEP_GEMM"
   echo "[h200] server log: $SERVER_LOG"
   VLLM_IMAGE_FETCH_TIMEOUT=60 \
   vllm serve "$MODEL" \
