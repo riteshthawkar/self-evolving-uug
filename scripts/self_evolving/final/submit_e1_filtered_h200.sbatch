@@ -30,6 +30,30 @@ ORIGINAL_HOME="${HOME:-}"
 
 cd "$REPO_ROOT"
 
+to_abs_path() {
+  local path="$1"
+  if [[ "$path" = /* ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s\n' "$REPO_ROOT/$path"
+  fi
+}
+
+nearest_existing_parent() {
+  local path="$1"
+  while [[ ! -d "$path" && "$path" != "/" ]]; do
+    path="$(dirname "$path")"
+  done
+  printf '%s\n' "$path"
+}
+
+is_writable_path_candidate() {
+  local path="$1"
+  local parent
+  parent="$(nearest_existing_parent "$path")"
+  [[ -n "$parent" && -d "$parent" && -w "$parent" ]]
+}
+
 # Optional module setup. Example:
 #   sbatch --export=ALL,MODULES_TO_LOAD="cuda/12.4 gcc/11" scripts/self_evolving/final/submit_e1_filtered_h200.sbatch
 if [[ -n "${MODULES_TO_LOAD:-}" ]] && type module >/dev/null 2>&1; then
@@ -83,9 +107,61 @@ else
   TOTAL_STEPS="${TOTAL_STEPS:-10000}"
 fi
 
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/$EXPERIMENT_NAME}"
+DEFAULT_OUTPUT_DIR="$REPO_ROOT/outputs/blip3o/$EXPERIMENT_NAME"
+OUTPUT_DIR_SOURCE="default"
+
+# Slurm exports the submitting shell by default.  Generic variables such as
+# OUTPUT_DIR and CACHE_ROOT are commonly set by cluster/container wrappers
+# (for example /var/outputs), so accept them only if the destination is
+# writable.  Use E1_OUTPUT_DIR/E1_CACHE_ROOT for intentional overrides.
+if [[ -n "${E1_OUTPUT_DIR:-}" ]]; then
+  OUTPUT_DIR="$(to_abs_path "$E1_OUTPUT_DIR")"
+  OUTPUT_DIR_SOURCE="E1_OUTPUT_DIR"
+  if ! is_writable_path_candidate "$OUTPUT_DIR"; then
+    echo "[slurm] ERROR: E1_OUTPUT_DIR is not writable: $OUTPUT_DIR" >&2
+    exit 1
+  fi
+elif [[ -n "${OUTPUT_DIR:-}" ]]; then
+  REQUESTED_OUTPUT_DIR="$(to_abs_path "$OUTPUT_DIR")"
+  if is_writable_path_candidate "$REQUESTED_OUTPUT_DIR"; then
+    OUTPUT_DIR="$REQUESTED_OUTPUT_DIR"
+    OUTPUT_DIR_SOURCE="OUTPUT_DIR"
+  else
+    echo "[slurm] WARNING: ignoring inherited OUTPUT_DIR=$REQUESTED_OUTPUT_DIR because its nearest existing parent is not writable." >&2
+    echo "[slurm] WARNING: use E1_OUTPUT_DIR=/writable/path for an explicit output override." >&2
+    OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
+    OUTPUT_DIR_SOURCE="default_ignored_inherited_OUTPUT_DIR"
+  fi
+else
+  OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
+fi
+
 DATA_DIR="${DATA_DIR:-$FILTERED_DATA_DEFAULT}"
-CACHE_ROOT="${CACHE_ROOT:-$OUTPUT_DIR/cache_runtime}"
+DATA_DIR="$(to_abs_path "$DATA_DIR")"
+
+DEFAULT_CACHE_ROOT="$OUTPUT_DIR/cache_runtime"
+CACHE_ROOT_SOURCE="default"
+if [[ -n "${E1_CACHE_ROOT:-}" ]]; then
+  CACHE_ROOT="$(to_abs_path "$E1_CACHE_ROOT")"
+  CACHE_ROOT_SOURCE="E1_CACHE_ROOT"
+  if ! is_writable_path_candidate "$CACHE_ROOT"; then
+    echo "[slurm] ERROR: E1_CACHE_ROOT is not writable: $CACHE_ROOT" >&2
+    exit 1
+  fi
+elif [[ -n "${CACHE_ROOT:-}" ]]; then
+  REQUESTED_CACHE_ROOT="$(to_abs_path "$CACHE_ROOT")"
+  if is_writable_path_candidate "$REQUESTED_CACHE_ROOT"; then
+    CACHE_ROOT="$REQUESTED_CACHE_ROOT"
+    CACHE_ROOT_SOURCE="CACHE_ROOT"
+  else
+    echo "[slurm] WARNING: ignoring inherited CACHE_ROOT=$REQUESTED_CACHE_ROOT because its nearest existing parent is not writable." >&2
+    echo "[slurm] WARNING: use E1_CACHE_ROOT=/writable/path for an explicit cache override." >&2
+    CACHE_ROOT="$DEFAULT_CACHE_ROOT"
+    CACHE_ROOT_SOURCE="default_ignored_inherited_CACHE_ROOT"
+  fi
+else
+  CACHE_ROOT="$DEFAULT_CACHE_ROOT"
+fi
 
 mkdir -p \
   "$OUTPUT_DIR/slurm" \
@@ -113,7 +189,9 @@ echo "[slurm] repo=$REPO_ROOT"
 echo "[slurm] conda_env=${CONDA_DEFAULT_ENV:-skipped_or_preexisting}"
 echo "[slurm] data_dir=$DATA_DIR"
 echo "[slurm] output_dir=$OUTPUT_DIR"
+echo "[slurm] output_dir_source=$OUTPUT_DIR_SOURCE"
 echo "[slurm] cache_root=$CACHE_ROOT"
+echo "[slurm] cache_root_source=$CACHE_ROOT_SOURCE"
 echo "[slurm] smoke=$SMOKE total_steps=$TOTAL_STEPS"
 
 if [[ ! -d "$DATA_DIR" ]]; then
