@@ -55,7 +55,6 @@ RUN_NAME="E1_main_joint_s42"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
 RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 MASTER_PORT="${MASTER_PORT:-29523}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
@@ -371,6 +370,48 @@ export TORCH_NCCL_BLOCKING_WAIT=1
 export TORCH_NCCL_TRACE_BUFFER_SIZE=1048576
 export TORCH_DISTRIBUTED_DEBUG="OFF"
 export NCCL_DEBUG="WARN"
+
+count_csv_devices() {
+  local value="$1"
+  if [[ -z "$value" || "$value" == "NoDevFiles" ]]; then
+    echo 0
+    return
+  fi
+  awk -F',' '{print NF}' <<<"$value"
+}
+
+detect_physical_gpus() {
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local n
+    n="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d '[:space:]')"
+    if [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]]; then
+      echo "$n"
+      return
+    fi
+  fi
+  "$PYTHON_BIN" - <<'PY' 2>/dev/null || echo 0
+try:
+    import torch
+    print(torch.cuda.device_count() if torch.cuda.is_available() else 0)
+except Exception:
+    print(0)
+PY
+}
+
+make_device_list() {
+  local n="$1"
+  if [[ "$n" -le 0 ]]; then
+    echo ""
+    return
+  fi
+  local out="0"
+  local i
+  for ((i=1; i<n; i++)); do
+    out="${out},${i}"
+  done
+  echo "$out"
+}
+
 if [[ -z "${HIP_VISIBLE_DEVICES:-}" && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
   export HIP_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
 fi
@@ -378,8 +419,22 @@ if [[ -z "${CUDA_VISIBLE_DEVICES:-}" && -n "${HIP_VISIBLE_DEVICES:-}" ]]; then
   export CUDA_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
 fi
 if [[ -z "${HIP_VISIBLE_DEVICES:-}" && -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-  export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+  DETECTED_GPU_COUNT="$(detect_physical_gpus)"
+  if [[ ! "$DETECTED_GPU_COUNT" =~ ^[0-9]+$ || "$DETECTED_GPU_COUNT" -le 0 ]]; then
+    DETECTED_GPU_COUNT=1
+  fi
+  export HIP_VISIBLE_DEVICES="$(make_device_list "$DETECTED_GPU_COUNT")"
   export CUDA_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES}"
+fi
+VISIBLE_GPU_COUNT="$(count_csv_devices "${CUDA_VISIBLE_DEVICES:-${HIP_VISIBLE_DEVICES:-}}")"
+if [[ "$VISIBLE_GPU_COUNT" -le 0 ]]; then
+  VISIBLE_GPU_COUNT=1
+fi
+NPROC_PER_NODE="${NPROC_PER_NODE:-$VISIBLE_GPU_COUNT}"
+if [[ "$NPROC_PER_NODE" -gt "$VISIBLE_GPU_COUNT" ]]; then
+  echo "[E1] ERROR: NPROC_PER_NODE=$NPROC_PER_NODE but only $VISIBLE_GPU_COUNT GPU(s) are visible." >&2
+  echo "[E1] For a single H200 run, use: CUDA_VISIBLE_DEVICES=0 NPROC_PER_NODE=1 ..." >&2
+  exit 1
 fi
 
 # ── Pre-flight checks ────────────────────────────────────────────────────────

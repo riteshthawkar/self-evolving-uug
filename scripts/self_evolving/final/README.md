@@ -78,6 +78,29 @@ CHECKPOINT_DIR=/path/to/step_010000 bash scripts/self_evolving/paper/run_generat
 Defaults now point to `data/joint_6k/images`, matching the manuscript protocol.
 Legacy partial runs under `runs/final/` remain discoverable by the readiness audit
 but new paper runs are written under `outputs/`.
+
+### Single-H200 Launch
+
+For a one-GPU 128 GB H200 allocation, run E1 with a single process. The E1
+launcher auto-detects visible GPUs and now fails early if `NPROC_PER_NODE`
+exceeds the GPU count, but setting both variables explicitly is still best for
+Slurm reproducibility:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+NPROC_PER_NODE=1 \
+DATA_DIR=/path/to/high_utility_pool_10k_h200_qwen3vl30b_a3b_bf16/images \
+OUTPUT_DIR=$PWD/outputs/blip3o/E1_main_joint_h200_single \
+TOTAL_STEPS=20 \
+bash scripts/self_evolving/final/E1_main_joint.sh
+```
+
+After the smoke run has finite losses in
+`logs/training_watch.log` / `logs/training_monitor.tsv`, remove `TOTAL_STEPS=20`
+for the full run. Keep `LOAD_IN_4BIT=0` on H200 unless memory profiling shows a
+real need for QLoRA; full bf16 LoRA is faster and avoids quantization-specific
+failure modes.
+
 The two-stage rebuttal control is intentionally different: it defaults to
 `data/joint_pool_10k/images`, runs 10k understanding-only steps, then resumes
 from `step_010000` and runs 10k additional generation-only steps to
