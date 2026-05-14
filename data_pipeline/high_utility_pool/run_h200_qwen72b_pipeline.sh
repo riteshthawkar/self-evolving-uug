@@ -34,7 +34,12 @@ mkdir -p "$(dirname "$OUTPUT_DIR")"
 
 # Keep caches off $HOME. Override EXP_CACHE_ROOT to a large scratch path.
 EXP_CACHE_ROOT="${EXP_CACHE_ROOT:-${OUTPUT_DIR}/cache_runtime}"
-mkdir -p "$EXP_CACHE_ROOT"/{tmp,xdg_cache,xdg_config,xdg_data,huggingface,torch,triton,nvidia,pip,wandb,vllm,matplotlib,python}
+mkdir -p "$EXP_CACHE_ROOT"/{tmp,xdg_cache,xdg_config,xdg_data,huggingface,torch,triton,nvidia,pip,wandb,vllm,matplotlib,python,home}
+
+# vLLM versions differ in which cache root they respect for IPC paths. Setting
+# HOME is the robust option for keeping ~/.cache/vllm/rpc off the real home dir.
+export REAL_HOME="${HOME:-}"
+export HOME="$EXP_CACHE_ROOT/home"
 
 export XDG_CACHE_HOME="$EXP_CACHE_ROOT/xdg_cache"
 export XDG_CONFIG_HOME="$EXP_CACHE_ROOT/xdg_config"
@@ -84,9 +89,20 @@ export WANDB_CACHE_DIR="$EXP_CACHE_ROOT/wandb/cache"
 export WANDB_CONFIG_DIR="$EXP_CACHE_ROOT/wandb/config"
 export WANDB_DATA_DIR="$EXP_CACHE_ROOT/wandb/data"
 
+mkdir -p \
+  "$HOME/.cache/vllm/rpc" \
+  "$XDG_CACHE_HOME/vllm/rpc" \
+  "$VLLM_CACHE_ROOT" \
+  "$VLLM_CONFIG_ROOT" \
+  "$VLLM_ASSETS_CACHE" \
+  "$VLLM_XLA_CACHE_PATH" \
+  "$VLLM_RPC_BASE_PATH"
+
 if [[ "$START_SERVER" == "1" ]]; then
   echo "[h200] starting vLLM server: $MODEL"
   echo "[h200] cache root: $EXP_CACHE_ROOT"
+  echo "[h200] HOME redirected to: $HOME"
+  echo "[h200] VLLM_RPC_BASE_PATH: $VLLM_RPC_BASE_PATH"
   echo "[h200] server log: $SERVER_LOG"
   VLLM_IMAGE_FETCH_TIMEOUT=60 \
   vllm serve "$MODEL" \
