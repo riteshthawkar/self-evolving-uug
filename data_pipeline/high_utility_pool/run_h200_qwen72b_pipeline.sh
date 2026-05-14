@@ -14,6 +14,15 @@ HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8000}"
 HEALTH_URL="${BASE_URL%/v1}/health"
 
+to_abs_path() {
+  local path="$1"
+  if [[ "$path" = /* ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s/%s\n' "$REPO_ROOT" "$path"
+  fi
+}
+
 # Set VLM_MAX_IMAGES=512 and DRY_RUN=1 for a quick audit.
 VLM_MAX_IMAGES="${VLM_MAX_IMAGES:-10000}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -31,7 +40,13 @@ VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 
 # Set START_SERVER=0 if you already started vLLM manually.
 START_SERVER="${START_SERVER:-1}"
+
+SOURCE_DIR="$(to_abs_path "$SOURCE_DIR")"
+OUTPUT_DIR="$(to_abs_path "$OUTPUT_DIR")"
+EXP_CACHE_ROOT="${EXP_CACHE_ROOT:-${OUTPUT_DIR}/cache_runtime}"
+EXP_CACHE_ROOT="$(to_abs_path "$EXP_CACHE_ROOT")"
 SERVER_LOG="${SERVER_LOG:-${OUTPUT_DIR}.vllm.log}"
+SERVER_LOG="$(to_abs_path "$SERVER_LOG")"
 
 mkdir -p "$(dirname "$OUTPUT_DIR")"
 
@@ -48,8 +63,6 @@ if [[ "$SOURCE_COUNT" == "0" ]]; then
   exit 2
 fi
 
-# Keep caches off $HOME. Override EXP_CACHE_ROOT to a large scratch path.
-EXP_CACHE_ROOT="${EXP_CACHE_ROOT:-${OUTPUT_DIR}/cache_runtime}"
 mkdir -p "$EXP_CACHE_ROOT"/{tmp,xdg_cache,xdg_config,xdg_data,huggingface,torch,triton,nvidia,pip,wandb,vllm,matplotlib,python,home}
 
 # vLLM versions differ in which cache root they respect for IPC paths. Setting
