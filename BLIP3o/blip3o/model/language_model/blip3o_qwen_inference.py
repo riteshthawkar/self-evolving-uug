@@ -17,6 +17,7 @@ import numpy as np
 from diffusers.models import AutoencoderKL
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from blip3o.model.image_utils import numpy_to_pil
+from .qwen_config_utils import ensure_qwen_vl_config_compat
 
 
 class blip3oQwenConfig(Qwen2_5_VLConfig):
@@ -34,6 +35,7 @@ class blip3oQwenForInferenceLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaFor
     config_class = blip3oQwenConfig
 
     def __init__(self, config):
+        ensure_qwen_vl_config_compat(config)
         Qwen2_5_VLForConditionalGeneration.__init__(self, config)
         config.model_type = "blip3o_qwen_inference"
 

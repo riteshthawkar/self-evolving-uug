@@ -167,19 +167,42 @@ def _build_compat_config(model_name: str, expected_model_type: Optional[str]):
         except Exception:
             pass
 
-    # Some checkpoints keep hidden size nested under text_config.
-    text_cfg = getattr(cfg, "text_config", None)
-    if not hasattr(cfg, "hidden_size"):
-        hidden_size = None
-        if text_cfg is not None:
-            hidden_size = getattr(text_cfg, "hidden_size", None)
-            if hidden_size is None:
-                hidden_size = getattr(text_cfg, "d_model", None)
-        if hidden_size is not None:
-            try:
-                setattr(cfg, "hidden_size", int(hidden_size))
-            except Exception:
-                pass
+    def _cfg_get(obj, name, default=None):
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    def _first_int(obj, names):
+        for name in names:
+            value = _cfg_get(obj, name)
+            if value is not None:
+                try:
+                    return int(value)
+                except Exception:
+                    continue
+        return None
+
+    # Some checkpoints keep language-model fields nested under text_config.
+    text_cfg = _cfg_get(cfg, "text_config")
+    hidden_size = _first_int(cfg, ("hidden_size", "d_model", "embed_dim"))
+    if hidden_size is None:
+        hidden_size = _first_int(text_cfg, ("hidden_size", "d_model", "embed_dim"))
+    if hidden_size is not None:
+        try:
+            setattr(cfg, "hidden_size", int(hidden_size))
+        except Exception:
+            pass
+
+    vocab_size = _first_int(cfg, ("vocab_size", "vocabulary_size"))
+    if vocab_size is None:
+        vocab_size = _first_int(text_cfg, ("vocab_size", "vocabulary_size"))
+    if vocab_size is not None:
+        try:
+            setattr(cfg, "vocab_size", int(vocab_size))
+        except Exception:
+            pass
     return cfg
 
 

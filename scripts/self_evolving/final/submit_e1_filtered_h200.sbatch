@@ -232,7 +232,7 @@ export DATA_DIR
 export OUTPUT_DIR
 export CACHE_ROOT
 export TRAIN_STAGE="${TRAIN_STAGE:-strict}"
-export ATTN_IMPL="${ATTN_IMPL:-flash_attention_2}"
+export ATTN_IMPL="${ATTN_IMPL:-auto}"
 export TOTAL_STEPS
 export SAVE_EVERY="${SAVE_EVERY:-50}"
 export SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-50}"
