@@ -14,7 +14,9 @@ VLM_TIMEOUT="${VLM_TIMEOUT:-240}"
 MIN_HEURISTIC_SCORE="${MIN_HEURISTIC_SCORE:-0.1}"
 VLM_DTYPE="${VLM_DTYPE:-auto}"
 VLM_DEVICE_MAP="${VLM_DEVICE_MAP:-auto}"
-VLM_ATTN_IMPLEMENTATION="${VLM_ATTN_IMPLEMENTATION:-}"
+VLM_ATTN_IMPLEMENTATION="${VLM_ATTN_IMPLEMENTATION:-flash_attention_2}"
+VLM_BATCH_SIZE="${VLM_BATCH_SIZE:-4}"
+VLM_MAX_NEW_TOKENS="${VLM_MAX_NEW_TOKENS:-384}"
 
 exec "$PYTHON_BIN" data_pipeline/high_utility_pool/build_high_utility_pool.py \
   --local_source "$SOURCE_DIR" \
@@ -27,6 +29,8 @@ exec "$PYTHON_BIN" data_pipeline/high_utility_pool/build_high_utility_pool.py \
   --vlm_dtype "$VLM_DTYPE" \
   --vlm_device_map "$VLM_DEVICE_MAP" \
   --vlm_attn_implementation "$VLM_ATTN_IMPLEMENTATION" \
+  --vlm_batch_size "$VLM_BATCH_SIZE" \
+  --vlm_max_new_tokens "$VLM_MAX_NEW_TOKENS" \
   --vlm_base_url "$BASE_URL" \
   --vlm_timeout "$VLM_TIMEOUT" \
   --vlm_max_images "$VLM_MAX_IMAGES" \

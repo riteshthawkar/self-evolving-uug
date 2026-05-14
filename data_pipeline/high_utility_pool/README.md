@@ -169,13 +169,21 @@ The launcher defaults to direct Hugging Face Transformers inference. This is
 slower per image than a healthy vLLM server, but it is the most reliable
 research path because it removes server startup, IPC, encoder-cache profiling,
 CUDA graph capture, and scheduler warmup from the critical path.
+It batches independent image judgments by default (`VLM_BATCH_SIZE=4`) and
+requests FlashAttention-2 when available; if that attention backend is missing,
+the loader automatically retries with the model's default attention.
 
 ```bash
 SOURCE_DIR=/absolute/path/to/high_utility_pool_10k/images \
 DRY_RUN=1 \
 VLM_MAX_IMAGES=128 \
+VLM_BATCH_SIZE=4 \
 bash data_pipeline/high_utility_pool/run_h200_qwen72b_pipeline.sh
 ```
+
+On a 128 GB H200, tune only `VLM_BATCH_SIZE` for throughput. Start with 4, try
+8 if GPU memory has headroom, and drop to 2 only if the process OOMs. This does
+not change the judge, prompt, image filtering criteria, or final scoring rule.
 
 To test vLLM explicitly, opt in with `VLM_BACKEND=openai_compatible`. In this
 mode, the launcher skips vLLM multimodal startup profiling, caps the expected

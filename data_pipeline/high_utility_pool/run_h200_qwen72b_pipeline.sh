@@ -43,6 +43,9 @@ LIMIT_MM_PER_PROMPT="${LIMIT_MM_PER_PROMPT:-{\"image\":{\"count\":1,\"width\":76
 MM_PROCESSOR_CACHE_GB="${MM_PROCESSOR_CACHE_GB:-1}"
 GENERATION_CONFIG="${GENERATION_CONFIG:-vllm}"
 DTYPE="${DTYPE:-bfloat16}"
+VLM_BATCH_SIZE="${VLM_BATCH_SIZE:-4}"
+VLM_MAX_NEW_TOKENS="${VLM_MAX_NEW_TOKENS:-384}"
+VLM_ATTN_IMPLEMENTATION="${VLM_ATTN_IMPLEMENTATION:-flash_attention_2}"
 STARTUP_STALL_TIMEOUT_S="${STARTUP_STALL_TIMEOUT_S:-900}"
 HEALTH_POLL_SECONDS="${HEALTH_POLL_SECONDS:-10}"
 # Some vLLM wheels do not ship a compatible DeepGEMM build. This is mainly
@@ -252,6 +255,8 @@ echo "[h200] running VLM data audit"
 echo "[h200] VLM backend: $VLM_BACKEND"
 if [[ "$VLM_BACKEND" == "transformers_vlm" ]]; then
   echo "[h200] using direct Hugging Face Transformers inference; vLLM server startup is skipped"
+  echo "[h200] VLM_BATCH_SIZE: $VLM_BATCH_SIZE"
+  echo "[h200] VLM_ATTN_IMPLEMENTATION: $VLM_ATTN_IMPLEMENTATION"
 fi
 python3 data_pipeline/high_utility_pool/build_high_utility_pool.py \
   --local_source "$SOURCE_DIR" \
@@ -262,6 +267,9 @@ python3 data_pipeline/high_utility_pool/build_high_utility_pool.py \
   --vlm_backend "$VLM_BACKEND" \
   --vlm_model "$MODEL" \
   --vlm_dtype "$DTYPE" \
+  --vlm_batch_size "$VLM_BATCH_SIZE" \
+  --vlm_max_new_tokens "$VLM_MAX_NEW_TOKENS" \
+  --vlm_attn_implementation "$VLM_ATTN_IMPLEMENTATION" \
   --vlm_base_url "$BASE_URL" \
   --vlm_timeout 240 \
   --vlm_max_images "$VLM_MAX_IMAGES" \

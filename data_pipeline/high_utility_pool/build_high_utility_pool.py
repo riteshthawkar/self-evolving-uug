@@ -182,6 +182,18 @@ def parse_args() -> argparse.Namespace:
         help="Pass trust_remote_code=True when loading a local Transformers VLM.",
     )
     p.add_argument(
+        "--vlm_batch_size",
+        type=int,
+        default=int(os.environ.get("VLM_BATCH_SIZE", "1")),
+        help="Batch size for local Transformers VLM judging. Does not change the judge prompt or scoring rule.",
+    )
+    p.add_argument(
+        "--vlm_max_new_tokens",
+        type=int,
+        default=int(os.environ.get("VLM_MAX_NEW_TOKENS", "384")),
+        help="Maximum generation tokens for VLM JSON judgments.",
+    )
+    p.add_argument(
         "--vlm_base_url",
         type=str,
         default="",
@@ -907,8 +919,91 @@ def _move_batch_to_device(batch: Any, device: Any) -> Any:
     return batch
 
 
-def judge_transformers_vlm(
-    image_path: Path,
+def _transformers_vlm_messages(image_path: Path) -> List[Dict[str, Any]]:
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image_path.resolve().as_uri()},
+                {"type": "text", "text": VLM_PROMPT},
+            ],
+        }
+    ]
+
+
+def _load_transformers_vlm_state(
+    *,
+    model_id: str,
+    dtype: str,
+    device_map: str,
+    attn_implementation: str,
+    trust_remote_code: bool,
+) -> Dict[str, Any]:
+    import torch
+    from transformers import AutoModelForImageTextToText, AutoProcessor
+
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+    torch_dtype = _resolve_torch_dtype(torch, dtype)
+    load_kwargs: Dict[str, Any] = {
+        "device_map": device_map or "auto",
+        "trust_remote_code": trust_remote_code,
+        "low_cpu_mem_usage": True,
+    }
+    if attn_implementation:
+        load_kwargs["attn_implementation"] = attn_implementation
+
+    def load_model(kwargs: Dict[str, Any]) -> Any:
+        try:
+            return AutoModelForImageTextToText.from_pretrained(
+                model_id,
+                dtype=torch_dtype,
+                **kwargs,
+            )
+        except TypeError:
+            return AutoModelForImageTextToText.from_pretrained(
+                model_id,
+                torch_dtype=torch_dtype,
+                **kwargs,
+            )
+
+    try:
+        local_model = load_model(load_kwargs)
+    except Exception as exc:
+        if not attn_implementation:
+            raise
+        fallback_kwargs = dict(load_kwargs)
+        fallback_kwargs.pop("attn_implementation", None)
+        print(
+            f"[vlm] warning: failed to load with attn_implementation={attn_implementation}: "
+            f"{type(exc).__name__}: {exc}. Retrying with model default attention.",
+            file=sys.stderr,
+            flush=True,
+        )
+        local_model = load_model(fallback_kwargs)
+        attn_implementation = ""
+
+    local_model.eval()
+    processor = AutoProcessor.from_pretrained(
+        model_id,
+        trust_remote_code=trust_remote_code,
+    )
+    if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
+        processor.tokenizer.padding_side = "left"
+    first_param = next(local_model.parameters(), None)
+    input_device = first_param.device if first_param is not None else torch.device("cuda:0")
+    return {
+        "model": local_model,
+        "processor": processor,
+        "torch": torch,
+        "input_device": input_device,
+        "attn_implementation": attn_implementation,
+    }
+
+
+def _get_transformers_vlm_state(
     *,
     model: str,
     dtype: str,
@@ -916,7 +1011,6 @@ def judge_transformers_vlm(
     attn_implementation: str,
     trust_remote_code: bool,
 ) -> Dict[str, Any]:
-    """Judge one image with a Hugging Face Transformers VLM loaded once."""
     model_id = model or "Qwen/Qwen3-VL-30B-A3B-Instruct"
     state_key = "::".join(
         [
@@ -930,86 +1024,100 @@ def judge_transformers_vlm(
     )
     state = _TRANSFORMERS_VLM_STATE.get(state_key)
     if state is None:
-        import torch
-        from transformers import AutoModelForImageTextToText, AutoProcessor
-
-        torch_dtype = _resolve_torch_dtype(torch, dtype)
-        load_kwargs: Dict[str, Any] = {
-            "device_map": device_map or "auto",
-            "trust_remote_code": trust_remote_code,
-            "low_cpu_mem_usage": True,
-        }
-        if attn_implementation:
-            load_kwargs["attn_implementation"] = attn_implementation
-
-        try:
-            local_model = AutoModelForImageTextToText.from_pretrained(
-                model_id,
-                dtype=torch_dtype,
-                **load_kwargs,
-            )
-        except TypeError:
-            local_model = AutoModelForImageTextToText.from_pretrained(
-                model_id,
-                torch_dtype=torch_dtype,
-                **load_kwargs,
-            )
-        local_model.eval()
-        processor = AutoProcessor.from_pretrained(
-            model_id,
+        state = _load_transformers_vlm_state(
+            model_id=model_id,
+            dtype=dtype,
+            device_map=device_map,
+            attn_implementation=attn_implementation,
             trust_remote_code=trust_remote_code,
         )
-        first_param = next(local_model.parameters(), None)
-        input_device = first_param.device if first_param is not None else torch.device("cuda:0")
-        state = {
-            "model": local_model,
-            "processor": processor,
-            "torch": torch,
-            "input_device": input_device,
-        }
+        state["model_id"] = model_id
+        state["dtype"] = dtype or "auto"
+        state["device_map"] = device_map or "auto"
         _TRANSFORMERS_VLM_STATE[state_key] = state
+    return state
 
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": str(image_path)},
-                {"type": "text", "text": VLM_PROMPT},
-            ],
-        }
-    ]
+
+def judge_transformers_vlm_batch(
+    image_paths: Sequence[Path],
+    *,
+    model: str,
+    dtype: str,
+    device_map: str,
+    attn_implementation: str,
+    trust_remote_code: bool,
+    max_new_tokens: int,
+) -> List[Dict[str, Any]]:
+    """Judge independent images as a batch without changing the judge prompt."""
+    if not image_paths:
+        return []
+    state = _get_transformers_vlm_state(
+        model=model,
+        dtype=dtype,
+        device_map=device_map,
+        attn_implementation=attn_implementation,
+        trust_remote_code=trust_remote_code,
+    )
     processor = state["processor"]
     local_model = state["model"]
+    messages = [_transformers_vlm_messages(path) for path in image_paths]
     inputs = processor.apply_chat_template(
         messages,
         tokenize=True,
         add_generation_prompt=True,
         return_dict=True,
         return_tensors="pt",
+        padding=True,
     )
     inputs = _move_batch_to_device(inputs, state["input_device"])
     torch = state["torch"]
     with torch.inference_mode():
         generated_ids = local_model.generate(
             **inputs,
-            max_new_tokens=384,
+            max_new_tokens=max_new_tokens,
             do_sample=False,
         )
     prompt_len = int(inputs["input_ids"].shape[-1])
     generated_ids_trimmed = generated_ids[:, prompt_len:]
-    text = processor.batch_decode(
+    texts = processor.batch_decode(
         generated_ids_trimmed,
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
+    )
+    payloads: List[Dict[str, Any]] = []
+    for text in texts:
+        payload = _parse_jsonish(text)
+        payload["_local_vlm_backend"] = "transformers_vlm"
+        payload["_local_vlm_model"] = state["model_id"]
+        payload["_local_vlm_dtype"] = state["dtype"]
+        payload["_local_vlm_device_map"] = state["device_map"]
+        if state.get("attn_implementation"):
+            payload["_local_vlm_attn_implementation"] = state["attn_implementation"]
+        payload["_local_vlm_batch_size"] = len(image_paths)
+        payloads.append(payload)
+    return payloads
+
+
+def judge_transformers_vlm(
+    image_path: Path,
+    *,
+    model: str,
+    dtype: str,
+    device_map: str,
+    attn_implementation: str,
+    trust_remote_code: bool,
+    max_new_tokens: int = 384,
+) -> Dict[str, Any]:
+    """Judge one image with a Hugging Face Transformers VLM loaded once."""
+    return judge_transformers_vlm_batch(
+        [image_path],
+        model=model,
+        dtype=dtype,
+        device_map=device_map,
+        attn_implementation=attn_implementation,
+        trust_remote_code=trust_remote_code,
+        max_new_tokens=max_new_tokens,
     )[0]
-    payload = _parse_jsonish(text)
-    payload["_local_vlm_backend"] = "transformers_vlm"
-    payload["_local_vlm_model"] = model_id
-    payload["_local_vlm_dtype"] = dtype or "auto"
-    payload["_local_vlm_device_map"] = device_map or "auto"
-    if attn_implementation:
-        payload["_local_vlm_attn_implementation"] = attn_implementation
-    return payload
 
 
 def _vlm_keep_score(vlm: Dict[str, Any]) -> Optional[float]:
@@ -1157,6 +1265,148 @@ def _select_vlm_candidates(
     return selected
 
 
+def _store_vlm_result(
+    item: ScoredCandidate,
+    *,
+    backend: str,
+    model: str,
+    vlm: Dict[str, Any],
+    cache_path: Path,
+) -> None:
+    vlm = _normalize_vlm_score(vlm)
+    item.vlm_score = vlm
+    vlm01 = _vlm_keep_score(vlm)
+    if vlm01 is not None:
+        item.final_score = 0.60 * item.heuristic_score + 0.40 * vlm01
+    row = {
+        "candidate_id": item.candidate.candidate_id,
+        "source": item.candidate.source,
+        "domain": item.candidate.domain,
+        "heuristic_score": item.heuristic_score,
+        "final_score": item.final_score,
+        "vlm_backend": backend,
+        "vlm_model": model,
+        "vlm_score": vlm,
+    }
+    _jsonl_append(cache_path, row)
+
+
+def _run_transformers_vlm_judge_batched(
+    ranked: Sequence[ScoredCandidate],
+    *,
+    cache: Dict[str, Dict[str, Any]],
+    model: str,
+    dtype: str,
+    device_map: str,
+    attn_implementation: str,
+    trust_remote_code: bool,
+    max_new_tokens: int,
+    max_images: int,
+    batch_size: int,
+    cache_path: Path,
+    cache_dir: Path,
+    timeout: float,
+    retries: int,
+    sleep_sec: float,
+) -> None:
+    judged = 0
+    pending_items: List[ScoredCandidate] = []
+    pending_paths: List[Path] = []
+
+    def flush_pending() -> None:
+        nonlocal judged, pending_items, pending_paths
+        if not pending_items:
+            return
+        try:
+            vlm_payloads = judge_transformers_vlm_batch(
+                pending_paths,
+                model=model,
+                dtype=dtype,
+                device_map=device_map,
+                attn_implementation=attn_implementation,
+                trust_remote_code=trust_remote_code,
+                max_new_tokens=max_new_tokens,
+            )
+        except Exception as exc:
+            print(
+                f"[vlm] batch of {len(pending_items)} failed: {type(exc).__name__}: {exc}; "
+                "falling back to single-image generation for this batch",
+                file=sys.stderr,
+                flush=True,
+            )
+            vlm_payloads = []
+            for path in pending_paths:
+                try:
+                    vlm_payloads.append(
+                        judge_transformers_vlm(
+                            path,
+                            model=model,
+                            dtype=dtype,
+                            device_map=device_map,
+                            attn_implementation=attn_implementation,
+                            trust_remote_code=trust_remote_code,
+                            max_new_tokens=max_new_tokens,
+                        )
+                    )
+                except Exception as single_exc:
+                    vlm_payloads.append(
+                        {
+                            "_failed": True,
+                            "_failure_type": type(single_exc).__name__,
+                            "_failure_message": str(single_exc),
+                        }
+                    )
+
+        for item, vlm in zip(pending_items, vlm_payloads):
+            if vlm.get("_failed"):
+                print(
+                    f"[vlm] failed {item.candidate.candidate_id}: "
+                    f"{vlm.get('_failure_type')}: {vlm.get('_failure_message')}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            _store_vlm_result(
+                item,
+                backend="transformers_vlm",
+                model=model,
+                vlm=vlm,
+                cache_path=cache_path,
+            )
+            judged += 1
+            if judged % 10 == 0 or judged == max_images:
+                print(f"[vlm] judged={judged}/{max_images}", flush=True)
+            time.sleep(max(0.0, sleep_sec))
+        pending_items = []
+        pending_paths = []
+
+    for item in ranked:
+        if judged >= max_images:
+            break
+        cid = item.candidate.candidate_id
+        if cid in cache:
+            item.vlm_score = _normalize_vlm_score(cache[cid].get("vlm_score") or {})
+            vlm01 = _vlm_keep_score(item.vlm_score or {})
+            if vlm01 is not None:
+                item.final_score = 0.60 * item.heuristic_score + 0.40 * vlm01
+            judged += 1
+            continue
+        img, local_path, reason = _load_candidate_image(
+            item.candidate,
+            cache_dir=cache_dir,
+            timeout=timeout,
+            retries=retries,
+        )
+        if img is None or local_path is None:
+            print(f"[vlm] skip {cid}: {reason}", file=sys.stderr)
+            continue
+        pending_items.append(item)
+        pending_paths.append(local_path)
+        if len(pending_items) >= batch_size:
+            flush_pending()
+    flush_pending()
+
+
 def run_vlm_judge(
     scored: List[ScoredCandidate],
     *,
@@ -1166,6 +1416,8 @@ def run_vlm_judge(
     device_map: str,
     attn_implementation: str,
     trust_remote_code: bool,
+    batch_size: int,
+    max_new_tokens: int,
     base_url: str,
     api_key_env: str,
     max_images: int,
@@ -1206,9 +1458,30 @@ def run_vlm_judge(
     )
     print(
         f"[vlm] backend={backend} model={model or 'default'} "
-        f"strategy={selection_strategy} candidates={len(ranked)} cache={cache_path}",
+        f"strategy={selection_strategy} candidates={len(ranked)} cache={cache_path} "
+        f"batch_size={max(1, batch_size)} max_new_tokens={max_new_tokens}",
         flush=True,
     )
+    if backend == "transformers_vlm" and max(1, batch_size) > 1:
+        _run_transformers_vlm_judge_batched(
+            ranked,
+            cache=cache,
+            model=model,
+            dtype=dtype,
+            device_map=device_map,
+            attn_implementation=attn_implementation,
+            trust_remote_code=trust_remote_code,
+            max_new_tokens=max_new_tokens,
+            max_images=max_images,
+            batch_size=max(1, batch_size),
+            cache_path=cache_path,
+            cache_dir=cache_dir,
+            timeout=timeout,
+            retries=retries,
+            sleep_sec=sleep_sec,
+        )
+        return
+
     judged = 0
     for item in ranked:
         if judged >= max_images:
@@ -1257,25 +1530,17 @@ def run_vlm_judge(
                     device_map=device_map,
                     attn_implementation=attn_implementation,
                     trust_remote_code=trust_remote_code,
+                    max_new_tokens=max_new_tokens,
                 )
             else:
                 raise ValueError(f"unsupported VLM backend {backend}")
-            vlm = _normalize_vlm_score(vlm)
-            item.vlm_score = vlm
-            vlm01 = _vlm_keep_score(vlm)
-            if vlm01 is not None:
-                item.final_score = 0.60 * item.heuristic_score + 0.40 * vlm01
-            row = {
-                "candidate_id": cid,
-                "source": item.candidate.source,
-                "domain": item.candidate.domain,
-                "heuristic_score": item.heuristic_score,
-                "final_score": item.final_score,
-                "vlm_backend": backend,
-                "vlm_model": model,
-                "vlm_score": vlm,
-            }
-            _jsonl_append(cache_path, row)
+            _store_vlm_result(
+                item,
+                backend=backend,
+                model=model,
+                vlm=vlm,
+                cache_path=cache_path,
+            )
             judged += 1
             if judged % 10 == 0 or judged == max_images:
                 print(f"[vlm] judged={judged}/{max_images}", flush=True)
@@ -1516,6 +1781,8 @@ def main() -> int:
         device_map=str(args.vlm_device_map or "auto"),
         attn_implementation=str(args.vlm_attn_implementation or ""),
         trust_remote_code=bool(args.vlm_trust_remote_code),
+        batch_size=max(1, int(args.vlm_batch_size)),
+        max_new_tokens=max(32, int(args.vlm_max_new_tokens)),
         base_url=str(args.vlm_base_url or ""),
         api_key_env=str(args.vlm_api_key_env or "OPENAI_COMPATIBLE_API_KEY"),
         max_images=int(args.vlm_max_images),
@@ -1621,6 +1888,9 @@ def main() -> int:
             "candidate_top_k": int(args.vlm_candidate_top_k),
             "selection_strategy": str(args.vlm_selection_strategy),
             "timeout": float(args.vlm_timeout),
+            "batch_size": max(1, int(args.vlm_batch_size)),
+            "max_new_tokens": max(32, int(args.vlm_max_new_tokens)),
+            "attn_implementation": str(args.vlm_attn_implementation or ""),
             "scored_count": len(vlm_scored),
             "schema_missing_count": sum(
                 1 for item in vlm_scored
