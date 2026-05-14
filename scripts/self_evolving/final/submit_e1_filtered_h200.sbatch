@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
 #SBATCH --time=2-00:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
@@ -17,6 +17,8 @@
 # Submit from the repository root after creating the Slurm output directory:
 #   mkdir -p logs
 #   sbatch scripts/self_evolving/final/submit_e1_filtered_h200.sbatch
+# For a larger host-memory allocation, override at submission time, e.g.:
+#   sbatch --mem=64G --cpus-per-task=8 scripts/self_evolving/final/submit_e1_filtered_h200.sbatch
 # Slurm opens logs/%x_%j.out before this script starts, so the logs directory
 # must exist before sbatch is called.
 
@@ -38,22 +40,30 @@ if [[ -n "${MODULES_TO_LOAD:-}" ]] && type module >/dev/null 2>&1; then
 fi
 
 # Conda activation. Override CONDA_ENV if your environment has another name.
+# Keep this enabled for batch jobs unless you are submitting from an already
+# activated environment and exporting that PATH intentionally.
 CONDA_ENV="${CONDA_ENV:-blip3o}"
-if [[ -n "${CONDA_EXE:-}" && -x "${CONDA_EXE:-}" ]]; then
-  eval "$("$CONDA_EXE" shell.bash hook)"
-elif command -v conda >/dev/null 2>&1; then
-  eval "$(conda shell.bash hook)"
-elif [[ -f "$ORIGINAL_HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
-  # shellcheck source=/dev/null
-  source "$ORIGINAL_HOME/miniconda3/etc/profile.d/conda.sh"
-elif [[ -f "$ORIGINAL_HOME/anaconda3/etc/profile.d/conda.sh" ]]; then
-  # shellcheck source=/dev/null
-  source "$ORIGINAL_HOME/anaconda3/etc/profile.d/conda.sh"
+SKIP_CONDA_ACTIVATE="${SKIP_CONDA_ACTIVATE:-0}"
+if [[ "$SKIP_CONDA_ACTIVATE" == "1" ]]; then
+  echo "[slurm] SKIP_CONDA_ACTIVATE=1: using existing PATH/python environment."
 else
-  echo "[slurm] ERROR: conda was not found. Set CONDA_EXE or load your conda module." >&2
-  exit 1
+  if [[ -n "${CONDA_EXE:-}" && -x "${CONDA_EXE:-}" ]]; then
+    eval "$("$CONDA_EXE" shell.bash hook)"
+  elif command -v conda >/dev/null 2>&1; then
+    eval "$(conda shell.bash hook)"
+  elif [[ -f "$ORIGINAL_HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$ORIGINAL_HOME/miniconda3/etc/profile.d/conda.sh"
+  elif [[ -f "$ORIGINAL_HOME/anaconda3/etc/profile.d/conda.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$ORIGINAL_HOME/anaconda3/etc/profile.d/conda.sh"
+  else
+    echo "[slurm] ERROR: conda was not found. Set CONDA_EXE or load your conda module." >&2
+    echo "[slurm] If your submitted environment already has the right python, use SKIP_CONDA_ACTIVATE=1." >&2
+    exit 1
+  fi
+  conda activate "$CONDA_ENV"
 fi
-conda activate "$CONDA_ENV"
 
 # Main experiment defaults. Override any of these via sbatch --export.
 FILTERED_DATA_DEFAULT="$REPO_ROOT/data/high_utility_pool_10k_h200_qwen3vl30b_a3b_bf16/images"
@@ -100,7 +110,7 @@ exec > >(tee -a "$SLURM_TEE_LOG") 2>&1
 echo "[slurm] job_id=${SLURM_JOB_ID:-manual}"
 echo "[slurm] node_list=${SLURM_JOB_NODELIST:-local}"
 echo "[slurm] repo=$REPO_ROOT"
-echo "[slurm] conda_env=$CONDA_ENV"
+echo "[slurm] conda_env=${CONDA_DEFAULT_ENV:-skipped_or_preexisting}"
 echo "[slurm] data_dir=$DATA_DIR"
 echo "[slurm] output_dir=$OUTPUT_DIR"
 echo "[slurm] cache_root=$CACHE_ROOT"
