@@ -1,3 +1,7 @@
 # Install on the H200 inference machine, preferably in a fresh CUDA environment.
 openai>=1.0.0
 vllm
+transformers>=4.57.0
+accelerate>=1.0.0
+pillow>=10.0.0
+safetensors>=0.4.0

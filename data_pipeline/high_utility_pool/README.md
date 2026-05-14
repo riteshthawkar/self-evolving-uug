@@ -152,50 +152,62 @@ it can take hours on a laptop.
 
 ## H200 Large-VLM Judge
 
-For a 128 GB H200 machine, use a server-style backend instead of loading the VLM
-inside the data builder. Start a vLLM OpenAI-compatible server in one terminal:
+For a 128 GB H200 machine, use the staged launcher below. It first runs
+heuristic scoring, then audits the selected candidates with either a vLLM
+OpenAI-compatible server or a direct Hugging Face Transformers backend. The
+default model is `Qwen/Qwen3-VL-30B-A3B-Instruct` because the model card
+documents both Transformers and vLLM usage, and the 30B-A3B MoE checkpoint fits
+comfortably on a single H200 for this one-image judge workload.
 
 ```bash
 cd /path/to/self-evolving-uug
-python3 -m venv .venv_h200_vlm
-source .venv_h200_vlm/bin/activate
 pip install -U -r data_pipeline/high_utility_pool/requirements-h200-vlm.txt
-
-VLM_MODEL=Qwen/Qwen2.5-VL-72B-Instruct-AWQ \
-  data_pipeline/high_utility_pool/serve_h200_qwen_vlm.sh
 ```
 
-Recommended model choices:
-
-- `Qwen/Qwen2.5-VL-72B-Instruct-AWQ`: best practical single-H200 quality target
-  for full 10k filtering; the AWQ checkpoint is much smaller than BF16 and the
-  official model card reports near-BF16 benchmark retention.
-- `Qwen/Qwen3-VL-32B-Instruct-FP8`: faster latest-generation option; useful for
-  staged audits or if 72B throughput is too slow.
-
-Then run a small audit first:
+Download or unpack the 10k image source first, then run a bounded smoke audit.
+This command uses vLLM, skips vLLM multimodal startup profiling, caps the
+expected request to one 768 px image, and writes all caches under `OUTPUT_DIR`
+except for a short vLLM IPC directory under `/tmp` to avoid Unix socket path
+limits.
 
 ```bash
-VLM_MODEL=Qwen/Qwen2.5-VL-72B-Instruct-AWQ \
-VLM_MAX_IMAGES=512 \
-OUTPUT_DIR=data/high_utility_pool_10k_h200_audit512 \
-  data_pipeline/high_utility_pool/run_h200_vlm_audit.sh --dry_run
+SOURCE_DIR=/absolute/path/to/high_utility_pool_10k/images \
+DRY_RUN=1 \
+VLM_MAX_IMAGES=128 \
+MAX_NUM_SEQS=1 \
+bash data_pipeline/high_utility_pool/run_h200_qwen72b_pipeline.sh
 ```
 
-If the audit report has low schema failures and sensible score distribution,
-run the full 10k VLM-rescored pool:
+If vLLM still stalls during engine warmup on a particular CUDA/vLLM build, use
+the direct Transformers backend. It is slower than vLLM but removes the server,
+IPC, encoder-cache profiling, CUDA graph, and scheduler layers from the
+experiment. This is the preferred fallback for correctness/debugging because it
+uses the model's documented Transformers path and still writes the same
+`scores/vlm_scores.jsonl` cache.
 
 ```bash
-VLM_MODEL=Qwen/Qwen2.5-VL-72B-Instruct-AWQ \
+SOURCE_DIR=/absolute/path/to/high_utility_pool_10k/images \
+VLM_BACKEND=transformers_vlm \
+VLM_MAX_IMAGES=128 \
+DRY_RUN=1 \
+bash data_pipeline/high_utility_pool/run_h200_qwen72b_pipeline.sh
+```
+
+After the smoke audit succeeds, scale in stages: 128 images, 512 images, 2k
+images, then 10k. Do not start the full 10k pass until `audit_report.json`
+shows low schema failures and the score distribution is sensible.
+
+```bash
+SOURCE_DIR=/absolute/path/to/high_utility_pool_10k/images \
 VLM_MAX_IMAGES=10000 \
-OUTPUT_DIR=data/high_utility_pool_10k_h200_qwen72b \
-  data_pipeline/high_utility_pool/run_h200_vlm_audit.sh
+OUTPUT_DIR=data/high_utility_pool_10k_h200_qwen3vl30b_a3b \
+bash data_pipeline/high_utility_pool/run_h200_qwen72b_pipeline.sh
 ```
 
-The builder calls the server through `--vlm_backend openai_compatible`, stores
-every judgment in `scores/vlm_scores.jsonl`, and writes the final selected pool
-plus `audit_report.json` under the requested output directory. Re-running is
-resumable because completed VLM rows are read from the score cache.
+The builder stores every judgment in `scores/vlm_scores.jsonl` and writes the
+final selected pool plus `audit_report.json` under the requested output
+directory. Re-running is resumable because completed VLM rows are read from the
+score cache.
 
 ## Use With BLIP3o Training
 
