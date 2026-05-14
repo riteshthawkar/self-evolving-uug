@@ -13,6 +13,7 @@ import pathlib
 import random
 import re
 import subprocess
+import warnings
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
@@ -216,12 +217,34 @@ def _safe_dtype(dtype: str) -> torch.dtype:
     return torch.float32
 
 
+def _flash_attention_2_available() -> bool:
+    if importlib.util.find_spec("flash_attn") is None:
+        return False
+    try:
+        __import__("flash_attn")
+        return True
+    except Exception:
+        return False
+
+
 def _resolve_attn_implementation(requested: str) -> Optional[str]:
     choice = (requested or "auto").strip().lower()
     if choice in {"none", "off", "disable", "disabled"}:
         return None
-    if choice in {"sdpa", "eager", "flash_attention_2"}:
+    if choice in {"sdpa", "eager"}:
         return choice
+    if choice == "flash_attention_2":
+        if _flash_attention_2_available():
+            return choice
+        if os.environ.get("SE_STRICT_FLASH_ATTN", "0") == "1":
+            return choice
+        warnings.warn(
+            "ATTN_IMPL=flash_attention_2 was requested, but flash_attn is not "
+            "importable in this environment. Falling back to sdpa. Set "
+            "SE_STRICT_FLASH_ATTN=1 to fail fast instead.",
+            RuntimeWarning,
+        )
+        return "sdpa" if torch.cuda.is_available() else None
     if choice != "auto":
         return None
 
@@ -230,7 +253,7 @@ def _resolve_attn_implementation(requested: str) -> Optional[str]:
     if getattr(torch.version, "hip", None):
         # On ROCm, SDPA is the most stable default backend.
         return "sdpa"
-    if importlib.util.find_spec("flash_attn") is not None:
+    if _flash_attention_2_available():
         return "flash_attention_2"
     return "sdpa"
 
