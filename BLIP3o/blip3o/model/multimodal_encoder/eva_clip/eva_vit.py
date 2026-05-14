@@ -191,9 +191,15 @@ else:
 
 try:
     import xformers.ops as xops
-except ImportError:
+except Exception as exc:
     xops = None
-    # print("Please 'pip install xformers'")
+    logging.warning(
+        "xFormers ops are unavailable for EVA-CLIP; falling back to PyTorch "
+        "attention. This is expected when xformers was built for a different "
+        "PyTorch/CUDA/Triton stack. Import failure: %s: %s",
+        type(exc).__name__,
+        exc,
+    )
 
 
 class DropPath(nn.Module):
@@ -310,7 +316,7 @@ class Attention(nn.Module):
         # self.proj = nn.Linear(all_head_dim, all_head_dim)
         self.proj = nn.Linear(all_head_dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
-        self.xattn = xattn
+        self.xattn = bool(xattn and xops is not None)
         self.xattn_drop = attn_drop
 
         self.rope = rope
