@@ -924,11 +924,46 @@ def _transformers_vlm_messages(image_path: Path) -> List[Dict[str, Any]]:
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": image_path.resolve().as_uri()},
+                # Qwen processor versions differ here: some docs show
+                # file:// URIs, but several HF processor builds accept only a
+                # plain local path, HTTP(S) URL, or base64 string.
+                {"type": "image", "image": str(image_path.resolve())},
                 {"type": "text", "text": VLM_PROMPT},
             ],
         }
     ]
+
+
+def _apply_transformers_vlm_template(processor: Any, messages: Sequence[List[Dict[str, Any]]]) -> Any:
+    """Apply Qwen chat template across Transformers processor API variants."""
+    common_kwargs = {
+        "tokenize": True,
+        "add_generation_prompt": True,
+        "return_dict": True,
+        "return_tensors": "pt",
+    }
+    attempts = [
+        {"processor_kwargs": {"padding": True}},
+        {"padding": True},
+        {"tokenizer_kwargs": {"padding": True}},
+    ]
+    last_exc: Optional[Exception] = None
+    for extra_kwargs in attempts:
+        try:
+            return processor.apply_chat_template(
+                messages,
+                **common_kwargs,
+                **extra_kwargs,
+            )
+        except TypeError as exc:
+            last_exc = exc
+        except ValueError as exc:
+            if "processor_kwargs" not in str(exc) and "padding" not in str(exc):
+                raise
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("failed to apply Transformers VLM chat template")
 
 
 def _load_transformers_vlm_state(
@@ -1061,14 +1096,7 @@ def judge_transformers_vlm_batch(
     processor = state["processor"]
     local_model = state["model"]
     messages = [_transformers_vlm_messages(path) for path in image_paths]
-    inputs = processor.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_dict=True,
-        return_tensors="pt",
-        padding=True,
-    )
+    inputs = _apply_transformers_vlm_template(processor, messages)
     inputs = _move_batch_to_device(inputs, state["input_device"])
     torch = state["torch"]
     with torch.inference_mode():
