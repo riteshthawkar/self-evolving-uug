@@ -35,6 +35,19 @@ SERVER_LOG="${SERVER_LOG:-${OUTPUT_DIR}.vllm.log}"
 
 mkdir -p "$(dirname "$OUTPUT_DIR")"
 
+# Fail before starting the expensive VLM server if the image pool is missing.
+if [[ ! -d "$SOURCE_DIR" ]]; then
+  echo "[h200] ERROR: SOURCE_DIR does not exist: $SOURCE_DIR" >&2
+  echo "[h200] Set SOURCE_DIR to the image folder on this machine, for example:" >&2
+  echo "[h200]   SOURCE_DIR=/absolute/path/to/images bash $0" >&2
+  exit 2
+fi
+SOURCE_COUNT="$(find "$SOURCE_DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.bmp' \) | wc -l | tr -d ' ')"
+if [[ "$SOURCE_COUNT" == "0" ]]; then
+  echo "[h200] ERROR: SOURCE_DIR contains no supported images: $SOURCE_DIR" >&2
+  exit 2
+fi
+
 # Keep caches off $HOME. Override EXP_CACHE_ROOT to a large scratch path.
 EXP_CACHE_ROOT="${EXP_CACHE_ROOT:-${OUTPUT_DIR}/cache_runtime}"
 mkdir -p "$EXP_CACHE_ROOT"/{tmp,xdg_cache,xdg_config,xdg_data,huggingface,torch,triton,nvidia,pip,wandb,vllm,matplotlib,python,home}
@@ -104,6 +117,7 @@ mkdir -p \
 
 if [[ "$START_SERVER" == "1" ]]; then
   echo "[h200] starting vLLM server: $MODEL"
+  echo "[h200] source images: $SOURCE_DIR ($SOURCE_COUNT files)"
   echo "[h200] cache root: $EXP_CACHE_ROOT"
   echo "[h200] HOME redirected to: $HOME"
   echo "[h200] VLLM_RPC_BASE_PATH: $VLLM_RPC_BASE_PATH"
