@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=blip3o-e1-filtered
+#SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=220G
-#SBATCH --time=72:00:00
-#SBATCH --output=slurm-%x-%j.out
-#SBATCH --error=slurm-%x-%j.err
+#SBATCH --mem=128G
+#SBATCH --time=2-00:00:00
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 
 # If your cluster requires these, uncomment and edit:
-##SBATCH --partition=gpu
 ##SBATCH --account=YOUR_ACCOUNT
 ##SBATCH --constraint=h200
+
+# Submit from the repository root after creating the Slurm output directory:
+#   mkdir -p logs
+#   sbatch scripts/self_evolving/final/submit_e1_filtered_h200.sbatch
+# Slurm opens logs/%x_%j.out before this script starts, so the logs directory
+# must exist before sbatch is called.
 
 set -euo pipefail
 
