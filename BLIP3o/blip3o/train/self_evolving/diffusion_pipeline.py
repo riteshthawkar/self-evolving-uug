@@ -437,6 +437,9 @@ def _build_original_blip3o_diffusion_pipeline(
 ):
     """Build original BLIP3o diffusion decoder pipeline from HF model repo."""
     try:
+        from blip3o.model.diffusers_xformers_guard import disable_broken_xformers_for_diffusers
+
+        disable_broken_xformers_for_diffusers()
         from diffusers import DiffusionPipeline
     except Exception as exc:
         raise RuntimeError(
