@@ -6,9 +6,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
 # Edit these if your paths/model choice differ.
-MODEL="${MODEL:-Qwen/Qwen3-VL-30B-A3B-Instruct-FP8}"
+MODEL="${MODEL:-Qwen/Qwen3-VL-30B-A3B-Instruct}"
 SOURCE_DIR="${SOURCE_DIR:-data/high_utility_pool_10k/images}"
-OUTPUT_DIR="${OUTPUT_DIR:-data/high_utility_pool_10k_h200_qwen3vl30b_a3b}"
+OUTPUT_DIR="${OUTPUT_DIR:-data/high_utility_pool_10k_h200_qwen3vl30b_a3b_bf16}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8000/v1}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8000}"
@@ -25,8 +25,8 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
 VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-2400}"
-# Some vLLM wheels do not ship a compatible DeepGEMM build. The Qwen3-VL FP8
-# checkpoint can otherwise fail during post-load FP8 weight processing.
+# Some vLLM wheels do not ship a compatible DeepGEMM build. This is mainly
+# needed for FP8 checkpoints, but keeping it off is harmless for BF16 models.
 VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 
 # Set START_SERVER=0 if you already started vLLM manually.
