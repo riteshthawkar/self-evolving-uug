@@ -12,7 +12,7 @@ To preserve base capabilities and keep the procedure architecture-agnostic, we f
     \phi=\{\phi_p,\phi_s,\phi_g\}, \qquad \theta'=\theta\oplus\phi,
     \label{eq:adapted_params}
 \end{equation}
-where $\phi_p$ parameterizes a \textbf{Proposer} $\pi_{\phi_p}(q\mid\mathcal{I})$, $\phi_s$ a \textbf{Solver} $\pi_{\phi_s}(a\mid\mathcal{I},q)$, and $\phi_g$ a \textbf{Generator} $\pi_{\phi_g}(\hat{\mathcal{I}}\mid t)$. We use only model-native operations (QA, captioning, and text-conditioned generation) plus similarity computations from frozen representations; we do not assume access to architecture-specific latents or any external judge.
+where $\phi_p$ parameterizes a \textbf{Proposer} $\pi_{\phi_p}(q\mid\mathcal{I})$, $\phi_s$ a \textbf{Solver} $\pi_{\phi_s}(a\mid\mathcal{I},q)$, and $\phi_g$ a \textbf{Generator} $\pi_{\phi_g}(\hat{\mathcal{I}}\mid t)$. For diffusion-based backbones such as BLIP3o, $\phi_g$ includes LoRA modules on both the language-model text-to-conditioning pathway and the frozen diffusion denoiser/DiT projections; the denoiser weights themselves remain frozen. Rewards use only model-native operations (QA, captioning, and text-conditioned generation) plus similarity computations from frozen representations, with no external judge.
 
 Our goal is to jointly improve visual understanding and image generation using \emph{self-derived} rewards:
 \begin{equation}
@@ -99,10 +99,10 @@ The Generator reward combines these signals, plus small diversity/contradiction 
     R_g = w_{\text{fid}} \cdot S_{\text{fid}} + w_{\text{cyc}} \cdot S_{\text{cyc}} + w_{\text{div}} \cdot S_{\text{div}} - w_{\text{ctr}} \cdot S_{\text{ctr}},
     \label{eq:gen_reward}
 \end{equation}
-and we update $\phi_g$ using the same KL-regularized policy-gradient recipe as in the visual understanding loop, which makes the optimization procedure consistent across image generation paradigms.
+The update rule depends on the generator parameterization. For autoregressive UUG backbones that expose discrete image-token log probabilities, we update $\phi_g$ with the same KL-regularized policy-gradient recipe used in the visual understanding loop. For diffusion or flow-matching backbones such as BLIP3o, the generated image is produced by a continuous denoiser rather than by discrete image tokens; applying token-level policy gradients would train only text/caption traces and not the image-producing module. In this case we use a diffusion-compatible Generator update: reward-weighted denoising regression on LoRA modules in the denoiser/DiT and, when available, the text-conditioning adapter. The base backbone and denoiser weights remain frozen; $R_g$ only weights the adapter loss.
 
 \paragraph{Coupling design.}
-The two loops are coupled only through the Solver: the Proposer is trained purely from visual understanding signals, while image generation rewards become stronger as the Solver becomes a more reliable evaluator.
+The two loops are coupled only through the Solver in the main method: the Proposer is trained purely from visual understanding signals, while image generation rewards become stronger as the Solver becomes a more reliable evaluator. We evaluate stronger generation-phase Proposer/Solver coupling only as ablations, not as the default training recipe.
 
 
 

@@ -67,7 +67,7 @@ REPO_ROOT="$(cd "$BAGEL_ROOT/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 MODEL_PATH="${MODEL_PATH:-$REPO_ROOT/models/BAGEL-7B-MoT}"
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_3k/images}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
 # Keep all baseline artifacts under a shared repo-level outputs tree.
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/bagel/B1_unified_training}"
 # Output layout:

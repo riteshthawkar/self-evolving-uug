@@ -10,12 +10,12 @@ Usage:
 
 checkpoint_dir should point to a self-evolving checkpoint directory containing:
     generator/adapter_config.json + adapter_model.*  (LLM conditioning adapter)
-    (optionally) dit_trainable/ for updated DiT weights (RWR-trained)
+    (optionally) dit_lora/ for DiT LoRA, or legacy dit_trainable/ full-DiT shards
 
 Generation pipeline flow:
     text -> LLM (generator LoRA) -> latent queries -> DiT denoising -> latents -> VAE decode -> image
     The generator LoRA adapts the LLM text-to-conditioning path.
-    The DiT weights (if updated via RWR) improve the denoising quality.
+    The DiT adapter/weights (if updated via RWR) improve the denoising quality.
 """
 
 import argparse
@@ -109,8 +109,47 @@ def _strip_peft_prefix(name: str) -> str:
     return name
 
 
+def _find_adapter_config_dir(adapter_root: str) -> str:
+    if os.path.isfile(os.path.join(adapter_root, "adapter_config.json")):
+        return adapter_root
+    for subdir in os.listdir(adapter_root):
+        candidate = os.path.join(adapter_root, subdir)
+        if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "adapter_config.json")):
+            print(f"  Found nested DiT adapter directory: dit_lora/{subdir}/")
+            return candidate
+    raise FileNotFoundError(f"adapter_config.json not found under {adapter_root}")
+
+
+def _load_dit_lora_adapter(model, checkpoint_dir) -> bool:
+    dit_lora_root = os.path.join(checkpoint_dir, "dit_lora")
+    if not os.path.isdir(dit_lora_root):
+        return False
+
+    from peft import PeftModel
+
+    adapter_path = _find_adapter_config_dir(dit_lora_root)
+    core_model_getter = getattr(model, "get_model", None)
+    core_model = core_model_getter() if callable(core_model_getter) else getattr(model, "model", None)
+    dit_module = getattr(core_model, "dit", None) if core_model is not None else None
+    if dit_module is None:
+        raise RuntimeError("Checkpoint contains dit_lora/, but the loaded model has no core_model.dit module.")
+
+    print(f"Loading DiT LoRA adapter from {adapter_path}")
+    dit_model = PeftModel.from_pretrained(dit_module, adapter_path)
+    try:
+        core_model.dit = dit_model.merge_and_unload()
+        print("DiT LoRA adapter merged into DiT.")
+    except Exception as exc:
+        core_model.dit = dit_model
+        print(f"WARNING: DiT LoRA merge failed; keeping PEFT-wrapped DiT. Reason: {exc}")
+    return True
+
+
 def load_dit_weights(model, checkpoint_dir):
     """Load updated DiT weights from a self-evolving checkpoint if available."""
+    if _load_dit_lora_adapter(model, checkpoint_dir):
+        return model
+
     dit_index_path = os.path.join(checkpoint_dir, "dit_trainable_index.json")
     dit_dir = os.path.join(checkpoint_dir, "dit_trainable")
 
@@ -184,6 +223,12 @@ def parse_args():
         type=str,
         help="dir to write results to",
         default="outputs"
+    )
+    parser.add_argument(
+        "--prompt_file",
+        type=str,
+        default=None,
+        help="GenEval prompt JSONL. Defaults to geneval_prompt.jsonl next to this script.",
     )
     parser.add_argument(
         "--n_samples",
@@ -297,8 +342,16 @@ def main(opt):
     pipe.vae.to(f'cuda:{device_id}')
     pipe.unet.to(f'cuda:{device_id}')
 
-    # Load all prompts
-    with open('geneval_prompt.jsonl') as fp:
+    # Load all prompts. Keep this independent of the caller's working directory.
+    prompt_file = opt.prompt_file
+    if prompt_file is None:
+        prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "geneval_prompt.jsonl")
+    if not os.path.isfile(prompt_file):
+        raise FileNotFoundError(
+            f"GenEval prompt file not found: {prompt_file}. "
+            "Pass --prompt_file or set PROMPT_FILE in generation_our.sh."
+        )
+    with open(prompt_file, "r", encoding="utf-8") as fp:
         metadatas = [json.loads(line) for line in fp]
 
     # Split the data into chunks

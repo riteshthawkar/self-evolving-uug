@@ -42,6 +42,8 @@ from .prompts import (
 from .utils import (
     HAS_PEFT,
     HAS_WANDB,
+    _append_training_monitor_record,
+    _append_training_watch_record,
     _build_chat_text,
     _build_text_only_chat,
     _clip_grad_norm_multi_device,
@@ -56,6 +58,7 @@ from .utils import (
     _prepare_text_only_inputs,
     _resolve_attn_implementation,
     _safe_dtype,
+    _save_code_run_registry,
     _set_global_seed,
     _unwrap_model,
     gaussian_reward,
@@ -69,10 +72,15 @@ from .utils import (
 
 if HAS_PEFT:
     from peft import LoraConfig, TaskType, get_peft_model
+    try:
+        from peft import prepare_model_for_kbit_training
+    except Exception:
+        prepare_model_for_kbit_training = None
 else:
     LoraConfig = None
     TaskType = None
     get_peft_model = None
+    prepare_model_for_kbit_training = None
 
 if HAS_WANDB:
     import wandb
@@ -114,6 +122,96 @@ from .model_api import (
     _load_blip3o_model,
     _parse_unused_model_kwargs_from_error,
 )
+
+
+_VISUAL_BRIDGE_TARGET_MARKERS = ("mm_projector", "visual.merger", "merger.mlp")
+
+
+def _target_tuple(value: Any) -> Tuple[str, ...]:
+    if value is None:
+        return tuple()
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.split(",") if part.strip())
+    return tuple(str(part).strip() for part in value if str(part).strip())
+
+
+def _dedupe_targets(*groups: Tuple[str, ...]) -> Tuple[str, ...]:
+    seen = set()
+    merged: List[str] = []
+    for group in groups:
+        for target in group:
+            if target and target not in seen:
+                seen.add(target)
+                merged.append(target)
+    return tuple(merged)
+
+
+def _text_only_lora_targets(targets: Tuple[str, ...]) -> Tuple[str, ...]:
+    return tuple(
+        target
+        for target in targets
+        if not any(marker in target for marker in _VISUAL_BRIDGE_TARGET_MARKERS)
+    )
+
+
+def _is_dit_param_name(name: str) -> bool:
+    return ".dit." in name or name.startswith("dit.")
+
+
+def _build_lora_config(
+    *,
+    r: int,
+    alpha: int,
+    dropout: float,
+    targets: Tuple[str, ...],
+    task_type: Optional[Any] = None,
+    rank_pattern: Optional[Dict[str, int]] = None,
+    alpha_pattern: Optional[Dict[str, int]] = None,
+):
+    kwargs = {
+        "r": int(r),
+        "lora_alpha": int(alpha),
+        "lora_dropout": float(dropout),
+        "target_modules": list(targets),
+        "bias": "none",
+    }
+    if task_type is not None:
+        kwargs["task_type"] = task_type
+    if rank_pattern:
+        kwargs["rank_pattern"] = dict(rank_pattern)
+    if alpha_pattern:
+        kwargs["alpha_pattern"] = dict(alpha_pattern)
+    try:
+        return LoraConfig(**kwargs)
+    except TypeError:
+        kwargs.pop("rank_pattern", None)
+        kwargs.pop("alpha_pattern", None)
+        return LoraConfig(**kwargs)
+
+
+def _count_lora_trainables(model: torch.nn.Module) -> Dict[str, int]:
+    counts = {
+        "solver": 0,
+        "solver_merger": 0,
+        "proposer": 0,
+        "generator": 0,
+        "dit": 0,
+    }
+    for name, param in model.named_parameters():
+        if "lora_" not in name or not param.requires_grad:
+            continue
+        n_params = int(param.numel())
+        if _is_dit_param_name(name):
+            counts["dit"] += n_params
+        elif ".default." in name:
+            counts["solver"] += n_params
+            if any(marker in name for marker in ("visual.merger", "merger.mlp", "mm_projector")):
+                counts["solver_merger"] += n_params
+        elif ".proposer." in name:
+            counts["proposer"] += n_params
+        elif ".generator." in name:
+            counts["generator"] += n_params
+    return counts
 
 
 # Strict-imageless fallback when no external image pool is available.
@@ -450,10 +548,14 @@ class GenerationSelfEvolvingTrainer:
         self.release_rollouts_log_path = self.run_dir / "rollouts.jsonl"
         self.release_generation_rollouts_log_path = self.run_dir / "generation_rollouts.jsonl"
         self.metrics_log_path = self.run_dir / "metrics.jsonl"
+        self.monitor_log_path = self.logs_dir / "training_monitor.jsonl"
+        self.monitor_tsv_path = self.logs_dir / "training_monitor.tsv"
+        self.watch_log_path = self.logs_dir / "training_watch.log"
         self.status_path = self.run_dir / "status.json"
         self.release_summary_path = self.run_dir / "summary.json"
         self.checkpoint_root = self.run_dir / "checkpoints"
         self.last_checkpoint_dir = ""
+        self.code_run_registry_entry = ""
         self._save_run_metadata()
 
         self._blip3o_diffusion_pipe = None
@@ -628,7 +730,9 @@ class GenerationSelfEvolvingTrainer:
                     print(
                         "[Generation] DiT updater active: "
                         f"freq={self.cfg.dit_update_freq}, lr={self.cfg.dit_lr:g}, "
-                        f"grad_accum={self.cfg.dit_grad_accum_steps}"
+                        f"grad_accum={self.cfg.dit_grad_accum_steps}, "
+                        f"lora_enabled={bool(getattr(self.cfg, 'dit_lora_enabled', True))}, "
+                        f"trainable_params={getattr(self.dit_updater, 'trainable_param_count', 'unknown')}"
                     )
             except Exception as exc:
                 self.dit_updater = None
@@ -782,20 +886,33 @@ class GenerationSelfEvolvingTrainer:
             return
         repo_root = pathlib.Path(__file__).resolve().parents[4]
         self.checkpoint_root.mkdir(parents=True, exist_ok=True)
-        _json_dump(self.run_dir / "config.json", dataclasses.asdict(self.cfg))
-        _json_dump(self.run_dir / "git_info.json", _collect_git_info(repo_root))
-        _json_dump(
-            self.run_dir / "environment.json",
-            {
-                "python": os.sys.version,
-                "torch": torch.__version__,
-                "cuda_available": torch.cuda.is_available(),
-                "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-                "rank": self.rank,
-                "world_size": self.world_size,
-                "distributed": self.distributed,
-            },
-        )
+        config_payload = dataclasses.asdict(self.cfg)
+        git_payload = _collect_git_info(repo_root)
+        env_payload = {
+            "python": os.sys.version,
+            "torch": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+            "rank": self.rank,
+            "world_size": self.world_size,
+            "distributed": self.distributed,
+        }
+        _json_dump(self.run_dir / "config.json", config_payload)
+        _json_dump(self.run_dir / "git_info.json", git_payload)
+        _json_dump(self.run_dir / "environment.json", env_payload)
+        if bool(getattr(self.cfg, "code_run_registry_enabled", True)):
+            try:
+                registry_entry = _save_code_run_registry(
+                    run_dir=self.run_dir,
+                    config=config_payload,
+                    git_info=git_payload,
+                    environment=env_payload,
+                    registry_dir=getattr(self.cfg, "code_run_registry_dir", None),
+                )
+                self.code_run_registry_entry = str(registry_entry)
+            except Exception as exc:
+                self.code_run_registry_entry = ""
+                print(f"[Generation] WARNING: failed to write code run registry: {exc}")
         self._dist_barrier()
 
     def _append_jsonl(self, path: pathlib.Path, record: Dict):
@@ -814,7 +931,243 @@ class GenerationSelfEvolvingTrainer:
             with mirror_path.open("a", encoding="utf-8") as f:
                 f.write(serialized + "\n")
 
+    @staticmethod
+    def _monitor_float(value, default=None):
+        try:
+            val = float(value)
+        except Exception:
+            return default
+        return val if math.isfinite(val) else default
+
+    @classmethod
+    def _monitor_stat(cls, stats, key: str, default=None):
+        if not isinstance(stats, dict):
+            return default
+        return cls._monitor_float(stats.get(key), default=default)
+
+    @staticmethod
+    def _monitor_bool(stats, key: str, default=False) -> bool:
+        if not isinstance(stats, dict) or key not in stats:
+            return bool(default)
+        return bool(stats.get(key))
+
+    @staticmethod
+    def _monitor_skip(stats) -> str:
+        if isinstance(stats, dict):
+            reason = stats.get("skipped_reason")
+            if reason:
+                return str(reason)
+        return ""
+
+    @staticmethod
+    def _monitor_nonfinite_fields(record: Dict) -> List[str]:
+        fields: List[str] = []
+
+        def visit(prefix: str, value):
+            if isinstance(value, float):
+                if not math.isfinite(value):
+                    fields.append(prefix)
+            elif isinstance(value, dict):
+                for k, v in value.items():
+                    visit(f"{prefix}.{k}" if prefix else str(k), v)
+            elif isinstance(value, (list, tuple)):
+                for idx, v in enumerate(value[:16]):
+                    visit(f"{prefix}[{idx}]", v)
+
+        visit("", record)
+        return fields
+
+    def _append_training_monitor(self, record: Dict):
+        if not self.is_main_process:
+            return
+        payload = dict(record)
+        nonfinite_fields = self._monitor_nonfinite_fields(payload)
+        prior_fields = [
+            part.strip()
+            for part in str(payload.get("nonfinite_fields", "") or "").split(",")
+            if part.strip()
+        ]
+        merged_fields = prior_fields + [f for f in nonfinite_fields if f not in prior_fields]
+        payload["nan_detected"] = bool(payload.get("nan_detected")) or bool(merged_fields)
+        payload["nonfinite_fields"] = ",".join(merged_fields[:16])
+        if not payload.get("health"):
+            if merged_fields:
+                payload["health"] = "nonfinite_detected"
+            elif any(payload.get(k) for k in ("generator_skip", "proposer_skip", "solver_skip", "dit_skip")):
+                payload["health"] = "skipped_or_waiting"
+            elif any(bool(payload.get(k)) for k in ("generator_did_step", "proposer_did_step", "solver_did_step", "dit_did_step")):
+                payload["health"] = "optimizer_step"
+            else:
+                payload["health"] = "observed"
+        _append_training_monitor_record(self.monitor_log_path, self.monitor_tsv_path, payload)
+        _append_training_watch_record(self.watch_log_path, payload)
+
+    @classmethod
+    def _finite_mean_from_stats(cls, stats_list: List[Dict], key: str) -> Optional[float]:
+        vals: List[float] = []
+        for stats in stats_list:
+            if not isinstance(stats, dict):
+                continue
+            val = cls._monitor_float(stats.get(key))
+            if val is not None:
+                vals.append(val)
+        if not vals:
+            return None
+        return float(sum(vals) / len(vals))
+
+    def _monitor_understanding_record(self, record: Dict):
+        solver_stats = record.get("solver_stats_per_sample") or record.get("solver_stats") or []
+        if not isinstance(solver_stats, list):
+            solver_stats = []
+        proposer_stats = record.get("proposer_stats")
+        solver_skip_reasons = sorted(
+            {
+                str(s.get("skipped_reason"))
+                for s in solver_stats
+                if isinstance(s, dict) and s.get("skipped_reason")
+            }
+        )
+        solver_did_step = any(
+            bool(s.get("did_step", False)) for s in solver_stats if isinstance(s, dict)
+        )
+        forced_tail_values = [
+            self._monitor_float(s.get("forced_tail_tokens"), 0.0) or 0.0
+            for s in solver_stats
+            if isinstance(s, dict)
+        ]
+        forced_tail_values.append(self._monitor_stat(proposer_stats, "forced_tail_tokens", 0.0) or 0.0)
+        raw_nonfinite = self._monitor_nonfinite_fields(
+            {
+                "solver_stats": solver_stats,
+                "proposer_stats": proposer_stats,
+            }
+        )
+        self._append_training_monitor(
+            {
+                "step": int(record.get("step", 0)),
+                "phase": "understanding",
+                "image_path": record.get("image_path"),
+                "solver_reward_raw_mean": self._monitor_float(
+                    record.get("solver_rewards_raw_mean", record.get("solver_reward_raw_mean"))
+                ),
+                "solver_reward_soft_mean": self._monitor_float(
+                    record.get("solver_rewards_soft_mean", record.get("solver_reward_soft_mean"))
+                ),
+                "proposer_reward": self._monitor_float(record.get("proposer_reward")),
+                "entropy_nats": self._monitor_float(record.get("entropy_nats")),
+                "majority_fraction": self._monitor_float(record.get("majority_fraction")),
+                "proposer_did_step": self._monitor_bool(proposer_stats, "did_step"),
+                "proposer_skip": str(record.get("proposer_skip_reason") or self._monitor_skip(proposer_stats) or ""),
+                "proposer_ce_loss": self._monitor_stat(proposer_stats, "ce_loss"),
+                "proposer_kl_loss": self._monitor_stat(proposer_stats, "kl_loss"),
+                "proposer_total_loss": self._monitor_stat(proposer_stats, "total_loss"),
+                "proposer_valid_tokens": self._monitor_stat(proposer_stats, "valid_token_count"),
+                "proposer_kl_coef": self._monitor_stat(
+                    proposer_stats,
+                    "kl_coef_after",
+                    record.get("proposer_kl_coef", getattr(self.proposer_updater, "kl_coef", None)),
+                ),
+                "solver_did_step": solver_did_step,
+                "solver_skip": str(record.get("solver_update_skip_reason") or ",".join(solver_skip_reasons)),
+                "solver_ce_loss": self._finite_mean_from_stats(solver_stats, "ce_loss"),
+                "solver_kl_loss": self._finite_mean_from_stats(solver_stats, "kl_loss"),
+                "solver_total_loss": self._finite_mean_from_stats(solver_stats, "total_loss"),
+                "solver_valid_tokens": self._finite_mean_from_stats(solver_stats, "valid_token_count"),
+                "solver_kl_coef": self._monitor_float(
+                    record.get("solver_kl_coef"),
+                    getattr(self.solver_updater, "kl_coef", None) if self.solver_updater is not None else None,
+                ),
+                "forced_tail_tokens": max(forced_tail_values) if forced_tail_values else 0.0,
+                "proposer_baseline": self._monitor_float(record.get("proposer_baseline_after", self.proposer_baseline)),
+                "solver_baseline": self._monitor_float(record.get("solver_baseline_after", self.solver_baseline)),
+                "step_duration_sec": self._monitor_float(record.get("step_duration_sec")),
+                "nan_detected": bool(raw_nonfinite),
+                "nonfinite_fields": ",".join(raw_nonfinite[:16]),
+            }
+        )
+
+    def _monitor_generation_step(
+        self,
+        *,
+        step: int,
+        meta: Dict,
+        scored: List[Dict[str, object]],
+        best_idx: int,
+        spec_quality: float,
+        generator_stats,
+        generator_update_mode,
+        generator_effective_objective: str,
+        generator_skipped_reason,
+        dit_stats,
+        dit_skip_reason,
+        proposer_stats,
+        proposer_skip_reason,
+        proposer_reward,
+        step_duration_sec: float,
+    ):
+        rewards = [self._monitor_float(c.get("total_reward")) for c in scored]
+        rewards = [r for r in rewards if r is not None]
+        best = scored[best_idx] if scored and 0 <= best_idx < len(scored) else {}
+        forced_tail = max(
+            self._monitor_stat(generator_stats, "forced_tail_tokens", 0.0) or 0.0,
+            self._monitor_stat(proposer_stats, "forced_tail_tokens", 0.0) or 0.0,
+        )
+        raw_nonfinite = self._monitor_nonfinite_fields(
+            {
+                "generator_stats": generator_stats,
+                "dit_stats": dit_stats,
+                "proposer_stats": proposer_stats,
+            }
+        )
+        self._append_training_monitor(
+            {
+                "step": int(step),
+                "phase": "generation",
+                "image_path": meta.get("path"),
+                "reward_mean": sum(rewards) / max(1, len(rewards)),
+                "reward_max": max(rewards) if rewards else None,
+                "reward_min": min(rewards) if rewards else None,
+                "best_reward": self._monitor_float(best.get("total_reward")),
+                "spec_quality": self._monitor_float(spec_quality),
+                "generator_objective": generator_effective_objective,
+                "generator_mode": generator_update_mode,
+                "generator_did_step": self._monitor_bool(generator_stats, "did_step"),
+                "generator_skip": str(generator_skipped_reason or self._monitor_skip(generator_stats) or ""),
+                "generator_ce_loss": self._monitor_stat(generator_stats, "ce_loss"),
+                "generator_kl_loss": self._monitor_stat(generator_stats, "kl_loss"),
+                "generator_total_loss": self._monitor_stat(generator_stats, "total_loss"),
+                "generator_valid_tokens": self._monitor_stat(generator_stats, "valid_token_count"),
+                "generator_kl_coef": self._monitor_stat(generator_stats, "kl_coef_after", getattr(self.generator_updater, "kl_coef", None)),
+                "dit_did_step": self._monitor_bool(dit_stats, "did_step"),
+                "dit_skip": str(dit_skip_reason or self._monitor_skip(dit_stats) or ""),
+                "dit_loss": self._monitor_stat(dit_stats, "loss"),
+                "dit_objective": str(dit_stats.get("objective", "")) if isinstance(dit_stats, dict) else "",
+                "dit_reward": self._monitor_stat(dit_stats, "reward"),
+                "proposer_did_step": self._monitor_bool(proposer_stats, "did_step"),
+                "proposer_skip": str(proposer_skip_reason or self._monitor_skip(proposer_stats) or ""),
+                "proposer_reward": self._monitor_float(proposer_reward),
+                "proposer_ce_loss": self._monitor_stat(proposer_stats, "ce_loss"),
+                "proposer_kl_loss": self._monitor_stat(proposer_stats, "kl_loss"),
+                "proposer_total_loss": self._monitor_stat(proposer_stats, "total_loss"),
+                "proposer_valid_tokens": self._monitor_stat(proposer_stats, "valid_token_count"),
+                "proposer_kl_coef": self._monitor_stat(proposer_stats, "kl_coef_after", getattr(self.proposer_updater, "kl_coef", None)),
+                "forced_tail_tokens": forced_tail,
+                "generator_baseline": self._monitor_float(self.generator_baseline),
+                "proposer_baseline": self._monitor_float(self.proposer_baseline),
+                "solver_baseline": self._monitor_float(self.solver_baseline),
+                "step_duration_sec": self._monitor_float(step_duration_sec),
+                "nan_detected": bool(raw_nonfinite),
+                "nonfinite_fields": ",".join(raw_nonfinite[:16]),
+            }
+        )
+
     def _update_metric(self, name: str, value: float):
+        try:
+            value = float(value)
+        except Exception:
+            return
+        if not math.isfinite(value):
+            return
         stat = self._metric_stats.setdefault(
             name,
             {"count": 0.0, "sum": 0.0, "sum_sq": 0.0, "min": value, "max": value},
@@ -913,6 +1266,10 @@ class GenerationSelfEvolvingTrainer:
             "rollouts_log_path": str(self.release_rollouts_log_path),
             "generation_rollouts_log_path": str(self.release_generation_rollouts_log_path),
             "metrics_log_path": str(self.metrics_log_path),
+            "training_monitor_log_path": str(self.monitor_log_path),
+            "training_monitor_tsv_path": str(self.monitor_tsv_path),
+            "training_watch_log_path": str(self.watch_log_path),
+            "code_run_registry_entry": str(getattr(self, "code_run_registry_entry", "")),
             "last_error": str(last_error or ""),
             "progress": progress,
             "metrics": metrics,
@@ -1179,6 +1536,8 @@ class GenerationSelfEvolvingTrainer:
                     "has_real_grad_in_window": bool(
                         getattr(self.dit_updater, "_has_real_grad_in_window", False)
                     ),
+                    "dit_lora_enabled": bool(getattr(self.dit_updater, "dit_lora_enabled", False)),
+                    "trainable_param_count": int(getattr(self.dit_updater, "trainable_param_count", 0)),
                     "optimizer": None,
                 }
         if torch.cuda.is_available():
@@ -1206,8 +1565,13 @@ class GenerationSelfEvolvingTrainer:
         return sorted(checkpoints, key=lambda p: p.name)
 
     def _load_model(self):
-        if self.cfg.use_lora and (not HAS_PEFT or LoraConfig is None or get_peft_model is None or TaskType is None):
-            raise RuntimeError("PEFT is required for role-specific LoRA adapters")
+        dit_lora_requested = bool(getattr(self.cfg, "dit_update_enabled", False)) and bool(
+            getattr(self.cfg, "dit_lora_enabled", True)
+        )
+        if (self.cfg.use_lora or dit_lora_requested) and (
+            not HAS_PEFT or LoraConfig is None or get_peft_model is None or TaskType is None
+        ):
+            raise RuntimeError("PEFT is required for role-specific LoRA adapters and DiT LoRA")
 
         dtype = _safe_dtype(self.cfg.dtype)
         attn_impl = _resolve_attn_implementation(self.cfg.attn_implementation)
@@ -1231,6 +1595,10 @@ class GenerationSelfEvolvingTrainer:
             torch_dtype=dtype,
             device_map=device_map,
             attn_implementation=attn_impl,
+            load_in_4bit=bool(getattr(self.cfg, "load_in_4bit", False)),
+            bnb_4bit_quant_type=str(getattr(self.cfg, "bnb_4bit_quant_type", "nf4")),
+            bnb_4bit_use_double_quant=bool(getattr(self.cfg, "bnb_4bit_use_double_quant", True)),
+            bnb_4bit_compute_dtype=str(getattr(self.cfg, "bnb_4bit_compute_dtype", "bfloat16")),
         )
 
         # Load processor
@@ -1240,34 +1608,82 @@ class GenerationSelfEvolvingTrainer:
             print(f"[Generation] Loaded model: dtype={dtype}, device_map={device_map}, attn_implementation={attn_impl or 'default'}")
 
         if self.cfg.use_lora:
-            lcfg = LoraConfig(
+            if bool(getattr(self.cfg, "load_in_4bit", False)):
+                if prepare_model_for_kbit_training is None:
+                    raise RuntimeError("QLoRA requires peft.prepare_model_for_kbit_training")
+                model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
+
+            requested_targets = _target_tuple(self.cfg.lora_target_modules)
+            text_targets = _text_only_lora_targets(requested_targets)
+            if not text_targets:
+                raise ValueError(
+                    "No text LoRA targets configured. `lora_target_modules` should include Qwen targets "
+                    "such as q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj."
+                )
+            solver_merger_enabled = bool(getattr(self.cfg, "solver_merger_lora_enabled", False))
+            solver_merger_targets = (
+                _target_tuple(getattr(self.cfg, "solver_merger_lora_target_modules", tuple()))
+                if solver_merger_enabled
+                else tuple()
+            )
+            solver_targets = _dedupe_targets(text_targets, solver_merger_targets)
+            solver_rank_pattern = {
+                target: int(getattr(self.cfg, "solver_merger_lora_r", self.cfg.lora_r))
+                for target in solver_merger_targets
+            }
+            solver_alpha_pattern = {
+                target: int(getattr(self.cfg, "solver_merger_lora_alpha", self.cfg.lora_alpha))
+                for target in solver_merger_targets
+            }
+
+            solver_cfg = _build_lora_config(
                 r=self.cfg.lora_r,
-                lora_alpha=self.cfg.lora_alpha,
-                lora_dropout=self.cfg.lora_dropout,
-                target_modules=list(self.cfg.lora_target_modules),
-                bias="none",
+                alpha=self.cfg.lora_alpha,
+                dropout=self.cfg.lora_dropout,
+                targets=solver_targets,
+                task_type=TaskType.CAUSAL_LM,
+                rank_pattern=solver_rank_pattern,
+                alpha_pattern=solver_alpha_pattern,
+            )
+            text_cfg = _build_lora_config(
+                r=self.cfg.lora_r,
+                alpha=self.cfg.lora_alpha,
+                dropout=self.cfg.lora_dropout,
+                targets=text_targets,
                 task_type=TaskType.CAUSAL_LM,
             )
-            model = get_peft_model(model, lcfg)
+            model = get_peft_model(model, solver_cfg)
             if hasattr(model, "add_adapter"):
                 try:
-                    model.add_adapter("proposer", lcfg)
+                    model.add_adapter("proposer", text_cfg)
                 except Exception:
                     pass
                 try:
-                    model.add_adapter("generator", lcfg)
+                    model.add_adapter("generator", text_cfg)
                 except Exception:
                     pass
 
             for name, param in model.named_parameters():
-                if "lora_" in name and (
-                    ".default." in name or ".proposer." in name or ".generator." in name
+                if (
+                    "lora_" in name
+                    and not _is_dit_param_name(name)
+                    and (".default." in name or ".proposer." in name or ".generator." in name)
                 ):
                     param.requires_grad_(True)
                 else:
                     param.requires_grad_(False)
 
-            model.print_trainable_parameters()
+            if self.is_main_process:
+                print(
+                    "[Generation] Role LoRA targets: "
+                    f"text={list(text_targets)}; "
+                    f"solver_merger_enabled={solver_merger_enabled}; "
+                    f"solver_merger={list(solver_merger_targets)}"
+                )
+                try:
+                    model.print_trainable_parameters()
+                except Exception:
+                    pass
 
         if bool(getattr(self.cfg, "dit_update_enabled", False)):
             try:
@@ -1277,16 +1693,58 @@ class GenerationSelfEvolvingTrainer:
                     if self.is_main_process:
                         print("[Generation] WARNING: --dit_update_enabled set but model has no `dit`; disabling DiT updates.")
                     self.cfg.dit_update_enabled = False
+                elif bool(getattr(self.cfg, "dit_lora_enabled", True)):
+                    dit_targets = _target_tuple(getattr(self.cfg, "dit_lora_target_modules", tuple()))
+                    if not dit_targets:
+                        raise ValueError("dit_lora_enabled=True but no dit_lora_target_modules were provided.")
+                    dit_lora_cfg = _build_lora_config(
+                        r=int(getattr(self.cfg, "dit_lora_r", 16)),
+                        alpha=int(getattr(self.cfg, "dit_lora_alpha", 32)),
+                        dropout=float(getattr(self.cfg, "dit_lora_dropout", 0.0)),
+                        targets=dit_targets,
+                    )
+                    core_model.dit = get_peft_model(dit_module, dit_lora_cfg)
+                    for name, param in core_model.dit.named_parameters():
+                        param.requires_grad_("lora_" in name)
+                    if self.is_main_process:
+                        counts = _count_lora_trainables(model)
+                        print(
+                            "[Generation] DiT LoRA enabled before DDP: "
+                            f"targets={list(dit_targets)}, "
+                            f"r={int(getattr(self.cfg, 'dit_lora_r', 16))}, "
+                            f"alpha={int(getattr(self.cfg, 'dit_lora_alpha', 32))}, "
+                            f"trainable_dit_lora_params={counts['dit']}"
+                        )
+                        if counts["dit"] <= 0:
+                            print("[Generation] WARNING: no trainable DiT LoRA parameters matched the configured targets.")
                 else:
+                    for param in dit_module.parameters():
+                        param.requires_grad_(True)
                     if self.is_main_process:
                         print(
                             "[Generation] DiT module detected. "
-                            "DiT params will be unfrozen after DDP setup by the DiT updater."
+                            "Legacy full-DiT update path is enabled (--disable_dit_lora)."
                         )
             except Exception as exc:
                 if self.is_main_process:
-                    print(f"[Generation] WARNING: failed to enable DiT training params: {exc}")
+                    print(f"[Generation] WARNING: failed to configure DiT training params: {exc}")
                 self.cfg.dit_update_enabled = False
+
+        if self.is_main_process and self.cfg.use_lora:
+            counts = _count_lora_trainables(model)
+            print(
+                "[Generation] Trainable LoRA parameters by role: "
+                f"solver={counts['solver']} "
+                f"(solver_merger={counts['solver_merger']}), "
+                f"proposer={counts['proposer']}, "
+                f"generator={counts['generator']}, "
+                f"dit={counts['dit']}"
+            )
+            if bool(getattr(self.cfg, "solver_merger_lora_enabled", False)) and counts["solver_merger"] <= 0:
+                print(
+                    "[Generation] WARNING: solver_merger_lora is enabled but no merger LoRA parameters "
+                    "were created. Check --solver_merger_lora_targets against the model module names."
+                )
 
         # Activation checkpointing significantly reduces training-time memory.
         gc_enabled = os.environ.get("SE_USE_GRADIENT_CHECKPOINTING", "1").strip().lower() not in {"0", "false", "no"}
@@ -3732,6 +4190,27 @@ class GenerationSelfEvolvingTrainer:
                         self.processor.save_pretrained(subdir)
                     except Exception:
                         pass
+            if bool(getattr(self.cfg, "dit_update_enabled", False)) and bool(getattr(self.cfg, "dit_lora_enabled", True)):
+                try:
+                    core_model = _unwrap_model(self.model).get_model()
+                    dit_module = getattr(core_model, "dit", None)
+                    if dit_module is not None and hasattr(dit_module, "save_pretrained"):
+                        dit_dir = tmp_dir / "dit_lora"
+                        dit_module.save_pretrained(dit_dir)
+                        _json_dump(
+                            tmp_dir / "dit_lora_metadata.json",
+                            {
+                                "dit_lora_enabled": True,
+                                "dit_lora_r": int(getattr(self.cfg, "dit_lora_r", 16)),
+                                "dit_lora_alpha": int(getattr(self.cfg, "dit_lora_alpha", 32)),
+                                "dit_lora_dropout": float(getattr(self.cfg, "dit_lora_dropout", 0.0)),
+                                "dit_lora_target_modules": list(
+                                    _target_tuple(getattr(self.cfg, "dit_lora_target_modules", tuple()))
+                                ),
+                            },
+                        )
+                except Exception as exc:
+                    print(f"[Generation] WARNING: failed to save DiT LoRA adapter: {exc}")
         else:
             self.model.save_pretrained(tmp_dir / "model")
             try:
@@ -3741,7 +4220,9 @@ class GenerationSelfEvolvingTrainer:
 
         model_ref = _unwrap_model(self.model)
         save_trainable_snapshot = not (
-            self.cfg.use_lora and bool(getattr(self.cfg, "dit_update_enabled", False))
+            self.cfg.use_lora
+            and bool(getattr(self.cfg, "dit_update_enabled", False))
+            and not bool(getattr(self.cfg, "dit_lora_enabled", True))
         )
         if save_trainable_snapshot:
             trainable_state = {
@@ -3787,6 +4268,7 @@ class GenerationSelfEvolvingTrainer:
                 "proposer_updater_step": self.proposer_updater.step_id,
                 "generator_updater_step": self.generator_updater.step_id,
                 "dit_updater_step": self.dit_updater.step_id if self.dit_updater is not None else None,
+                "dit_lora_enabled": bool(getattr(self.cfg, "dit_lora_enabled", True)),
             },
         )
         with (tmp_dir / "SAVE_OK").open("w", encoding="utf-8") as f:
@@ -3920,6 +4402,10 @@ class GenerationSelfEvolvingTrainer:
             metrics["train/generator_update_mode"] = generator_update_mode
         if generator_skipped_reason:
             metrics["train/generator_skip_reason"] = generator_skipped_reason
+        if dit_stats is not None:
+            metrics["train/diffusion_generator_update"] = 1.0 if bool(dit_stats.get("did_step", False)) else 0.0
+            if dit_stats.get("objective"):
+                metrics["train/generator_effective_objective"] = str(dit_stats.get("objective"))
         if image_path:
             metrics["data/image_path"] = image_path
         if unicorn_spec_meta:
@@ -3971,6 +4457,8 @@ class GenerationSelfEvolvingTrainer:
             metrics["train/dit_update_applied"] = 1.0 if bool(dit_stats.get("did_step", False)) else 0.0
             metrics["dit/loss"] = float(dit_stats.get("loss", 0.0))
             metrics["dit/valid_latent_tokens"] = float(dit_stats.get("valid_latent_tokens", 0.0))
+            metrics["dit/lora_enabled"] = 1.0 if bool(dit_stats.get("lora_enabled", False)) else 0.0
+            metrics["dit/trainable_params"] = float(dit_stats.get("trainable_params", 0.0))
             if dit_stats.get("skipped_reason"):
                 metrics["train/dit_skip_reason"] = str(dit_stats.get("skipped_reason"))
 
@@ -5038,18 +5526,20 @@ class GenerationSelfEvolvingTrainer:
         #     policy_completion_ids is non-None → generator GRPO ran above with
         #     real token traces → the correct module was already trained.
         #
-        #   Paradigm B — continuous latent + diffusion decoder (BLIP3o, BAGEL, etc.):
+        #   Paradigm B — continuous latent + diffusion/flow decoder (BLIP3o, BAGEL, etc.):
         #     The LLM encodes a spec prompt into continuous features; a separate
         #     DiT/flow denoiser produces the image from those features.
         #     policy_completion_ids is always None (no discrete image tokens exist).
         #     Generator GRPO would only train caption-writing, NOT image generation.
-        #     The correct module to train is the DiT → denoising MSE on real images.
+        #     The correct Generator adapter objective is reward-weighted denoising:
+        #     DiT/flow LoRA and, when enabled, text-conditioning LoRA receive gradients
+        #     through the denoising loss while base weights remain frozen.
         #
         # Routing logic:
         #   • generator_update_freq controls BOTH paths (single unified knob).
         #   • If generator GRPO fired successfully (token traces) → DiT skips.
         #   • If generator GRPO was skipped due to missing token traces AND a DiT
-        #     updater exists → DiT fires as the architecture-appropriate fallback.
+        #     updater exists → route to the diffusion Generator objective.
         #   • dit_update_enabled / dit_update_freq still work as explicit overrides
         #     for running DiT updates independently of generator_update_freq.
         #
@@ -5076,8 +5566,8 @@ class GenerationSelfEvolvingTrainer:
 
         # Determine if the DiT should fire this step. Two triggers:
         #   1. Explicit dit_update_freq path (legacy/override, independent frequency).
-        #   2. Unified fallback: generator_update_freq fired but no token traces exist
-        #      (architecture-appropriate fallback for diffusion-based models).
+        #   2. Unified diffusion route: generator_update_freq fired but no token
+        #      traces exist, so the Generator update is the denoising objective.
         # Avoid double updates: if both triggers fire on the same step, run once.
         if self.dit_updater is not None:
             _explicit_dit_due = (
@@ -5086,7 +5576,7 @@ class GenerationSelfEvolvingTrainer:
             )
             dit_update_due = _explicit_dit_due or _dit_should_fallback
             _dit_trigger = (
-                "generator_fallback" if (_dit_should_fallback and not _explicit_dit_due)
+                "diffusion_generator_route" if _dit_should_fallback
                 else "explicit_dit_update_freq" if _explicit_dit_due
                 else None
             )
@@ -5134,7 +5624,16 @@ class GenerationSelfEvolvingTrainer:
                     {
                         "step": step,
                         "role": "dit",
+                        "role_family": "generator",
+                        "submodule": "dit",
+                        "objective": (
+                            "reward_weighted_denoising"
+                            if float(getattr(self.cfg, "dit_reward_loss_weight", 0.0)) > 0.0
+                            else "denoising"
+                        ),
                         "trigger": _dit_trigger,
+                        "explicit_dit_due": bool(_explicit_dit_due),
+                        "missing_trace_route": bool(_dit_should_fallback),
                         "update_due": True,
                         "skipped": bool(dit_skip_reason),
                         "reason": dit_skip_reason,
@@ -5147,6 +5646,12 @@ class GenerationSelfEvolvingTrainer:
 
         self._sync_state_scalars()
 
+        generator_effective_objective = "none"
+        if generator_stats is not None and generator_skipped_reason is None:
+            generator_effective_objective = f"text_{generator_update_mode or self.cfg.generator_update_rule}"
+        if dit_stats is not None and bool(dit_stats.get("did_step", False)):
+            generator_effective_objective = str(dit_stats.get("objective") or "diffusion_denoising")
+
         self._save_candidate_images(step=step, scored=scored, best_idx=best_idx)
 
         if verbose:
@@ -5155,6 +5660,7 @@ class GenerationSelfEvolvingTrainer:
                 f"[Step {step:05d}][G] generation phase done in {step_dt:.1f}s "
                 f"(best_idx={best_idx}, best_reward={float(best['total_reward']):.3f})"
             )
+        step_duration_sec = time.perf_counter() - step_t0
 
         self._append_jsonl(
             self.prompts_log_path,
@@ -5223,6 +5729,7 @@ class GenerationSelfEvolvingTrainer:
                 "generator_update_rule": self.cfg.generator_update_rule,
                 "generator_skipped_reason": generator_skipped_reason,
                 "generator_update_mode": generator_update_mode,
+                "generator_effective_objective": generator_effective_objective,
                 "generator_proxy_ratio": float(self._current_proxy_ratio()),
                 "unicorn_spec_meta": unicorn_spec_meta,
                 "unicorn_reconstruction": unicorn_reconstruction,
@@ -5235,6 +5742,24 @@ class GenerationSelfEvolvingTrainer:
                 "proposer_stats": proposer_stats,
                 "generator_update_stats": generator_stats,
             },
+        )
+
+        self._monitor_generation_step(
+            step=step,
+            meta=meta,
+            scored=scored,
+            best_idx=best_idx,
+            spec_quality=spec_quality,
+            generator_stats=generator_stats,
+            generator_update_mode=generator_update_mode,
+            generator_effective_objective=generator_effective_objective,
+            generator_skipped_reason=generator_skipped_reason,
+            dit_stats=dit_stats,
+            dit_skip_reason=dit_skip_reason,
+            proposer_stats=proposer_stats,
+            proposer_skip_reason=proposer_skip_reason,
+            proposer_reward=proposer_reward,
+            step_duration_sec=step_duration_sec,
         )
 
         return {
@@ -5251,6 +5776,7 @@ class GenerationSelfEvolvingTrainer:
             "generator_update_rule": self.cfg.generator_update_rule,
             "generator_skipped_reason": generator_skipped_reason,
             "generator_update_mode": generator_update_mode,
+            "generator_effective_objective": generator_effective_objective,
             "generator_proxy_ratio": float(self._current_proxy_ratio()),
             "unicorn_spec_meta": unicorn_spec_meta,
             "unicorn_reconstruction": unicorn_reconstruction,

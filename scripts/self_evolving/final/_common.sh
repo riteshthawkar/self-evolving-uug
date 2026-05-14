@@ -25,14 +25,16 @@ ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 
 # ── Default data ─────────────────────────────────────────────────────────────
-# For JOINT experiments (E1, E3, E4, E5, E6): use the natural-image pool.
+# For JOINT experiments (E1, E3, E4, E5, E6): use the paper natural-image pool.
 #   DiT/generator cannot produce charts → chart images waste generation steps.
-#   Download with: python scripts/download_joint_3k.py
+#   Download with: bash scripts/self_evolving/paper/prepare_data_6k.sh
 #
 # For UNDERSTANDING-ONLY (E2): the chart-heavy 50k pool is fine (no G steps).
 #   Override: DATA_DIR=/workspace/.../shared_uug_50k_balanced/images bash E2_...
 #
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_3k/images}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
+MIN_DATA_IMAGES="${MIN_DATA_IMAGES:-6000}"
+ALLOW_SMALL_DATA="${ALLOW_SMALL_DATA:-0}"
 
 # ── Cache / environment ──────────────────────────────────────────────────────
 CACHE_ROOT="${CACHE_ROOT:-$REPO_ROOT/cache}"
@@ -112,6 +114,15 @@ if [[ ! -d "$DATA_DIR" ]]; then
   echo "[COMMON] If 50k data is not downloaded, set DATA_DIR to your local image dir." >&2
   exit 1
 fi
+IMAGE_COUNT="$(find "$DATA_DIR" -type f \
+  \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" -o -iname "*.bmp" -o -iname "*.tiff" \) \
+  | wc -l | tr -d '[:space:]')"
+if [[ "$IMAGE_COUNT" -lt "$MIN_DATA_IMAGES" && "$ALLOW_SMALL_DATA" != "1" ]]; then
+  echo "[COMMON] ERROR: DATA_DIR has $IMAGE_COUNT images; paper protocol requires at least $MIN_DATA_IMAGES." >&2
+  echo "[COMMON] Prepare data with: bash scripts/self_evolving/paper/prepare_data_6k.sh" >&2
+  echo "[COMMON] For smoke tests only, set ALLOW_SMALL_DATA=1." >&2
+  exit 1
+fi
 
 # ── Shared training arguments (model, LoRA, optimiser, sampling) ─────────────
 # These are identical across all experiments to ensure fair comparison.
@@ -136,7 +147,12 @@ SHARED_ARGS=(
   --lora_r 16
   --lora_alpha 32
   --lora_dropout 0.05
-  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
+  --solver_merger_lora
+  --solver_merger_lora_r 4
+  --solver_merger_lora_alpha 8
+  --solver_merger_lora_lr 2e-7
+  --solver_merger_lora_targets visual.merger.mlp.0,visual.merger.mlp.2
 
   # Optimiser
   --lr 1e-6

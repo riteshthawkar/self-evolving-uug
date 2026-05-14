@@ -1,7 +1,10 @@
-"""DiT denoising updater for generation/unified self-evolving training.
+"""Diffusion Generator updater for generation/unified self-evolving training.
 
-This updater applies an SFT-style denoising objective directly on BLIP3o's
-diffusion transformer (DiT) using real source images and generation prompts.
+This updater applies a denoising objective to BLIP3o's diffusion transformer
+(DiT) LoRA adapters using real source images and generation prompts. When
+reward weighting is enabled, the denoising loss is scaled by the Solver-derived
+generation reward, giving a diffusion-compatible Generator update without
+unfreezing the base denoiser weights.
 """
 
 import contextlib
@@ -52,6 +55,7 @@ class DiTUpdater:
         self.model_ref = model_ref
         self.core_model = core_model_getter()
         self.dit = getattr(self.core_model, "dit", None)
+        self.dit_base = self._unwrap_dit_module(self.dit)
         self.noise_scheduler = getattr(self.core_model, "noise_scheduler", None)
         self.gen_vision_tower = getattr(self.core_model, "get_gen_vision_tower", lambda: None)()
         if self.dit is None:
@@ -82,11 +86,29 @@ class DiTUpdater:
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
 
-        for p in self.dit.parameters():
-            p.requires_grad_(True)
-        self.params = [p for p in self.dit.parameters() if p.requires_grad]
+        self.dit_lora_enabled = bool(getattr(config, "dit_lora_enabled", True))
+        if self.dit_lora_enabled:
+            named_dit_params = list(self.dit.named_parameters())
+            for name, param in named_dit_params:
+                param.requires_grad_("lora_" in name)
+            self.params = [
+                param
+                for name, param in named_dit_params
+                if "lora_" in name and param.requires_grad
+            ]
+            if not self.params:
+                raise RuntimeError(
+                    "dit_lora_enabled=True but no trainable DiT LoRA parameters were found. "
+                    "Check --dit_lora_targets against the loaded BLIP3o DiT module names."
+                )
+        else:
+            for p in self.dit.parameters():
+                p.requires_grad_(True)
+            self.params = [p for p in self.dit.parameters() if p.requires_grad]
         if not self.params:
             raise RuntimeError("No trainable DiT parameters found.")
+        self.trainable_param_count = int(sum(p.numel() for p in self.params))
+        self.trainable_param_tensors = int(len(self.params))
 
         lr = float(getattr(config, "dit_lr", getattr(config, "lr", 1e-6)))
         weight_decay = float(getattr(config, "dit_weight_decay", getattr(config, "weight_decay", 0.01)))
@@ -112,14 +134,22 @@ class DiTUpdater:
                 from peft import PeftModel
                 model_unwrapped = _unwrap_model(model)
                 # Try PEFT adapter parameter access first
+                def _is_generator_lora(name: str) -> bool:
+                    if ".dit." in name or name.startswith("dit."):
+                        return False
+                    return (
+                        ("lora_A" in name or "lora_B" in name)
+                        and (".generator." in name or "generator." in name)
+                    )
+
                 if hasattr(model_unwrapped, "peft_config") and "generator" in getattr(model_unwrapped, "peft_config", {}):
                     for name, p in model_unwrapped.named_parameters():
-                        if "generator" in name and ("lora_A" in name or "lora_B" in name):
+                        if _is_generator_lora(name):
                             p.requires_grad_(True)
                             gen_lora_params.append(p)
                 elif hasattr(model_unwrapped, "base_model"):
                     for name, p in model_unwrapped.named_parameters():
-                        if "generator" in name and ("lora_A" in name or "lora_B" in name):
+                        if _is_generator_lora(name):
                             p.requires_grad_(True)
                             gen_lora_params.append(p)
             except Exception:
@@ -147,6 +177,28 @@ class DiTUpdater:
 
         self.distributed = bool(dist.is_available() and dist.is_initialized())
         self.world_size = int(dist.get_world_size()) if self.distributed else 1
+        if not self.distributed or dist.get_rank() == 0:
+            mode = "lora" if self.dit_lora_enabled else "full"
+            print(
+                f"[DiTUpdater] DiT update mode={mode}; "
+                f"trainable_tensors={self.trainable_param_tensors}; "
+                f"trainable_params={self.trainable_param_count}; "
+                f"lr={lr:.2e}; weight_decay={weight_decay:.2e}"
+            )
+
+    @staticmethod
+    def _unwrap_dit_module(dit: Optional[torch.nn.Module]) -> Optional[torch.nn.Module]:
+        if dit is None:
+            return None
+        getter = getattr(dit, "get_base_model", None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception:
+                pass
+        base_model = getattr(dit, "base_model", None)
+        inner = getattr(base_model, "model", None) if base_model is not None else None
+        return inner if inner is not None else dit
 
     def state_dict(self) -> Dict:
         return {
@@ -154,13 +206,19 @@ class DiTUpdater:
             "step_id": int(self.step_id),
             "accum_count": int(self._accum_count),
             "has_real_grad_in_window": bool(self._has_real_grad_in_window),
+            "dit_lora_enabled": bool(self.dit_lora_enabled),
+            "trainable_param_count": int(self.trainable_param_count),
         }
 
     def load_state_dict(self, state: Dict):
         if not isinstance(state, dict):
             return
         if "optimizer" in state and isinstance(state.get("optimizer"), dict):
-            self.opt.load_state_dict(state["optimizer"])
+            try:
+                self.opt.load_state_dict(state["optimizer"])
+            except Exception as exc:
+                if not self.distributed or dist.get_rank() == 0:
+                    print(f"[DiTUpdater] WARNING: failed to restore optimizer state: {exc}")
         if "step_id" in state:
             self.step_id = int(state["step_id"])
         if "accum_count" in state:
@@ -460,7 +518,7 @@ class DiTUpdater:
             if "early" in pooling and callable(pool_img) and latents.ndim == 3:
                 latents = pool_img(latents)
 
-        dit_cfg = getattr(self.dit, "config", None)
+        dit_cfg = getattr(self.dit_base, "config", None)
         # The DiT config's in_channels defaults to 1792 (Lumina pre-training), but
         # BLIP3o checkpoints are trained with SigLip visual features (hidden_size=1152).
         # After pool_img the latent is (B, 1152, S, S), so derive in_channels from the
@@ -585,7 +643,7 @@ class DiTUpdater:
                     raise RuntimeError("Core model forward did not return hidden states for DiT conditioning.")
             z_latents = hidden[:, -queries.shape[1] :, :].to(device=device, dtype=dtype)
 
-        expected_dim = int(getattr(getattr(self.dit, "config", None), "latent_embedding_size", z_latents.shape[-1]))
+        expected_dim = int(getattr(getattr(self.dit_base, "config", None), "latent_embedding_size", z_latents.shape[-1]))
         if z_latents.shape[-1] != expected_dim:
             down_projector = getattr(self.core_model, "down_projector", None)
             if down_projector is not None:
@@ -771,7 +829,7 @@ class DiTUpdater:
             # is enabled. Checkpointed blocks require at least one input tensor
             # with requires_grad=True; otherwise the output is detached and loss
             # has no grad_fn. Enable grads on noisy latents in that case.
-            dit_inner = getattr(self.dit, "model", self.dit)
+            dit_inner = self.dit_base if self.dit_base is not None else getattr(self.dit, "model", self.dit)
             gc_active = bool(getattr(dit_inner, "gradient_checkpointing", False))
             if gc_active and not noisy_latents.requires_grad:
                 noisy_latents = noisy_latents.detach().requires_grad_(True)
@@ -785,11 +843,11 @@ class DiTUpdater:
             mse = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
             loss = mse.to(dtype=model_dtype) * self.loss_weight
 
-            # ── Reward-Weighted Regression (RWR / Change 3) ─────────────────────
+            # ── Reward-Weighted Regression (RWR) ────────────────────────────────
             # Scale denoising loss by (1 + w * reward) so that high-reward
             # generations are reinforced more strongly.  This implements the
             # continuous-action analogue of GRPO for the DiT+generator pathway.
-            # reward_loss_weight=0 (default) recovers the original SFT objective.
+            # reward_loss_weight=0 recovers the plain denoising objective.
             if self.reward_loss_weight > 0.0 and reward is not None:
                 reward_scale = 1.0 + self.reward_loss_weight * float(reward)
                 reward_scale = max(0.0, reward_scale)  # never invert the loss
@@ -829,9 +887,11 @@ class DiTUpdater:
                 # Clip gradients across all jointly-trained params
                 # (DiT params + generator LoRA params if joint_conditioning_train=True).
                 _all_trainable = list(self.params) + list(self.generator_lora_params)
-                _clip_grad_norm_multi_device(_all_trainable, self.grad_clip)
-                self.opt.step()
-                did_step = True
+                if _clip_grad_norm_multi_device(_all_trainable, self.grad_clip):
+                    self.opt.step()
+                    did_step = True
+                else:
+                    skipped_reason = skipped_reason or "non_finite_gradient"
             self.opt.zero_grad(set_to_none=True)
             self._accum_count = 0
             self._has_real_grad_in_window = False
@@ -862,4 +922,11 @@ class DiTUpdater:
             "valid_latent_tokens": float(valid_latent_tokens),
             "reward": float(reward) if reward is not None else None,
             "joint_conditioning": bool(self.joint_conditioning_train),
+            "lora_enabled": bool(self.dit_lora_enabled),
+            "trainable_params": float(self.trainable_param_count),
+            "objective": (
+                "diffusion_reward_weighted_denoising"
+                if self.reward_loss_weight > 0.0 and reward is not None
+                else "diffusion_denoising"
+            ),
         }

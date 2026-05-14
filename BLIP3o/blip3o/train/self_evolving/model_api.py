@@ -190,6 +190,7 @@ def _load_from_explicit_class(
     torch_dtype: torch.dtype,
     device_map,
     attn_implementation: Optional[str],
+    quantization_config=None,
 ):
     errors: List[str] = []
     base_kwargs = {
@@ -197,6 +198,8 @@ def _load_from_explicit_class(
         "device_map": device_map,
         "trust_remote_code": True,
     }
+    if quantization_config is not None:
+        base_kwargs["quantization_config"] = quantization_config
 
     attempts: List[Dict[str, object]] = []
     if attn_implementation is not None:
@@ -237,6 +240,10 @@ def _load_blip3o_model(
     torch_dtype: torch.dtype,
     device_map,
     attn_implementation: Optional[str] = None,
+    load_in_4bit: bool = False,
+    bnb_4bit_quant_type: str = "nf4",
+    bnb_4bit_use_double_quant: bool = True,
+    bnb_4bit_compute_dtype: Optional[str] = None,
 ):
     """
     Load model using native BLIP3o inference class when possible.
@@ -270,6 +277,30 @@ def _load_blip3o_model(
     model_name_l = (model_name or "").lower()
     model_type_hint = _resolve_model_type_hint(model_name)
     is_blip3o_target = ("blip3o" in model_name_l) or model_type_hint.startswith("blip3o")
+    quantization_config = None
+    if bool(load_in_4bit):
+        try:
+            from transformers import BitsAndBytesConfig
+        except Exception as exc:
+            raise RuntimeError(
+                "QLoRA/load_in_4bit requires transformers BitsAndBytesConfig "
+                "and bitsandbytes to be installed."
+            ) from exc
+        compute_dtype_name = str(bnb_4bit_compute_dtype or "").strip().lower()
+        compute_dtype = {
+            "bfloat16": torch.bfloat16,
+            "bf16": torch.bfloat16,
+            "float16": torch.float16,
+            "fp16": torch.float16,
+            "float32": torch.float32,
+            "fp32": torch.float32,
+        }.get(compute_dtype_name, torch_dtype)
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_quant_type=str(bnb_4bit_quant_type or "nf4"),
+            bnb_4bit_use_double_quant=bool(bnb_4bit_use_double_quant),
+        )
 
     explicit_errors: List[str] = []
 
@@ -288,6 +319,7 @@ def _load_blip3o_model(
                 torch_dtype=torch_dtype,
                 device_map=device_map,
                 attn_implementation=attn_implementation,
+                quantization_config=quantization_config,
             )
         except Exception as exc:
             explicit_errors.append(f"blip3oQwenForInferenceLM: {exc}")
@@ -320,6 +352,8 @@ def _load_blip3o_model(
         "device_map": device_map,
         "trust_remote_code": True,
     }
+    if quantization_config is not None:
+        base_kwargs["quantization_config"] = quantization_config
     if attn_implementation is not None:
         attempts.append({**base_kwargs, "attn_implementation": attn_implementation})
     attempts.append(base_kwargs)

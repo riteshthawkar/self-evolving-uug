@@ -6,7 +6,11 @@ Ported from self_evolving/experiments/understanding.py and generation.py.
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from .utils import DEFAULT_LORA_TARGETS
+from .utils import (
+    DEFAULT_DIT_LORA_TARGETS,
+    DEFAULT_SOLVER_MERGER_LORA_TARGETS,
+    DEFAULT_TEXT_LORA_TARGETS,
+)
 
 
 @dataclass
@@ -36,7 +40,7 @@ class UnderstandingSelfEvolvingConfig:
     lr: float = 1e-6
     weight_decay: float = 0.01
     grad_clip: float = 1.0
-    grad_accum_steps: int = 4
+    grad_accum_steps: int = 1
     proposer_update_freq: int = 1  # update proposer every understanding step (was 5 — too sparse)
 
     # Decoding
@@ -44,7 +48,7 @@ class UnderstandingSelfEvolvingConfig:
     top_p: float = 1.0
     max_new_tokens_solver: int = 128
     max_new_tokens_proposer: int = 128
-    num_solver_samples: int = 5
+    num_solver_samples: int = 7
 
     # Reward shaping
     solver_soft_gamma: float = 0.7
@@ -137,6 +141,9 @@ class UnderstandingSelfEvolvingConfig:
     solver_token_entropy_window_size: int = 128  # rolling window for quantile normalization
     solver_token_entropy_sigmoid_alpha: float = 1.5  # sigmoid steepness (cold-window fallback)
     solver_token_entropy_sigmoid_beta: float = 2.0  # sigmoid midpoint (in nats; ln(2)≈0.69, tuned for entropy scale)
+    solver_token_entropy_aggregation: str = "max"  # rebuttal ablation: max or mean over first K answer tokens
+    proposer_ste_primary_weight: float = 0.70  # warm-start primary STE weight
+    proposer_sample_entropy_weight: float = 0.30  # complementary self-consistency/sample-entropy weight
     proposer_ste_reward_weight: float = 0.30  # weight after warm-start (complementary to sample entropy)
     proposer_ste_warm_start_weight: float = 0.70  # weight during warm-start (primary signal)
     # Prompt-Perturbed Sampling (PPS): use 7 different prompt framings instead
@@ -299,15 +306,26 @@ class UnderstandingSelfEvolvingConfig:
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
-    lora_target_modules: Tuple[str, ...] = DEFAULT_LORA_TARGETS
+    lora_target_modules: Tuple[str, ...] = DEFAULT_TEXT_LORA_TARGETS
+    solver_merger_lora_enabled: bool = True
+    solver_merger_lora_r: int = 4
+    solver_merger_lora_alpha: int = 8
+    solver_merger_lora_lr: float = 2e-7
+    solver_merger_lora_target_modules: Tuple[str, ...] = DEFAULT_SOLVER_MERGER_LORA_TARGETS
+    load_in_4bit: bool = False
+    bnb_4bit_quant_type: str = "nf4"
+    bnb_4bit_use_double_quant: bool = True
+    bnb_4bit_compute_dtype: str = "bfloat16"
 
     # Repro + logging
     seed: int = 42
     deterministic: bool = True
     log_every: int = 1
-    save_every: int = 500
+    save_every: int = 50
     max_checkpoints: int = 5
     clear_cache_every: int = 25
+    code_run_registry_enabled: bool = True
+    code_run_registry_dir: Optional[str] = None
 
     # W&B
     wandb_mode: str = "disabled"  # online|offline|disabled
@@ -347,7 +365,7 @@ class GenerationSelfEvolvingConfig:
     lr: float = 1e-6
     weight_decay: float = 0.01
     grad_clip: float = 1.0
-    grad_accum_steps: int = 4
+    grad_accum_steps: int = 1
     proposer_update_freq: int = 1
     generator_update_freq: int = 1
     enable_solver_updates: bool = False
@@ -360,15 +378,15 @@ class GenerationSelfEvolvingConfig:
     max_new_tokens_proposer: int = 256
     max_new_tokens_caption: int = 96
     max_new_tokens_generator: int = 768
-    num_solver_samples: int = 5
+    num_solver_samples: int = 7
     num_solver_samples_spec: int = 3
-    num_generations: int = 4
+    num_generations: int = 3
 
     # Generation backend
-    generation_num_inference_steps: int = 30
+    generation_num_inference_steps: int = 50
     generation_guidance_scale: float = 2.0
-    generation_height: int = 1024
-    generation_width: int = 1024
+    generation_height: int = 896
+    generation_width: int = 896
     require_decoder_for_blip3o: bool = True
     allow_latent_visualization_fallback: bool = False
     strict_require_generation_tokens: bool = True
@@ -412,6 +430,13 @@ class GenerationSelfEvolvingConfig:
     dit_conditioning_dropout: float = 0.10
     dit_loss_weight: float = 1.0
     dit_prompt_suffix_token_id: int = 151665
+    # Research default: train diffusion denoiser adapters instead of full DiT weights.
+    # Full-DiT unfreeze remains available as an ablation via dit_lora_enabled=False.
+    dit_lora_enabled: bool = True
+    dit_lora_r: int = 16
+    dit_lora_alpha: int = 32
+    dit_lora_dropout: float = 0.0
+    dit_lora_target_modules: Tuple[str, ...] = DEFAULT_DIT_LORA_TARGETS
     # Joint LLM+DiT training: remove torch.no_grad() from _prepare_conditioning so
     # denoising loss gradients flow back through z_latents into the generator LoRA.
     # This trains the text conditioning encoder jointly with the DiT denoiser.
@@ -548,6 +573,9 @@ class GenerationSelfEvolvingConfig:
     solver_token_entropy_window_size: int = 128  # rolling window for quantile normalization
     solver_token_entropy_sigmoid_alpha: float = 1.5  # sigmoid steepness (cold-window fallback)
     solver_token_entropy_sigmoid_beta: float = 2.0  # sigmoid midpoint (in nats; ln(2)≈0.69, tuned for entropy scale)
+    solver_token_entropy_aggregation: str = "max"  # rebuttal ablation: max or mean over first K answer tokens
+    proposer_ste_primary_weight: float = 0.70  # warm-start primary STE weight
+    proposer_sample_entropy_weight: float = 0.30  # complementary self-consistency/sample-entropy weight
     proposer_ste_reward_weight: float = 0.30  # weight after warm-start (complementary to sample entropy)
     proposer_ste_warm_start_weight: float = 0.70  # weight during warm-start (primary signal)
     # Prompt-Perturbed Sampling (PPS): use 7 different prompt framings instead
@@ -705,16 +733,27 @@ class GenerationSelfEvolvingConfig:
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
-    lora_target_modules: Tuple[str, ...] = DEFAULT_LORA_TARGETS
+    lora_target_modules: Tuple[str, ...] = DEFAULT_TEXT_LORA_TARGETS
+    solver_merger_lora_enabled: bool = True
+    solver_merger_lora_r: int = 4
+    solver_merger_lora_alpha: int = 8
+    solver_merger_lora_lr: float = 2e-7
+    solver_merger_lora_target_modules: Tuple[str, ...] = DEFAULT_SOLVER_MERGER_LORA_TARGETS
+    load_in_4bit: bool = False
+    bnb_4bit_quant_type: str = "nf4"
+    bnb_4bit_use_double_quant: bool = True
+    bnb_4bit_compute_dtype: str = "bfloat16"
 
     # Repro + logging
     seed: int = 42
     deterministic: bool = True
     log_every: int = 1
-    save_every: int = 500
+    save_every: int = 50
     max_checkpoints: int = 5
     clear_cache_every: int = 25
     save_generated_images_every: int = 0
+    code_run_registry_enabled: bool = True
+    code_run_registry_dir: Optional[str] = None
 
     # W&B
     wandb_mode: str = "disabled"
@@ -737,7 +776,7 @@ class UnifiedSelfEvolvingConfig(GenerationSelfEvolvingConfig):
     generation_steps_per_cycle: int = 2
     cycle_starts_with_generation: bool = False
     bootstrap_generated_pool_steps: int = 0
-    synthetic_solver_update_freq: int = 1
+    synthetic_solver_update_freq: int = 0
     synthetic_solver_hard_only: bool = False
     solver_hardness_min_entropy: float = 0.2
 

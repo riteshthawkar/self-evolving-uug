@@ -169,8 +169,35 @@ class RolePolicyUpdater:
                 f"No trainable parameters found for adapter={adapter_name!r}"
             )
         self.params = params
+        merger_lr = float(getattr(config, "solver_merger_lora_lr", 0.0) or 0.0)
+        optimizer_groups = None
+        if adapter_name == "default" and merger_lr > 0.0:
+            param_ids = {id(p) for p in params}
+            merger_params = []
+            base_params = []
+            for name, param in _unwrap_model(model).named_parameters():
+                if id(param) not in param_ids:
+                    continue
+                if any(marker in name for marker in ("visual.merger", "merger.mlp", "mm_projector")):
+                    merger_params.append(param)
+                else:
+                    base_params.append(param)
+            if merger_params and base_params:
+                optimizer_groups = [
+                    {"params": base_params, "lr": config.lr, "weight_decay": config.weight_decay},
+                    {"params": merger_params, "lr": merger_lr, "weight_decay": config.weight_decay},
+                ]
+                if not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0:
+                    print(
+                        "[RolePolicyUpdater] Solver optimizer split: "
+                        f"base_lora_params={sum(p.numel() for p in base_params)}, "
+                        f"merger_lora_params={sum(p.numel() for p in merger_params)}, "
+                        f"base_lr={float(config.lr):.2e}, merger_lr={merger_lr:.2e}"
+                    )
         self.opt = torch.optim.AdamW(
-            params, lr=config.lr, weight_decay=config.weight_decay
+            optimizer_groups if optimizer_groups is not None else params,
+            lr=config.lr,
+            weight_decay=config.weight_decay,
         )
 
     def state_dict(self) -> Dict:
@@ -184,7 +211,11 @@ class RolePolicyUpdater:
         if not isinstance(state, dict):
             return
         if "optimizer" in state:
-            self.opt.load_state_dict(state["optimizer"])
+            try:
+                self.opt.load_state_dict(state["optimizer"])
+            except Exception as exc:
+                if not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0:
+                    print(f"[RolePolicyUpdater] WARNING: failed to restore optimizer state: {exc}")
         if "kl_coef" in state:
             self.kl_coef = float(state["kl_coef"])
         if "step_id" in state:
@@ -192,8 +223,16 @@ class RolePolicyUpdater:
 
     def _adapt_beta(self, kl_val: float):
         target = max(self.config.kl_target, 1e-8)
-        delta = (kl_val - target) / target
-        beta = self.kl_coef * math.exp(self.config.kl_adapt_rate * delta)
+        if not math.isfinite(float(kl_val)):
+            return
+        rate = float(getattr(self.config, "kl_adapt_rate", 0.0))
+        if not math.isfinite(rate):
+            return
+        current = float(self.kl_coef)
+        if not math.isfinite(current) or current <= 0.0:
+            current = max(float(self.config.kl_min), 1e-8)
+        delta = max(-50.0, min(50.0, (float(kl_val) - target) / target))
+        beta = current * math.exp(max(-50.0, min(50.0, rate * delta)))
         beta = max(self.config.kl_min, min(self.config.kl_max, beta))
         self.kl_coef = float(beta)
 
@@ -318,7 +357,12 @@ class RolePolicyUpdater:
                     raise
         self.model.train(True)
         policy_inputs = dict(forward_full)
-        policy_inputs["labels"] = labels
+        # Only ask Hugging Face to compute CE when at least one completion
+        # token is unmasked.  CrossEntropy over an all-ignored label tensor is
+        # undefined and commonly returns NaN; the training signal is absent, not
+        # numerically meaningful.
+        if valid_token_count > 0:
+            policy_inputs["labels"] = labels
         # Avoid allocating KV cache during training forwards
         policy_inputs["use_cache"] = False
         def _run_policy_forward():
@@ -334,7 +378,10 @@ class RolePolicyUpdater:
                 out_pi = _run_policy_forward()
             else:
                 raise
-        ce_loss = out_pi.loss
+        if valid_token_count > 0 and out_pi.loss is not None:
+            ce_loss = out_pi.loss
+        else:
+            ce_loss = torch.zeros((), device=out_pi.logits.device, dtype=out_pi.logits.dtype)
 
         # Check for non-finite ce_loss — mark for skip but do NOT return early
         # to keep DDP in sync across ranks.
@@ -375,7 +422,12 @@ class RolePolicyUpdater:
             # Use sum() so every parameter contributes; multiply by 0 so
             # the actual gradient is zero.  nan_to_num guards against the
             # (rare) case where logits contain NaN.
-            total_loss = (out_pi.logits.sum() * 0.0)
+            total_loss = torch.nan_to_num(
+                out_pi.logits,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).sum() * 0.0
             if not torch.isfinite(total_loss):
                 total_loss = torch.zeros((), device=out_pi.logits.device,
                                          dtype=out_pi.logits.dtype, requires_grad=True)
@@ -386,7 +438,12 @@ class RolePolicyUpdater:
             skipped_reason = None
             if not bool(torch.isfinite(total_loss.detach()).all().item()):
                 # Non-finite total_loss: backward zero instead.
-                total_loss = out_pi.logits.sum() * 0.0
+                total_loss = torch.nan_to_num(
+                    out_pi.logits,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                ).sum() * 0.0
                 skipped_reason = "non_finite_total_loss"
         has_real_grad = skipped_reason is None
         if dist.is_available() and dist.is_initialized():
@@ -447,9 +504,12 @@ class RolePolicyUpdater:
                         dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
                         p.grad /= float(dist.get_world_size())
             if self._has_real_grad_in_window:
-                _clip_grad_norm_multi_device(self.params, self.config.grad_clip)
-                self.opt.step()
-                did_step = True
+                if _clip_grad_norm_multi_device(self.params, self.config.grad_clip):
+                    self.opt.step()
+                    did_step = True
+                else:
+                    skipped_reason = skipped_reason or "non_finite_gradient"
+                    self.opt.zero_grad(set_to_none=True)
             else:
                 # All microbatches in this accumulation window were effectively skipped.
                 # Do not step AdamW to avoid decoupled-weight-decay drift.

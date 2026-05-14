@@ -7,7 +7,7 @@
 
 We apply one training recipe to three unified backbones spanning major image synthesis paradigms: BLIP3o-8B~\cite{chen2025blip3o} (diffusion), BAGEL-7B~\cite{deng2025bagel} (flow matching), and VARGPT-v1.1~\cite{zhuang2025vargpt} (autoregressive). For each backbone, we attach three LoRA adapters~\cite{hu2022lora} for the Proposer, Solver, and Generator roles while keeping the base model frozen. Training uses only raw images from a 6{,}000-image pool sampled from five open datasets (COCO, SA-1B, TextVQA, GQA, and LAION-COCO), discarding all dataset-provided annotations. Our primary evidence is within-backbone base-versus-ours deltas under identical inference settings. Visual understanding is evaluated on eight scores: MMMU~\cite{yue2024mmmu}, MMBench~\cite{liu2024mmbench}, TextVQA~\cite{singh2019textvqa}, SEED-Bench~\cite{li2024seedbench}, RealWorldQA~\cite{lmmseval2024}, MM-Vet~\cite{yu2023mmvet}, and MME~\cite{fu2024mme} (reporting both perception and cognition); image generation on GenEval~\cite{ghosh2024geneval} (nine metrics total). Prior method scores are reported as context only.
 
-Unless stated otherwise, all runs share the same hyperparameters: 10k steps with AdamW in bfloat16, learning rate $1\times10^{-6}$, LoRA rank 16 ($\alpha{=}32$, dropout $0.05$), and a 3:2 understanding-to-generation schedule. Self-consistency uses $N{=}7$ prompt perturbations, the Proposer samples $K{=}3$ candidate questions per image, and STE uses a rolling window of 128 samples.
+Unless stated otherwise, all runs share the same hyperparameters: 10k steps with AdamW in bfloat16, learning rate $1\times10^{-6}$, LoRA rank 16 ($\alpha{=}32$, dropout $0.05$), and a 3:2 understanding-to-generation schedule. Self-consistency uses $N{=}7$ prompt perturbations, the Proposer samples $K{=}3$ candidate questions per image, and STE uses a rolling window of 128 samples. For BLIP3o, the Generator adapter includes DiT LoRA trained with reward-weighted denoising; this is still a frozen-backbone LoRA-only update, not full DiT fine-tuning.
 
 \subsection{Results and Analysis}
 \label{sec:main_results}
@@ -76,7 +76,7 @@ We run ablations on BLIP3o-8B with the same compute budget as the full method (T
   \label{fig:training_dynamics}
 \end{figure}
 
-Figure~\ref{fig:training_dynamics} tracks normalized reward curves over 10k steps. For visual understanding, all three backbones show a consistent two-phase pattern: STE drives exploration in the early stages before self-consistency entropy takes over as the primary difficulty signal. For image generation, rewards increase monotonically without plateaus across all three paradigms, confirming that KL-regularized optimization with a frozen backbone ensures stable training.
+Figure~\ref{fig:training_dynamics} tracks normalized reward curves over 10k steps. For visual understanding, all three backbones show a consistent two-phase pattern: STE drives exploration in the early stages before self-consistency entropy takes over as the primary difficulty signal. For image generation, rewards increase monotonically without plateaus across all three paradigms, confirming that adapter-only optimization with a frozen backbone remains stable across both token-based and diffusion/flow generators.
 
 \FloatBarrier
 

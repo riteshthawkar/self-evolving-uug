@@ -24,8 +24,8 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 #     1. Proposer writes generation spec (prompt + QA) for a real image
 #     2. Generator creates candidate images from the spec
 #     3. Solver scores candidates by answering QA → combined_score reward
-#     4. Generator LoRA updated via GRPO (generation reward)          ✓
-#     5. DiT weights updated via RWR (denoising reward)               ✓
+#     4. Generator/DiT LoRA updated via diffusion denoising reward    ✓
+#     5. DiT LoRA updated via RWR (denoising reward)                  ✓
 #     6. Solver LoRA updated via REINFORCE (combined_score)           ✓
 #     7. Proposer LoRA updated via dual reward (entropy + quality)    ✓
 #
@@ -62,16 +62,23 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_3k/images}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/final/E6_single_step}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
+MIN_DATA_IMAGES="${MIN_DATA_IMAGES:-6000}"
+ALLOW_SMALL_DATA="${ALLOW_SMALL_DATA:-0}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E6_single_step}"
 RUN_NAME="E6_single_step_s42"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
 RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+MASTER_PORT="${MASTER_PORT:-29528}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 TRAIN_ENTRY="${TRAIN_ENTRY:-$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+LOG_EVERY="${LOG_EVERY:-1}"
+SAVE_EVERY="${SAVE_EVERY:-50}"
+SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-50}"
 
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
@@ -242,10 +249,13 @@ if [[ ! -d "$DATA_DIR" ]]; then
   echo "[E6] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
   exit 1
 fi
-if ! find "$DATA_DIR" -type f \
-    \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) \
-    -print -quit | grep -q .; then
-  echo "[E6] ERROR: DATA_DIR has no image files: $DATA_DIR" >&2
+IMAGE_COUNT="$(find "$DATA_DIR" -type f \
+  \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" -o -iname "*.bmp" -o -iname "*.tiff" \) \
+  | wc -l | tr -d '[:space:]')"
+if [[ "$IMAGE_COUNT" -lt "$MIN_DATA_IMAGES" && "$ALLOW_SMALL_DATA" != "1" ]]; then
+  echo "[E6] ERROR: DATA_DIR has $IMAGE_COUNT images; paper protocol requires at least $MIN_DATA_IMAGES." >&2
+  echo "[E6] Prepare data with: bash scripts/self_evolving/paper/prepare_data_6k.sh" >&2
+  echo "[E6] For smoke tests only, set ALLOW_SMALL_DATA=1." >&2
   exit 1
 fi
 
@@ -265,7 +275,7 @@ fi
 "$PYTHON_BIN" -m torch.distributed.run \
   --standalone \
   --nproc_per_node "$NPROC_PER_NODE" \
-  --master_port 29528 \
+  --master_port "$MASTER_PORT" \
   "$TRAIN_ENTRY" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
@@ -279,11 +289,11 @@ fi
   --cuda_device 0 \
   \
   `# ── Training schedule ──────────────────────────────────────────────────` \
-  --total_steps 10000 \
-  --save_every 50 \
-  --log_every 1 \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every "$LOG_EVERY" \
   --max_checkpoints "${MAX_CHECKPOINTS:-10000}" \
-  --save_generated_images_every 50 \
+  --save_generated_images_every "$SAVE_GENERATED_IMAGES_EVERY" \
   --deterministic \
   \
   `# ── Model / LoRA ───────────────────────────────────────────────────────` \
@@ -292,7 +302,7 @@ fi
   --lora_r 16 \
   --lora_alpha 32 \
   --lora_dropout 0.05 \
-  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
   \
   `# ── Optimiser (understanding-side GRPO) ────────────────────────────────` \
   --lr 1e-6 \
@@ -306,7 +316,7 @@ fi
   --enable_solver_updates \
   --solver_update_freq 1 \
   \
-  `# ── Generator GRPO ─────────────────────────────────────────────────────` \
+  `# ── Generator token policy path; BLIP3o routes to DiT denoising ────────` \
   --generator_update_rule grpo \
   --generator_missing_trace_strategy skip \
   --grpo_clip_ratio 0.2 \
@@ -367,7 +377,7 @@ fi
   \
   `# ── Cycle: ALL generation steps — solver trains via gen_step_solver_update` \
   `# No separate U-steps. Every step is a G-step where ALL components update:` \
-  `# Generator GRPO + DiT RWR + Solver REINFORCE + Proposer dual reward.    ` \
+  `# Generator DiT RWR + Solver REINFORCE + Proposer dual reward.           ` \
   --understanding_steps_per_cycle 0 \
   --generation_steps_per_cycle 5 \
   --synthetic_solver_update_freq 0 \

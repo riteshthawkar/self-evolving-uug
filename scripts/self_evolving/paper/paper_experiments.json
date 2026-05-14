@@ -1,0 +1,632 @@
+{
+  "schema_version": 1,
+  "paper": {
+    "title": "Ask, Solve, Generate: Self-Evolving Unified Multimodal Understanding and Generation via Self-Consistency Rewards",
+    "submission_id": "ECCV-2026-2837"
+  },
+  "protocol": {
+    "seed": 42,
+    "total_steps": 10000,
+    "precision": "bfloat16",
+    "optimizer": "AdamW",
+    "learning_rate": 1e-6,
+    "weight_decay": 0.01,
+    "grad_clip": 1.0,
+    "grad_accum_steps": 1,
+    "lora": {
+      "rank": 16,
+      "alpha": 32,
+      "dropout": 0.05,
+      "targets": "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+      "solver_merger_targets": "visual.merger.mlp.0,visual.merger.mlp.2",
+      "blip3o_dit_targets": "attn2.to_q,attn2.to_k,attn2.to_v,attn2.to_out.0,caption_projection.linear_1,caption_projection.linear_2"
+    },
+    "schedule": {
+      "joint": "3U:2G",
+      "understanding_only": "5U:0G",
+      "generation_only": "0U:5G",
+      "two_stage": "10000 U-only steps followed by 10000 G-only steps on the same 10000-image subset; Proposer/Solver frozen during generation stage"
+    },
+    "sampling": {
+      "proposer_candidates": 3,
+      "solver_prompt_framings": 7,
+      "generation_candidates": 3,
+      "ste_window": 128
+    },
+    "generation_reward_weights": {
+      "qa_fidelity": 0.65,
+      "cycle_consistency": 0.2,
+      "diversity": 0.1,
+      "contradiction_penalty": 0.2
+    },
+    "default_data_dir": "data/joint_6k/images",
+    "minimum_data_images": 6000,
+    "expected_data_sources": [
+      "coco",
+      "sa1b",
+      "textvqa",
+      "gqa",
+      "laion_coco"
+    ],
+    "default_gpus_per_run": 8
+  },
+  "training_experiments": [
+    {
+      "id": "blip3o_joint",
+      "backbone": "BLIP3o-8B",
+      "purpose": "Main joint 3U:2G run for paper tables and dynamics.",
+      "script": "scripts/self_evolving/final/E1_main_joint.sh",
+      "output_dir": "outputs/blip3o/E1_main_joint",
+      "legacy_output_dirs": [
+        "runs/final/E1_main_joint"
+      ],
+      "required": true
+    },
+    {
+      "id": "blip3o_understanding_only",
+      "backbone": "BLIP3o-8B",
+      "purpose": "Understanding-only loop ablation.",
+      "script": "scripts/self_evolving/final/E2_understanding_only.sh",
+      "output_dir": "outputs/blip3o/E2_understanding_only",
+      "legacy_output_dirs": [
+        "runs/final/E2_understanding_only"
+      ],
+      "required": true
+    },
+    {
+      "id": "blip3o_generation_only",
+      "backbone": "BLIP3o-8B",
+      "purpose": "Generation-only loop ablation.",
+      "script": "scripts/self_evolving/final/E3_generation_only.sh",
+      "output_dir": "outputs/blip3o/E3_generation_only",
+      "legacy_output_dirs": [
+        "runs/final/E3_generation_only"
+      ],
+      "required": true
+    },
+    {
+      "id": "blip3o_no_dit_rwr",
+      "backbone": "BLIP3o-8B",
+      "purpose": "Ablate DiT reward-weighted regression while keeping the joint schedule.",
+      "script": "scripts/self_evolving/final/E4_no_dit_rwr.sh",
+      "output_dir": "outputs/blip3o/E4_no_dit_rwr",
+      "legacy_output_dirs": [
+        "runs/final/E4_no_dit_rwr"
+      ],
+      "required": true
+    },
+    {
+      "id": "blip3o_synthetic_loop",
+      "backbone": "BLIP3o-8B",
+      "purpose": "Generated-only/imageless loop control.",
+      "script": "scripts/self_evolving/final/E5_synthetic_loop.sh",
+      "output_dir": "outputs/blip3o/E5_synthetic_loop",
+      "legacy_output_dirs": [
+        "runs/final/E5_synthetic_loop"
+      ],
+      "required": true
+    },
+    {
+      "id": "blip3o_single_step",
+      "backbone": "BLIP3o-8B",
+      "purpose": "Unified generation-step update ablation.",
+      "script": "scripts/self_evolving/final/E6_single_step.sh",
+      "output_dir": "outputs/blip3o/E6_single_step",
+      "legacy_output_dirs": [
+        "runs/final/E6_single_step"
+      ],
+      "required": false
+    },
+    {
+      "id": "blip3o_two_stage",
+      "backbone": "BLIP3o-8B",
+      "purpose": "Rebuttal control: understanding first, then frozen Proposer/Solver generation training.",
+      "script": "scripts/self_evolving/final/E7_two_stage.sh",
+      "output_dir": "outputs/blip3o/E7_two_stage",
+      "data_dir": "data/joint_pool_10k/images",
+      "env": {
+        "TWO_STAGE_IMAGE_SAMPLES": "10000",
+        "STAGE1_STEPS": "10000",
+        "STAGE2_STEPS": "10000",
+        "TOTAL_STEPS": "20000"
+      },
+      "required": true
+    },
+    {
+      "id": "bagel_joint",
+      "backbone": "BAGEL-7B",
+      "purpose": "Flow-matching backbone joint run.",
+      "script": "Bagel/scripts/B1_unified_training.sh",
+      "output_dir": "outputs/bagel/B1_unified_training",
+      "legacy_output_dirs": [
+        "runs/final/BAGEL_exp",
+        "Bagel/scripts/runs"
+      ],
+      "required": true,
+      "required_env": [
+        "MODEL_PATH"
+      ]
+    },
+    {
+      "id": "bagel_understanding_only",
+      "backbone": "BAGEL-7B",
+      "purpose": "Flow-matching understanding-only ablation.",
+      "script": "Bagel/scripts/B1_unified_training.sh",
+      "output_dir": "outputs/bagel/B2_understanding_only",
+      "required": false,
+      "required_env": [
+        "MODEL_PATH"
+      ],
+      "env": {
+        "EXPERIMENT": "unified_self_evolving",
+        "UNDERSTANDING_STEPS_PER_CYCLE": "5",
+        "GENERATION_STEPS_PER_CYCLE": "0"
+      }
+    },
+    {
+      "id": "bagel_generation_only",
+      "backbone": "BAGEL-7B",
+      "purpose": "Flow-matching generation-only ablation.",
+      "script": "Bagel/scripts/B1_unified_training.sh",
+      "output_dir": "outputs/bagel/B3_generation_only",
+      "required": false,
+      "required_env": [
+        "MODEL_PATH"
+      ],
+      "env": {
+        "EXPERIMENT": "unified_self_evolving",
+        "UNDERSTANDING_STEPS_PER_CYCLE": "0",
+        "GENERATION_STEPS_PER_CYCLE": "5"
+      }
+    },
+    {
+      "id": "vargpt_joint",
+      "backbone": "VARGPT-v1.1",
+      "purpose": "Autoregressive unified backbone joint run.",
+      "script": "vargpt_1_1/VARGPT-family-training/examples/train_self_evolving/run_self_evolving.sh",
+      "script_args": [
+        "joint"
+      ],
+      "output_dir": "outputs/vargpt/joint",
+      "required": true
+    },
+    {
+      "id": "vargpt_understanding_only",
+      "backbone": "VARGPT-v1.1",
+      "purpose": "Autoregressive understanding-only ablation.",
+      "script": "vargpt_1_1/VARGPT-family-training/examples/train_self_evolving/run_self_evolving.sh",
+      "script_args": [
+        "u_only"
+      ],
+      "output_dir": "outputs/vargpt/u_only",
+      "required": false
+    },
+    {
+      "id": "vargpt_generation_only",
+      "backbone": "VARGPT-v1.1",
+      "purpose": "Autoregressive generation-only ablation.",
+      "script": "vargpt_1_1/VARGPT-family-training/examples/train_self_evolving/run_self_evolving.sh",
+      "script_args": [
+        "gen_only"
+      ],
+      "output_dir": "outputs/vargpt/gen_only",
+      "required": false
+    }
+  ],
+  "blip3o_table_reproduction": [
+    {
+      "table": "main_ablation",
+      "experiments": [
+        {
+          "id": "blip3o_ablate_no_ste",
+          "launcher_env": {
+            "SOLVER_TOKEN_ENTROPY_ENABLED": "0"
+          }
+        },
+        {
+          "id": "blip3o_ablate_no_self_consistency",
+          "launcher_env": {
+            "PROPOSER_SAMPLE_ENTROPY_WEIGHT": "0.0"
+          }
+        },
+        {
+          "id": "blip3o_ablate_no_prompt_perturbation",
+          "launcher_env": {
+            "SOLVER_PPS_ENABLED": "0"
+          }
+        },
+        {
+          "id": "blip3o_ablate_no_qa_fidelity",
+          "launcher_env": {
+            "REWARD_SPEC_WEIGHT": "0.0"
+          }
+        },
+        {
+          "id": "blip3o_ablate_no_cycle_consistency",
+          "launcher_env": {
+            "REWARD_CYCLE_WEIGHT": "0.0"
+          }
+        }
+      ]
+    },
+    {
+      "table": "rebuttal_ste_aggregation",
+      "experiments": [
+        {
+          "id": "blip3o_ste_mean",
+          "launcher_env": {
+            "SOLVER_TOKEN_ENTROPY_AGGREGATION": "mean"
+          }
+        }
+      ]
+    },
+    {
+      "table": "table_param_strategy",
+      "experiments": [
+        {
+          "id": "blip3o_strategy_lora",
+          "launcher_env": {
+            "USE_LORA": "1",
+            "LOAD_IN_4BIT": "0"
+          }
+        },
+        {
+          "id": "blip3o_strategy_qlora",
+          "launcher_env": {
+            "USE_LORA": "1",
+            "LOAD_IN_4BIT": "1",
+            "BNB_4BIT_QUANT_TYPE": "nf4",
+            "BNB_4BIT_COMPUTE_DTYPE": "bfloat16"
+          }
+        },
+        {
+          "id": "blip3o_strategy_sft_self_generated",
+          "script": "scripts/self_evolving/paper/run_blip3o_sft_self_generated.sh",
+          "launcher_env": {
+            "GENERATED_MIX_DIR": "outputs/blip3o/E5_synthetic_loop/generated_mix_pool"
+          }
+        },
+        {
+          "id": "blip3o_strategy_full_finetune",
+          "launcher_env": {
+            "USE_LORA": "0",
+            "LOAD_IN_4BIT": "0"
+          }
+        }
+      ]
+    },
+    {
+      "table": "supp_lora_rank",
+      "experiments": [
+        {
+          "id": "blip3o_lora_r4",
+          "launcher_env": {
+            "LORA_R": "4"
+          }
+        },
+        {
+          "id": "blip3o_lora_r8",
+          "launcher_env": {
+            "LORA_R": "8"
+          }
+        },
+        {
+          "id": "blip3o_lora_r16",
+          "launcher_env": {
+            "LORA_R": "16"
+          }
+        },
+        {
+          "id": "blip3o_lora_r32",
+          "launcher_env": {
+            "LORA_R": "32"
+          }
+        },
+        {
+          "id": "blip3o_lora_r64",
+          "launcher_env": {
+            "LORA_R": "64"
+          }
+        }
+      ]
+    },
+    {
+      "table": "supp_pps_count",
+      "experiments": [
+        {
+          "id": "blip3o_pps_n3",
+          "launcher_env": {
+            "NUM_SOLVER_SAMPLES": "3"
+          }
+        },
+        {
+          "id": "blip3o_pps_n5",
+          "launcher_env": {
+            "NUM_SOLVER_SAMPLES": "5"
+          }
+        },
+        {
+          "id": "blip3o_pps_n7",
+          "launcher_env": {
+            "NUM_SOLVER_SAMPLES": "7"
+          }
+        },
+        {
+          "id": "blip3o_pps_n9",
+          "launcher_env": {
+            "NUM_SOLVER_SAMPLES": "9"
+          }
+        },
+        {
+          "id": "blip3o_pps_n11",
+          "launcher_env": {
+            "NUM_SOLVER_SAMPLES": "11"
+          }
+        }
+      ]
+    },
+    {
+      "table": "supp_proposer_candidates",
+      "experiments": [
+        {
+          "id": "blip3o_proposer_k1",
+          "launcher_env": {
+            "PROPOSER_NUM_CANDIDATES": "1"
+          }
+        },
+        {
+          "id": "blip3o_proposer_k3",
+          "launcher_env": {
+            "PROPOSER_NUM_CANDIDATES": "3"
+          }
+        },
+        {
+          "id": "blip3o_proposer_k5",
+          "launcher_env": {
+            "PROPOSER_NUM_CANDIDATES": "5"
+          }
+        }
+      ]
+    },
+    {
+      "table": "supp_ste_window",
+      "experiments": [
+        {
+          "id": "blip3o_ste_w64",
+          "launcher_env": {
+            "SOLVER_TOKEN_ENTROPY_WINDOW_SIZE": "64"
+          }
+        },
+        {
+          "id": "blip3o_ste_w128",
+          "launcher_env": {
+            "SOLVER_TOKEN_ENTROPY_WINDOW_SIZE": "128"
+          }
+        },
+        {
+          "id": "blip3o_ste_w256",
+          "launcher_env": {
+            "SOLVER_TOKEN_ENTROPY_WINDOW_SIZE": "256"
+          }
+        }
+      ]
+    },
+    {
+      "table": "supp_optimization",
+      "experiments": [
+        {
+          "id": "blip3o_lr_5e7",
+          "launcher_env": {
+            "LR": "5e-7"
+          }
+        },
+        {
+          "id": "blip3o_lr_1e6",
+          "launcher_env": {
+            "LR": "1e-6"
+          }
+        },
+        {
+          "id": "blip3o_lr_2e6",
+          "launcher_env": {
+            "LR": "2e-6"
+          }
+        },
+        {
+          "id": "blip3o_wd_0",
+          "launcher_env": {
+            "WEIGHT_DECAY": "0.0"
+          }
+        },
+        {
+          "id": "blip3o_wd_0p01",
+          "launcher_env": {
+            "WEIGHT_DECAY": "0.01"
+          }
+        },
+        {
+          "id": "blip3o_wd_0p05",
+          "launcher_env": {
+            "WEIGHT_DECAY": "0.05"
+          }
+        },
+        {
+          "id": "blip3o_dropout_0",
+          "launcher_env": {
+            "LORA_DROPOUT": "0.0"
+          }
+        },
+        {
+          "id": "blip3o_dropout_0p05",
+          "launcher_env": {
+            "LORA_DROPOUT": "0.05"
+          }
+        },
+        {
+          "id": "blip3o_dropout_0p10",
+          "launcher_env": {
+            "LORA_DROPOUT": "0.10"
+          }
+        },
+        {
+          "id": "blip3o_kl_0p005",
+          "launcher_env": {
+            "KL_COEF": "0.005"
+          }
+        },
+        {
+          "id": "blip3o_kl_0p01",
+          "launcher_env": {
+            "KL_COEF": "0.01"
+          }
+        },
+        {
+          "id": "blip3o_kl_0p020",
+          "launcher_env": {
+            "KL_COEF": "0.020"
+          }
+        }
+      ]
+    },
+    {
+      "table": "supp_generation",
+      "experiments": [
+        {
+          "id": "blip3o_gen_l1",
+          "launcher_env": {
+            "NUM_GENERATIONS": "1"
+          }
+        },
+        {
+          "id": "blip3o_gen_l3",
+          "launcher_env": {
+            "NUM_GENERATIONS": "3"
+          }
+        },
+        {
+          "id": "blip3o_gen_l5",
+          "launcher_env": {
+            "NUM_GENERATIONS": "5"
+          }
+        },
+        {
+          "id": "blip3o_min_qa1",
+          "launcher_env": {
+            "MIN_SPEC_QA_PAIRS": "1"
+          }
+        },
+        {
+          "id": "blip3o_min_qa2",
+          "launcher_env": {
+            "MIN_SPEC_QA_PAIRS": "2"
+          }
+        },
+        {
+          "id": "blip3o_min_qa3",
+          "launcher_env": {
+            "MIN_SPEC_QA_PAIRS": "3"
+          }
+        },
+        {
+          "id": "blip3o_reward_qa_0p50",
+          "launcher_env": {
+            "REWARD_SPEC_WEIGHT": "0.50"
+          }
+        },
+        {
+          "id": "blip3o_reward_qa_0p65",
+          "launcher_env": {
+            "REWARD_SPEC_WEIGHT": "0.65"
+          }
+        },
+        {
+          "id": "blip3o_reward_qa_0p80",
+          "launcher_env": {
+            "REWARD_SPEC_WEIGHT": "0.80"
+          }
+        },
+        {
+          "id": "blip3o_reward_cycle_0p10",
+          "launcher_env": {
+            "REWARD_CYCLE_WEIGHT": "0.10"
+          }
+        },
+        {
+          "id": "blip3o_reward_cycle_0p20",
+          "launcher_env": {
+            "REWARD_CYCLE_WEIGHT": "0.20"
+          }
+        },
+        {
+          "id": "blip3o_reward_cycle_0p30",
+          "launcher_env": {
+            "REWARD_CYCLE_WEIGHT": "0.30"
+          }
+        },
+        {
+          "id": "blip3o_min_spec_quality_0p25",
+          "launcher_env": {
+            "MIN_SPEC_QUALITY_FOR_UPDATE": "0.25"
+          }
+        },
+        {
+          "id": "blip3o_min_spec_quality_0p35",
+          "launcher_env": {
+            "MIN_SPEC_QUALITY_FOR_UPDATE": "0.35"
+          }
+        },
+        {
+          "id": "blip3o_min_spec_quality_0p45",
+          "launcher_env": {
+            "MIN_SPEC_QUALITY_FOR_UPDATE": "0.45"
+          }
+        }
+      ]
+    }
+  ],
+  "evaluation_sets": [
+    {
+      "id": "understanding_core",
+      "metrics": [
+        "MMMU",
+        "MMBench",
+        "TextVQA",
+        "SEED-Bench",
+        "RealWorldQA",
+        "MM-Vet",
+        "MME-P",
+        "MME-C"
+      ]
+    },
+    {
+      "id": "generation_core",
+      "metrics": [
+        "GenEval",
+        "DPG-Bench",
+        "WISE"
+      ]
+    }
+  ],
+  "rebuttal_evidence": [
+    {
+      "id": "two_stage_control",
+      "script": "scripts/self_evolving/final/E7_two_stage.sh",
+      "description": "Compare joint alternating training against understanding-first then generation-only training."
+    },
+    {
+      "id": "answer_length_stats",
+      "script": "scripts/self_evolving/paper/rebuttal_stats.py",
+      "description": "Report solver answer token-length distribution for STE length-normalization concern."
+    },
+    {
+      "id": "compute_cost",
+      "script": "scripts/self_evolving/paper/rebuttal_stats.py",
+      "description": "Estimate observed and projected wall-clock/GPU-hour training cost."
+    },
+    {
+      "id": "generation_extra_benchmarks",
+      "script": "scripts/self_evolving/paper/run_generation_evals.sh",
+      "description": "Run GenEval, DPG-Bench, and WISE for base/ours checkpoints."
+    }
+  ]
+}

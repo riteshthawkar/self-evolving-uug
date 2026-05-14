@@ -86,16 +86,21 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 # DATA_DIR is needed for pool init; U-steps use 100% replay buffer (generated images)
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_3k/images}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/final/E5_synthetic_loop}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E5_synthetic_loop}"
 RUN_NAME="E5_synthetic_loop_s42"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
 RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+MASTER_PORT="${MASTER_PORT:-29527}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 TRAIN_ENTRY="${TRAIN_ENTRY:-$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+LOG_EVERY="${LOG_EVERY:-1}"
+SAVE_EVERY="${SAVE_EVERY:-50}"
+SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-50}"
 
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
@@ -289,7 +294,7 @@ fi
 "$PYTHON_BIN" -m torch.distributed.run \
   --standalone \
   --nproc_per_node "$NPROC_PER_NODE" \
-  --master_port 29527 \
+  --master_port "$MASTER_PORT" \
   "$TRAIN_ENTRY" \
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
@@ -303,11 +308,11 @@ fi
   --cuda_device 0 \
   \
   `# ── Training schedule ──────────────────────────────────────────────────` \
-  --total_steps 10000 \
-  --save_every 50 \
-  --log_every 1 \
+  --total_steps "$TOTAL_STEPS" \
+  --save_every "$SAVE_EVERY" \
+  --log_every "$LOG_EVERY" \
   --max_checkpoints "${MAX_CHECKPOINTS:-10000}" \
-  --save_generated_images_every 50 \
+  --save_generated_images_every "$SAVE_GENERATED_IMAGES_EVERY" \
   --deterministic \
   \
   `# ── Model / LoRA ───────────────────────────────────────────────────────` \
@@ -316,7 +321,7 @@ fi
   --lora_r 16 \
   --lora_alpha 32 \
   --lora_dropout 0.05 \
-  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mm_projector \
+  --lora_targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
   \
   `# ── Optimiser (understanding-side GRPO) ────────────────────────────────` \
   --lr 1e-6 \
@@ -330,7 +335,7 @@ fi
   --enable_solver_updates \
   --solver_update_freq 1 \
   \
-  `# ── Generator GRPO ─────────────────────────────────────────────────────` \
+  `# ── Generator token policy path; BLIP3o routes to DiT denoising ────────` \
   --generator_update_rule grpo \
   --generator_missing_trace_strategy skip \
   --grpo_clip_ratio 0.2 \

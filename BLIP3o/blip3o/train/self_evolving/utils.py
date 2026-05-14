@@ -4,6 +4,7 @@ Ported from self_evolving/experiments/understanding.py.
 """
 
 import contextlib
+import datetime as dt
 import importlib.util
 import json
 import math
@@ -12,7 +13,7 @@ import pathlib
 import random
 import re
 import subprocess
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -171,7 +172,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 # Default LoRA targets
 # ---------------------------------------------------------------------------
-DEFAULT_LORA_TARGETS = (
+DEFAULT_TEXT_LORA_TARGETS = (
     "q_proj",
     "k_proj",
     "v_proj",
@@ -179,7 +180,27 @@ DEFAULT_LORA_TARGETS = (
     "gate_proj",
     "up_proj",
     "down_proj",
+)
+
+DEFAULT_LORA_TARGETS = DEFAULT_TEXT_LORA_TARGETS
+
+DEFAULT_LEGACY_LORA_TARGETS = (
+    *DEFAULT_TEXT_LORA_TARGETS,
     "mm_projector",
+)
+
+DEFAULT_SOLVER_MERGER_LORA_TARGETS = (
+    "visual.merger.mlp.0",
+    "visual.merger.mlp.2",
+)
+
+DEFAULT_DIT_LORA_TARGETS = (
+    "attn2.to_q",
+    "attn2.to_k",
+    "attn2.to_v",
+    "attn2.to_out.0",
+    "caption_projection.linear_1",
+    "caption_projection.linear_2",
 )
 
 # ---------------------------------------------------------------------------
@@ -769,16 +790,300 @@ def _prepare_mm_inputs(
 # ---------------------------------------------------------------------------
 
 
+def _gradients_are_finite(params: Iterable[torch.nn.Parameter]) -> bool:
+    """Return False if any materialized gradient contains NaN/Inf values."""
+    for p in params:
+        if p.grad is None:
+            continue
+        try:
+            if not bool(torch.isfinite(p.grad.detach()).all().item()):
+                return False
+        except RuntimeError:
+            return False
+    return True
+
+
 def _clip_grad_norm_multi_device(
     params: Iterable[torch.nn.Parameter], max_norm: float
-):
+) -> bool:
+    """Clip gradients grouped by device and report whether they stayed finite.
+
+    The training loop treats ``False`` as a skipped optimizer step.  This keeps
+    AdamW moment estimates from being polluted by NaN/Inf gradients, which was a
+    common failure mode in unstable early BLIP3o runs.
+    """
+    params = list(params)
+    if not _gradients_are_finite(params):
+        return False
     grouped: Dict[torch.device, List[torch.nn.Parameter]] = {}
     for p in params:
         if p.grad is None:
             continue
         grouped.setdefault(p.grad.device, []).append(p)
     for group in grouped.values():
-        torch.nn.utils.clip_grad_norm_(group, max_norm)
+        total_norm = torch.nn.utils.clip_grad_norm_(group, max_norm)
+        if not bool(torch.isfinite(torch.as_tensor(total_norm)).all().item()):
+            return False
+    return _gradients_are_finite(params)
+
+
+def _strict_jsonable(value: Any) -> Any:
+    """Convert records to strict JSON values with non-finite floats as null."""
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return _strict_jsonable(value.detach().cpu().item())
+        return _strict_jsonable(value.detach().cpu().tolist())
+    if isinstance(value, dict):
+        return {str(k): _strict_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_strict_jsonable(v) for v in value]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (int, str, bool)) or value is None:
+        return value
+    try:
+        return _strict_jsonable(float(value))
+    except Exception:
+        return str(value)
+
+
+TRAINING_MONITOR_COLUMNS: Tuple[str, ...] = (
+    "timestamp_utc",
+    "step",
+    "phase",
+    "health",
+    "nan_detected",
+    "nonfinite_fields",
+    "image_path",
+    "reward_mean",
+    "reward_max",
+    "reward_min",
+    "best_reward",
+    "spec_quality",
+    "solver_reward_raw_mean",
+    "solver_reward_soft_mean",
+    "proposer_reward",
+    "entropy_nats",
+    "majority_fraction",
+    "generator_objective",
+    "generator_mode",
+    "generator_did_step",
+    "generator_skip",
+    "generator_ce_loss",
+    "generator_kl_loss",
+    "generator_total_loss",
+    "generator_valid_tokens",
+    "generator_kl_coef",
+    "dit_did_step",
+    "dit_skip",
+    "dit_loss",
+    "dit_objective",
+    "dit_reward",
+    "proposer_did_step",
+    "proposer_skip",
+    "proposer_ce_loss",
+    "proposer_kl_loss",
+    "proposer_total_loss",
+    "proposer_valid_tokens",
+    "proposer_kl_coef",
+    "solver_did_step",
+    "solver_skip",
+    "solver_ce_loss",
+    "solver_kl_loss",
+    "solver_total_loss",
+    "solver_valid_tokens",
+    "solver_kl_coef",
+    "forced_tail_tokens",
+    "generator_baseline",
+    "proposer_baseline",
+    "solver_baseline",
+    "step_duration_sec",
+)
+
+
+def _append_training_monitor_record(
+    jsonl_path: pathlib.Path,
+    tsv_path: pathlib.Path,
+    record: Dict[str, Any],
+):
+    """Append a concise strict-JSONL record and a spreadsheet-friendly TSV row."""
+    payload = _strict_jsonable(dict(record))
+    payload.setdefault("timestamp_utc", dt.datetime.utcnow().isoformat(timespec="seconds") + "Z")
+
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n")
+
+    columns = TRAINING_MONITOR_COLUMNS
+    write_header = not tsv_path.exists() or tsv_path.stat().st_size == 0
+    with tsv_path.open("a", encoding="utf-8") as f:
+        if write_header:
+            f.write("\t".join(columns) + "\n")
+        row = []
+        for col in columns:
+            val = payload.get(col)
+            if isinstance(val, (dict, list)):
+                cell = json.dumps(val, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            elif val is None:
+                cell = ""
+            else:
+                cell = str(val)
+            row.append(cell.replace("\t", " ").replace("\n", " "))
+        f.write("\t".join(row) + "\n")
+
+
+def _watch_fmt(value: Any) -> str:
+    if value is None or value == "":
+        return "-"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    try:
+        val = float(value)
+    except Exception:
+        text = str(value).strip().replace("\t", " ").replace("\n", " ")
+        return text[:96] if len(text) > 96 else text
+    if not math.isfinite(val):
+        return "-"
+    if val == 0.0:
+        return "0"
+    if abs(val) >= 1000 or abs(val) < 0.001:
+        return f"{val:.3e}"
+    return f"{val:.4g}"
+
+
+def _watch_first(payload: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _append_training_watch_record(watch_path: pathlib.Path, record: Dict[str, Any]):
+    """Append a short, human-readable line for live training monitoring."""
+    payload = _strict_jsonable(dict(record))
+    payload.setdefault("timestamp_utc", dt.datetime.utcnow().isoformat(timespec="seconds") + "Z")
+    phase = str(payload.get("phase") or "").strip().lower()
+
+    parts = [
+        str(payload.get("timestamp_utc")),
+        f"step={_watch_fmt(payload.get('step'))}",
+        f"phase={_watch_fmt(payload.get('phase'))}",
+        f"health={_watch_fmt(payload.get('health'))}",
+    ]
+
+    if phase.startswith("u") or phase == "understanding":
+        parts.extend(
+            [
+                f"Rraw={_watch_fmt(payload.get('solver_reward_raw_mean'))}",
+                f"Rsoft={_watch_fmt(payload.get('solver_reward_soft_mean'))}",
+                f"PropR={_watch_fmt(payload.get('proposer_reward'))}",
+                f"H={_watch_fmt(payload.get('entropy_nats'))}",
+                f"maj={_watch_fmt(payload.get('majority_fraction'))}",
+                f"SCE={_watch_fmt(payload.get('solver_ce_loss'))}",
+                f"SKL={_watch_fmt(payload.get('solver_kl_loss'))}",
+                f"Sstep={_watch_fmt(payload.get('solver_did_step'))}",
+                f"Sskip={_watch_fmt(payload.get('solver_skip'))}",
+                f"PCE={_watch_fmt(payload.get('proposer_ce_loss'))}",
+                f"PKL={_watch_fmt(payload.get('proposer_kl_loss'))}",
+                f"Pstep={_watch_fmt(payload.get('proposer_did_step'))}",
+                f"Pskip={_watch_fmt(payload.get('proposer_skip'))}",
+                f"tok={_watch_fmt(_watch_first(payload, 'solver_valid_tokens', 'proposer_valid_tokens'))}",
+            ]
+        )
+    else:
+        parts.extend(
+            [
+                f"Rmean={_watch_fmt(payload.get('reward_mean'))}",
+                f"Rmax={_watch_fmt(payload.get('reward_max'))}",
+                f"best={_watch_fmt(payload.get('best_reward'))}",
+                f"spec={_watch_fmt(payload.get('spec_quality'))}",
+                f"obj={_watch_fmt(payload.get('generator_objective'))}",
+                f"mode={_watch_fmt(payload.get('generator_mode'))}",
+                f"GCE={_watch_fmt(payload.get('generator_ce_loss'))}",
+                f"GKL={_watch_fmt(payload.get('generator_kl_loss'))}",
+                f"Gstep={_watch_fmt(payload.get('generator_did_step'))}",
+                f"Gskip={_watch_fmt(payload.get('generator_skip'))}",
+                f"DitLoss={_watch_fmt(payload.get('dit_loss'))}",
+                f"DitStep={_watch_fmt(payload.get('dit_did_step'))}",
+                f"DitSkip={_watch_fmt(payload.get('dit_skip'))}",
+                f"Pstep={_watch_fmt(payload.get('proposer_did_step'))}",
+                f"Pskip={_watch_fmt(payload.get('proposer_skip'))}",
+                f"Sstep={_watch_fmt(payload.get('solver_did_step'))}",
+                f"Sskip={_watch_fmt(payload.get('solver_skip'))}",
+            ]
+        )
+
+    parts.extend(
+        [
+            f"nan={_watch_fmt(payload.get('nan_detected'))}",
+            f"bad={_watch_fmt(payload.get('nonfinite_fields'))}",
+            f"dt={_watch_fmt(payload.get('step_duration_sec'))}s",
+        ]
+    )
+
+    watch_path.parent.mkdir(parents=True, exist_ok=True)
+    with watch_path.open("a", encoding="utf-8") as f:
+        f.write(" ".join(parts) + "\n")
+
+
+def _default_code_run_registry_dir() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parent / "training_runs"
+
+
+def _save_code_run_registry(
+    *,
+    run_dir: pathlib.Path,
+    config: Dict[str, Any],
+    git_info: Dict[str, Any],
+    environment: Dict[str, Any],
+    registry_dir: Optional[str] = None,
+) -> pathlib.Path:
+    """Mirror lightweight run metadata beside the training code.
+
+    Heavy artifacts remain in ``output_dir``.  This registry keeps the exact
+    launch configuration, environment, git state, and output directory together
+    with the training package so experiments are easier to audit later.
+    """
+    configured = registry_dir
+    if configured is None:
+        configured = os.environ.get("SELF_EVOLVING_CODE_RUN_REGISTRY")
+    if configured is not None and str(configured).strip().lower() in {"", "0", "false", "none", "disabled"}:
+        raise RuntimeError("code run registry disabled")
+
+    root = pathlib.Path(configured).expanduser().resolve() if configured else _default_code_run_registry_dir()
+    entry = root / run_dir.name
+    entry.mkdir(parents=True, exist_ok=True)
+
+    manifest = {
+        "created_at_utc": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "run_name": run_dir.name,
+        "output_dir": str(run_dir),
+        "config_path": str(run_dir / "config.json"),
+        "git_info_path": str(run_dir / "git_info.json"),
+        "environment_path": str(run_dir / "environment.json"),
+    }
+    _json_dump(entry / "manifest.json", manifest)
+    _json_dump(entry / "config.json", config)
+    _json_dump(entry / "git_info.json", git_info)
+    _json_dump(entry / "environment.json", environment)
+    with (entry / "output_dir.txt").open("w", encoding="utf-8") as f:
+        f.write(str(run_dir) + "\n")
+
+    latest = root / "latest"
+    try:
+        if latest.is_symlink() or latest.exists():
+            if latest.is_dir() and not latest.is_symlink():
+                pass
+            else:
+                latest.unlink()
+        if not latest.exists():
+            latest.symlink_to(entry.name, target_is_directory=True)
+    except Exception:
+        pass
+    return entry
 
 
 def _collect_trainable_params(
@@ -789,10 +1094,15 @@ def _collect_trainable_params(
     if adapter_name is None:
         return [p for _, p in trainable]
 
+    def _belongs_to_role_adapter(name: str) -> bool:
+        if ".dit." in name or name.startswith("dit."):
+            return False
+        return (f".{adapter_name}." in name) or (f"{adapter_name}." in name)
+
     selected = [
         p
         for n, p in trainable
-        if (f".{adapter_name}." in n) or (f"{adapter_name}." in n)
+        if _belongs_to_role_adapter(n)
     ]
     if not selected:
         preview = [name for name, _ in trainable[:20]]

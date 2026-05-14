@@ -19,7 +19,7 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 # Usage:
 #   CHECKPOINT_DIR=/path/to/step_00500 bash understanding_eval_our.sh
 #   CHECKPOINT_DIR=/path/to/step_00500 NUM_GPUS=8 bash understanding_eval_our.sh
-#   CHECKPOINT_DIR=/path/to/step_00500 ADAPTER=solver TASKS="realworldqa,textvqa,gqa" bash understanding_eval_our.sh
+#   CHECKPOINT_DIR=/path/to/step_00500 ADAPTER=solver TASKS="realworldqa,textvqa" bash understanding_eval_our.sh
 
 # ─── Multi-GPU configuration ───
 NUM_GPUS="${NUM_GPUS:-8}"
@@ -39,7 +39,7 @@ export PYTHONPATH="${BLIP3O_ROOT}:${BLIP3O_ROOT}/eval/lmms-eval:${PYTHONPATH:-}"
 BASE_MODEL="${BASE_MODEL:-BLIP3o/BLIP3o-Model-8B}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:?Please set CHECKPOINT_DIR to your training checkpoint path (e.g. /path/to/step_00500)}"
 ADAPTER="${ADAPTER:-solver}"
-TASKS="${TASKS:-realworldqa,textvqa}"
+TASKS="${TASKS:-mmmu_val,mmbench_en_dev,textvqa_val,seedbench,realworldqa,mmvet,mme}"
 OUTPUT_DIR="${OUTPUT_DIR:-${BLIP3O_ROOT}/eval/logs}"
 
 # Derive a suffix from the checkpoint path for log identification
