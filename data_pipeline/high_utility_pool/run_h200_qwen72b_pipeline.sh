@@ -9,7 +9,7 @@ cd "$REPO_ROOT"
 MODEL="${MODEL:-Qwen/Qwen3-VL-30B-A3B-Instruct}"
 SOURCE_DIR="${SOURCE_DIR:-data/high_utility_pool_10k/images}"
 OUTPUT_DIR="${OUTPUT_DIR:-data/high_utility_pool_10k_h200_qwen3vl30b_a3b_bf16}"
-VLM_BACKEND="${VLM_BACKEND:-openai_compatible}"
+VLM_BACKEND="${VLM_BACKEND:-transformers_vlm}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8000/v1}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8000}"
@@ -28,8 +28,9 @@ to_abs_path() {
 VLM_MAX_IMAGES="${VLM_MAX_IMAGES:-10000}"
 DRY_RUN="${DRY_RUN:-0}"
 
-# H200 serving defaults. The data builder sends VLM calls sequentially, so 4
-# concurrent sequences and 4k context are enough and reduce startup/KV memory.
+# H200 defaults. The research pipeline uses direct Transformers inference by
+# default because it removes vLLM engine startup/profiling from the critical
+# path. Set VLM_BACKEND=openai_compatible to use the optional vLLM server mode.
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
@@ -248,6 +249,10 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 echo "[h200] running VLM data audit"
+echo "[h200] VLM backend: $VLM_BACKEND"
+if [[ "$VLM_BACKEND" == "transformers_vlm" ]]; then
+  echo "[h200] using direct Hugging Face Transformers inference; vLLM server startup is skipped"
+fi
 python3 data_pipeline/high_utility_pool/build_high_utility_pool.py \
   --local_source "$SOURCE_DIR" \
   --output_dir "$OUTPUT_DIR" \

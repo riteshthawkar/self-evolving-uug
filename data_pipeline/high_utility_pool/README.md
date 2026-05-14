@@ -165,31 +165,29 @@ pip install -U -r data_pipeline/high_utility_pool/requirements-h200-vlm.txt
 ```
 
 Download or unpack the 10k image source first, then run a bounded smoke audit.
-This command uses vLLM, skips vLLM multimodal startup profiling, caps the
-expected request to one 768 px image, and writes all caches under `OUTPUT_DIR`
-except for a short vLLM IPC directory under `/tmp` to avoid Unix socket path
-limits.
+The launcher defaults to direct Hugging Face Transformers inference. This is
+slower per image than a healthy vLLM server, but it is the most reliable
+research path because it removes server startup, IPC, encoder-cache profiling,
+CUDA graph capture, and scheduler warmup from the critical path.
 
 ```bash
 SOURCE_DIR=/absolute/path/to/high_utility_pool_10k/images \
 DRY_RUN=1 \
 VLM_MAX_IMAGES=128 \
-MAX_NUM_SEQS=1 \
 bash data_pipeline/high_utility_pool/run_h200_qwen72b_pipeline.sh
 ```
 
-If vLLM still stalls during engine warmup on a particular CUDA/vLLM build, use
-the direct Transformers backend. It is slower than vLLM but removes the server,
-IPC, encoder-cache profiling, CUDA graph, and scheduler layers from the
-experiment. This is the preferred fallback for correctness/debugging because it
-uses the model's documented Transformers path and still writes the same
-`scores/vlm_scores.jsonl` cache.
+To test vLLM explicitly, opt in with `VLM_BACKEND=openai_compatible`. In this
+mode, the launcher skips vLLM multimodal startup profiling, caps the expected
+request to one 768 px image, and writes all caches under `OUTPUT_DIR` except
+for a short vLLM IPC directory under `/tmp` to avoid Unix socket path limits.
 
 ```bash
 SOURCE_DIR=/absolute/path/to/high_utility_pool_10k/images \
-VLM_BACKEND=transformers_vlm \
+VLM_BACKEND=openai_compatible \
 VLM_MAX_IMAGES=128 \
 DRY_RUN=1 \
+MAX_NUM_SEQS=1 \
 bash data_pipeline/high_utility_pool/run_h200_qwen72b_pipeline.sh
 ```
 

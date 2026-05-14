@@ -2,8 +2,8 @@
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-MODEL="${VLM_MODEL:-Qwen/Qwen2.5-VL-72B-Instruct-AWQ}"
-VLM_BACKEND="${VLM_BACKEND:-openai_compatible}"
+MODEL="${VLM_MODEL:-Qwen/Qwen3-VL-30B-A3B-Instruct}"
+VLM_BACKEND="${VLM_BACKEND:-transformers_vlm}"
 BASE_URL="${VLM_BASE_URL:-http://127.0.0.1:8000/v1}"
 SOURCE_DIR="${SOURCE_DIR:-data/high_utility_pool_10k/images}"
 OUTPUT_DIR="${OUTPUT_DIR:-data/high_utility_pool_10k_h200_vlm_audit}"
