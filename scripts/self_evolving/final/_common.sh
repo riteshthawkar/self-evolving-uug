@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
-ATTN_IMPL="${ATTN_IMPL:-sdpa}"
+ATTN_IMPL="${ATTN_IMPL:-flash_attention_2}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 
 # ── Default data ─────────────────────────────────────────────────────────────
