@@ -144,6 +144,7 @@ export DATA_DIR
 export OUTPUT_DIR
 export CACHE_ROOT
 export TRAIN_STAGE="${TRAIN_STAGE:-strict}"
+export ATTN_IMPL="${ATTN_IMPL:-flash_attention_2}"
 export TOTAL_STEPS
 export SAVE_EVERY="${SAVE_EVERY:-50}"
 export SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-50}"
@@ -158,6 +159,7 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 echo "[slurm] cuda_visible_devices=$CUDA_VISIBLE_DEVICES"
 echo "[slurm] nproc_per_node=$NPROC_PER_NODE"
 echo "[slurm] master_port=$MASTER_PORT"
+echo "[slurm] attn_impl=$ATTN_IMPL"
 echo "[slurm] wandb_mode=$WANDB_MODE"
 
 if [[ "${USE_SRUN:-0}" == "1" ]]; then
