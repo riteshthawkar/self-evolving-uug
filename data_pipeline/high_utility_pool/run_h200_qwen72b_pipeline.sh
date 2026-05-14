@@ -47,6 +47,11 @@ EXP_CACHE_ROOT="${EXP_CACHE_ROOT:-${OUTPUT_DIR}/cache_runtime}"
 EXP_CACHE_ROOT="$(to_abs_path "$EXP_CACHE_ROOT")"
 SERVER_LOG="${SERVER_LOG:-${OUTPUT_DIR}.vllm.log}"
 SERVER_LOG="$(to_abs_path "$SERVER_LOG")"
+RUN_USER="${USER:-$(id -un 2>/dev/null || id -u)}"
+# Unix IPC socket paths have a hard ~107 character limit. vLLM appends a UUID
+# to this directory, so the RPC path must stay short even when caches live in a
+# longer scratch/output directory.
+VLLM_RPC_BASE_PATH="${VLLM_RPC_BASE_PATH:-/tmp/vllm_rpc_${RUN_USER}_${PORT}}"
 
 mkdir -p "$(dirname "$OUTPUT_DIR")"
 
@@ -105,7 +110,7 @@ export VLLM_CACHE_ROOT="$EXP_CACHE_ROOT/vllm/cache"
 export VLLM_CONFIG_ROOT="$EXP_CACHE_ROOT/vllm/config"
 export VLLM_ASSETS_CACHE="$EXP_CACHE_ROOT/vllm/assets"
 export VLLM_XLA_CACHE_PATH="$EXP_CACHE_ROOT/vllm/xla_cache"
-export VLLM_RPC_BASE_PATH="$EXP_CACHE_ROOT/vllm/rpc"
+export VLLM_RPC_BASE_PATH
 export VLLM_ENGINE_READY_TIMEOUT_S
 export VLLM_USE_DEEP_GEMM
 export VLLM_NO_USAGE_STATS=1
