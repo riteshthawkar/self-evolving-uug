@@ -495,6 +495,9 @@ class GenerationSelfEvolvingTrainer:
             1, int(getattr(self.cfg, "unicorn_reconstruction_updates_per_step", 2))
         )
         self.cfg.dit_update_enabled = bool(getattr(self.cfg, "dit_update_enabled", False))
+        self.cfg.require_dit_update = bool(getattr(self.cfg, "require_dit_update", False))
+        if self.cfg.require_dit_update and not self.cfg.dit_update_enabled:
+            raise ValueError("--require_dit_update requires --dit_update_enabled.")
         self.cfg.dit_update_freq = max(1, int(getattr(self.cfg, "dit_update_freq", 1)))
         self.cfg.dit_grad_accum_steps = max(1, int(getattr(self.cfg, "dit_grad_accum_steps", 1)))
         self.cfg.dit_lr = float(getattr(self.cfg, "dit_lr", self.cfg.lr))
@@ -737,6 +740,11 @@ class GenerationSelfEvolvingTrainer:
             except Exception as exc:
                 self.dit_updater = None
                 self.cfg.dit_update_enabled = False
+                if bool(getattr(self.cfg, "require_dit_update", False)):
+                    raise RuntimeError(
+                        "DiT updates are required for this run, but DiTUpdater "
+                        f"failed to initialize: {type(exc).__name__}: {exc}"
+                    ) from exc
                 if self.is_main_process:
                     print(f"[Generation] WARNING: failed to initialize DiT updater, disabling it: {exc}")
 
@@ -1054,6 +1062,15 @@ class GenerationSelfEvolvingTrainer:
                     record.get("solver_rewards_soft_mean", record.get("solver_reward_soft_mean"))
                 ),
                 "proposer_reward": self._monitor_float(record.get("proposer_reward")),
+                "proposer_easy_reward_cap_applied": bool(
+                    record.get("proposer_easy_reward_cap_applied", False)
+                ),
+                "proposer_easy_reward_cap_value": self._monitor_float(
+                    record.get("proposer_easy_reward_cap_value")
+                ),
+                "proposer_easy_reward_cap_reason": str(
+                    record.get("proposer_easy_reward_cap_reason") or ""
+                ),
                 "entropy_nats": self._monitor_float(record.get("entropy_nats")),
                 "majority_fraction": self._monitor_float(record.get("majority_fraction")),
                 "proposer_did_step": self._monitor_bool(proposer_stats, "did_step"),
@@ -1690,6 +1707,11 @@ class GenerationSelfEvolvingTrainer:
                 core_model = _unwrap_model(model).get_model()
                 dit_module = getattr(core_model, "dit", None)
                 if dit_module is None:
+                    if bool(getattr(self.cfg, "require_dit_update", False)):
+                        raise RuntimeError(
+                            "--dit_update_enabled was requested with --require_dit_update, "
+                            "but the loaded model core does not expose `dit`."
+                        )
                     if self.is_main_process:
                         print("[Generation] WARNING: --dit_update_enabled set but model has no `dit`; disabling DiT updates.")
                     self.cfg.dit_update_enabled = False
@@ -1726,6 +1748,11 @@ class GenerationSelfEvolvingTrainer:
                             "Legacy full-DiT update path is enabled (--disable_dit_lora)."
                         )
             except Exception as exc:
+                if bool(getattr(self.cfg, "require_dit_update", False)):
+                    raise RuntimeError(
+                        "DiT updates are required for this run, but DiT training "
+                        f"parameters could not be configured: {type(exc).__name__}: {exc}"
+                    ) from exc
                 if self.is_main_process:
                     print(f"[Generation] WARNING: failed to configure DiT training params: {exc}")
                 self.cfg.dit_update_enabled = False
@@ -5042,6 +5069,11 @@ class GenerationSelfEvolvingTrainer:
                 grpo_images: list = []
                 grpo_token_ids: list = []
 
+                missing_trace_count = sum(
+                    1
+                    for sc in scored
+                    if not str(sc.get("policy_completion", "")).strip()
+                )
                 any_needs_proxy = any(
                     not str(sc.get("policy_completion", "")).strip()
                     for sc in scored
@@ -5077,7 +5109,15 @@ class GenerationSelfEvolvingTrainer:
                 local_can_update = len(grpo_completions) >= 2
                 grpo_skip_reason: Optional[str] = None
                 if not local_can_update:
-                    grpo_skip_reason = "grpo_too_few_completions"
+                    # For BLIP3o's diffusion backend, image candidates are
+                    # produced by the DiT/flow decoder and carry no discrete
+                    # generator token trace.  This is not a generic "too few"
+                    # failure; it is the expected signal to route the Generator
+                    # update to reward-weighted denoising below.
+                    if missing_trace_count == len(scored) and any_needs_proxy:
+                        grpo_skip_reason = "missing_generation_token_trace"
+                    else:
+                        grpo_skip_reason = "grpo_too_few_completions"
 
                 can_update, generator_skipped_reason = _global_update_ready(
                     local_can_update,
@@ -5550,19 +5590,42 @@ class GenerationSelfEvolvingTrainer:
             and generator_skipped_reason is None
             and generator_stats is not None
         )
-        _dit_should_fallback = (
+        _missing_diffusion_trace_for_generator = bool(
             generator_update_due
             and not _generator_grpo_fired
-            and generator_skipped_reason in (
-                "missing_generation_token_trace",
-                "missing_generation_token_trace_strict",
-                "missing_trace_proxy_empty_completion",
-                "missing_trace_proxy_missing_image",
-                "dpo_proxy_empty_completion",
-                "dpo_proxy_missing_image",
+            and (
+                generator_skipped_reason in (
+                    "missing_generation_token_trace",
+                    "missing_generation_token_trace_strict",
+                    "missing_trace_proxy_empty_completion",
+                    "missing_trace_proxy_missing_image",
+                    "dpo_proxy_empty_completion",
+                    "dpo_proxy_missing_image",
+                )
+                or (
+                    generator_skipped_reason == "grpo_too_few_completions"
+                    and scored
+                    and all(
+                        not str(sc.get("policy_completion", "")).strip()
+                        for sc in scored
+                    )
+                )
             )
+        )
+        _dit_should_fallback = (
+            _missing_diffusion_trace_for_generator
             and self.dit_updater is not None
         )
+        if (
+            _missing_diffusion_trace_for_generator
+            and self.dit_updater is None
+            and bool(getattr(self.cfg, "require_dit_update", False))
+        ):
+            raise RuntimeError(
+                "Generator update has no discrete token traces, so this BLIP3o "
+                "run must route to DiT denoising, but no active DiT updater exists. "
+                "Check earlier initialization logs for the exact DiT setup failure."
+            )
 
         # Determine if the DiT should fire this step. Two triggers:
         #   1. Explicit dit_update_freq path (legacy/override, independent frequency).

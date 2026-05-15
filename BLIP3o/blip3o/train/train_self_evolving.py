@@ -141,6 +141,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prop_entropy_mu_min", type=float, default=0.05)
     p.add_argument("--prop_entropy_mu_max", type=float, default=1.5)
     p.add_argument("--zero_entropy_reward_cap", type=float, default=0.10)
+    p.add_argument("--proposer_easy_reward_cap", type=float, default=0.20)
+    p.add_argument("--proposer_easy_gotcha_reward_cap", type=float, default=0.50)
     p.add_argument("--proposer_non_objective_penalty", type=float, default=0.20)
     p.add_argument("--proposer_low_info_majority_penalty", type=float, default=0.50)
     p.add_argument("--proposer_slot_compiler_enabled", action="store_true", default=True)
@@ -463,6 +465,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--dit_update_enabled", action="store_true", default=False)
     p.add_argument("--disable_dit_update", dest="dit_update_enabled", action="store_false")
+    p.add_argument(
+        "--require_dit_update",
+        action="store_true",
+        default=False,
+        help="Fail fast if --dit_update_enabled cannot create an active DiT updater.",
+    )
     p.add_argument("--dit_update_freq", type=int, default=1)
     p.add_argument("--dit_lr", type=float, default=5e-7)
     p.add_argument("--dit_weight_decay", type=float, default=0.01)
@@ -675,6 +683,8 @@ def _build_understanding_config(args):
         prop_entropy_mu_min=args.prop_entropy_mu_min,
         prop_entropy_mu_max=args.prop_entropy_mu_max,
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
+        proposer_easy_reward_cap=args.proposer_easy_reward_cap,
+        proposer_easy_gotcha_reward_cap=args.proposer_easy_gotcha_reward_cap,
         proposer_non_objective_penalty=args.proposer_non_objective_penalty,
         proposer_low_info_majority_penalty=args.proposer_low_info_majority_penalty,
         proposer_slot_compiler_enabled=args.proposer_slot_compiler_enabled,
@@ -873,6 +883,7 @@ def _build_generation_config(args):
         unicorn_reconstruction_enable_proposer=args.unicorn_reconstruction_enable_proposer,
         unicorn_reconstruction_enable_generator=args.unicorn_reconstruction_enable_generator,
         dit_update_enabled=args.dit_update_enabled,
+        require_dit_update=args.require_dit_update,
         dit_update_freq=args.dit_update_freq,
         dit_lr=args.dit_lr,
         dit_weight_decay=args.dit_weight_decay,
@@ -925,6 +936,8 @@ def _build_generation_config(args):
         prop_entropy_mu_min=args.prop_entropy_mu_min,
         prop_entropy_mu_max=args.prop_entropy_mu_max,
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
+        proposer_easy_reward_cap=args.proposer_easy_reward_cap,
+        proposer_easy_gotcha_reward_cap=args.proposer_easy_gotcha_reward_cap,
         proposer_non_objective_penalty=args.proposer_non_objective_penalty,
         proposer_low_info_majority_penalty=args.proposer_low_info_majority_penalty,
         proposer_slot_compiler_enabled=args.proposer_slot_compiler_enabled,
@@ -1170,6 +1183,7 @@ def _build_unified_config(args):
         unicorn_reconstruction_enable_proposer=args.unicorn_reconstruction_enable_proposer,
         unicorn_reconstruction_enable_generator=args.unicorn_reconstruction_enable_generator,
         dit_update_enabled=args.dit_update_enabled,
+        require_dit_update=args.require_dit_update,
         dit_update_freq=args.dit_update_freq,
         dit_lr=args.dit_lr,
         dit_weight_decay=args.dit_weight_decay,
@@ -1222,6 +1236,8 @@ def _build_unified_config(args):
         prop_entropy_mu_min=args.prop_entropy_mu_min,
         prop_entropy_mu_max=args.prop_entropy_mu_max,
         zero_entropy_reward_cap=args.zero_entropy_reward_cap,
+        proposer_easy_reward_cap=args.proposer_easy_reward_cap,
+        proposer_easy_gotcha_reward_cap=args.proposer_easy_gotcha_reward_cap,
         proposer_non_objective_penalty=args.proposer_non_objective_penalty,
         proposer_low_info_majority_penalty=args.proposer_low_info_majority_penalty,
         proposer_slot_compiler_enabled=args.proposer_slot_compiler_enabled,
