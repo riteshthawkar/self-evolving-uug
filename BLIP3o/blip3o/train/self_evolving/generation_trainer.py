@@ -158,6 +158,47 @@ def _is_dit_param_name(name: str) -> bool:
     return ".dit." in name or name.startswith("dit.")
 
 
+def _disable_gradient_checkpointing_for_peft_wrap(module: torch.nn.Module) -> bool:
+    """Disable checkpointing before wrapping a non-text DiT with PEFT.
+
+    PEFT checks ``is_gradient_checkpointing`` during ``get_peft_model`` and, for
+    PreTrainedModel instances, installs an input-embedding grad hook.  BLIP3o's
+    DiT is a PreTrainedModel wrapper around a diffusion transformer and does not
+    implement text ``get_input_embeddings()``, so that hook path raises
+    NotImplementedError.  Disabling checkpointing before the adapter injection
+    avoids the text-only hook while preserving the same LoRA parameters and
+    denoising objective.
+    """
+    disabled_any = False
+    try:
+        disable = getattr(module, "gradient_checkpointing_disable", None)
+        if callable(disable):
+            disable()
+            disabled_any = True
+    except Exception:
+        pass
+
+    for submodule in module.modules():
+        for attr in ("gradient_checkpointing", "_gradient_checkpointing"):
+            if not hasattr(submodule, attr):
+                continue
+            try:
+                if bool(getattr(submodule, attr)):
+                    disabled_any = True
+                setattr(submodule, attr, False)
+            except Exception:
+                pass
+        cfg = getattr(submodule, "config", None)
+        if cfg is not None and hasattr(cfg, "_gradient_checkpointing"):
+            try:
+                if bool(getattr(cfg, "_gradient_checkpointing")):
+                    disabled_any = True
+                setattr(cfg, "_gradient_checkpointing", False)
+            except Exception:
+                pass
+    return disabled_any
+
+
 def _build_lora_config(
     *,
     r: int,
@@ -1725,6 +1766,7 @@ class GenerationSelfEvolvingTrainer:
                         dropout=float(getattr(self.cfg, "dit_lora_dropout", 0.0)),
                         targets=dit_targets,
                     )
+                    dit_gc_disabled = _disable_gradient_checkpointing_for_peft_wrap(dit_module)
                     core_model.dit = get_peft_model(dit_module, dit_lora_cfg)
                     for name, param in core_model.dit.named_parameters():
                         param.requires_grad_("lora_" in name)
@@ -1737,6 +1779,11 @@ class GenerationSelfEvolvingTrainer:
                             f"alpha={int(getattr(self.cfg, 'dit_lora_alpha', 32))}, "
                             f"trainable_dit_lora_params={counts['dit']}"
                         )
+                        if dit_gc_disabled:
+                            print(
+                                "[Generation] DiT gradient checkpointing disabled before PEFT wrapping "
+                                "to avoid text-embedding gradient hooks on the diffusion transformer."
+                            )
                         if counts["dit"] <= 0:
                             print("[Generation] WARNING: no trainable DiT LoRA parameters matched the configured targets.")
                 else:
