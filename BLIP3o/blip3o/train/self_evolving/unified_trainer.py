@@ -3478,6 +3478,13 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if difficulty_bucket_observed == "easy" and (not proposer_warm_start_active) and (not _ste_is_primary):
             proposer_reward = min(proposer_reward, easy_reward_floor)
 
+        easy_update_majority_frac_threshold = float(
+            getattr(self.cfg, "easy_update_majority_frac_threshold", 0.95)
+        )
+        easy_update_majority_frac_threshold = max(
+            0.0, min(1.0, easy_update_majority_frac_threshold)
+        )
+
         # Final safety cap for collapsed/easy questions.  STE and structural
         # certificates are useful auxiliary signals, but they must not override
         # the observed self-consistency result: if all solver passes agree, the
@@ -3568,12 +3575,6 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             solver_update_scale = 1.0
         solver_skip_update_on_easy = bool(
             getattr(self.cfg, "solver_skip_update_on_easy", True)
-        )
-        easy_update_majority_frac_threshold = float(
-            getattr(self.cfg, "easy_update_majority_frac_threshold", 0.95)
-        )
-        easy_update_majority_frac_threshold = max(
-            0.0, min(1.0, easy_update_majority_frac_threshold)
         )
         entropy_iqr_filter_min_majority_frac = float(
             getattr(self.cfg, "entropy_iqr_filter_min_majority_frac", 0.80)
