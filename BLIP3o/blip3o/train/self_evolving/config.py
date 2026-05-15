@@ -78,6 +78,8 @@ class UnderstandingSelfEvolvingConfig:
     prop_entropy_mu_min: float = 0.40
     prop_entropy_mu_max: float = 1.5
     zero_entropy_reward_cap: float = 0.10  # hard negative magnitude when entropy=0 (trivially easy)
+    proposer_easy_reward_cap: float = 0.20  # max proposer reward for collapsed/easy questions
+    proposer_easy_gotcha_reward_cap: float = 0.50  # max reward when dual-track answers disagree
     proposer_unsolvable_reward_cap: float = 0.10  # hard negative magnitude when question is unsolvable
     solver_unsolvable_maj_threshold: float = 0.20  # majority fraction at or below this → question treated as unsolvable
     proposer_non_objective_penalty: float = 0.20  # subtract from proposer reward when question is subjective/open-ended
@@ -422,6 +424,7 @@ class GenerationSelfEvolvingConfig:
     unicorn_reconstruction_enable_proposer: bool = True
     unicorn_reconstruction_enable_generator: bool = True
     dit_update_enabled: bool = False
+    require_dit_update: bool = False
     dit_update_freq: int = 1
     dit_lr: float = 5e-7
     dit_weight_decay: float = 0.01
@@ -510,6 +513,8 @@ class GenerationSelfEvolvingConfig:
     prop_entropy_mu_min: float = 0.40
     prop_entropy_mu_max: float = 1.5
     zero_entropy_reward_cap: float = 0.10
+    proposer_easy_reward_cap: float = 0.20
+    proposer_easy_gotcha_reward_cap: float = 0.50
     proposer_unsolvable_reward_cap: float = 0.10
     solver_unsolvable_maj_threshold: float = 0.20
     proposer_non_objective_penalty: float = 0.20

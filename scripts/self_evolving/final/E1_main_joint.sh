@@ -128,6 +128,7 @@ DIT_ARGS=()
 if [[ "$DIT_UPDATE_ENABLED" == "1" ]]; then
   DIT_ARGS+=(
     --dit_update_enabled
+    --require_dit_update
     --dit_lora_r "$DIT_LORA_R"
     --dit_lora_alpha "$DIT_LORA_ALPHA"
     --dit_lora_dropout "$DIT_LORA_DROPOUT"
@@ -219,6 +220,8 @@ if [[ "$TRAIN_STAGE" == "warmup" ]]; then
     --proposer_certificate_strict_struct
     --proposer_certificate_min_score 0.60
     --proposer_easy_reward_floor -0.65
+    --proposer_easy_reward_cap 0.20
+    --proposer_easy_gotcha_reward_cap 0.45
     --proposer_all_easy_rank_spread 0.20
     --all_easy_explore_trigger 2
     --all_easy_explore_steps 16
@@ -260,6 +263,8 @@ elif [[ "$TRAIN_STAGE" == "strict" ]]; then
     --proposer_certificate_strict_struct
     --proposer_certificate_min_score 0.60
     --proposer_easy_reward_floor -0.65
+    --proposer_easy_reward_cap 0.20
+    --proposer_easy_gotcha_reward_cap 0.45
     --proposer_all_easy_rank_spread 0.20
     --all_easy_explore_trigger 2
     --all_easy_explore_steps 16

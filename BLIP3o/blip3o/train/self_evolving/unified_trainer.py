@@ -3478,6 +3478,51 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
         if difficulty_bucket_observed == "easy" and (not proposer_warm_start_active) and (not _ste_is_primary):
             proposer_reward = min(proposer_reward, easy_reward_floor)
 
+        # Final safety cap for collapsed/easy questions.  STE and structural
+        # certificates are useful auxiliary signals, but they must not override
+        # the observed self-consistency result: if all solver passes agree, the
+        # proposer did not produce useful exploration signal for the solver.
+        # A verified dual-track disagreement is allowed a higher cap, but
+        # rejected/all-easy candidate groups stay under the conservative cap.
+        proposer_easy_reward_cap_applied = False
+        proposer_easy_reward_cap_value = None
+        proposer_easy_reward_cap_reason = ""
+        easy_cap = max(
+            -1.0,
+            min(1.0, float(getattr(self.cfg, "proposer_easy_reward_cap", 0.20))),
+        )
+        gotcha_cap = max(
+            easy_cap,
+            min(1.0, float(getattr(self.cfg, "proposer_easy_gotcha_reward_cap", 0.50))),
+        )
+        collapsed_easy_for_reward_cap = bool(
+            difficulty_bucket_observed == "easy"
+            or easy_solver_case
+            or (entropy_nats < 1e-6)
+            or (maj_frac >= easy_update_majority_frac_threshold)
+            or question_rejected
+            or all_easy_candidate_group
+        )
+        verified_dual_track_gap = bool(
+            (not _tracks_agree)
+            and bool(_intuitive_answer_vote)
+            and not question_rejected
+            and not all_easy_candidate_group
+            and solver_informative_gate
+        )
+        if collapsed_easy_for_reward_cap:
+            proposer_easy_reward_cap_reason = (
+                "dual_track_gap" if verified_dual_track_gap else "collapsed_easy"
+            )
+            cap_value = gotcha_cap if verified_dual_track_gap else easy_cap
+            if question_rejected or all_easy_candidate_group or not solver_informative_gate:
+                cap_value = min(cap_value, easy_cap)
+                proposer_easy_reward_cap_reason = "rejected_or_all_easy"
+            proposer_easy_reward_cap_value = cap_value
+            if proposer_reward > cap_value:
+                proposer_reward = cap_value
+                proposer_easy_reward_cap_applied = True
+
         proposer_reward_pre_clip = float(proposer_reward)
         proposer_reward = max(-1.0, min(1.0, proposer_reward))
         proposer_reward_clipped = bool(abs(proposer_reward - proposer_reward_pre_clip) > 1e-8)
@@ -4422,6 +4467,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             "proposer_reward": proposer_reward,
             "proposer_reward_pre_clip": proposer_reward_pre_clip,
             "proposer_reward_clipped": proposer_reward_clipped,
+            "proposer_easy_reward_cap_applied": proposer_easy_reward_cap_applied,
+            "proposer_easy_reward_cap_value": proposer_easy_reward_cap_value,
+            "proposer_easy_reward_cap_reason": proposer_easy_reward_cap_reason,
             "proposer_bonus_enabled": proposer_bonus_enabled,
             "proposer_bonus_warm_enabled": proposer_bonus_warm_enabled,
             "proposer_certificate_weight_used": proposer_certificate_weight_used,
@@ -4622,6 +4670,9 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 "proposer_reward": proposer_reward,
                 "proposer_reward_pre_clip": proposer_reward_pre_clip,
                 "proposer_reward_clipped": proposer_reward_clipped,
+                "proposer_easy_reward_cap_applied": proposer_easy_reward_cap_applied,
+                "proposer_easy_reward_cap_value": proposer_easy_reward_cap_value,
+                "proposer_easy_reward_cap_reason": proposer_easy_reward_cap_reason,
                 "proposer_bonus_enabled": proposer_bonus_enabled,
                 "proposer_bonus_warm_enabled": proposer_bonus_warm_enabled,
                 "proposer_certificate_weight_used": proposer_certificate_weight_used,
