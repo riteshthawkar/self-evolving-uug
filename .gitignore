@@ -151,8 +151,11 @@ htmlcov/
 # etc.
 !.gitkeep
 
+# Project page branch assets.
+!assets/
+!assets/**
+
 
 run_eval.sh
 data/
 data.tar
-
