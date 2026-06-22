@@ -1,14 +1,17 @@
 # Self-Evolving UUG Project Page
 
-Static project page for:
+Static GitHub Pages-style project page for:
 
 **Ask, Solve, Generate: Self-Evolving Unified Multimodal Understanding and Generation via Self-Consistency Rewards**
 
-This branch is intended for GitHub Pages-style hosting. The page is self-contained:
+The page follows the same high-level presentation pattern as the Mobile-O project page: centered hero, author/affiliation block, release buttons, metric cards, section shortcuts, paper figures, results tables, citation, and acknowledgements.
 
-- `index.html` contains the page content.
-- `styles.css` contains the visual system and responsive layout.
-- `script.js` contains lightweight interactions for figure tabs and BibTeX copy.
-- `assets/` contains manuscript figures, icons, and the current paper PDF.
+Files:
 
-Before public release, update the author block in `index.html` and replace the paper/model URLs if final release URLs differ.
+- `index.html` contains the project-page content.
+- `styles.css` contains the responsive visual system.
+- `script.js` contains tab switching and BibTeX copy behavior.
+- `assets/figures/` contains PNG exports from the current manuscript figures.
+- `assets/paper/self-evolving-uug.pdf` contains the current manuscript PDF.
+
+Before public release, replace the GitHub and HuggingFace URLs if the final release locations differ, and update the BibTeX entry with the arXiv or venue metadata.
