@@ -11,32 +11,18 @@
     <meta property="og:type" content="website">
     <meta property="og:image" content="assets/figures/intro.png">
     <meta name="twitter:card" content="summary_large_image">
-    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap">
+    <link rel="stylesheet" href="styles.css?v=6">
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
 
-    <header class="site-header" aria-label="Primary navigation">
-      <nav class="top-nav">
-        <a class="brand" href="#top" aria-label="Ask, Solve, Generate home">
-          <span class="brand-mark" aria-hidden="true">ASG</span>
-          <span>Self-Evolving UUG</span>
-        </a>
-        <div class="nav-links" aria-label="Page sections">
-          <a href="#overview">Overview</a>
-          <a href="#method">Method</a>
-          <a href="#results">Results</a>
-          <a href="#analysis">Analysis</a>
-          <a href="#release">Release</a>
-          <a href="#citation">Citation</a>
-        </div>
-      </nav>
-    </header>
-
     <main id="main">
       <section class="hero" id="top">
         <div class="hero-content">
-          <div class="project-label">Unified multimodal post-training from unlabeled images</div>
+          <div class="project-label">Self-evolving multimodal post-training</div>
           <h1>Ask, Solve, Generate</h1>
           <p class="hero-subtitle">Self-Evolving Unified Multimodal Understanding and Generation via Self-Consistency Rewards</p>
 
@@ -58,8 +44,8 @@
           </div>
 
           <div class="action-row" aria-label="Release links">
-            <a class="button primary" href="assets/paper/self-evolving-uug.pdf">
-              <span class="file-badge" aria-hidden="true">PDF</span>
+            <a class="button" href="assets/paper/self-evolving-uug.pdf">
+              <img src="assets/icons/arxiv.svg" alt="" aria-hidden="true">
               <span>Paper</span>
             </a>
             <a class="button" href="https://github.com/riteshthawkar/self-evolving-uug">
@@ -71,156 +57,150 @@
               <span>Models</span>
             </a>
           </div>
-
-          <div class="stat-grid" aria-label="Key paper statistics">
-            <div class="stat-card">
-              <strong>10k</strong>
-              <span>unlabeled images</span>
-            </div>
-            <div class="stat-card">
-              <strong>10k</strong>
-              <span>training steps</span>
-            </div>
-            <div class="stat-card">
-              <strong>3</strong>
-              <span>backbone families</span>
-            </div>
-            <div class="stat-card">
-              <strong>+3%</strong>
-              <span>GenEval on each backbone</span>
-            </div>
-          </div>
         </div>
 
-        <figure class="hero-figure">
+        <figure class="hero-figure reveal">
           <img src="assets/figures/intro.png" alt="High-level overview of the self-evolving framework for unified understanding and generation." decoding="async">
           <figcaption>Three LoRA roles operate on a frozen unified backbone: the Proposer asks, the Solver answers and evaluates, and the Generator synthesizes images under Solver-mediated rewards.</figcaption>
         </figure>
       </section>
 
       <nav class="section-nav" aria-label="Section shortcuts">
-        <a href="#overview">Overview</a>
-        <a href="#method">Method</a>
-        <a href="#training">Training</a>
+        <a href="#tldr">TL;DR</a>
+        <a href="#challenges">Challenges</a>
+        <a href="#framework">Framework</a>
+        <a href="#ingredients">Key ideas</a>
         <a href="#results">Results</a>
-        <a href="#qualitative">Qualitative</a>
-        <a href="#release">Release</a>
+        <a href="#analysis">Analysis</a>
+        <a href="#comparison">Comparison</a>
+        <a href="#citation">Cite</a>
       </nav>
 
-      <section class="section overview" id="overview">
+      <section class="section tldr" id="tldr">
         <div class="section-head centered">
-          <p class="kicker">Overview</p>
-          <h2>Can a unified LMM improve itself without labels?</h2>
-          <p>Most unified understanding-and-generation models still depend on curated post-training supervision. This work removes that requirement and derives both understanding and generation signals from the model itself.</p>
+          <p class="kicker">TL;DR</p>
+          <h2>Can a unified model improve understanding <em>and</em> generation using only unlabeled images?</h2>
+          <p>Most unified understanding-and-generation models still depend on curated post-training supervision &mdash; VQA labels, preference data, captions, or external reward models. We show that a single self-evolving recipe can improve <em>both</em> capabilities from raw images alone, with no human annotations and no task-trained reward or judge models, and that the same recipe transfers across diffusion, rectified-flow, and autoregressive backbones.</p>
         </div>
 
-        <div class="overview-grid">
+        <div class="overview-grid reveal">
           <article>
-            <h3>Problem</h3>
-            <p>Unlabeled images contain rich visual structure, but standard post-training pipelines require VQA labels, preference data, captions, or external reward models.</p>
+            <h3>No labels</h3>
+            <p>Training uses a 10k-image unlabeled pool. All captions, boxes, and QA annotations are discarded &mdash; supervision is derived entirely from the model's own consistency.</p>
           </article>
           <article>
-            <h3>Core idea</h3>
-            <p>Split a frozen unified backbone into three LoRA roles: a Proposer, a Solver, and a Generator. Each role is trained only from internal consistency and Solver-mediated feedback.</p>
+            <h3>No external judges</h3>
+            <p>Rewards come from the model itself through self-consistency and a Solver that evaluates its own generations &mdash; no GPT-as-judge, reward model, or preference data.</p>
           </article>
           <article>
-            <h3>Main result</h3>
-            <p>One matched recipe improves all eight reported understanding metrics and raises GenEval by +3 percentage points on BLIP3o-8B, BAGEL, and VARGPT-v1.1.</p>
+            <h3>One recipe, three paradigms</h3>
+            <p>The same role decomposition, reward design, and schedule improve all eight understanding metrics and lift GenEval by +3 points on BLIP3o-8B, BAGEL, and VARGPT-v1.1.</p>
           </article>
         </div>
       </section>
 
-      <section class="section method" id="method">
-        <div class="section-head split">
-          <div>
-            <p class="kicker">Method</p>
-            <h2>Ask, solve, and generate with internal rewards.</h2>
-          </div>
-          <p>The framework does not add architecture-specific modules. It freezes the base model and trains lightweight role adapters with a common reward design.</p>
+      <section class="section challenges" id="challenges">
+        <div class="section-head centered">
+          <p class="kicker">Why it is hard</p>
+          <h2>Removing labels exposes two failure modes.</h2>
+          <p>Naively training on self-consistency collapses the learning signal and decouples the two tasks. Our two core ideas directly target these failures.</p>
         </div>
 
-        <figure class="framed-figure">
+        <div class="overview-grid reveal">
+          <article>
+            <span class="role-index">01</span>
+            <h3>Reward degeneracy</h3>
+            <p>Sample-level self-consistency saturates: when every prompt framing yields the same answer, entropy hits zero even if the model is confidently wrong, leaving no curriculum signal. <b>Our fix:</b> Solver Token Entropy (STE), a continuous token-level difficulty signal that stays informative after agreement saturates.</p>
+          </article>
+          <article>
+            <span class="role-index">02</span>
+            <h3>Weak cross-task coupling</h3>
+            <p>Understanding and generation are usually optimized with separate objectives, so better comprehension does little for image synthesis. <b>Our fix:</b> the Solver becomes the internal evaluator for generation, so understanding gains directly sharpen generation-side rewards.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section framework" id="framework">
+        <div class="section-head centered">
+          <p class="kicker">Framework</p>
+          <h2>Three internal roles on one frozen backbone.</h2>
+          <p>We add no architecture-specific modules. The base model stays frozen, and three lightweight LoRA adapters take on the Proposer, Solver, and Generator roles under a shared reward design.</p>
+        </div>
+
+        <figure class="framed-figure reveal">
           <img src="assets/figures/framework.png" alt="Detailed Proposer, Solver, and Generator framework with understanding and generation loops." loading="lazy" decoding="async">
         </figure>
 
-        <div class="role-grid" aria-label="Framework roles">
+        <div class="role-grid reveal" aria-label="Framework roles">
           <article class="role-card">
             <span class="role-index">01</span>
             <h3>Proposer</h3>
-            <p>Samples candidate visual questions from unlabeled images and is rewarded for questions near the Solver's competence frontier.</p>
+            <p>Samples visual questions from unlabeled images, rewarded for questions near the Solver's competence frontier &mdash; neither trivial nor unsolvable.</p>
           </article>
           <article class="role-card emphasized">
             <span class="role-index">02</span>
             <h3>Solver</h3>
-            <p>Answers under multiple prompt framings, supplies Solver Token Entropy, and serves as the internal evaluator for generated images.</p>
+            <p>Answers under N=7 prompt framings, supplies Solver Token Entropy, and doubles as the internal evaluator that scores generated images.</p>
           </article>
           <article class="role-card">
             <span class="role-index">03</span>
             <h3>Generator</h3>
-            <p>Produces candidate images and receives QA fidelity, cycle-consistency, diversity, and contradiction rewards from internal evaluation.</p>
+            <p>Synthesizes candidate images and is optimized from Solver-derived QA fidelity, cycle-consistency, diversity, and contradiction rewards.</p>
           </article>
         </div>
 
         <div class="paradigm-strip" aria-label="Backbone coverage">
           <div><strong>BLIP3o-8B</strong><span>diffusion generation</span></div>
-          <div><strong>BAGEL</strong><span>7B active flow matching</span></div>
-          <div><strong>VARGPT-v1.1</strong><span>7B+2B autoregressive</span></div>
+          <div><strong>BAGEL</strong><span>rectified-flow, 7B active</span></div>
+          <div><strong>VARGPT-v1.1</strong><span>autoregressive, 7B+2B</span></div>
         </div>
       </section>
 
-      <section class="section training" id="training">
+      <section class="section ingredients" id="ingredients">
         <div class="section-head centered">
-          <p class="kicker">Training pipeline</p>
-          <h2>A shared 10k-step recipe across backbones.</h2>
-          <p>All runs use a 10k-image unlabeled pool, a 3:2 understanding-to-generation schedule, LoRA rank 16, and roughly 10k training steps.</p>
+          <p class="kicker">Key ideas</p>
+          <h2>What makes label-free self-evolution work.</h2>
+          <p>Three components turn raw images into a stable training signal for both tasks.</p>
         </div>
 
-        <div class="timeline">
+        <div class="timeline reveal">
           <article>
             <span>1</span>
-            <h3>Self-consistent understanding</h3>
-            <p>The Solver answers each proposed question under N=7 prompt framings. Sample-level self-consistency and STE provide complementary difficulty signals.</p>
+            <h3>Solver Token Entropy (STE)</h3>
+            <p>A token-level uncertainty score from the Solver's next-token distributions, percentile-normalized over a rolling window. It recovers a continuous difficulty measure precisely when sample-level self-consistency goes degenerate.</p>
           </article>
           <article>
             <span>2</span>
-            <h3>Internal generation assessment</h3>
-            <p>The Generator samples L=3 candidate images. Solver-derived QA fidelity and cycle-consistent captioning score whether generated images preserve semantic facts.</p>
+            <h3>Solver-as-evaluator generation</h3>
+            <p>Generated images are scored by QA fidelity (do Solver answers match the source image?) and cycle-consistent captioning (does the caption round-trip?), giving a multi-scale, label-free generation reward.</p>
           </article>
           <article>
             <span>3</span>
-            <h3>Asymmetric coupling</h3>
-            <p>Understanding updates improve the Solver that evaluates generation, while generation updates optimize the Generator under that evolving internal evaluator.</p>
+            <h3>Solver-mediated coupling</h3>
+            <p>The loops are coupled only through the Solver: understanding updates improve the evaluator, and a stronger evaluator supplies sharper generation rewards &mdash; an asymmetric link, not a symmetric gradient exchange.</p>
           </article>
         </div>
       </section>
 
       <section class="section results" id="results">
-        <div class="section-head split">
-          <div>
-            <p class="kicker">Results</p>
-            <h2>Consistent base-versus-ours gains under matched conditions.</h2>
-          </div>
+        <div class="section-head centered">
+          <p class="kicker">Results</p>
+          <h2>Consistent base-versus-ours gains under matched conditions.</h2>
           <p>The strongest evidence is the within-backbone delta: every base checkpoint and its self-evolved counterpart are evaluated under the same inference setting.</p>
         </div>
 
-        <div class="metric-row" aria-label="Result highlights">
-          <article><strong>+3.5</strong><span>MMMU on BAGEL</span></article>
-          <article><strong>+3.6</strong><span>RWQA on VARGPT-v1.1</span></article>
-          <article><strong>+17.4</strong><span>MME-P on VARGPT-v1.1</span></article>
-          <article><strong>+9%</strong><span>BAGEL color attribution</span></article>
-        </div>
-
-        <div class="result-panels">
+        <div class="result-panels reveal">
           <article class="table-panel">
             <div class="panel-title">
               <h3>Visual understanding</h3>
-              <span>Base -> Ours</span>
+              <span>Eight benchmarks &middot; our rows highlighted, &Delta; vs. base</span>
             </div>
             <div class="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th>Backbone</th>
+                    <th>Method</th>
+                    <th>Params</th>
                     <th>MMMU</th>
                     <th>MMBench</th>
                     <th>TextVQA</th>
@@ -232,54 +212,42 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>BLIP3o-8B</td>
-                    <td>50.6 -> 52.8</td>
-                    <td>83.5 -> 86.1</td>
-                    <td>83.1 -> 85.2</td>
-                    <td>77.5 -> 79.4</td>
-                    <td>69.0 -> 70.9</td>
-                    <td>66.6 -> 68.7</td>
-                    <td>1682.6 -> 1698.4</td>
-                    <td>647.1 -> 660.3</td>
-                  </tr>
-                  <tr>
-                    <td>BAGEL</td>
-                    <td>55.3 -> 58.8</td>
-                    <td>85.0 -> 87.1</td>
-                    <td>86.0 -> 88.5</td>
-                    <td>79.3 -> 81.8</td>
-                    <td>71.2 -> 73.9</td>
-                    <td>67.2 -> 69.5</td>
-                    <td>1687.0 -> 1701.7</td>
-                    <td>701.0 -> 715.9</td>
-                  </tr>
-                  <tr>
-                    <td>VARGPT-v1.1</td>
-                    <td>48.6 -> 51.6</td>
-                    <td>81.0 -> 83.7</td>
-                    <td>82.0 -> 84.8</td>
-                    <td>76.1 -> 79.2</td>
-                    <td>67.5 -> 71.1</td>
-                    <td>51.9 -> 54.0</td>
-                    <td>1678.3 -> 1695.7</td>
-                    <td>592.9 -> 606.4</td>
-                  </tr>
+                  <tr class="group-row"><td colspan="10">Unified understanding and generation models</td></tr>
+                  <tr><td>Janus-Pro-7B</td><td>7B</td><td>41.0</td><td>79.2</td><td>&ndash;</td><td>72.1</td><td>&ndash;</td><td>50.0</td><td>1567.1</td><td>&ndash;</td></tr>
+                  <tr><td>Emu3</td><td>&ndash;</td><td>31.6</td><td>58.5</td><td>64.7</td><td>68.2</td><td>57.4</td><td>37.2</td><td>1243.8</td><td>266.1</td></tr>
+                  <tr><td>TokenFlow</td><td>&ndash;</td><td>43.2</td><td>76.8</td><td>62.3</td><td>72.6</td><td>56.6</td><td>48.2</td><td>1551.1</td><td>371.1</td></tr>
+                  <tr><td>MetaMorph</td><td>&ndash;</td><td>41.8</td><td>75.2</td><td>60.5</td><td>71.8</td><td>58.3</td><td>&ndash;</td><td>&ndash;</td><td>&ndash;</td></tr>
+
+                  <tr class="group-row"><td colspan="10">Self-evolving methods</td></tr>
+                  <tr><td>UniGame</td><td>7B</td><td>43.8</td><td>83.2</td><td>&ndash;</td><td>&ndash;</td><td>&ndash;</td><td>&ndash;</td><td>&ndash;</td><td>&ndash;</td></tr>
+                  <tr><td>SUDER</td><td>7B</td><td>&ndash;</td><td>80.1</td><td>&ndash;</td><td>71.9</td><td>&ndash;</td><td>&ndash;</td><td>&ndash;</td><td>&ndash;</td></tr>
+                  <tr><td>UniCorn</td><td>7B active</td><td>53.8</td><td>84.1</td><td>&ndash;</td><td>&ndash;</td><td>&ndash;</td><td>&ndash;</td><td>1660.0</td><td>677.0</td></tr>
+                  <tr><td>ILLUME</td><td>7B</td><td>38.2</td><td>75.1</td><td>72.1</td><td>72.9</td><td>&ndash;</td><td>37.0</td><td>1445.3</td><td>&ndash;</td></tr>
+
+                  <tr class="group-row"><td colspan="10">Our backbones (base &rarr; ours)</td></tr>
+                  <tr><td>BLIP3o-8B</td><td>8B</td><td>50.6</td><td>83.5</td><td>83.1</td><td>77.5</td><td>69.0</td><td>66.6</td><td>1682.6</td><td>647.1</td></tr>
+                  <tr class="is-ours"><td>BLIP3o-8B (Ours)</td><td>8B</td><td>52.8<span class="up">+2.2</span></td><td>86.1<span class="up">+2.6</span></td><td>85.2<span class="up">+2.1</span></td><td>79.4<span class="up">+1.9</span></td><td>70.9<span class="up">+1.9</span></td><td>68.7<span class="up">+2.1</span></td><td>1698.4<span class="up">+15.8</span></td><td>660.3<span class="up">+13.2</span></td></tr>
+                  <tr><td>BAGEL</td><td>7B active</td><td>55.3</td><td>85.0</td><td>86.0</td><td>79.3</td><td>71.2</td><td>67.2</td><td>1687.0</td><td>701.0</td></tr>
+                  <tr class="is-ours"><td>BAGEL (Ours)</td><td>7B active</td><td>58.8<span class="up">+3.5</span></td><td>87.1<span class="up">+2.1</span></td><td>88.5<span class="up">+2.5</span></td><td>81.8<span class="up">+2.5</span></td><td>73.9<span class="up">+2.7</span></td><td>69.5<span class="up">+2.3</span></td><td>1701.7<span class="up">+14.7</span></td><td>715.9<span class="up">+14.9</span></td></tr>
+                  <tr><td>VARGPT-v1.1</td><td>7B+2B</td><td>48.6</td><td>81.0</td><td>82.0</td><td>76.1</td><td>67.5</td><td>51.9</td><td>1678.3</td><td>592.9</td></tr>
+                  <tr class="is-ours"><td>VARGPT-v1.1 (Ours)</td><td>7B+2B</td><td>51.6<span class="up">+3.0</span></td><td>83.7<span class="up">+2.7</span></td><td>84.8<span class="up">+2.8</span></td><td>79.2<span class="up">+3.1</span></td><td>71.1<span class="up">+3.6</span></td><td>54.0<span class="up">+2.1</span></td><td>1695.7<span class="up">+17.4</span></td><td>606.4<span class="up">+13.5</span></td></tr>
                 </tbody>
               </table>
             </div>
+            <figcaption>Same recipe, data, roles, and schedule across backbones. Dashes indicate metrics not reported in the source paper; cross-paper rows are context only.</figcaption>
           </article>
 
           <article class="table-panel">
             <div class="panel-title">
-              <h3>GenEval generation</h3>
-              <span>Base -> Ours</span>
+              <h3>Image generation &middot; GenEval</h3>
+              <span>Six subcategories + overall &middot; our rows highlighted, &Delta; vs. base</span>
             </div>
             <div class="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th>Backbone</th>
+                    <th>Method</th>
+                    <th>Params</th>
                     <th>Single</th>
                     <th>Two obj.</th>
                     <th>Counting</th>
@@ -290,70 +258,76 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>BLIP3o-8B</td>
-                    <td>100 -> 99</td>
-                    <td>85 -> 93</td>
-                    <td>63 -> 71</td>
-                    <td>92 -> 94</td>
-                    <td>90 -> 90</td>
-                    <td>74 -> 75</td>
-                    <td>84 -> 87</td>
-                  </tr>
-                  <tr>
-                    <td>BAGEL</td>
-                    <td>99 -> 99</td>
-                    <td>94 -> 95</td>
-                    <td>81 -> 87</td>
-                    <td>88 -> 90</td>
-                    <td>64 -> 67</td>
-                    <td>63 -> 72</td>
-                    <td>82 -> 85</td>
-                  </tr>
-                  <tr>
-                    <td>VARGPT-v1.1</td>
-                    <td>96 -> 97</td>
-                    <td>53 -> 59</td>
-                    <td>48 -> 56</td>
-                    <td>83 -> 85</td>
-                    <td>13 -> 15</td>
-                    <td>21 -> 24</td>
-                    <td>53 -> 56</td>
-                  </tr>
+                  <tr class="group-row"><td colspan="9">Unified understanding and generation models</td></tr>
+                  <tr><td>Show-o</td><td>&ndash;</td><td>98</td><td>85</td><td>67</td><td>81</td><td>28</td><td>55</td><td>69</td></tr>
+                  <tr><td>Janus-Pro-7B</td><td>7B</td><td>99</td><td>89</td><td>59</td><td>90</td><td>79</td><td>66</td><td>80</td></tr>
+                  <tr><td>Emu3</td><td>&ndash;</td><td>98</td><td>71</td><td>34</td><td>81</td><td>17</td><td>21</td><td>54</td></tr>
+                  <tr><td>TokenFlow</td><td>&ndash;</td><td>97</td><td>66</td><td>40</td><td>84</td><td>17</td><td>26</td><td>55</td></tr>
+
+                  <tr class="group-row"><td colspan="9">Self-evolving methods</td></tr>
+                  <tr><td>UniGame</td><td>7B</td><td>99</td><td>91</td><td>62</td><td>93</td><td>80</td><td>68</td><td>82</td></tr>
+                  <tr><td>SUDER</td><td>7B</td><td>99</td><td>89</td><td>70</td><td>92</td><td>82</td><td>71</td><td>84</td></tr>
+                  <tr><td>UniRL (SFT)</td><td>&ndash;</td><td>99</td><td>93</td><td>62</td><td>89</td><td>55</td><td>68</td><td>77</td></tr>
+                  <tr><td>UniCorn</td><td>7B active</td><td>99</td><td>94</td><td>80</td><td>88</td><td>61</td><td>73</td><td>82</td></tr>
+                  <tr><td>ILLUME</td><td>7B</td><td>99</td><td>86</td><td>45</td><td>71</td><td>39</td><td>28</td><td>61</td></tr>
+
+                  <tr class="group-row"><td colspan="9">Our backbones (base &rarr; ours)</td></tr>
+                  <tr><td>BLIP3o-8B</td><td>8B</td><td>100</td><td>85</td><td>63</td><td>92</td><td>90</td><td>74</td><td>84</td></tr>
+                  <tr class="is-ours"><td>BLIP3o-8B (Ours)</td><td>8B</td><td>99<span class="down">-1</span></td><td>93<span class="up">+8</span></td><td>71<span class="up">+8</span></td><td>94<span class="up">+2</span></td><td>90<span class="down">+0</span></td><td>75<span class="up">+1</span></td><td>87<span class="up">+3</span></td></tr>
+                  <tr><td>BAGEL</td><td>7B active</td><td>99</td><td>94</td><td>81</td><td>88</td><td>64</td><td>63</td><td>82</td></tr>
+                  <tr class="is-ours"><td>BAGEL (Ours)</td><td>7B active</td><td>99<span class="down">+0</span></td><td>95<span class="up">+1</span></td><td>87<span class="up">+6</span></td><td>90<span class="up">+2</span></td><td>67<span class="up">+3</span></td><td>72<span class="up">+9</span></td><td>85<span class="up">+3</span></td></tr>
+                  <tr><td>VARGPT-v1.1</td><td>7B+2B</td><td>96</td><td>53</td><td>48</td><td>83</td><td>13</td><td>21</td><td>53</td></tr>
+                  <tr class="is-ours"><td>VARGPT-v1.1 (Ours)</td><td>7B+2B</td><td>97<span class="up">+1</span></td><td>59<span class="up">+6</span></td><td>56<span class="up">+8</span></td><td>85<span class="up">+2</span></td><td>15<span class="up">+2</span></td><td>24<span class="up">+3</span></td><td>56<span class="up">+3</span></td></tr>
                 </tbody>
               </table>
             </div>
+            <figcaption>A uniform +3-point overall gain on all three backbones, concentrated on composition-heavy subcategories. Cross-paper rows are context only.</figcaption>
           </article>
         </div>
       </section>
 
       <section class="section analysis" id="analysis">
-        <div class="section-head split">
-          <div>
-            <p class="kicker">Mechanism evidence</p>
-            <h2>Diagnostics explain where the gains come from.</h2>
-          </div>
+        <div class="section-head centered">
+          <p class="kicker">Mechanism evidence</p>
+          <h2>Diagnostics explain where the gains come from.</h2>
           <p>The diagnostic figures show complementary understanding signals, asymmetric loop coupling, and stable reward trajectories across model families.</p>
         </div>
 
-        <div class="tabs" role="tablist" aria-label="Diagnostic figures">
-          <button class="tab is-active" type="button" data-figure="signal" role="tab" aria-selected="true">Signal analysis</button>
-          <button class="tab" type="button" data-figure="loop" role="tab" aria-selected="false">Loop coupling</button>
-          <button class="tab" type="button" data-figure="dynamics" role="tab" aria-selected="false">Training dynamics</button>
+        <figure class="analysis-figure reveal">
+          <img src="assets/figures/signal-analysis.png" alt="Signal analysis showing STE difficulty, self-consistency entropy, and generation reward trends." loading="lazy" decoding="async">
+          <figcaption><b>Signal analysis.</b> STE and prompt-perturbed self-consistency occupy complementary difficulty regions, while QA fidelity and cycle consistency rise during generation-side training.</figcaption>
+        </figure>
+        <figure class="analysis-figure reveal">
+          <img src="assets/figures/loop-coupling.png" alt="Loop coupling analysis comparing joint training, understanding-only, and generation-only variants." loading="lazy" decoding="async">
+          <figcaption><b>Loop coupling.</b> Joint alternating training outperforms isolated and staged controls. Generation-only training improves GenEval but leaves Solver-side understanding at the base level.</figcaption>
+        </figure>
+        <figure class="analysis-figure reveal">
+          <img src="assets/figures/training-dynamics.png" alt="Training dynamics over 10k steps across BLIP3o, BAGEL, and VARGPT-v1.1." loading="lazy" decoding="async">
+          <figcaption><b>Training dynamics.</b> Across diffusion, flow-matching, and autoregressive backbones, generation rewards rise without collapse and understanding signals stabilize during the 10k-step run.</figcaption>
+        </figure>
+      </section>
+
+      <section class="section comparison" id="comparison">
+        <div class="section-head centered">
+          <p class="kicker">In context</p>
+          <h2>Matched gains without judges or curated data.</h2>
+          <p>The full result tables above already place our runs alongside prior unified and self-evolving methods. The distinction is not only the scores, but what we deliberately avoid using to reach them.</p>
         </div>
 
-        <figure class="analysis-figure" data-panel="signal">
-          <img src="assets/figures/signal-analysis.png" alt="Signal analysis showing STE difficulty, self-consistency entropy, and generation reward trends." loading="lazy" decoding="async">
-          <figcaption>STE and prompt-perturbed self-consistency occupy complementary difficulty regions, while QA fidelity and cycle consistency rise during generation-side training.</figcaption>
-        </figure>
-        <figure class="analysis-figure is-hidden" data-panel="loop">
-          <img src="assets/figures/loop-coupling.png" alt="Loop coupling analysis comparing joint training, understanding-only, and generation-only variants." loading="lazy" decoding="async">
-          <figcaption>Joint alternating training outperforms isolated and staged controls. Generation-only training improves GenEval but leaves Solver-side understanding at the base level.</figcaption>
-        </figure>
-        <figure class="analysis-figure is-hidden" data-panel="dynamics">
-          <img src="assets/figures/training-dynamics.png" alt="Training dynamics over 10k steps across BLIP3o, BAGEL, and VARGPT-v1.1." loading="lazy" decoding="async">
-          <figcaption>Across diffusion, flow-matching, and autoregressive backbones, generation rewards rise without collapse and understanding signals stabilize during the 10k-step run.</figcaption>
-        </figure>
+        <div class="overview-grid reveal compare-points">
+          <article>
+            <h3>No curated supervision</h3>
+            <p>Only raw images &mdash; no VQA labels, captions, or preference data at any stage of post-training.</p>
+          </article>
+          <article>
+            <h3>No task-trained judge</h3>
+            <p>No GPT-as-judge, reward model, or trained verifier; the Solver evaluates its own generations.</p>
+          </article>
+          <article>
+            <h3>One portable recipe</h3>
+            <p>Identical roles, rewards, and schedule across diffusion, rectified-flow, and autoregressive backbones.</p>
+          </article>
+        </div>
       </section>
 
       <section class="section qualitative" id="qualitative">
@@ -362,51 +336,31 @@
           <h2>Self-evolving training changes both answers and generated images.</h2>
           <p>Representative examples show corrections in object recognition, action understanding, and spatial reasoning, along with better color, count, and compositional fidelity in generation.</p>
         </div>
-        <figure class="wide-figure">
+        <figure class="wide-figure reveal">
           <img src="assets/figures/qualitative.png" alt="Qualitative before-and-after examples for understanding and generation across the three backbones." loading="lazy" decoding="async">
+          <figcaption><b>Overview.</b> Paired before/after results for understanding and generation across all three backbones.</figcaption>
+        </figure>
+        <figure class="wide-figure reveal">
+          <img src="assets/figures/qual-understanding.png" alt="Understanding corrections across BLIP3o-8B, BAGEL, and VARGPT-1.1 on grounding, counting, and spatial reasoning questions." loading="lazy" decoding="async">
+          <figcaption><b>Understanding.</b> Before/after answers on fine-grained recognition, counting, text grounding, and spatial reasoning. Red marks pre-training errors; green marks self-evolved corrections shared across all three backbones.</figcaption>
+        </figure>
+        <figure class="wide-figure reveal">
+          <img src="assets/figures/qual-generation-natural.png" alt="Natural compositional generation prompts showing improved attribute binding, color grounding, and positioning." loading="lazy" decoding="async">
+          <figcaption><b>Generation &mdash; natural prompts.</b> Compositional prompts (attribute&ndash;object binding, local color grounding, multi-person interaction, relative positioning) where self-evolving training tightens prompt fidelity.</figcaption>
+        </figure>
+        <figure class="wide-figure reveal">
+          <img src="assets/figures/qual-generation-geneval.png" alt="Controlled GenEval-style generation prompts covering counting, attribute binding, multi-object composition, and spatial arrangement." loading="lazy" decoding="async">
+          <figcaption><b>Generation &mdash; GenEval-style prompts.</b> Controlled prompts for counting, cross-object attribute binding, multi-object composition, and spatial arrangement, isolating the skills GenEval measures.</figcaption>
         </figure>
       </section>
 
-      <section class="section release" id="release">
-        <div class="section-head split">
-          <div>
-            <p class="kicker">Release</p>
-            <h2>Paper, code, and model adapters.</h2>
-          </div>
-          <p>The code and models are intended for public release with training, evaluation, and inference support for the self-evolving recipe.</p>
-        </div>
-
-        <div class="release-grid">
-          <a class="release-card" href="assets/paper/self-evolving-uug.pdf">
-            <span class="release-icon file-badge" aria-hidden="true">PDF</span>
-            <div>
-              <strong>Paper</strong>
-              <span>Current manuscript PDF used by this page.</span>
-            </div>
-          </a>
-          <a class="release-card" href="https://github.com/riteshthawkar/self-evolving-uug">
-            <img src="assets/icons/github.png" alt="" aria-hidden="true">
-            <div>
-              <strong>GitHub Code</strong>
-              <span>Training, evaluation, and inference code.</span>
-            </div>
-          </a>
-          <a class="release-card" href="https://huggingface.co/riteshthawkar/self-evolving-uug">
-            <img src="assets/icons/huggingface.png" alt="" aria-hidden="true">
-            <div>
-              <strong>Models</strong>
-              <span>Released LoRA adapters and checkpoints.</span>
-            </div>
-          </a>
-        </div>
-      </section>
-
       <section class="section citation" id="citation">
-        <div class="section-head split">
-          <div>
-            <p class="kicker">Citation</p>
-            <h2>Cite this work.</h2>
-          </div>
+        <div class="section-head centered">
+          <p class="kicker">Citation</p>
+          <h2>Cite this work.</h2>
+          <p>Copy the BibTeX entry below.</p>
+        </div>
+        <div class="copy-row">
           <button class="copy-button" type="button" data-copy-target="bibtex">Copy BibTeX</button>
         </div>
         <pre class="bibtex" id="bibtex"><code>@misc{thawkar2026asksolvegenerate,
@@ -415,20 +369,27 @@
   year   = {2026},
   note   = {Manuscript}
 }</code></pre>
-        <p class="citation-note">The BibTeX entry will be updated with the arXiv identifier or venue metadata after public release.</p>
       </section>
 
       <section class="section acknowledgement" id="acknowledgement">
         <div class="section-head centered narrow">
           <p class="kicker">Acknowledgements</p>
           <h2>Compute support</h2>
-          <p>The computations were enabled by resources provided by NAISS at Alvis partially funded by Swedish Research Council through grant agreement no. 2022-06725, LUMI hosted by CSC (Finland) and LUMI consortium, and by Berzelius resource provided by the Knut and Alice Wallenberg Foundation at the NSC.</p>
+          <p>The computations were enabled by resources provided by LUMI hosted by CSC (Finland) and LUMI consortium, and by Berzelius resource provided by the Knut and Alice Wallenberg Foundation at the NSC.</p>
         </div>
       </section>
     </main>
 
     <footer class="footer">
-      <p>Self-Evolving UUG &copy; 2026</p>
+      <div class="footer-inner">
+        <p>Ask, Solve, Generate &middot; Self-Evolving UUG &copy; 2026</p>
+        <div class="footer-links">
+          <a href="assets/paper/self-evolving-uug.pdf">Paper</a>
+          <a href="https://github.com/riteshthawkar/self-evolving-uug">Code</a>
+          <a href="https://huggingface.co/riteshthawkar/self-evolving-uug">Models</a>
+          <a href="#top">Back to top</a>
+        </div>
+      </div>
     </footer>
 
     <script src="script.js"></script>
