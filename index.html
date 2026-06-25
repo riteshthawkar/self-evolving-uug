@@ -134,17 +134,17 @@
         <div class="role-grid reveal" aria-label="Framework roles">
           <article class="role-card">
             <span class="role-index">01</span>
-            <h3>Proposer</h3>
+            <h3><span class="role-action">Ask</span> Proposer</h3>
             <p>Samples visual questions from unlabeled images, rewarded for questions near the Solver's competence frontier &mdash; neither trivial nor unsolvable.</p>
           </article>
           <article class="role-card emphasized">
             <span class="role-index">02</span>
-            <h3>Solver</h3>
+            <h3><span class="role-action">Solve</span> Solver</h3>
             <p>Answers under N=7 prompt framings, supplies Solver Token Entropy, and doubles as the internal evaluator that scores generated images.</p>
           </article>
           <article class="role-card">
             <span class="role-index">03</span>
-            <h3>Generator</h3>
+            <h3><span class="role-action">Generate</span> Generator</h3>
             <p>Synthesizes candidate images and is optimized from Solver-derived QA fidelity, cycle-consistency, diversity, and contradiction rewards.</p>
           </article>
         </div>
@@ -234,7 +234,7 @@
                 </tbody>
               </table>
             </div>
-            <figcaption>Same recipe, data, roles, and schedule across backbones. Dashes indicate metrics not reported in the source paper; cross-paper rows are context only.</figcaption>
+            <figcaption>Same recipe, data, roles, and schedule across backbones.</figcaption>
           </article>
 
           <article class="table-panel">
@@ -281,7 +281,7 @@
                 </tbody>
               </table>
             </div>
-            <figcaption>A uniform +3-point overall gain on all three backbones, concentrated on composition-heavy subcategories. Cross-paper rows are context only.</figcaption>
+            <figcaption>A uniform +3-point overall gain on all three backbones, concentrated on composition-heavy subcategories.</figcaption>
           </article>
         </div>
       </section>

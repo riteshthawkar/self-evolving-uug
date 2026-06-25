@@ -1,7 +1,7 @@
 :root {
   /* Neutral editorial base */
   --bg: #ffffff;
-  --bg-alt: #f7f8fa;
+  --bg-alt: #fafbfc;
   --paper: #ffffff;
   --ink: #0b1220;
   --ink-soft: #1f2937;
@@ -93,13 +93,36 @@ h3 {
 
 /* ---------- Hero ---------- */
 .hero {
+  position: relative;
+  isolation: isolate;
   width: min(var(--container), calc(100% - 40px));
   margin: 0 auto;
   padding: 5rem 0 3rem;
   text-align: center;
 }
 
+.hero::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  z-index: -1;
+  width: 100vw;
+  height: 540px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(59, 91, 219, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(59, 91, 219, 0.08) 1px, transparent 1px);
+  background-position: center top;
+  background-size: 34px 34px;
+  mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.62) 44%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.62) 44%, transparent 100%);
+}
+
 .hero-content {
+  position: relative;
+  z-index: 1;
   max-width: 880px;
   margin: 0 auto;
 }
@@ -356,7 +379,7 @@ figcaption {
   align-items: center;
   margin-bottom: -1px;
   padding: 0.85rem 1.05rem;
-  border-bottom: 2px solid transparent;
+  border-bottom: 4px solid transparent;
   color: var(--muted);
   font-size: 0.9rem;
   font-weight: 600;
@@ -370,20 +393,24 @@ figcaption {
 
 .section-nav a.is-current {
   color: var(--accent-strong);
-  border-bottom-color: var(--accent);
+  border-bottom-color: var(--accent-strong);
   font-weight: 800;
 }
 
 /* ---------- Sections ---------- */
 .section {
-  width: min(var(--container), calc(100% - 40px));
+  width: 100%;
   margin: 0 auto;
-  padding: 5rem 0;
+  padding: 5rem max(20px, calc((100% - var(--container)) / 2));
   border-top: 1px solid var(--line);
 }
 
 .section:first-of-type {
   border-top: 0;
+}
+
+.section:nth-of-type(even) {
+  background: var(--bg-alt);
 }
 
 .section-head {
@@ -537,7 +564,26 @@ figcaption {
 }
 
 .role-card h3 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
   margin-top: 0.9rem;
+}
+
+.role-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.45rem;
+  padding: 0.16rem 0.52rem;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  text-transform: uppercase;
 }
 
 /* ---------- Paradigm strip ---------- */
@@ -738,7 +784,14 @@ figcaption {
 }
 
 .panel-title h3 {
+  display: inline-flex;
+  align-items: center;
   margin: 0;
+  padding: 0.42rem 0.65rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 
 .panel-title span {
@@ -1081,7 +1134,7 @@ td .down {
   }
 
   .section {
-    padding: 3.5rem 0;
+    padding: 3.5rem 20px;
   }
 
   .panel-title {
