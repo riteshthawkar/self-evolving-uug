@@ -29,12 +29,6 @@ training loop turns each image into self-generated questions, selects reliable
 reference answers through self-consistency, and uses the same interaction signal
 to update both understanding and generation components.
 
-This repository contains the public training, inference, and evaluation code.
-The release focuses on model-side implementation. Private data-construction
-pipelines, manuscript source, local checkpoints, generated outputs, and
-local logs are intentionally not included. The arXiv link will be added after
-the public paper metadata is finalized.
-
 ---
 
 ## 🔎 Overview
