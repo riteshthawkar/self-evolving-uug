@@ -130,9 +130,6 @@ models/
 *.jpeg
 *.png
 !/assets/*.png
-!/assets/icons/
-!/assets/icons/*.png
-!/assets/icons/*.svg
 *.webp
 *.bmp
 *.tiff

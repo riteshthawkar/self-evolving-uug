@@ -3,12 +3,12 @@ Ask, Solve, Generate: Self-Evolving Unified Multimodal Understanding and Generat
 </h1>
 
 <p align="center">
-  <img src="assets/icons/arxiv.svg" alt="arXiv" height="18"> Paper coming soon &nbsp;&nbsp;|&nbsp;&nbsp;
-  <a href="https://github.com/riteshthawkar/self-evolving-uug"><img src="assets/icons/github.png" alt="GitHub" height="18"> Code</a> &nbsp;&nbsp;|&nbsp;&nbsp;
-  <a href="https://riteshthawkar.github.io/self-evolving-uug/"><img src="assets/icons/globe.png" alt="Project page" height="18"> Project Page</a> &nbsp;&nbsp;|&nbsp;&nbsp;
-  <a href="https://huggingface.co/collections/Ritesh-hf/ask-solve-generate-paper-models"><img src="assets/icons/huggingface.png" alt="Hugging Face" height="18"> Models</a> &nbsp;&nbsp;|&nbsp;&nbsp;
-  <a href="LICENSE"><img src="assets/icons/apache.svg" alt="Apache License" height="18"> License</a> &nbsp;&nbsp;|&nbsp;&nbsp;
-  <a href="https://pytorch.org/"><img src="assets/icons/pytorch.svg" alt="PyTorch" height="18"> PyTorch</a>
+  <img alt="arXiv Paper" src="https://img.shields.io/badge/arXiv-Paper_coming_soon-B31B1B.svg?logo=arxiv&logoColor=white">
+  <a href="https://github.com/riteshthawkar/self-evolving-uug"><img alt="GitHub Code" src="https://img.shields.io/badge/GitHub-Code-181717.svg?logo=github&logoColor=white"></a>
+  <a href="https://riteshthawkar.github.io/self-evolving-uug/"><img alt="Project Page" src="https://img.shields.io/badge/Project_Page-online-1f6feb.svg?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTIiIHI9IjEwIi8+PHBhdGggZD0iTTIgMTJoMjAiLz48cGF0aCBkPSJNMTIgMmExNS4zIDE1LjMgMCAwIDEgMCAyMCIvPjxwYXRoIGQ9Ik0xMiAyYTE1LjMgMTUuMyAwIDAgMCAwIDIwIi8+PC9zdmc+"></a>
+  <a href="https://huggingface.co/collections/Ritesh-hf/ask-solve-generate-paper-models"><img alt="Hugging Face Models" src="https://img.shields.io/badge/Models-HuggingFace-fcd734.svg?logo=huggingface&logoColor=black"></a>
+  <a href="LICENSE"><img alt="Apache License" src="https://img.shields.io/badge/License-Apache--2.0-CA2133.svg?logo=apache&logoColor=white"></a>
+  <a href="https://pytorch.org/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-EE4C2C.svg?logo=pytorch&logoColor=white"></a>
 </p>
 
 <p align="center">
