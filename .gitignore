@@ -129,6 +129,7 @@ models/
 *.jpg
 *.jpeg
 *.png
+!/assets/*.png
 *.webp
 *.bmp
 *.tiff

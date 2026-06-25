@@ -55,6 +55,19 @@ The main implementation is built around BLIP3o. BAGEL and VARGPT-v1.1
 integrations are included to evaluate the same self-evolving recipe on different
 unified model families.
 
+## Architecture
+
+<p align="center">
+  <img src="assets/architecture.png" alt="Ask, Solve, Generate architecture" width="100%">
+</p>
+
+The framework alternates understanding and generation steps. In the
+understanding step, the Proposer creates image-grounded questions, the Solver
+answers perturbed prompts, and self-consistency plus token-level entropy provide
+training signals. In the generation step, question-answer-derived generation
+specifications guide image synthesis, while the Solver evaluates QA fidelity and
+cycle consistency.
+
 ## Method at a Glance
 
 The release combines:
@@ -66,6 +79,30 @@ The release combines:
 - **Cycle consistency** that checks generated images against the original
   multimodal interaction.
 - **Backend adapters** for BLIP3o, BAGEL, and VARGPT-v1.1.
+
+## Main Results
+
+Results are reported as base checkpoint -> self-evolved checkpoint under
+matched evaluation settings. MME-P and MME-C use the raw MME perception and
+cognition scores; other understanding metrics are percentages.
+
+### Visual Understanding
+
+| Backbone | MMMU | MMBench | TextVQA | SEED | RWQA | MMVet | MME-P | MME-C |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BLIP3o-8B | 50.6 -> 52.8 | 83.5 -> 86.1 | 83.1 -> 85.2 | 77.5 -> 79.4 | 69.0 -> 70.9 | 66.6 -> 68.7 | 1682.6 -> 1698.4 | 647.1 -> 660.3 |
+| BAGEL | 55.3 -> 58.8 | 85.0 -> 87.1 | 86.0 -> 88.5 | 79.3 -> 81.8 | 71.2 -> 73.9 | 67.2 -> 69.5 | 1687.0 -> 1701.7 | 701.0 -> 715.9 |
+| VARGPT-v1.1 | 48.6 -> 51.6 | 81.0 -> 83.7 | 82.0 -> 84.8 | 76.1 -> 79.2 | 67.5 -> 71.1 | 51.9 -> 54.0 | 1678.3 -> 1695.7 | 592.9 -> 606.4 |
+
+### Image Generation
+
+GenEval scores are percentages.
+
+| Backbone | Single Obj. | Two Obj. | Counting | Colors | Position | Color Attr. | Overall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BLIP3o-8B | 100 -> 99 | 85 -> 93 | 63 -> 71 | 92 -> 94 | 90 -> 90 | 74 -> 75 | 84 -> 87 |
+| BAGEL | 99 -> 99 | 94 -> 95 | 81 -> 87 | 88 -> 90 | 64 -> 67 | 63 -> 72 | 82 -> 85 |
+| VARGPT-v1.1 | 96 -> 97 | 53 -> 59 | 48 -> 56 | 83 -> 85 | 13 -> 15 | 21 -> 24 | 53 -> 56 |
 
 ## Release Scope
 
