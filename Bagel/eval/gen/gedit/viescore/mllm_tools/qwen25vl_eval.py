@@ -42,12 +42,16 @@ def set_seed(seed: int):
 class Qwen25VL():
     def __init__(self) -> None:     
         attn_implementation = "flash_attention_2" if is_flash_attn_2_available() else None
+        model_name_or_path = os.environ.get(
+            "QWEN25VL_MODEL_PATH",
+            "Qwen/Qwen2.5-VL-72B-Instruct-AWQ",
+        )
         self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            "/mnt/jfs-test/pretrained_models/Qwen2.5-VL-72B-Instruct-AWQ", 
+            model_name_or_path,
             torch_dtype=torch.float16, 
             device_map="auto"
         ).eval()
-        self.processor = AutoProcessor.from_pretrained("/mnt/jfs-test/pretrained_models/Qwen2.5-VL-72B-Instruct-AWQ")
+        self.processor = AutoProcessor.from_pretrained(model_name_or_path)
 
         print(f"Using {attn_implementation} for attention implementation")
 
