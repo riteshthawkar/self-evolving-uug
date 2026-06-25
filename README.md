@@ -1,13 +1,14 @@
-# Ask, Solve, Generate
+<h1 align="center">
+Ask, Solve, Generate: Self-Evolving Unified Multimodal Understanding and Generation via Self-Consistency Rewards
+</h1>
 
-**Self-Evolving Unified Multimodal Understanding and Generation via
-Self-Consistency Rewards**
-
-![Paper](https://img.shields.io/badge/Paper-coming_soon-lightgrey.svg)
-![Project Page](https://img.shields.io/badge/Project_Page-coming_soon-lightgrey.svg)
-![Models](https://img.shields.io/badge/Models-coming_soon-fcd734.svg?logo=huggingface&logoColor=black)
-[![License](https://img.shields.io/badge/License-Apache--2.0-4caf50.svg)](LICENSE)
-[![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C.svg?logo=pytorch&logoColor=white)](https://pytorch.org/)
+<p align="center">
+  <img alt="Paper" src="https://img.shields.io/badge/Paper-coming_soon-lightgrey.svg">
+  <img alt="Project Page" src="https://img.shields.io/badge/Project_Page-coming_soon-lightgrey.svg">
+  <img alt="Models" src="https://img.shields.io/badge/Models-coming_soon-fcd734.svg?logo=huggingface&logoColor=black">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache--2.0-4caf50.svg"></a>
+  <a href="https://pytorch.org/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-EE4C2C.svg?logo=pytorch&logoColor=white"></a>
+</p>
 
 Ritesh Thawkar · Shravan Venkatraman · Omkar Thawakar · Abdelrahman M Shaker ·
 Fahad Shahbaz Khan · Hisham Cholakkal · Salman Khan · Rao Muhammad Anwer
