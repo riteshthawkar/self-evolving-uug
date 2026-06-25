@@ -3,11 +3,12 @@ Ask, Solve, Generate: Self-Evolving Unified Multimodal Understanding and Generat
 </h1>
 
 <p align="center">
-  <img alt="Paper" src="https://img.shields.io/badge/Paper-coming_soon-lightgrey.svg">
-  <a href="https://riteshthawkar.github.io/self-evolving-uug/"><img alt="Project Page" src="https://img.shields.io/badge/Project_Page-online-blue.svg"></a>
-  <a href="https://huggingface.co/collections/Ritesh-hf/ask-solve-generate-paper-models"><img alt="Models" src="https://img.shields.io/badge/Models-HuggingFace-fcd734.svg?logo=huggingface&logoColor=black"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache--2.0-4caf50.svg"></a>
-  <a href="https://pytorch.org/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-EE4C2C.svg?logo=pytorch&logoColor=white"></a>
+  <img src="assets/icons/arxiv.svg" alt="arXiv" height="18"> Paper coming soon &nbsp;&nbsp;|&nbsp;&nbsp;
+  <a href="https://github.com/riteshthawkar/self-evolving-uug"><img src="assets/icons/github.png" alt="GitHub" height="18"> Code</a> &nbsp;&nbsp;|&nbsp;&nbsp;
+  <a href="https://riteshthawkar.github.io/self-evolving-uug/"><img src="assets/icons/globe.png" alt="Project page" height="18"> Project Page</a> &nbsp;&nbsp;|&nbsp;&nbsp;
+  <a href="https://huggingface.co/collections/Ritesh-hf/ask-solve-generate-paper-models"><img src="assets/icons/huggingface.png" alt="Hugging Face" height="18"> Models</a> &nbsp;&nbsp;|&nbsp;&nbsp;
+  <a href="LICENSE"><img src="assets/icons/apache.svg" alt="Apache License" height="18"> License</a> &nbsp;&nbsp;|&nbsp;&nbsp;
+  <a href="https://pytorch.org/"><img src="assets/icons/pytorch.svg" alt="PyTorch" height="18"> PyTorch</a>
 </p>
 
 <p align="center">
@@ -33,8 +34,8 @@ to update both understanding and generation components.
 This repository contains the public training, inference, and evaluation code.
 The release focuses on model-side implementation. Private data-construction
 pipelines, manuscript source, local checkpoints, generated outputs, and
-local logs are intentionally not included. Paper, project page, and released
-checkpoint links will be added after the public release metadata is finalized.
+local logs are intentionally not included. The arXiv link will be added after
+the public paper metadata is finalized.
 
 ---
 
@@ -386,9 +387,6 @@ If this codebase is useful for your research, please cite:
   note = {Manuscript}
 }
 ```
-
-This entry intentionally omits arXiv, DOI, URL, and conference fields until the
-public paper metadata is finalized.
 
 ---
 
