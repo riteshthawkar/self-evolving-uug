@@ -103,10 +103,7 @@ huggingface/
 /BLIP3o/tests/
 /scripts/download_*.py
 /scripts/filter_dataset_images.py
-/scripts/self_evolving/_archive/
-/scripts/self_evolving/paper/prepare_data*.sh
-/scripts/self_evolving/paper/run_blip3o_step10250_full_eval.sh
-/scripts/self_evolving/final/submit_e1_filtered_h200.sbatch
+/scripts/submit_*.sbatch
 /vargpt_1_1/VARGPT-family-training/data_temp/
 /vargpt_1_1/VARGPT-family-training/docker/
 /vargpt_1_1/VARGPT-family-training/README_llamafactory.md

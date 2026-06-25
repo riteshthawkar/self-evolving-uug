@@ -1,13 +1,9 @@
--e .
-
-xformers==0.0.26.post1
 tokenizers
 sentencepiece
 shortuuid
 transformers==4.51.3
 accelerate
 peft
-bitsandbytes
 pydantic
 markdown2[all]
 numpy
@@ -23,10 +19,13 @@ einops-exts==0.0.4
 timm==0.6.13
 ftfy
 git+https://github.com/JiuhaiChen/diffusers.git
-deepspeed
 datasets
 tabulate
 ninja
 qwen_vl_utils
 huggingface_hub
 wandb
+pillow
+tqdm
+opencv-python-headless
+safetensors

@@ -16,7 +16,7 @@ set -euo pipefail
 # through step_020000. Therefore TOTAL_STEPS must be 20,000, not 10,000.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
 
 # Rebuttal control data: both stages use the exact same deterministic subset.
 # ImagePool sorts image paths, truncates to MAX_IMAGES, then shuffles with seed 42.

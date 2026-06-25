@@ -15,38 +15,36 @@ done
 unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 
 # ══════════════════════════════════════════════════════════════════════════════
-# E4 — Ablation: Full Joint Training WITHOUT DiT RWR
+# E2 — Ablation: Understanding-Only Training
 # ══════════════════════════════════════════════════════════════════════════════
 #
-# Same as E1 (full joint training) but with DiT updates completely disabled:
-#   • No DiT denoising MSE loss
-#   • No reward-weighted regression
-#   • No joint LLM→DiT gradient flow
+# Trains ONLY the understanding pathway (solver + proposer).
+# Generation phase is completely disabled:
+#   * No generator LoRA updates (generator_update_freq=0)
+#   * No DiT RWR updates (dit_update_freq=0)
+#   * No generation-phase proposer reward
 #
-# What still gets trained:
-#   • Solver LoRA — understanding via GRPO (same as E1)
-#   • Generator text-conditioning LoRA only when valid generator traces exist
-#   • Proposer LoRA — visual-understanding curriculum (same as E1)
+# Only the proposer-solver loop runs:
+#   * Proposer generates questions about images
+#   * Solver answers with multiple samples (self-consistency)
+#   * Solver LoRA is updated via REINFORCE on ALL questions (easy included)
+#   * Proposer is updated via GRPO to produce harder questions
+#
+# Data: Can use chart-heavy 50k pool since there are NO generation steps.
+#   Override: DATA_DIR=/workspace/.../shared_uug_50k_balanced/images bash E2_...
 #
 # What this experiment proves:
-#   ✓ Diffusion Generator LoRA/RWR is essential for generation quality
-#   ✓ Compare E4 vs E1: GenEval gap = DiT contribution
-#   ✓ Understanding should be similar to E1 (DiT doesn't affect understanding)
-#   ✓ This ablation is UNIQUE to our work — no competitor trains DiT jointly
-#
-# Why this matters for the paper:
-#   SUDER/UniCorn/CoRL all use AR-based generation where the same LLM produces
-#   discrete image tokens. They CAN'T train a separate DiT because there is none.
-#   Our framework handles the ADDITIONAL challenge of training a continuous-latent
-#   denoiser (DiT) jointly with the LLM conditioning encoder.
+#   * Understanding improves when trained in isolation
+#   * Compare E2 vs E1 to see if joint training helps or hurts understanding
+#   * Compare E2 vs E3 to show understanding-only doesn't help generation
 #
 # Usage:
-#   TRAIN_STAGE=warmup bash E4_no_dit_rwr.sh
-#   RESUME_FROM=/path/to/step_N TRAIN_STAGE=warmup bash E4_no_dit_rwr.sh
+#   TRAIN_STAGE=warmup bash E2_understanding_only.sh
+#   RESUME_FROM=/path/to/step_N TRAIN_STAGE=warmup bash E2_understanding_only.sh
 # ══════════════════════════════════════════════════════════════════════════════
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 HF_TOKEN_FILE="${HF_TOKEN_FILE:-${ORIGINAL_HOME:-$HOME}/.cache/huggingface/token}"
@@ -56,26 +54,39 @@ fi
 DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_pool_10k/images}"
 MIN_DATA_IMAGES="${MIN_DATA_IMAGES:-10000}"
 ALLOW_SMALL_DATA="${ALLOW_SMALL_DATA:-0}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E4_no_dit_rwr}"
-RUN_NAME="E4_no_dit_rwr_s42"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E2_understanding_only}"
+RUN_NAME="E2_understanding_only_s42_updated"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
 RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
-MASTER_PORT="${MASTER_PORT:-29526}"
+MASTER_PORT="${MASTER_PORT:-29524}"
 ATTN_IMPL="${ATTN_IMPL:-auto}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 TRAIN_ENTRY="${TRAIN_ENTRY:-$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py}"
 TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+MAX_IMAGES="${MAX_IMAGES:-}"
+INCLUDE_SUBFOLDERS="${INCLUDE_SUBFOLDERS:-}"
 LOG_EVERY="${LOG_EVERY:-1}"
 SAVE_EVERY="${SAVE_EVERY:-50}"
 SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-50}"
+UNDERSTANDING_STEPS_PER_CYCLE="${UNDERSTANDING_STEPS_PER_CYCLE:-5}"
+GENERATION_STEPS_PER_CYCLE="${GENERATION_STEPS_PER_CYCLE:-0}"
+ALLOW_SOLVER_UPDATE_ON_EASY="${ALLOW_SOLVER_UPDATE_ON_EASY:-1}"
+
+EASY_UPDATE_ARGS=()
+if [[ "$ALLOW_SOLVER_UPDATE_ON_EASY" == "1" ]]; then
+  EASY_UPDATE_ARGS+=(--allow_solver_update_on_easy)
+  EASY_UPDATE_MODE_TEXT="DISABLED (solver trains on easy + hard questions)"
+else
+  EASY_UPDATE_ARGS+=(--solver_skip_update_on_easy)
+  EASY_UPDATE_MODE_TEXT="ENABLED (easy-bucket solver skipping remains active)"
+fi
 
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
   RUN_NAME="${RUN_NAME}_warmup"
   STAGE_ARGS=(
-    --acceptance_require_non_easy
     --proposer_require_objective
     --proposer_non_objective_penalty 0.20
     --proposer_certificate_strict_struct
@@ -116,7 +127,6 @@ if [[ "$TRAIN_STAGE" == "warmup" ]]; then
 elif [[ "$TRAIN_STAGE" == "strict" ]]; then
   RUN_NAME="${RUN_NAME}_strict"
   STAGE_ARGS=(
-    --acceptance_require_non_easy
     --proposer_require_objective
     --proposer_non_objective_penalty 0.20
     --proposer_certificate_strict_struct
@@ -157,19 +167,27 @@ elif [[ "$TRAIN_STAGE" == "strict" ]]; then
     --solver_top_p_max 1.00
   )
 else
-  echo "[E4] ERROR: TRAIN_STAGE must be one of: warmup, strict (got: $TRAIN_STAGE)" >&2
+  echo "[E2] ERROR: TRAIN_STAGE must be one of: warmup, strict (got: $TRAIN_STAGE)" >&2
   exit 1
 fi
 
 # ── Resume from checkpoint (optional) ───────────────────────────────────────
 RESUME_ARGS=()
 if [[ -n "${RESUME_FROM:-}" ]]; then
-  echo "[E4] Resuming from checkpoint: $RESUME_FROM"
+  echo "[E2] Resuming from checkpoint: $RESUME_FROM"
   RESUME_ARGS=(--resume_from "$RESUME_FROM")
   if [[ "${RESET_PROPOSER_BASELINE:-0}" == "1" ]]; then
-    echo "[E4] Resetting proposer baseline on resume."
+    echo "[E2] Resetting proposer baseline on resume."
     RESUME_ARGS+=(--reset_proposer_baseline)
   fi
+fi
+
+DATA_SELECTION_ARGS=()
+if [[ -n "$MAX_IMAGES" ]]; then
+  DATA_SELECTION_ARGS+=(--max_images "$MAX_IMAGES")
+fi
+if [[ -n "$INCLUDE_SUBFOLDERS" ]]; then
+  DATA_SELECTION_ARGS+=(--include_subfolders "$INCLUDE_SUBFOLDERS")
 fi
 
 # ── Directory / cache setup ──────────────────────────────────────────────────
@@ -237,29 +255,33 @@ fi
 
 # ── Pre-flight checks ────────────────────────────────────────────────────────
 if [[ ! -d "$DATA_DIR" ]]; then
-  echo "[E4] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
+  echo "[E2] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
   exit 1
 fi
 IMAGE_COUNT="$(find "$DATA_DIR" -type f \
   \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" -o -iname "*.bmp" -o -iname "*.tiff" \) \
   | wc -l | tr -d '[:space:]')"
 if [[ "$IMAGE_COUNT" -lt "$MIN_DATA_IMAGES" && "$ALLOW_SMALL_DATA" != "1" ]]; then
-  echo "[E4] ERROR: DATA_DIR has $IMAGE_COUNT images; paper protocol requires at least $MIN_DATA_IMAGES." >&2
-  echo "[E4] Set DATA_DIR to a local directory of unlabeled training images." >&2
-  echo "[E4] For smoke tests only, set ALLOW_SMALL_DATA=1." >&2
+  echo "[E2] ERROR: DATA_DIR has $IMAGE_COUNT images; paper protocol requires at least $MIN_DATA_IMAGES." >&2
+  echo "[E2] Set DATA_DIR to a local directory of unlabeled training images." >&2
+  echo "[E2] For smoke tests only, set ALLOW_SMALL_DATA=1." >&2
   exit 1
 fi
 
-echo "[E4] Starting experiment E4 (No DiT RWR Ablation)"
-echo "[E4]   Stage:       $TRAIN_STAGE"
-echo "[E4]   Run name:    $RUN_NAME"
-echo "[E4]   Output dir:  $OUTPUT_DIR"
-echo "[E4]   Data dir:    $DATA_DIR"
-echo "[E4]   GPUs:        $NPROC_PER_NODE"
-echo "[E4]   Attn impl:   $ATTN_IMPL"
-echo "[E4]   NOTE: DiT training DISABLED (LLM LoRA only)"
+echo "[E2] Starting experiment E2 (Understanding-Only Ablation)"
+echo "[E2]   Stage:       $TRAIN_STAGE"
+echo "[E2]   Run name:    $RUN_NAME"
+echo "[E2]   Output dir:  $OUTPUT_DIR"
+echo "[E2]   Data dir:    $DATA_DIR"
+echo "[E2]   Max images:  ${MAX_IMAGES:-all}"
+echo "[E2]   GPUs:        $NPROC_PER_NODE"
+echo "[E2]   Attn impl:   $ATTN_IMPL"
+echo "[E2]   Total steps: $TOTAL_STEPS"
+echo "[E2]   Cycle:       U=$UNDERSTANDING_STEPS_PER_CYCLE, G=$GENERATION_STEPS_PER_CYCLE"
+echo "[E2]   NOTE: Generation training DISABLED"
+echo "[E2]   NOTE: Easy-question skipping $EASY_UPDATE_MODE_TEXT"
 if [[ -n "${RESUME_FROM:-}" ]]; then
-  echo "[E4]   Resume from: $RESUME_FROM"
+  echo "[E2]   Resume from: $RESUME_FROM"
 fi
 
 # ── Launch ───────────────────────────────────────────────────────────────────
@@ -271,6 +293,7 @@ fi
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
   --data_split all \
+  "${DATA_SELECTION_ARGS[@]}" \
   --model_name BLIP3o/BLIP3o-Model-8B \
   --output_dir "$OUTPUT_DIR" \
   --run_name "$RUN_NAME" \
@@ -301,13 +324,14 @@ fi
   --grad_clip 1.0 \
   --grad_accum_steps 1 \
   \
-  `# ── Role update frequencies (all active, same as E1) ───────────────────` \
+  `# ── Role update frequencies ─────────────────────────────────────────────` \
+  `# Proposer + Solver active; Generator DISABLED                            ` \
   --proposer_update_freq 1 \
-  --generator_update_freq 1 \
+  --generator_update_freq 0 \
   --enable_solver_updates \
   --solver_update_freq 1 \
   \
-  `# ── Generator token policy path; BLIP3o has no image-token traces ──────` \
+  `# ── Generator policy args retained for parser compatibility; freq=0 ───` \
   --generator_update_rule grpo \
   --generator_missing_trace_strategy skip \
   --grpo_clip_ratio 0.2 \
@@ -333,7 +357,7 @@ fi
   --generation_height "$GENERATION_IMAGE_SIDE" \
   --generation_width  "$GENERATION_IMAGE_SIDE" \
   \
-  `# ── Difficulty curriculum ───────────────────────────────────────────────` \
+  `# ── Difficulty curriculum (easy-bucket rejection ENABLED) ──────────` \
   --difficulty_sampler_enabled \
   \
   `# ── Reward weights ──────────────────────────────────────────────────────` \
@@ -362,13 +386,14 @@ fi
   --solver_hardness_min_entropy 0.20 \
   --easy_update_majority_frac_threshold 1.00 \
   --entropy_iqr_filter_enabled \
+  ${EASY_UPDATE_ARGS[@]+"${EASY_UPDATE_ARGS[@]}"} \
   \
   `# ── Proposer entropy target ─────────────────────────────────────────────` \
   --prop_entropy_sigma 0.25 \
   \
-  `# ── Cycle scheduling (same as E1: 3U + 2G) ────────────────────────────` \
-  --understanding_steps_per_cycle 3 \
-  --generation_steps_per_cycle 2 \
+  `# ── Cycle scheduling: ALL understanding, no generation ─────────────────` \
+  --understanding_steps_per_cycle "$UNDERSTANDING_STEPS_PER_CYCLE" \
+  --generation_steps_per_cycle "$GENERATION_STEPS_PER_CYCLE" \
   --synthetic_solver_update_freq 0 \
   \
   `# ── KL regularisation ───────────────────────────────────────────────────` \
@@ -403,7 +428,7 @@ fi
   --gen_mix_ratio_max 0.0 \
   --gen_mix_ratio_warmup_steps 1 \
   \
-  `# ── DiT DISABLED — no denoising loss, no RWR, no joint conditioning ───` \
+  `# ── DiT DISABLED (no generation steps) ─────────────────────────────────` \
   --dit_update_freq 0 \
   --dit_lr 5e-7 \
   --dit_weight_decay 0.01 \
@@ -413,7 +438,7 @@ fi
   --dit_loss_weight 1.0 \
   --dit_prompt_suffix_token_id 151665 \
   \
-  `# ── Main-method coupling only: no G-step proposer/solver updates ───────` \
+  `# ── NO proposer generation reward (no G-steps) ─────────────────────────` \
   \
   `# ── Logging / W&B ─────────────────────────────────────────────────────` \
   --wandb_mode disabled \

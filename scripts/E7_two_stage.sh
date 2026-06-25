@@ -11,7 +11,7 @@ set -euo pipefail
 # Stage 2 runs from step_010000 to step_020000 by default.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
 
 DATA_DIR="${DATA_DIR:-${TWO_STAGE_DATA_DIR:-$REPO_ROOT/data/joint_pool_10k/images}}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E7_two_stage}"

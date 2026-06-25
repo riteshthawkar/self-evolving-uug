@@ -4,16 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BLIP3O_ROOT = REPO_ROOT / "BLIP3o"
-if str(BLIP3O_ROOT) not in sys.path:
-    sys.path.insert(0, str(BLIP3O_ROOT))
-
-from blip3o.train.self_evolving.checkpoint_adapters import sanitize_peft_adapter_dir  # noqa: E402
+CHECKPOINT_ADAPTERS = REPO_ROOT / "BLIP3o" / "blip3o" / "train" / "self_evolving" / "checkpoint_adapters.py"
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,12 +27,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _load_sanitize_peft_adapter_dir():
+    spec = importlib.util.spec_from_file_location("blip3o_checkpoint_adapters", CHECKPOINT_ADAPTERS)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load checkpoint adapter helpers from {CHECKPOINT_ADAPTERS}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.sanitize_peft_adapter_dir
+
+
 def main() -> int:
     args = parse_args()
     checkpoint_dir = args.checkpoint_dir
     if not checkpoint_dir.is_dir():
         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
 
+    sanitize_peft_adapter_dir = _load_sanitize_peft_adapter_dir()
     for adapter in args.adapters:
         adapter_root = checkpoint_dir / adapter
         if not adapter_root.exists():

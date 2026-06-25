@@ -83,7 +83,7 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 # ══════════════════════════════════════════════════════════════════════════════
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 HF_TOKEN_FILE="${HF_TOKEN_FILE:-${ORIGINAL_HOME:-$HOME}/.cache/huggingface/token}"

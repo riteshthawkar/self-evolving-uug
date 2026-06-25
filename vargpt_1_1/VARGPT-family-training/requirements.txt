@@ -18,6 +18,7 @@ pydantic
 fastapi
 sse-starlette
 matplotlib>=3.7.0
+openai
 fire
 packaging
 pyyaml
@@ -28,6 +29,10 @@ deepspeed==0.15.4
 icecream
 ipdb
 timm==0.9.6
+safetensors
+qwen_vl_utils
+open-clip-torch
+clip-benchmark
 # flash_attn-2.7.3+cu12torch2.1cxx11abiFALSE-cp39-cp39-linux_x86_64.whl
 opencv-python
 imageio

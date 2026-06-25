@@ -1,43 +1,59 @@
 # Ask, Solve, Generate
 
-Code for **Ask, Solve, Generate: Self-Evolving Unified Multimodal Understanding
-and Generation via Self-Consistency Rewards**.
+**Self-Evolving Unified Multimodal Understanding and Generation via
+Self-Consistency Rewards**
 
-This repository contains the public training, inference, and evaluation code for
-self-evolving unified multimodal understanding and generation. The release
-focuses on the model-side implementation: the private data-construction pipeline,
-paper source, local checkpoints, generated outputs, and cluster-specific logs are
-not included.
+![Paper](https://img.shields.io/badge/Paper-coming_soon-lightgrey.svg)
+![Project Page](https://img.shields.io/badge/Project_Page-coming_soon-lightgrey.svg)
+![Models](https://img.shields.io/badge/Models-coming_soon-fcd734.svg?logo=huggingface&logoColor=black)
+[![License](https://img.shields.io/badge/License-Apache--2.0-4caf50.svg)](LICENSE)
+[![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C.svg?logo=pytorch&logoColor=white)](https://pytorch.org/)
 
-| Resource | Status |
-| --- | --- |
-| Paper | Coming soon |
-| Project page | Coming soon |
-| Model checkpoints | Coming soon |
+Ritesh Thawkar · Shravan Venkatraman · Omkar Thawakar · Abdelrahman M Shaker ·
+Fahad Shahbaz Khan · Hisham Cholakkal · Salman Khan · Rao Muhammad Anwer
+
+**Ask, Solve, Generate** studies whether unified multimodal models can improve
+visual understanding and image generation from unlabeled images alone. The
+training loop turns each image into self-generated questions, selects reliable
+reference answers through self-consistency, and uses the same interaction signal
+to update both understanding and generation components.
+
+This repository contains the public training, inference, and evaluation code.
+The release focuses on model-side implementation. Private data-construction
+pipelines, manuscript source, local checkpoints, generated outputs, and
+cluster-specific logs are intentionally not included.
 
 ## Contents
 
+- [News](#news)
 - [Overview](#overview)
+- [Method at a Glance](#method-at-a-glance)
 - [Release Scope](#release-scope)
 - [Repository Layout](#repository-layout)
 - [Installation](#installation)
+- [Quick Start](#quick-start)
 - [Secrets](#secrets)
 - [Data](#data)
+- [Model Zoo](#model-zoo)
 - [Training](#training)
 - [Inference](#inference)
 - [Resume and Monitoring](#resume-and-monitoring)
 - [Evaluation](#evaluation)
-- [Protocol Checks](#protocol-checks)
 - [Cluster Usage](#cluster-usage)
 - [Citation](#citation)
 - [License](#license)
 - [Release Checklist](#release-checklist)
 
+## News
+
+- **[Release]** Public training, inference, and evaluation code is prepared for
+  BLIP3o, BAGEL, and VARGPT-v1.1 backends.
+- **[Coming soon]** Paper, project page, and released model checkpoints will be
+  linked here after the public release metadata is finalized.
+
 ## Overview
 
-The project studies whether unified multimodal models can improve both visual
-understanding and image generation from unlabeled images. The training loop uses
-three internal roles:
+The self-evolving loop uses three internal roles:
 
 | Role | Purpose |
 | --- | --- |
@@ -45,15 +61,27 @@ three internal roles:
 | Solver | Answers and scores candidate questions through self-consistency |
 | Generator | Produces images from question-answer-derived generation specs |
 
-The implementation uses internal consistency signals instead of external answer
+The implementation uses internal consistency signals rather than external answer
 labels. For understanding, Solver Token Entropy (STE) provides a token-level
-uncertainty signal for selecting useful updates. For generation, question-answer
-fidelity and cycle-consistent captioning couple generated images back to the
-understanding loop.
+uncertainty signal for selecting useful updates. For generation,
+question-answer fidelity and cycle-consistent captioning connect generated
+images back to the understanding loop.
 
 The main implementation is built around BLIP3o. BAGEL and VARGPT-v1.1
 integrations are included to evaluate the same self-evolving recipe on different
 unified model families.
+
+## Method at a Glance
+
+The release combines:
+
+- **Self-questioning** over unlabeled images through a proposer model.
+- **Reference-answer selection** through solver self-consistency and entropy
+  signals.
+- **Generation supervision** from question-answer-derived image specifications.
+- **Cycle consistency** that checks generated images against the original
+  multimodal interaction.
+- **Backend adapters** for BLIP3o, BAGEL, and VARGPT-v1.1.
 
 ## Release Scope
 
@@ -62,7 +90,7 @@ Included:
 - BLIP3o self-evolving training and evaluation code.
 - BAGEL training and evaluation integration.
 - VARGPT-v1.1 training and evaluation integration.
-- Paper-protocol launch manifests and reproducibility checks.
+- BLIP3o release launchers and checkpoint-sanitization utilities.
 - Public release documentation and Apache-2.0 license.
 
 Not included:
@@ -80,9 +108,7 @@ Not included:
 | `BLIP3o/` | BLIP3o training, inference, and evaluation code |
 | `Bagel/` | BAGEL baseline integration and self-evolving launchers |
 | `vargpt_1_1/` | VARGPT-v1.1 baseline integration and self-evolving launchers |
-| `scripts/self_evolving/final/` | Fixed BLIP3o experiment and ablation launchers |
-| `scripts/self_evolving/paper/` | Manifest-based paper-protocol launch and audit utilities |
-| `scripts/env/` | Shared environment bootstrap helpers |
+| `scripts/` | BLIP3o experiment launchers and release utilities |
 | `.env.example` | Template for local secrets and cache paths |
 
 Generated outputs are ignored by git. Keep datasets, model weights,
@@ -96,16 +122,27 @@ and mixing them in one environment can create version conflicts.
 
 ### BLIP3o
 
+Install a PyTorch build that matches your machine first, for example the
+CUDA or ROCm wheel recommended by your cluster. Then install the BLIP3o
+dependencies and local packages:
+
 ```bash
 conda create -n uug-blip3o python=3.10 -y
 conda activate uug-blip3o
+# Install torch/torchvision/torchaudio for your CUDA or ROCm stack first.
 pip install -r BLIP3o/requirements.safe.txt
+pip install -e BLIP3o
+pip install -e BLIP3o/eval/lmms-eval
 ```
 
-If you need the full original stack instead of the safer pinned subset:
+`BLIP3o/requirements.safe.txt` intentionally avoids reinstalling PyTorch,
+`xformers`, `flash-attn`, `deepspeed`, and `bitsandbytes`. If you want the
+full upstream CUDA stack instead, use:
 
 ```bash
 pip install -r BLIP3o/requirements.txt
+pip install -e BLIP3o
+pip install -e BLIP3o/eval/lmms-eval
 ```
 
 ### BAGEL
@@ -116,12 +153,18 @@ conda activate uug-bagel
 pip install -r Bagel/requirements.txt
 ```
 
+Generation benchmark scoring may also require benchmark-specific detector
+assets and setup from `Bagel/EVAL.md`.
+
 ### VARGPT-v1.1
 
 ```bash
 conda create -n uug-vargpt python=3.10 -y
 conda activate uug-vargpt
-pip install -r vargpt_1_1/VARGPT-family-training/requirements.txt
+cd vargpt_1_1/VARGPT-family-training
+pip install -r requirements.txt
+pip install -e .
+cd ../..
 ```
 
 For VARGPT understanding evaluation, install the local evaluation package when
@@ -129,6 +172,36 @@ needed:
 
 ```bash
 pip install -e vargpt_1_1/understand_eval
+```
+
+The standalone upstream inference examples under `vargpt_1_1/inference_v1_1`
+use `vargpt_1_1/requirements.txt`, which pins a PyTorch/flash-attn stack. Use
+that file in a separate environment if it conflicts with the training setup.
+
+## Quick Start
+
+After installing the BLIP3o environment, run a small launcher smoke test on any
+local folder of images:
+
+```bash
+cp .env.example .env
+
+TOTAL_STEPS=20 \
+ALLOW_SMALL_DATA=1 \
+DATA_DIR=/path/to/small/image/folder \
+OUTPUT_DIR=$PWD/outputs/smoke/blip3o \
+bash scripts/E1_main_joint.sh
+```
+
+For a full BLIP3o run, point `DATA_DIR` to the 10k unlabeled image pool and
+remove the smoke-test overrides:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+DATA_DIR=/path/to/unlabeled/images \
+OUTPUT_DIR=$PWD/outputs/blip3o/E1_main_joint \
+bash scripts/E1_main_joint.sh
 ```
 
 ## Secrets
@@ -152,13 +225,13 @@ Common variables:
 ## Data
 
 The public release expects a local directory of unlabeled images. The default
-paper-protocol path is:
+launcher path is:
 
 ```text
 data/joint_pool_10k/images/
 ```
 
-A full paper-protocol run expects at least 10,000 images. You can also point the
+A full training run expects at least 10,000 images. You can also point the
 launchers to any local image directory:
 
 ```bash
@@ -168,38 +241,33 @@ export DATA_DIR=/path/to/unlabeled/images
 Supported image extensions are detected by the launch scripts, including
 `.jpg`, `.jpeg`, `.png`, `.webp`, and `.bmp`.
 
+## Model Zoo
+
+Public model links will be added after release. Until then, the training and
+evaluation scripts expect local checkpoint paths.
+
+| Backend | Checkpoint status | Notes |
+| --- | --- | --- |
+| BLIP3o | Coming soon | Main implementation for self-evolving unified training |
+| BAGEL | Coming soon | Baseline integration for the same training recipe |
+| VARGPT-v1.1 | Coming soon | 7B+2B baseline integration |
+
 ## Training
 
-The recommended entry point is the paper manifest launcher:
+BLIP3o training launchers are under `scripts/`. BAGEL and VARGPT-v1.1 use their
+backend-native launchers, shown below.
 
-```bash
-DATA_DIR=/path/to/unlabeled/images \
-NPROC_PER_NODE=8 \
-bash scripts/self_evolving/paper/run_experiment.sh blip3o_joint
-```
+Common BLIP3o launchers:
 
-Dry-run a command without launching training:
-
-```bash
-DRY_RUN=1 DATA_DIR=/path/to/unlabeled/images \
-bash scripts/self_evolving/paper/run_experiment.sh blip3o_joint
-```
-
-Common experiment IDs:
-
-| ID | Backend | Purpose |
-| --- | --- | --- |
-| `blip3o_joint` | BLIP3o | Main joint 3U:2G training run |
-| `blip3o_understanding_only` | BLIP3o | Understanding-only ablation |
-| `blip3o_generation_only` | BLIP3o | Generation-only ablation |
-| `blip3o_no_dit_rwr` | BLIP3o | Joint run without DiT reward-weighted regression |
-| `blip3o_synthetic_loop` | BLIP3o | Generated-only loop control |
-| `blip3o_two_stage` | BLIP3o | Understanding stage followed by generation stage |
-| `bagel_joint` | BAGEL | Main BAGEL joint run |
-| `vargpt_joint` | VARGPT-v1.1 | Main VARGPT joint run |
-
-The full manifest is in
-`scripts/self_evolving/paper/paper_experiments.json`.
+| Script | Purpose |
+| --- | --- |
+| `scripts/E1_main_joint.sh` | Main joint 3U:2G training run |
+| `scripts/E2_understanding_only.sh` | Understanding-only ablation |
+| `scripts/E3_generation_only.sh` | Generation-only ablation |
+| `scripts/E4_no_dit_rwr.sh` | Joint run without DiT reward-weighted regression |
+| `scripts/E5_synthetic_loop.sh` | Generated-only loop control |
+| `scripts/E6_single_step.sh` | Generation-centered unified-step ablation |
+| `scripts/E7_two_stage.sh` | Understanding stage followed by generation stage |
 
 ### Direct BLIP3o Launcher
 
@@ -208,7 +276,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 NPROC_PER_NODE=8 \
 DATA_DIR=/path/to/unlabeled/images \
 OUTPUT_DIR=$PWD/outputs/blip3o/E1_main_joint \
-bash scripts/self_evolving/final/E1_main_joint.sh
+bash scripts/E1_main_joint.sh
 ```
 
 For a short smoke test:
@@ -218,7 +286,7 @@ TOTAL_STEPS=20 \
 ALLOW_SMALL_DATA=1 \
 DATA_DIR=/path/to/small/image/folder \
 OUTPUT_DIR=$PWD/outputs/smoke/blip3o \
-bash scripts/self_evolving/final/E1_main_joint.sh
+bash scripts/E1_main_joint.sh
 ```
 
 ### BAGEL Launcher
@@ -281,10 +349,10 @@ BLIP3o checkpoints are saved under the configured `OUTPUT_DIR` as
 
 ```bash
 RESUME_FROM=/path/to/output_dir \
-bash scripts/self_evolving/final/E1_main_joint.sh
+bash scripts/E1_main_joint.sh
 
 RESUME_FROM=/path/to/output_dir/step_010000 \
-bash scripts/self_evolving/final/E1_main_joint.sh
+bash scripts/E1_main_joint.sh
 ```
 
 Typical run files:
@@ -369,21 +437,6 @@ cd vargpt_1_1/VARGPT-family-training
 CHECKPOINT_DIR=/path/to/se_checkpoint_10000 \
 bash run_scripts/run_eval_vargpt_generation_our.sh
 ```
-
-## Protocol Checks
-
-Before launching full experiments, validate the static protocol and local run
-readiness:
-
-```bash
-python scripts/self_evolving/paper/validate_protocol.py --format text
-
-DATA_DIR=/path/to/unlabeled/images \
-python scripts/self_evolving/paper/check_experiment_readiness.py --format text
-```
-
-Use `--strict` on the readiness checker when you want missing required assets to
-return a non-zero exit code.
 
 ## Cluster Usage
 

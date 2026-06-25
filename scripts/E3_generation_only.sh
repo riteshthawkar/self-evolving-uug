@@ -15,52 +15,33 @@ done
 unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 
 # ══════════════════════════════════════════════════════════════════════════════
-# E6 — Ablation: Unified Single-Step Joint Training (ALL components per step)
+# E3 — Ablation: Generation-Only Training
 # ══════════════════════════════════════════════════════════════════════════════
 #
-# Every training step updates ALL four components simultaneously:
+# Trains ONLY the generation pathway (generator LoRA + DiT).
+# Understanding phase is completely disabled:
+#   • No solver LoRA updates (solver_update_freq=0)
+#   • No understanding-phase proposer reward
+#   • Solver runs only as a frozen verifier (for spec/cycle rewards)
 #
-#   Each step:
-#     1. Proposer writes generation spec (prompt + QA) for a real image
-#     2. Generator creates candidate images from the spec
-#     3. Solver scores candidates by answering QA → combined_score reward
-#     4. Generator/DiT LoRA updated via diffusion denoising reward    ✓
-#     5. DiT LoRA updated via RWR (denoising reward)                  ✓
-#     6. Solver LoRA updated via REINFORCE (combined_score)           ✓
-#     7. Proposer LoRA updated via dual reward (entropy + quality)    ✓
-#
-# This is different from E1 (3U + 2G) where understanding and generation
-# happen in SEPARATE steps:
-#   E1: Steps 1-3 train ONLY solver+proposer, Steps 4-5 train ONLY generator+DiT
-#   E6: EVERY step trains solver + generator + DiT + proposer simultaneously
-#
-# Implementation:
-#   • understanding_steps_per_cycle = 0  (no separate U-steps)
-#   • generation_steps_per_cycle = 5     (every step is a G-step)
-#   • gen_step_solver_update_enabled = True (solver trains during G-steps)
-#   • proposer_gen_reward_enabled = True (proposer gets dual reward in G-steps)
-#   → All 4 LoRA/weight updates happen in every single step
-#
-# What this experiment tests:
-#   • Is dedicated understanding training (separate U-steps with richer reward
-#     signals: 8+ samples, informativeness gating, entropy-IQR filtering)
-#     better than unified steps where solver piggybacks on generation scoring?
-#   • Or is simultaneous all-component training more efficient?
+# What gets trained:
+#   • Generator LoRA — text-to-latent conditioning via denoising gradients
+#   • DiT LoRA — denoising via RWR (reward-weighted MSE)
+#   • Generator LoRA also gets gradients from DiT joint conditioning
+#   • Proposer/Solver LoRA are frozen during generation updates
 #
 # What this experiment proves:
-#   ✓ Compare E6 vs E1: dedicated U-steps vs unified training
-#   ✓ If E6 ≈ E1: dedicated U-steps unnecessary → simpler single-step works
-#   ✓ If E6 > E1: simultaneous training is more efficient
-#   ✓ If E6 < E1: understanding benefits from dedicated steps with richer rewards
-#   ✓ Compare E6 vs E3: adding solver training to G-steps improves understanding
+#   ✓ Generation improves when trained in isolation
+#   ✓ Compare E3 vs E1 to see if joint training helps generation
+#   ✓ Compare E3 understanding metrics to show generation-only may hurt understanding
 #
 # Usage:
-#   TRAIN_STAGE=warmup bash E6_single_step.sh
-#   RESUME_FROM=/path/to/step_N TRAIN_STAGE=warmup bash E6_single_step.sh
+#   TRAIN_STAGE=warmup bash E3_generation_only.sh
+#   RESUME_FROM=/path/to/step_N TRAIN_STAGE=warmup bash E3_generation_only.sh
 # ══════════════════════════════════════════════════════════════════════════════
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 HF_TOKEN_FILE="${HF_TOKEN_FILE:-${ORIGINAL_HOME:-$HOME}/.cache/huggingface/token}"
@@ -70,20 +51,34 @@ fi
 DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_pool_10k/images}"
 MIN_DATA_IMAGES="${MIN_DATA_IMAGES:-10000}"
 ALLOW_SMALL_DATA="${ALLOW_SMALL_DATA:-0}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E6_single_step}"
-RUN_NAME="E6_single_step_s42"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E3_generation_only}"
+RUN_NAME="E3_generation_only_s42"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
 RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
-MASTER_PORT="${MASTER_PORT:-29528}"
+MASTER_PORT="${MASTER_PORT:-29525}"
 ATTN_IMPL="${ATTN_IMPL:-auto}"
 GENERATION_IMAGE_SIDE="${GENERATION_IMAGE_SIDE:-896}"
 TRAIN_ENTRY="${TRAIN_ENTRY:-$REPO_ROOT/BLIP3o/blip3o/train/train_self_evolving.py}"
 TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+MAX_IMAGES="${MAX_IMAGES:-}"
+INCLUDE_SUBFOLDERS="${INCLUDE_SUBFOLDERS:-}"
 LOG_EVERY="${LOG_EVERY:-1}"
 SAVE_EVERY="${SAVE_EVERY:-50}"
 SAVE_GENERATED_IMAGES_EVERY="${SAVE_GENERATED_IMAGES_EVERY:-50}"
+UNDERSTANDING_STEPS_PER_CYCLE="${UNDERSTANDING_STEPS_PER_CYCLE:-0}"
+GENERATION_STEPS_PER_CYCLE="${GENERATION_STEPS_PER_CYCLE:-5}"
+PROPOSER_GEN_REWARD_ENABLED="${PROPOSER_GEN_REWARD_ENABLED:-0}"
+
+PROPOSER_GEN_REWARD_ARGS=()
+if [[ "$PROPOSER_GEN_REWARD_ENABLED" == "1" ]]; then
+  PROPOSER_GEN_REWARD_ARGS+=(
+    --proposer_gen_reward_enabled
+    --proposer_gen_entropy_weight 0.7
+    --proposer_gen_baseline_momentum 0.6
+  )
+fi
 
 # ── Stage-specific hyperparameters ──────────────────────────────────────────
 if [[ "$TRAIN_STAGE" == "warmup" ]]; then
@@ -171,19 +166,27 @@ elif [[ "$TRAIN_STAGE" == "strict" ]]; then
     --solver_top_p_max 1.00
   )
 else
-  echo "[E6] ERROR: TRAIN_STAGE must be one of: warmup, strict (got: $TRAIN_STAGE)" >&2
+  echo "[E3] ERROR: TRAIN_STAGE must be one of: warmup, strict (got: $TRAIN_STAGE)" >&2
   exit 1
 fi
 
 # ── Resume from checkpoint (optional) ───────────────────────────────────────
 RESUME_ARGS=()
 if [[ -n "${RESUME_FROM:-}" ]]; then
-  echo "[E6] Resuming from checkpoint: $RESUME_FROM"
+  echo "[E3] Resuming from checkpoint: $RESUME_FROM"
   RESUME_ARGS=(--resume_from "$RESUME_FROM")
   if [[ "${RESET_PROPOSER_BASELINE:-0}" == "1" ]]; then
-    echo "[E6] Resetting proposer baseline on resume."
+    echo "[E3] Resetting proposer baseline on resume."
     RESUME_ARGS+=(--reset_proposer_baseline)
   fi
+fi
+
+DATA_SELECTION_ARGS=()
+if [[ -n "$MAX_IMAGES" ]]; then
+  DATA_SELECTION_ARGS+=(--max_images "$MAX_IMAGES")
+fi
+if [[ -n "$INCLUDE_SUBFOLDERS" ]]; then
+  DATA_SELECTION_ARGS+=(--include_subfolders "$INCLUDE_SUBFOLDERS")
 fi
 
 # ── Directory / cache setup ──────────────────────────────────────────────────
@@ -251,29 +254,32 @@ fi
 
 # ── Pre-flight checks ────────────────────────────────────────────────────────
 if [[ ! -d "$DATA_DIR" ]]; then
-  echo "[E6] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
+  echo "[E3] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
   exit 1
 fi
 IMAGE_COUNT="$(find "$DATA_DIR" -type f \
   \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" -o -iname "*.bmp" -o -iname "*.tiff" \) \
   | wc -l | tr -d '[:space:]')"
 if [[ "$IMAGE_COUNT" -lt "$MIN_DATA_IMAGES" && "$ALLOW_SMALL_DATA" != "1" ]]; then
-  echo "[E6] ERROR: DATA_DIR has $IMAGE_COUNT images; paper protocol requires at least $MIN_DATA_IMAGES." >&2
-  echo "[E6] Set DATA_DIR to a local directory of unlabeled training images." >&2
-  echo "[E6] For smoke tests only, set ALLOW_SMALL_DATA=1." >&2
+  echo "[E3] ERROR: DATA_DIR has $IMAGE_COUNT images; paper protocol requires at least $MIN_DATA_IMAGES." >&2
+  echo "[E3] Set DATA_DIR to a local directory of unlabeled training images." >&2
+  echo "[E3] For smoke tests only, set ALLOW_SMALL_DATA=1." >&2
   exit 1
 fi
 
-echo "[E6] Starting experiment E6 (Unified Single-Step — ALL components per step)"
-echo "[E6]   Stage:       $TRAIN_STAGE"
-echo "[E6]   Run name:    $RUN_NAME"
-echo "[E6]   Output dir:  $OUTPUT_DIR"
-echo "[E6]   Data dir:    $DATA_DIR"
-echo "[E6]   GPUs:        $NPROC_PER_NODE"
-echo "[E6]   Attn impl:   $ATTN_IMPL"
-echo "[E6]   MODE: Every step updates Solver + Generator + DiT + Proposer simultaneously"
+echo "[E3] Starting experiment E3 (Generation-Only Ablation)"
+echo "[E3]   Stage:       $TRAIN_STAGE"
+echo "[E3]   Run name:    $RUN_NAME"
+echo "[E3]   Output dir:  $OUTPUT_DIR"
+echo "[E3]   Data dir:    $DATA_DIR"
+echo "[E3]   Max images:  ${MAX_IMAGES:-all}"
+echo "[E3]   GPUs:        $NPROC_PER_NODE"
+echo "[E3]   Attn impl:   $ATTN_IMPL"
+echo "[E3]   Steps:       $TOTAL_STEPS"
+echo "[E3]   Gen reward:  proposer=$PROPOSER_GEN_REWARD_ENABLED"
+echo "[E3]   NOTE: Understanding training DISABLED (solver frozen as verifier)"
 if [[ -n "${RESUME_FROM:-}" ]]; then
-  echo "[E6]   Resume from: $RESUME_FROM"
+  echo "[E3]   Resume from: $RESUME_FROM"
 fi
 
 # ── Launch ───────────────────────────────────────────────────────────────────
@@ -285,6 +291,7 @@ fi
   --experiment unified_self_evolving \
   --data_dir "$DATA_DIR" \
   --data_split all \
+  "${DATA_SELECTION_ARGS[@]}" \
   --model_name BLIP3o/BLIP3o-Model-8B \
   --output_dir "$OUTPUT_DIR" \
   --run_name "$RUN_NAME" \
@@ -315,11 +322,11 @@ fi
   --grad_clip 1.0 \
   --grad_accum_steps 1 \
   \
-  `# ── Role update frequencies (ALL active every step) ─────────────────────` \
+  `# ── Role update frequencies ─────────────────────────────────────────────` \
+  `# Generator active; Solver DISABLED (runs as frozen verifier only)        ` \
   --proposer_update_freq 1 \
   --generator_update_freq 1 \
-  --enable_solver_updates \
-  --solver_update_freq 1 \
+  --solver_update_freq 0 \
   \
   `# ── Generator token policy path; BLIP3o routes to DiT denoising ────────` \
   --generator_update_rule grpo \
@@ -347,7 +354,7 @@ fi
   --generation_height "$GENERATION_IMAGE_SIDE" \
   --generation_width  "$GENERATION_IMAGE_SIDE" \
   \
-  `# ── Difficulty curriculum ───────────────────────────────────────────────` \
+  `# ── Difficulty curriculum (still active for proposer) ──────────────────` \
   --difficulty_sampler_enabled \
   \
   `# ── Reward weights ──────────────────────────────────────────────────────` \
@@ -380,11 +387,9 @@ fi
   `# ── Proposer entropy target ─────────────────────────────────────────────` \
   --prop_entropy_sigma 0.25 \
   \
-  `# ── Cycle: ALL generation steps — solver trains via gen_step_solver_update` \
-  `# No separate U-steps. Every step is a G-step where ALL components update:` \
-  `# Generator DiT RWR + Solver REINFORCE + Proposer dual reward.           ` \
-  --understanding_steps_per_cycle 0 \
-  --generation_steps_per_cycle 5 \
+  `# ── Cycle scheduling: ALL generation, no understanding ─────────────────` \
+  --understanding_steps_per_cycle "$UNDERSTANDING_STEPS_PER_CYCLE" \
+  --generation_steps_per_cycle "$GENERATION_STEPS_PER_CYCLE" \
   --synthetic_solver_update_freq 0 \
   \
   `# ── KL regularisation ───────────────────────────────────────────────────` \
@@ -433,14 +438,8 @@ fi
   --dit_joint_conditioning_lr 5e-7 \
   --dit_reward_loss_weight 0.5 \
   \
-  `# ── Unified step: ALL components update during EVERY G-step ────────────` \
-  `# proposer_gen_reward_enabled: proposer gets dual reward every step      ` \
-  `# gen_step_solver_update_enabled: solver trains on generated images      ` \
-  `# → Together: Solver + Generator + DiT + Proposer all update per step   ` \
-  --proposer_gen_reward_enabled \
-  --proposer_gen_entropy_weight 0.7 \
-  --proposer_gen_baseline_momentum 0.6 \
-  --gen_step_solver_update_enabled \
+  `# ── Optional generation-phase proposer ablation (off by default) ───────` \
+  "${PROPOSER_GEN_REWARD_ARGS[@]}" \
   \
   `# ── Logging / W&B ─────────────────────────────────────────────────────` \
   --wandb_mode disabled \
