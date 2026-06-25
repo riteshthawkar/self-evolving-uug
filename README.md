@@ -138,26 +138,6 @@ GenEval scores are percentages.
 
 ---
 
-## Release Scope
-
-Included:
-
-- BLIP3o self-evolving training and evaluation code.
-- BAGEL training and evaluation integration.
-- VARGPT-v1.1 training and evaluation integration.
-- BLIP3o release launchers and checkpoint-sanitization utilities.
-- Public release documentation and Apache-2.0 license.
-
-Not included:
-
-- Private data-construction or filtering pipelines.
-- Training images, benchmark data mirrors, or generated images.
-- Model checkpoints, local model downloads, caches, or run logs.
-- Manuscript source, Overleaf folders, reviewer materials, or internal notes.
-- API keys, Hugging Face tokens, W&B credentials, or machine-specific paths.
-
----
-
 ## Repository Layout
 
 | Path | Purpose |
