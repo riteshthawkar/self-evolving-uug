@@ -101,6 +101,12 @@ GenEval scores are percentages.
 | BAGEL | 99 -> 99 | 94 -> 95 | 81 -> 87 | 88 -> 90 | 64 -> 67 | 63 -> 72 | 82 -> 85 |
 | VARGPT-v1.1 | 96 -> 97 | 53 -> 59 | 48 -> 56 | 83 -> 85 | 13 -> 15 | 21 -> 24 | 53 -> 56 |
 
+### 🖼️ Qualitative Results
+
+<p align="center">
+  <img src="assets/qualitative_results.png" alt="Qualitative before and after examples for visual understanding and image generation" width="100%">
+</p>
+
 ---
 
 ## 🗂️ Repository Layout
