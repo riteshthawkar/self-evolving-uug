@@ -28,7 +28,7 @@ The release focuses on model-side implementation. Private data-construction
 pipelines, manuscript source, local checkpoints, generated outputs, and
 cluster-specific logs are intentionally not included.
 
-## Announcement
+## 📢 Announcement
 
 - **[Release]** Public training, inference, and evaluation code is prepared for
   BLIP3o, BAGEL, and VARGPT-v1.1 backends.
@@ -37,7 +37,7 @@ cluster-specific logs are intentionally not included.
 
 ---
 
-## Overview
+## 🔎 Overview
 
 The self-evolving loop uses three internal roles:
 
@@ -59,7 +59,7 @@ unified model families.
 
 ---
 
-## Model Capabilities
+## ✨ Model Capabilities
 
 | Capability | Input | Output | Description |
 | --- | --- | --- | --- |
@@ -70,7 +70,7 @@ unified model families.
 
 ---
 
-## Architecture
+## 🏗️ Architecture
 
 <p align="center">
   <img src="assets/architecture.png" alt="Ask, Solve, Generate architecture" width="100%">
@@ -85,7 +85,7 @@ cycle consistency.
 
 ---
 
-## Supported Tasks
+## ✅ Supported Tasks
 
 | Task | Backend support | Primary scripts |
 | --- | --- | --- |
@@ -98,7 +98,7 @@ cycle consistency.
 
 ---
 
-## Framework Components
+## 🧩 Framework Components
 
 The release combines:
 
@@ -112,13 +112,13 @@ The release combines:
 
 ---
 
-## Main Results
+## 📊 Main Results
 
 Results are reported as base checkpoint -> self-evolved checkpoint under
 matched evaluation settings. MME-P and MME-C use the raw MME perception and
 cognition scores; other understanding metrics are percentages.
 
-### Visual Understanding
+### 🧠 Visual Understanding
 
 | Backbone | MMMU | MMBench | TextVQA | SEED | RWQA | MMVet | MME-P | MME-C |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -126,7 +126,7 @@ cognition scores; other understanding metrics are percentages.
 | BAGEL | 55.3 -> 58.8 | 85.0 -> 87.1 | 86.0 -> 88.5 | 79.3 -> 81.8 | 71.2 -> 73.9 | 67.2 -> 69.5 | 1687.0 -> 1701.7 | 701.0 -> 715.9 |
 | VARGPT-v1.1 | 48.6 -> 51.6 | 81.0 -> 83.7 | 82.0 -> 84.8 | 76.1 -> 79.2 | 67.5 -> 71.1 | 51.9 -> 54.0 | 1678.3 -> 1695.7 | 592.9 -> 606.4 |
 
-### Image Generation
+### 🎨 Image Generation
 
 GenEval scores are percentages.
 
@@ -138,7 +138,7 @@ GenEval scores are percentages.
 
 ---
 
-## Repository Layout
+## 🗂️ Repository Layout
 
 | Path | Purpose |
 | --- | --- |
@@ -154,12 +154,12 @@ paths such as `data/`, `models/`, `outputs/`, and `logs/`.
 
 ---
 
-## Setup
+## ⚙️ Setup
 
 Use separate environments for the three backends. The dependency stacks differ,
 and mixing them in one environment can create version conflicts.
 
-### BLIP3o
+### 🔧 BLIP3o
 
 Install a PyTorch build that matches your machine first, for example the
 CUDA or ROCm wheel recommended by your cluster. Then install the BLIP3o
@@ -184,7 +184,7 @@ pip install -e BLIP3o
 pip install -e BLIP3o/eval/lmms-eval
 ```
 
-### BAGEL
+### 🔧 BAGEL
 
 ```bash
 conda create -n uug-bagel python=3.10 -y
@@ -195,7 +195,7 @@ pip install -r Bagel/requirements.txt
 Generation benchmark scoring may also require benchmark-specific detector
 assets and setup from `Bagel/EVAL.md`.
 
-### VARGPT-v1.1
+### 🔧 VARGPT-v1.1
 
 ```bash
 conda create -n uug-vargpt python=3.10 -y
@@ -219,7 +219,7 @@ that file in a separate environment if it conflicts with the training setup.
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
 After installing the BLIP3o environment, run a small launcher smoke test on any
 local folder of images:
@@ -247,7 +247,7 @@ bash scripts/E1_main_joint.sh
 
 ---
 
-## Environment Variables
+## 🔐 Environment Variables
 
 Do not commit secrets. Use environment variables or an untracked local `.env`
 file. Start from the provided template:
@@ -267,7 +267,7 @@ Common variables:
 
 ---
 
-## Model Zoo
+## 🤗 Model Zoo
 
 Public model links will be added after release. Until then, the training and
 evaluation scripts expect local checkpoint paths.
@@ -280,7 +280,7 @@ evaluation scripts expect local checkpoint paths.
 
 ---
 
-## Inference
+## 🔮 Inference
 
 For BLIP3o interactive qualitative inspection:
 
@@ -310,7 +310,7 @@ by the BAGEL training and evaluation launchers.
 
 ---
 
-## Training
+## 🏋️ Training
 
 BLIP3o training launchers are under `scripts/`. BAGEL and VARGPT-v1.1 use their
 backend-native launchers, shown below.
@@ -327,7 +327,7 @@ Common BLIP3o launchers:
 | `scripts/E6_single_step.sh` | Generation-centered unified-step ablation |
 | `scripts/E7_two_stage.sh` | Understanding stage followed by generation stage |
 
-### Direct BLIP3o Launcher
+### ▶️ Direct BLIP3o Launcher
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -347,7 +347,7 @@ OUTPUT_DIR=$PWD/outputs/smoke/blip3o \
 bash scripts/E1_main_joint.sh
 ```
 
-### BAGEL Launcher
+### ▶️ BAGEL Launcher
 
 ```bash
 MODEL_PATH=/path/to/BAGEL-7B-MoT \
@@ -360,7 +360,7 @@ bash Bagel/scripts/B1_unified_training.sh
 `MODEL_PATH` must point to the local BAGEL model checkout or checkpoint
 directory.
 
-### VARGPT-v1.1 Launcher
+### ▶️ VARGPT-v1.1 Launcher
 
 ```bash
 cd vargpt_1_1/VARGPT-family-training
@@ -374,7 +374,7 @@ Available VARGPT modes are `joint`, `u_only`, and `gen_only`.
 
 ---
 
-## Resume and Monitoring
+## ♻️ Resume and Monitoring
 
 BLIP3o checkpoints are saved under the configured `OUTPUT_DIR` as
 `step_NNNNN` directories. A checkpoint is complete when it contains `SAVE_OK`.
@@ -399,12 +399,12 @@ Typical run files:
 
 ---
 
-## Evaluation
+## 📏 Evaluation
 
 Use completed checkpoints as input. The exact benchmark data setup follows the
 underlying benchmark and upstream evaluation tool requirements.
 
-### BLIP3o Understanding
+### 🧠 BLIP3o Understanding
 
 ```bash
 CHECKPOINT_DIR=/path/to/step_010000 \
@@ -420,7 +420,7 @@ TASKS="realworldqa,textvqa" \
 bash BLIP3o/eval/understanding_eval_our.sh
 ```
 
-### BLIP3o Generation
+### 🎨 BLIP3o Generation
 
 ```bash
 CHECKPOINT_DIR=/path/to/step_010000 \
@@ -435,7 +435,7 @@ bash BLIP3o/eval/wise/generate_wise_our.sh
 
 WISE scoring requires `OPENAI_API_KEY`.
 
-### BAGEL Evaluation
+### 📋 BAGEL Evaluation
 
 Understanding benchmarks are launched through the BAGEL VLM evaluation
 dispatcher:
@@ -449,7 +449,7 @@ bash Bagel/eval/vlm/evaluate.sh mme
 For generation benchmarks, follow the dependency and detector setup described
 in `Bagel/EVAL.md`.
 
-### VARGPT-v1.1 Evaluation
+### 📋 VARGPT-v1.1 Evaluation
 
 ```bash
 CHECKPOINT_DIR=/path/to/se_checkpoint_10000 \
@@ -474,25 +474,7 @@ bash run_scripts/run_eval_vargpt_generation_our.sh
 
 ---
 
-## Cluster Usage
-
-On Slurm systems, enter an allocated shell before launching training or
-evaluation:
-
-```bash
-srun --partition=gpu \
-  --gres=gpu:1 \
-  --cpus-per-task=4 \
-  --mem=96G \
-  --time=3-00:00:00 \
-  --pty bash
-```
-
-Then activate the appropriate conda environment and run the launcher.
-
----
-
-## Citation
+## 📚 Citation
 
 If this codebase is useful for your research, please cite:
 
@@ -510,7 +492,7 @@ public paper metadata is finalized.
 
 ---
 
-## Acknowledgements
+## 🙏 Acknowledgements
 
 This repository builds on BLIP3o, BAGEL, VARGPT-v1.1, lmms-eval, GenEval,
 DPG-Bench, and WISE evaluation tooling. We thank the authors and maintainers of
@@ -518,7 +500,7 @@ these projects for releasing their code and models.
 
 ---
 
-## License
+## 📄 License
 
 This repository is released under the Apache License 2.0. See `LICENSE`.
 
