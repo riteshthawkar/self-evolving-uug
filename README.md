@@ -12,6 +12,5 @@ Files:
 - `styles.css` contains the responsive visual system.
 - `script.js` contains tab switching and BibTeX copy behavior.
 - `assets/figures/` contains PNG exports from the current manuscript figures.
-- `assets/paper/self-evolving-uug.pdf` contains the current manuscript PDF.
 
-Before public release, replace the GitHub and HuggingFace URLs if the final release locations differ, and update the BibTeX entry with the arXiv or venue metadata.
+Before public release, replace the GitHub and HuggingFace URLs if the final release locations differ, add a public paper link when available, and update the BibTeX entry with the arXiv or venue metadata.
