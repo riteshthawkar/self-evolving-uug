@@ -11,8 +11,15 @@ Ask, Solve, Generate: Self-Evolving Unified Multimodal Understanding and Generat
 </p>
 
 <p align="center">
-  Ritesh Thawkar · Shravan Venkatraman · Omkar Thawakar · Abdelrahman M Shaker ·
-  Fahad Shahbaz Khan · Hisham Cholakkal · Salman Khan · Rao Muhammad Anwer
+  Ritesh Thawkar<sup>1</sup> · Shravan Venkatraman<sup>1</sup> · Omkar Thawakar<sup>1</sup> · Abdelrahman M Shaker<sup>1</sup> ·
+  Fahad Shahbaz Khan<sup>1,4</sup> · Hisham Cholakkal<sup>1</sup> · Salman Khan<sup>1,3</sup> · Rao Muhammad Anwer<sup>1,2</sup>
+</p>
+
+<p align="center">
+  <sup>1</sup> Mohamed bin Zayed University of Artificial Intelligence &nbsp;&nbsp;
+  <sup>2</sup> Aalto University &nbsp;&nbsp;
+  <sup>3</sup> Australian National University &nbsp;&nbsp;
+  <sup>4</sup> Link&ouml;ping University
 </p>
 
 ---
