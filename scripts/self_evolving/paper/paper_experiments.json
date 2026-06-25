@@ -39,8 +39,8 @@
       "diversity": 0.1,
       "contradiction_penalty": 0.2
     },
-    "default_data_dir": "data/joint_6k/images",
-    "minimum_data_images": 6000,
+    "default_data_dir": "data/joint_pool_10k/images",
+    "minimum_data_images": 10000,
     "expected_data_sources": [
       "coco",
       "sa1b",

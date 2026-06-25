@@ -11,7 +11,7 @@ vargpt_version: "qwen2vl-v1.1"
 vargpt_train_stage: 0
 
 ### dataset
-eval_dataset:  eval_inference_demo 
+eval_dataset: your_eval_dataset_name
 
 template: vargpt_qwen2_vl
 cutoff_len: 2048
@@ -27,4 +27,3 @@ overwrite_output_dir: true
 ### eval
 per_device_eval_batch_size: 1
 predict_with_generate: true
-

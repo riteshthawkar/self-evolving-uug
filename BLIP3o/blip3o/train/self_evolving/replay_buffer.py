@@ -2,7 +2,7 @@
 Replay buffer for the self-evolving pipeline.
 
 Stores the best generated images along with their scoring metadata
-(prompt, questions, reference answers) so they can be mixed into
+(prompt, questions, Solver-derived reference answers) so they can be mixed into
 the understanding training step.  This closes the
 *generation → understanding* supervision loop.
 
@@ -33,7 +33,7 @@ class ReplayEntry:
     image: Image.Image
     prompt: str                         # generation prompt
     questions: List[str]                # proposer-generated questions
-    reference_answers: List[str]        # solver answers on the *real* image
+    reference_answers: List[str]        # Solver-derived answers on the real image
     reward: float                       # total_reward at generation time
     step_generated: int                 # training step when image was created
     meta: Dict = field(default_factory=dict)   # arbitrary extra info

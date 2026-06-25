@@ -66,8 +66,13 @@ BAGEL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$BAGEL_ROOT/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
+HF_TOKEN_FILE="${HF_TOKEN_FILE:-${ORIGINAL_HOME:-$HOME}/.cache/huggingface/token}"
+if [[ -z "${HF_TOKEN:-}" && -f "$HF_TOKEN_FILE" ]]; then
+  export HF_TOKEN="$(< "$HF_TOKEN_FILE")"
+fi
+
 MODEL_PATH="${MODEL_PATH:-$REPO_ROOT/models/BAGEL-7B-MoT}"
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_pool_10k/images}"
 # Keep all baseline artifacts under a shared repo-level outputs tree.
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/bagel/B1_unified_training}"
 # Output layout:
@@ -120,7 +125,7 @@ SOLVER_TEXT_TOP_K="${SOLVER_TEXT_TOP_K:-32}"
 GEN_SPEC_TEXT_TOP_P="${GEN_SPEC_TEXT_TOP_P:-0.85}"
 GEN_SPEC_TEXT_TOP_K="${GEN_SPEC_TEXT_TOP_K:-20}"
 SAVE_GENERATED_IMAGES="${SAVE_GENERATED_IMAGES:-0}"
-ENABLE_LORA="${ENABLE_LORA:-0}"
+ENABLE_LORA="${ENABLE_LORA:-1}"
 LORA_CHECKPOINT_PATH="${LORA_CHECKPOINT_PATH:-}"
 LORA_RANK="${LORA_RANK:-16}"
 LORA_ALPHA="${LORA_ALPHA:-32}"
@@ -160,6 +165,8 @@ GEN_SOLVER_POLICY_MAX_SAMPLES="${GEN_SOLVER_POLICY_MAX_SAMPLES:-0}"
 PROPOSER_POLICY_MAX_CANDIDATES="${PROPOSER_POLICY_MAX_CANDIDATES:-0}"
 BASELINE_MOMENTUM="${BASELINE_MOMENTUM:-0.6}"
 SOLVER_REWARD_MIX_GAMMA="${SOLVER_REWARD_MIX_GAMMA:-0.7}"
+SOLVER_SKIP_EASY_UPDATES="${SOLVER_SKIP_EASY_UPDATES:-1}"
+SOLVER_EASY_UPDATE_MAJORITY_THRESHOLD="${SOLVER_EASY_UPDATE_MAJORITY_THRESHOLD:-0.85}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-100}"
 RESUME_FROM="${RESUME_FROM:-}"
 DISABLE_FLASH_ATTN="${DISABLE_FLASH_ATTN:-1}"
@@ -522,6 +529,7 @@ SHARED_ARGS=(
   --max_new_tokens_proposer "$MAX_NEW_TOKENS_PROPOSER"
   --max_new_tokens_solver "$MAX_NEW_TOKENS_SOLVER"
   --solver_unsolvable_maj_threshold 0.20
+  --solver_easy_update_majority_threshold "$SOLVER_EASY_UPDATE_MAJORITY_THRESHOLD"
   --zero_entropy_eps 1e-6
   --seed 42
   --log_every 10
@@ -645,6 +653,11 @@ if [[ "$SOLVER_SKIP_UNSOLVABLE_UPDATES" == "1" ]]; then
   SHARED_ARGS+=(--solver_skip_unsolvable_updates)
 else
   SHARED_ARGS+=(--disable_solver_skip_unsolvable_updates)
+fi
+if [[ "$SOLVER_SKIP_EASY_UPDATES" == "1" ]]; then
+  SHARED_ARGS+=(--solver_skip_easy_updates)
+else
+  SHARED_ARGS+=(--disable_solver_skip_easy_updates)
 fi
 if [[ "$SOLVER_TOKEN_ENTROPY_ENABLED" == "1" ]]; then
   SHARED_ARGS+=(--solver_token_entropy_enabled)
@@ -930,7 +943,7 @@ if [[ "$RUN_MODE" == "train" ]]; then
   echo "[B1]   PolicyTok:  max_completion_tokens=$POLICY_MAX_COMPLETION_TOKENS min_completion_tokens=$POLICY_MIN_COMPLETION_TOKENS max_prompt_tokens=$POLICY_MAX_PROMPT_TOKENS text_only=$POLICY_TEXT_ONLY_MAX_COMPLETION_TOKENS retries=$POLICY_TEXT_ONLY_MAX_RETRIES"
   echo "[B1]   PolicyFB:   text_only_fallback=$POLICY_TEXT_ONLY_FALLBACK text_only_mode=$POLICY_TEXT_ONLY_MODE rocm_force_text_only=$POLICY_ROCM_FORCE_TEXT_ONLY empty_cache_each_step=$POLICY_EMPTY_CACHE_EACH_STEP"
   echo "[B1]   PolicyUpd:  solver_max_samples=$SOLVER_POLICY_MAX_SAMPLES gen_solver_max_samples=$GEN_SOLVER_POLICY_MAX_SAMPLES proposer_max_candidates=$PROPOSER_POLICY_MAX_CANDIDATES"
-  echo "[B1]   U-Gating:   skip_no_acceptable=$UNDERSTANDING_SKIP_NO_ACCEPTABLE require_acceptable=$UNDERSTANDING_REQUIRE_ACCEPTABLE_FOR_UPDATE require_disagreement=$UNDERSTANDING_UPDATE_REQUIRE_DISAGREEMENT reject_unsolvable=$PROPOSER_REJECT_UNSOLVABLE solver_skip_unsolvable=$SOLVER_SKIP_UNSOLVABLE_UPDATES"
+  echo "[B1]   U-Gating:   skip_no_acceptable=$UNDERSTANDING_SKIP_NO_ACCEPTABLE require_acceptable=$UNDERSTANDING_REQUIRE_ACCEPTABLE_FOR_UPDATE require_disagreement=$UNDERSTANDING_UPDATE_REQUIRE_DISAGREEMENT reject_unsolvable=$PROPOSER_REJECT_UNSOLVABLE solver_skip_easy=$SOLVER_SKIP_EASY_UPDATES solver_skip_unsolvable=$SOLVER_SKIP_UNSOLVABLE_UPDATES"
   echo "[B1]   TrainRoles: U-proposer=$TRAIN_UNDERSTANDING_PROPOSER solver=$TRAIN_SOLVER G-proposer=$TRAIN_GENERATION_PROPOSER generator=$TRAIN_GENERATOR"
   echo "[B1]   Gen-GRPO:   group=$PROPOSER_GRPO_GEN_GROUP_SIZE score_extras=$SCORE_GRPO_EXTRAS temp_mult=$GRPO_EXTRA_TEMP_MULTIPLIER"
   echo "[B1]   LoRA:       enabled (r=$LORA_RANK, alpha=$LORA_ALPHA, dropout=$LORA_DROPOUT)"

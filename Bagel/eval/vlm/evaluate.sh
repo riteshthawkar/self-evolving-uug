@@ -9,176 +9,114 @@
 #
 # This modified file is released under the same license.
 
-set -x
+set -euo pipefail
 
-export PYTHONPATH="$(pwd):${PYTHONPATH}"
+export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 export TF_CPP_MIN_LOG_LEVEL=3
 export LAUNCHER=pytorch
 
-DATASET=${1}
-echo "CHECKPOINT: ${CHECKPOINT}"
+usage() {
+  cat <<'EOF'
+Usage: bash Bagel/eval/vlm/evaluate.sh DATASET [evaluation args...]
 
-# Save original arguments
+DATASET options:
+  mme, mmvet, mmbench-dev-en, mmbench-dev-cn, mmbench-test-en,
+  mmbench-test-cn, mmmu-dev, mmmu-val, mmmu-val_cot, mmmu-test,
+  mathvista-testmini, mathvista-test, pope, pope_cot,
+  vqa-gqa-testdev, mmvp
+EOF
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 2
+fi
+
+DATASET="$1"
+shift
 ARGS=("$@")
 
+: "${GPUS:=1}"
+: "${CHECKPOINT:=}"
+: "${ARNOLD_WORKER_NUM:=1}"
+: "${ARNOLD_ID:=0}"
+: "${ARNOLD_WORKER_0_HOST:=127.0.0.1}"
+: "${MASTER_PORT:=29500}"
+
+echo "CHECKPOINT: ${CHECKPOINT}"
+
 # Parse options
-while [[ $# -gt 0 ]]; do
-  case "$1" in
+for arg in "${ARGS[@]}"; do
+  case "${arg}" in
     --auto)
       GPUS=1
-      shift
-      ;;
-    *)
-      shift
       ;;
   esac
 done
 echo "GPUS: ${GPUS}"
 
-if  [ ${DATASET} == "mme" ]; then
-  python -m eval.vlm.eval.mme.eval "${ARGS[@]:1}"
-fi
+run_torch() {
+  torchrun \
+    --nnodes="${ARNOLD_WORKER_NUM}" \
+    --node_rank="${ARNOLD_ID}" \
+    --master_addr="${ARNOLD_WORKER_0_HOST}" \
+    --nproc_per_node="${GPUS}" \
+    --master_port="${MASTER_PORT}" \
+    "$@"
+}
 
-if [ ${DATASET} == "mmvet" ]; then
-    python -m eval.vlm.eval.mmvet.evaluate_mmvet --datasets mmvet "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "mmbench-dev-en" ]; then
-    torchrun \
-      --nnodes=$ARNOLD_WORKER_NUM \
-      --node_rank=$ARNOLD_ID \
-      --master_addr=$ARNOLD_WORKER_0_HOST \
-      --nproc_per_node=${GPUS} \
-      --master_port=${MASTER_PORT} \
-      -m eval.vlm.eval.mmbench.evaluate_mmbench --datasets mmbench_dev_20230712 "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "mmbench-dev-cn" ]; then
-    torchrun \
-      --nnodes=$ARNOLD_WORKER_NUM \
-      --node_rank=$ARNOLD_ID \
-      --master_addr=$ARNOLD_WORKER_0_HOST \
-      --nproc_per_node=${GPUS} \
-      --master_port=${MASTER_PORT} \
-      -m eval.vlm.eval.mmbench.evaluate_mmbench --datasets mmbench_dev_cn_20231003 "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "mmbench-test-en" ]; then
-    torchrun \
-      --nnodes=$ARNOLD_WORKER_NUM \
-      --node_rank=$ARNOLD_ID \
-      --master_addr=$ARNOLD_WORKER_0_HOST \
-      --nproc_per_node=${GPUS} \
-      --master_port=${MASTER_PORT} \
-      -m eval.vlm.eval.mmbench.evaluate_mmbench --datasets mmbench_test_en_20231003 "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "mmbench-test-cn" ]; then
-    torchrun \
-      --nnodes=$ARNOLD_WORKER_NUM \
-      --node_rank=$ARNOLD_ID \
-      --master_addr=$ARNOLD_WORKER_0_HOST \
-      --nproc_per_node=${GPUS} \
-      --master_port=${MASTER_PORT} \
-      -m eval.vlm.eval.mmbench.evaluate_mmbench --datasets mmbench_test_cn_20231003 "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "mmmu-dev" ]; then
-    torchrun \
-      --nnodes=$ARNOLD_WORKER_NUM \
-      --node_rank=$ARNOLD_ID \
-      --master_addr=$ARNOLD_WORKER_0_HOST \
-      --nproc_per_node=${GPUS} \
-      --master_port=${MASTER_PORT} \
-      -m eval.vlm.eval.mmmu.evaluate_mmmu --datasets MMMU_dev "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "mmmu-val" ]; then
-    torchrun \
-      --nnodes=$ARNOLD_WORKER_NUM \
-      --node_rank=$ARNOLD_ID \
-      --master_addr=$ARNOLD_WORKER_0_HOST \
-      --nproc_per_node=${GPUS} \
-      --master_port=${MASTER_PORT} \
-      -m eval.vlm.eval.mmmu.evaluate_mmmu --datasets MMMU_validation "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "mmmu-val_cot" ]; then
-    torchrun \
-      --nnodes=$ARNOLD_WORKER_NUM \
-      --node_rank=$ARNOLD_ID \
-      --master_addr=$ARNOLD_WORKER_0_HOST \
-      --nproc_per_node=${GPUS} \
-      --master_port=${MASTER_PORT} \
-      -m eval.vlm.eval.mmmu.evaluate_mmmu_cot --datasets MMMU_validation_cot "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "mmmu-test" ]; then
-    torchrun \
-      --nnodes=$ARNOLD_WORKER_NUM \
-      --node_rank=$ARNOLD_ID \
-      --master_addr=$ARNOLD_WORKER_0_HOST \
-      --nproc_per_node=${GPUS} \
-      --master_port=${MASTER_PORT} \
-      -m eval.vlm.eval.mmmu.evaluate_mmmu --datasets MMMU_test "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "mathvista-testmini" ]; then
-    torchrun \
-      --nnodes=$ARNOLD_WORKER_NUM \
-      --node_rank=$ARNOLD_ID \
-      --master_addr=$ARNOLD_WORKER_0_HOST \
-      --nproc_per_node=${GPUS} \
-      --master_port=${MASTER_PORT} \
-      -m eval.vlm.eval.mathvista.evaluate_mathvista --datasets MathVista_testmini "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "mathvista-test" ]; then
-    torchrun \
-      --nnodes=$ARNOLD_WORKER_NUM \
-      --node_rank=$ARNOLD_ID \
-      --master_addr=$ARNOLD_WORKER_0_HOST \
-      --nproc_per_node=${GPUS} \
-      --master_port=${MASTER_PORT} \
-      -m eval.vlm.eval.mathvista.evaluate_mathvista --datasets MathVista_test "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "pope" ]; then
-    torchrun \
-    --nnodes=$ARNOLD_WORKER_NUM \
-    --node_rank=$ARNOLD_ID \
-    --master_addr=$ARNOLD_WORKER_0_HOST \
-    --nproc_per_node=${GPUS} \
-    --master_port=${MASTER_PORT} \
-    -m eval.vlm.eval.pope.evaluate_pope --datasets pope "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "pope_cot" ]; then
-    torchrun \
-    --nnodes=$ARNOLD_WORKER_NUM \
-    --node_rank=$ARNOLD_ID \
-    --master_addr=$ARNOLD_WORKER_0_HOST \
-    --nproc_per_node=${GPUS} \
-    --master_port=${MASTER_PORT} \
-    -m eval.vlm.eval.pope.evaluate_pope --datasets pope_cot --cot "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "vqa-gqa-testdev" ]; then
-    torchrun \
-    --nnodes=$ARNOLD_WORKER_NUM \
-    --node_rank=$ARNOLD_ID \
-    --master_addr=$ARNOLD_WORKER_0_HOST \
-    --nproc_per_node=${GPUS} \
-    --master_port=${MASTER_PORT} \
-    -m eval.vlm.eval.vqa.evaluate_vqa --datasets gqa_testdev_llava "${ARGS[@]:1}"
-fi
-
-if [ ${DATASET} == "mmvp" ]; then
-    torchrun \
-      --nnodes=$ARNOLD_WORKER_NUM \
-      --node_rank=$ARNOLD_ID \
-      --master_addr=$ARNOLD_WORKER_0_HOST \
-      --nproc_per_node=${GPUS} \
-      --master_port=${MASTER_PORT} \
-      -m eval.vlm.eval.mmvp.evaluate_mmvp --datasets MMVP "${ARGS[@]:1}"
-fi
+case "${DATASET}" in
+  mme)
+    python -m eval.vlm.eval.mme.eval "${ARGS[@]}"
+    ;;
+  mmvet)
+    python -m eval.vlm.eval.mmvet.evaluate_mmvet --datasets mmvet "${ARGS[@]}"
+    ;;
+  mmbench-dev-en)
+    run_torch -m eval.vlm.eval.mmbench.evaluate_mmbench --datasets mmbench_dev_20230712 "${ARGS[@]}"
+    ;;
+  mmbench-dev-cn)
+    run_torch -m eval.vlm.eval.mmbench.evaluate_mmbench --datasets mmbench_dev_cn_20231003 "${ARGS[@]}"
+    ;;
+  mmbench-test-en)
+    run_torch -m eval.vlm.eval.mmbench.evaluate_mmbench --datasets mmbench_test_en_20231003 "${ARGS[@]}"
+    ;;
+  mmbench-test-cn)
+    run_torch -m eval.vlm.eval.mmbench.evaluate_mmbench --datasets mmbench_test_cn_20231003 "${ARGS[@]}"
+    ;;
+  mmmu-dev)
+    run_torch -m eval.vlm.eval.mmmu.evaluate_mmmu --datasets MMMU_dev "${ARGS[@]}"
+    ;;
+  mmmu-val)
+    run_torch -m eval.vlm.eval.mmmu.evaluate_mmmu --datasets MMMU_validation "${ARGS[@]}"
+    ;;
+  mmmu-val_cot)
+    run_torch -m eval.vlm.eval.mmmu.evaluate_mmmu_cot --datasets MMMU_validation_cot "${ARGS[@]}"
+    ;;
+  mmmu-test)
+    run_torch -m eval.vlm.eval.mmmu.evaluate_mmmu --datasets MMMU_test "${ARGS[@]}"
+    ;;
+  mathvista-testmini)
+    run_torch -m eval.vlm.eval.mathvista.evaluate_mathvista --datasets MathVista_testmini "${ARGS[@]}"
+    ;;
+  mathvista-test)
+    run_torch -m eval.vlm.eval.mathvista.evaluate_mathvista --datasets MathVista_test "${ARGS[@]}"
+    ;;
+  pope)
+    run_torch -m eval.vlm.eval.pope.evaluate_pope --datasets pope "${ARGS[@]}"
+    ;;
+  pope_cot)
+    run_torch -m eval.vlm.eval.pope.evaluate_pope --datasets pope_cot --cot "${ARGS[@]}"
+    ;;
+  vqa-gqa-testdev)
+    run_torch -m eval.vlm.eval.vqa.evaluate_vqa --datasets gqa_testdev_llava "${ARGS[@]}"
+    ;;
+  mmvp)
+    run_torch -m eval.vlm.eval.mmvp.evaluate_mmvp --datasets MMVP "${ARGS[@]}"
+    ;;
+  *)
+    echo "ERROR: unknown DATASET '${DATASET}'" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

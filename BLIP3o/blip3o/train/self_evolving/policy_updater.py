@@ -134,12 +134,26 @@ def _estimate_completion_token_count(processor, completion_text: str) -> int:
     return max(1, int(word_count * 1.3))
 
 
+def _reinforce_loss_from_ce(
+    ce_loss: torch.Tensor,
+    kl_loss: torch.Tensor,
+    advantage: float,
+    beta: float,
+) -> torch.Tensor:
+    """Return KL-regularized REINFORCE loss from CE = -logprob."""
+    return float(advantage) * ce_loss + float(beta) * kl_loss
+
+
 class RolePolicyUpdater:
     """
     KL-regularized REINFORCE updater for a role adapter.
 
     Computes:
-        loss = -advantage * CE_loss + beta * KL_loss
+        loss = advantage * CE_loss + beta * KL_loss
+
+    where CE_loss is the Hugging Face negative log-likelihood over the
+    completion tokens. A positive advantage must therefore reduce CE and
+    increase completion probability; a negative advantage must increase CE.
 
     with adaptive beta based on KL target.
     """
@@ -434,7 +448,12 @@ class RolePolicyUpdater:
             skipped_reason = "no_valid_completion_tokens" if valid_token_count <= 0 else "non_finite_ce_loss"
         else:
             # REINFORCE sign: maximize (advantage * logprob) via gradient descent.
-            total_loss = (-advantage) * ce_loss + beta_before * kl_loss
+            total_loss = _reinforce_loss_from_ce(
+                ce_loss,
+                kl_loss,
+                advantage,
+                beta_before,
+            )
             skipped_reason = None
             if not bool(torch.isfinite(total_loss.detach()).all().item()):
                 # Non-finite total_loss: backward zero instead.

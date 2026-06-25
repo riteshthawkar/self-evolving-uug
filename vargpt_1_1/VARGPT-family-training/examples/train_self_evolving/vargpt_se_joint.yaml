@@ -19,7 +19,6 @@ lora_target: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
 freeze_vision_tower: true
 
 ### dataset
-dataset: train_vargpt_v1_1_demo
 template: vargpt_qwen2_vl
 cutoff_len: 2048
 
@@ -56,17 +55,23 @@ se_min_spec_quality_for_update: 0.35
 se_min_spec_qa_pairs: 2
 se_max_expected_words: 8
 se_max_question_words: 24
+se_use_ref_answer_scoring: false
 se_proposer_gen_reward_enabled: true
 se_num_solver_samples: 7
+se_proposer_num_candidates: 3
 se_proposer_spot_check_samples: 3
+se_proposer_question_quality_min_score: 0.60
+se_proposer_question_structural_min_score: 0.50
+se_proposer_question_model_judge_enabled: true
+se_proposer_question_model_judge_weight: 0.15
 se_solver_use_temperature_mix: true
 se_solver_use_forced_choice_from_proposer: true
 se_solver_temp_min: 0.5
 se_solver_temp_max: 2.5
 se_solver_top_p_min: 0.3
 se_solver_top_p_max: 1.0
-se_solver_skip_update_on_easy: false
-se_easy_update_majority_frac_threshold: 1.0
+se_solver_skip_update_on_easy: true
+se_easy_update_majority_frac_threshold: 0.85
 se_difficulty_sampler_enabled: true
 se_difficulty_sampler_min_samples: 8
 se_difficulty_target_easy: 0.0

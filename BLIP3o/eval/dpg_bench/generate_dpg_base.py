@@ -26,6 +26,13 @@ from blip3o.model.builder import load_pretrained_model
 from blip3o.utils import disable_torch_init
 
 
+def diffusion_pretrained_args(model_name):
+    local_decoder = os.path.join(model_name, "diffusion-decoder")
+    if os.path.isdir(local_decoder):
+        return local_decoder, {}
+    return model_name, {"subfolder": "diffusion-decoder"}
+
+
 def set_global_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -74,7 +81,7 @@ torch.set_grad_enabled(False)
 def main():
     opt = parse_args()
     model_name = opt.model
-    diffusion_path = model_name + "/diffusion-decoder"
+    diffusion_path, diffusion_kwargs = diffusion_pretrained_args(model_name)
 
     # Resolve paths
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -100,6 +107,7 @@ def main():
 
     pipe = DiffusionPipeline.from_pretrained(
         diffusion_path,
+        **diffusion_kwargs,
         custom_pipeline="pipeline_llava_gen",
         torch_dtype=torch.bfloat16,
         use_safetensors=True,

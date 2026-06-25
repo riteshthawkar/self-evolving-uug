@@ -25,6 +25,7 @@ N_CHUNKS="${N_CHUNKS:-8}"
 OUTDIR="${OUTDIR:-${SCRIPT_DIR}/outputs/base_model}"
 
 echo "=== WISE Generation (Base BLIP3o) ==="
+pids=()
 for i in $(seq 0 $(($N_CHUNKS - 1))); do
     CUDA_VISIBLE_DEVICES=$i python "${SCRIPT_DIR}/generate_wise_base.py" \
         --model "$MODEL" --outdir "$OUTDIR" --index $i --n_chunks $N_CHUNKS &

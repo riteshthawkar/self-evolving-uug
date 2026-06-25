@@ -148,14 +148,20 @@ def gaussian_reward(x: float, mu: float, sigma: float) -> float:
 def _parse_first_question(text: str) -> str:
     tagged = strip_tags(text, "question")
     if tagged:
-        return tagged
+        text_tagged = strip_tags(tagged, "text")
+        if text_tagged:
+            return text_tagged.replace("\n", " ").strip()
+        tagged = re.sub(r"<[^>]+>", " ", tagged).strip()
+        if "?" in tagged:
+            return tagged[: tagged.find("?") + 1].strip()
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     for line in lines:
-        line = re.sub(r"^\d+[\).\-\s]*", "", line).strip()
-        if line.endswith("?"):
-            return line
-    if lines:
-        return lines[0]
+        line = re.sub(r"^\s*(?:q(?:uestion)?\s*)?\d+\s*[\).:\-\s]*", "", line, flags=re.IGNORECASE).strip()
+        line = re.sub(r"<[^>]+>", " ", line).strip()
+        if re.match(r"^<[^>]+>$", line):
+            continue
+        if "?" in line:
+            return line[: line.find("?") + 1].strip()
     return ""
 
 
@@ -165,6 +171,14 @@ def _parse_all_questions(text: str) -> List[str]:
     Handles the XML format produced by ``build_proposer_multi_prompt``.
     """
     questions: List[str] = []
+
+    # Recover common partial-XML outputs such as
+    # ``<text>What color is the sign?</text>`` even when the surrounding
+    # ``<question>`` block is truncated or malformed.
+    for match in re.finditer(r'<text[^>]*>(.*?)</text>', text, re.DOTALL | re.IGNORECASE):
+        q = match.group(1).strip().replace("\n", " ")
+        if q:
+            questions.append(q)
 
     question_blocks = re.findall(
         r'<question[^>]*>(.*?)</question>',
@@ -192,9 +206,8 @@ def _parse_all_questions(text: str) -> List[str]:
                 if ln_clean.endswith("?"):
                     found = ln_clean
                     break
-            if not found and lines:
-                found = lines[0]
-            questions.append(found)
+            if found:
+                questions.append(found)
         questions = [q for q in questions if q]
 
     if questions:
@@ -207,11 +220,20 @@ def _parse_all_questions(text: str) -> List[str]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     candidates: List[str] = []
     for ln in lines:
-        ln_clean = re.sub(r"^\d+[\).\-\s]*", "", ln).strip()
+        ln_clean = re.sub(r"^\s*(?:q(?:uestion)?\s*)?\d+\s*[\).:\-\s]*", "", ln, flags=re.IGNORECASE).strip()
+        ln_clean = re.sub(r'<[^>]+>', ' ', ln_clean).strip()
         if re.match(r'^<[^>]+>$', ln_clean):
             continue
-        if ln_clean.endswith("?"):
-            candidates.append(ln_clean)
+        if "?" in ln_clean:
+            candidates.append(ln_clean[: ln_clean.find("?") + 1].strip())
+    if candidates:
+        return candidates
+
+    stripped = re.sub(r'<[^>]+>', ' ', text)
+    for match in re.finditer(r'([^?\n]{6,180}\?)', stripped):
+        q = " ".join(match.group(1).split())
+        if q:
+            candidates.append(q)
     if candidates:
         return candidates
 

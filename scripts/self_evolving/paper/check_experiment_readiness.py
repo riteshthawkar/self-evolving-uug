@@ -3,7 +3,7 @@
 
 This script intentionally checks readiness, not scientific correctness of the
 reported numbers. It validates the protocol assets that reviewers asked about:
-the 6k data pool, launch scripts, environment requirements, existing run
+the 10k data pool, launch scripts, environment requirements, existing run
 progress, failed runs, and the rebuttal evidence hooks.
 """
 

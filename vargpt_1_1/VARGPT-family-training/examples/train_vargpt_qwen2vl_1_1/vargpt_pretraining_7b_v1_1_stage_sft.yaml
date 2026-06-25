@@ -10,7 +10,7 @@ vargpt_version: "qwen2vl-v1.1"
 vargpt_train_stage: 3 # for check code logit
 
 ### dataset
-dataset:  train_vargpt_v1_1_demo 
+dataset: your_dataset_name
 
 
 template: vargpt_qwen2_vl

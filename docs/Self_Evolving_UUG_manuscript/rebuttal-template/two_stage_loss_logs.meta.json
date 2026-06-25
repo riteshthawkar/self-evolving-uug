@@ -1,8 +1,0 @@
-{
-  "run_dir": "/Users/ritesh.thawkar/Ritesh/self-evolving-uug/outputs/blip3o/E7_two_stage",
-  "stage1_steps": 5000,
-  "output": "/Users/ritesh.thawkar/Ritesh/self-evolving-uug/docs/Self_Evolving_UUG_manuscript/rebuttal-template/two_stage_loss_logs.csv",
-  "rows_extracted": 0,
-  "logs_found": [],
-  "note": "Rows are extracted from observed logs only; no values are synthesized."
-}

@@ -26,6 +26,7 @@ from PIL import Image
 from transformers import AutoProcessor
 
 from .config import UnderstandingSelfEvolvingConfig
+from .checkpoint_adapters import sanitize_peft_adapter_dir
 from .image_pool import ImagePool, ImagePoolConfig
 from .model_api import _load_blip3o_model
 from .policy_updater import RolePolicyUpdater
@@ -1356,6 +1357,15 @@ class UnderstandingSelfEvolvingTrainer:
                 if not saved:
                     with use_adapter(self.model, adapter_name):
                         self.model.save_pretrained(subdir)
+                try:
+                    sanitize_peft_adapter_dir(
+                        subdir,
+                        in_place=True,
+                        backup=False,
+                        log=lambda msg: print(f"[Understanding] {msg}"),
+                    )
+                except Exception as exc:
+                    print(f"[Understanding] WARNING: failed to sanitize {sub_name} adapter checkpoint: {exc}")
                 if sub_name == "solver":
                     try:
                         self.processor.save_pretrained(subdir)

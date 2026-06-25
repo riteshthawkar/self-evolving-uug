@@ -71,6 +71,8 @@ model.safetensors
 # ==============================================================================
 logs/
 *.log
+*.out
+*.err
 wandb/
 mlruns/
 tensorboard/
@@ -82,6 +84,7 @@ trainer_state.pt
 # Cache Files
 # ==============================================================================
 .cache/
+cache/
 *.cache
 hub/
 ~/.cache/
@@ -89,8 +92,43 @@ transformers_cache/
 huggingface/
 
 # ==============================================================================
-# Data Files (keep folders, ignore large files)
+# Public-release boundary
 # ==============================================================================
+# Do not publish private data construction pipelines. The public repository should
+# contain training, evaluation, and inference code; users provide their own image
+# directory through DATA_DIR.
+/data_pipeline/
+/docs/
+/BLIP3o/eval/lmms-eval/tools/
+/BLIP3o/tests/
+/scripts/download_*.py
+/scripts/filter_dataset_images.py
+/scripts/self_evolving/_archive/
+/scripts/self_evolving/paper/prepare_data*.sh
+/scripts/self_evolving/paper/run_blip3o_step10250_full_eval.sh
+/scripts/self_evolving/final/submit_e1_filtered_h200.sbatch
+/vargpt_1_1/VARGPT-family-training/data_temp/
+/vargpt_1_1/VARGPT-family-training/docker/
+/vargpt_1_1/VARGPT-family-training/README_llamafactory.md
+/vargpt_1_1/VARGPT-family-training/README_zh.md
+/vargpt_1_1/VARGPT-family-training/examples/accelerate/
+/vargpt_1_1/VARGPT-family-training/examples/README*.md
+/vargpt_1_1/VARGPT-family-training/examples/extras/
+/vargpt_1_1/VARGPT-family-training/examples/merge_lora/
+/vargpt_1_1/VARGPT-family-training/examples/train_full/
+/vargpt_1_1/VARGPT-family-training/examples/train_lora/
+/vargpt_1_1/VARGPT-family-training/examples/train_qlora/
+/vargpt_1_1/VARGPT-family-training/tests/
+/vargpt_1_1/understand_eval/docs/
+/vargpt_1_1/understand_eval/test_parse.py
+/vargpt_1_1/understand_eval/tools/
+
+# ==============================================================================
+# Data, model weights, and generated media
+# ==============================================================================
+/data/
+/datasets/
+models/
 *.jpg
 *.jpeg
 *.png
@@ -102,16 +140,29 @@ huggingface/
 *.avi
 *.mov
 *.pdf
+*.jsonl
+*.parquet
+*.arrow
+*.tar
+*.tar.*
+*.zip
+*.ipynb
 
-# Keep specific documentation PDFs if needed
-!blip30.pdf
-!evolmm.pdf
+# Small prompt metadata required by generation evaluation.
+!BLIP3o/eval/geneval/geneval_prompt.jsonl
+!Bagel/eval/gen/geneval/prompts/evaluation_metadata.jsonl
+!Bagel/eval/gen/geneval/prompts/evaluation_metadata_long.jsonl
 
 # ==============================================================================
 # Temporary Files
 # ==============================================================================
 *.tmp
 *.temp
+*.aux
+*.brf
+*.blg
+*.fls
+*.fdb_latexmk
 *.swp
 *.swo
 *~
@@ -153,6 +204,8 @@ htmlcov/
 
 
 run_eval.sh
-data/
-data.tar
-
+useful_commands
+PROJECT_STATE_HANDOFF.md
+E1_run.txt
+BLIP3o/run_outputs/
+vargpt_1_1/VARGPT-family-training/VARGPT-v1.1/

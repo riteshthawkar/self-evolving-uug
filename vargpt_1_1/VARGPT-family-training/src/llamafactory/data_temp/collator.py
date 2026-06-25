@@ -154,7 +154,7 @@ class PairwiseDataCollatorWithPadding(MultiModalDataCollatorForSeq2Seq):
         concatenated_features = []
         for key in ("chosen", "rejected"):
             for feature in features:
-                if key is "chosen":
+                if key == "chosen":
                     target_feature = {
                         "input_ids": feature[f"{key}_input_ids"],
                         "attention_mask": feature[f"{key}_attention_mask"],

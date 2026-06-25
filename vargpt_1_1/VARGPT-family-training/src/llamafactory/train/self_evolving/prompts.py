@@ -357,27 +357,12 @@ def build_proposer_multi_prompt(
     curriculum_arm_hint: str = "",
     replay_anchor_hints: list = None,
 ) -> str:
-    """Single-shot multi-question proposer prompt with adversarial solver-failure framing.
+    """Compact multi-question proposer prompt.
 
-    The proposer's explicit goal is to craft questions that a vision-language
-    solver (a peer model looking at the same image) would FAIL to answer
-    unanimously — i.e. questions where solvers would disagree or make errors.
-
-    Key design principles (researcher notes):
-    1. STRATEGY LIBRARY: Give the proposer concrete question-writing strategies
-       that empirically cause solver disagreement, not just abstract difficulty levels.
-    2. ANTI-PATTERN BLOCKING: Explicitly name the easy-question patterns the model
-       defaults to (single salient object, dominant scene action, obvious text) and
-       forbid them.
-    3. AMBIGUITY IS THE TARGET: The proposer must identify a visual element where
-       the *answer is genuinely uncertain* due to occlusion, similarity, scale, or
-       boundary conditions — not just "complex to describe".
-    4. TWO-ANSWER TEST: Each question must pass the internal test "could a reasonable
-       person looking at this image give TWO different answers?" If not, it is easy.
-
-    Returns K=num_questions candidate questions ordered hardest-first.
-    Each candidate includes a chain-of-thought block reasoning about WHY each
-    question will cause the solver to fail/disagree.
+    VARGPT is much more reliable when asked for short structured candidates
+    instead of a long adversarial XML form. Keep the fields needed by the
+    trainer's general quality/certificate checks, but avoid placeholder-heavy
+    templates that the model may copy verbatim.
     """
     level = (target_difficulty or "medium").strip().lower()
     if level not in {"easy", "medium", "hard"}:
@@ -385,90 +370,38 @@ def build_proposer_multi_prompt(
 
     if level == "hard":
         diff_hint = (
-            "TARGET: HARD — the solver should be genuinely uncertain.\n"
-            "Required: pick a question strategy from the HARD tier below and apply it to a specific "
-            "visual element in this image where the answer is genuinely ambiguous.\n"
-            "The correct answer should NOT be immediately obvious from the most salient part of the image."
+            "Target HARD: ask about a small, occluded, overlapping, distant, or visually subtle element. "
+            "The answer must still be directly visible."
         )
     elif level == "easy":
         diff_hint = (
-            "TARGET: EASY-MEDIUM — avoid single-lookup questions but keep the answer verifiable.\n"
-            "Pick a strategy from the MEDIUM tier below that requires noticing at least two objects or "
-            "one non-obvious attribute. Solvers should sometimes give different precise answers."
+            "Target EASY-MEDIUM: ask a concrete visual question that requires more than naming the main object."
         )
     else:
         diff_hint = (
-            "TARGET: MEDIUM — the solver should frequently disagree on the precise answer.\n"
-            "Required: pick a question strategy from the MEDIUM or HARD tier below and apply it to "
-            "a non-salient or ambiguous visual element in this image.\n"
-            "Do NOT ask about the most obvious/dominant element in the scene."
+            "Target MEDIUM: ask about a secondary object, relation, count, attribute, text, or state. "
+            "Avoid the most obvious object/action."
         )
 
-    # Strategy library — compact but concrete templates.
     strategy_block = (
-        "STRATEGY LIBRARY (choose one per question; DO NOT repeat strategy):\n"
-        "HARD — OCCLUSION & RELATIONS:\n"
-        "  H1=occlusion-count: count partially visible/overlapping instances.\n"
-        "     Example: 'How many cups are partially visible behind the tray?'\n"
-        "  H2=boundary-comparison: compare nearby objects with subtle boundary cues.\n"
-        "     Example: 'Which object extends farther right: the plate edge or the napkin edge?'\n"
-        "  H4=multi-hop-relation: chain two relations.\n"
-        "     Example: 'What is left of the object that is above the sink?'\n"
-        "  H13=compositional-reference: identify subject by one attribute, ask another.\n"
-        "     Example: 'What color is the hat of the person holding the bag?'\n"
-        "HARD — DEPTH & 3D:\n"
-        "  H5=edge-condition: ask about objects at image edges/corners.\n"
-        "  H11=depth-ordering: ask which overlapping object is in front/behind.\n"
-        "  H12=part-whole: ask about a component/sub-part of a larger object.\n"
-        "HARD — ATTRIBUTES & MATERIALS:\n"
-        "  H3=occluded-attribute: attribute of partially hidden object.\n"
-        "  H10=material-texture: material/texture/finish of specific object.\n"
-        "HARD — ACTIONS & STATES:\n"
-        "  H9=background-action: action/pose of non-dominant actor.\n"
-        "  H14=object-state: open/closed, full/empty, on/off states.\n"
-        "HARD — TEXT & DATA:\n"
-        "  H7=occluded-text: small/partial/distant text.\n"
-        "  H8=chart-delta: small differences in chart values.\n"
-        "MEDIUM:\n"
-        "  M1=precise-count  M2=relative-spatial  M3=comparative-attr\n"
-        "  M4=secondary-attr  M5=non-obvious-existence  M6=state-condition  M7=viewpoint-angle\n"
-        "BANNED PATTERNS (always easy):\n"
-        "  X main-subject-identity | dominant-text-reading | single-salient-color | main-subject-count\n"
-        "  X obvious-yes-no | main-action | forced-choice-in-question-text\n"
+        "Useful question types: precise count, spatial relation, comparison, secondary attribute, "
+        "visible text, object state, occlusion, part-whole detail, depth/overlap."
     )
     reasoning_domains_block = (
-        "REASONING DOMAINS (must include >=2 domains per question; include >=1 non-relational domain):\n"
-        "  D1=relation/spatial\n"
-        "  D2=action/temporal\n"
-        "  D3=physics/mechanics\n"
-        "  D4=behavior/intent\n"
-        "  D5=commonsense/world-knowledge\n"
-        "  D6=scientific/material inference\n"
-        "  D7=causal/counterfactual\n"
-    )
-    hard_task_cards = (
-        "HARD TASK CARDS (templates; do NOT copy literally, instantiate on this image):\n"
-        "  C1 physics+causal: support/contact under occlusion; chain=contact cues -> gravity plausibility -> support conclusion.\n"
-        "  C2 action+temporal: observable action proxy; chain=limb pose -> object trajectory -> temporal phase.\n"
-        "  C3 behavior+commonsense: behavior cue; chain=body orientation -> affordance cue -> context consistency.\n"
-        "  C4 scientific+material: material identity; chain=highlight behavior -> edge softness -> texture consistency.\n"
-        "  C5 OCR+context: partial text token; chain=glyph fragments -> lexical plausibility -> scene compatibility.\n"
-        "  C6 causal+count: occluded count source; chain=occlusion map -> boundary ownership -> count consistency.\n"
-        "  C7 depth+spatial: overlap order; chain=occlusion edges -> relative size cues -> depth conclusion.\n"
-        "  C8 compositional+attribute: chain=reference resolution -> attribute isolation -> evidence grounding.\n"
-        "  C9 part-whole+function: chain=structural context -> attachment point -> functional inference.\n"
+        "Use at least two simple domains per question, chosen from: spatial, counting, attribute, text, "
+        "state, comparison, part, depth, action."
     )
 
     # Dataset-specific one-liner hint (kept short to save tokens).
     src = (image_source_hint or "").strip().lower()
     if src == "textvqa":
-        dataset_hint = "IMAGE: text-in-scene. Prefer H7, H4, M2. Avoid largest visible text.\n"
+        dataset_hint = "Image type: text-in-scene. Prefer small/partial text plus location or attribute.\n"
     elif src in {"chartqa", "chart"}:
-        dataset_hint = "IMAGE: chart/graph. Prefer H8 (small delta), H6, M3 (2nd-highest). Avoid peak-bar or title.\n"
+        dataset_hint = "Image type: chart/graph. Prefer small value differences, trends, or second-highest/lowest marks.\n"
     elif src == "gqa":
-        dataset_hint = "IMAGE: relational scene. Prefer H4, H2, H1, M2. Avoid dominant-object type/color.\n"
+        dataset_hint = "Image type: relational scene. Prefer relation, count, comparison, and secondary attributes.\n"
     else:
-        dataset_hint = "IMAGE: natural photo. Prefer H1, H2, H3, H6, M2 on SECONDARY objects. Avoid main-subject action or type.\n"
+        dataset_hint = "Image type: natural photo. Prefer secondary objects and concrete visible details.\n"
 
     arm_hint = (curriculum_arm_hint or "").strip()
     arm_block = ""
@@ -492,58 +425,19 @@ def build_proposer_multi_prompt(
             )
 
     n = max(1, int(num_questions))
-    qa_template = "\n".join(
-        f'  <question id="{i}">\n'
-        f'    <task_card>...C1/C2/C3/C4/C5/C6/C7/C8/C9...</task_card>\n'
-        f'    <reasoning_domains>...comma-separated D-codes, minimum 2...</reasoning_domains>\n'
-        f'    <reasoning_chain>...2-4 short steps with visible evidence...</reasoning_chain>\n'
-        f'    <strategy_used>...which strategy from the library above (e.g. H2, H11, M3)...</strategy_used>\n'
-        f'    <visual_target>...specific small/secondary/background element (must NOT be main subject)...</visual_target>\n'
-        f'    <text>...OPEN-ENDED question ending with "?" — must NOT contain answer options...</text>\n'
-        f'    <two_answer_test>...two genuinely DIFFERENT, concrete, image-grounded candidate answers '
-        f'(never placeholders; never vague words like many/several/unclear). '
-        f'This is a HIDDEN validator — the question in <text> must NOT mention these options...</two_answer_test>\n'
-        f'    <rationale>...why this is hard but still objectively and exactly verifiable from visible evidence...</rationale>\n'
-        f'  </question>'
-        for i in range(1, n + 1)
-    )
 
     return (
-        "You are an Adversarial Fine-Grained Question Proposer.\n"
-        "GOAL: produce hard, visually grounded, objective questions using reasoning-first construction.\n"
-        "\n"
-        "CRITICAL RULES:\n"
-        "- NEVER ask about the main/dominant subject, object, or largest text.\n"
-        "- <text> is written BEFORE <two_answer_test>. Write the question FIRST as an open-ended question, THEN define the two-answer validator.\n"
-        "- Each question must use >=2 reasoning domains and include >=1 non-relational domain.\n"
-        "- Each question must include a valid two-answer precision test with distinct concrete alternatives.\n"
-        "- Final question must have one exact answer grounded in visible evidence.\n"
-        "- NEVER copy literal placeholders into final text (token_1, token_2, stable-by-contact, unsupported, pre-event, post-event).\n"
-        "- Avoid low-information yes/no forms and latent non-visual states.\n"
-        "- Do not ask hidden-state intent or speculative timeline questions.\n"
-        "- Use DISTINCT strategy codes across questions.\n"
-        "\n"
+        "You are a vision question proposer. Look at the image and write candidate questions.\n"
+        "Questions must be objective, image-grounded, and answerable with a short phrase or number.\n"
+        "Do not ask why/opinion/intent questions. Do not include answer options.\n"
+        "Use concrete visible objects from this image.\n"
         f"{diff_hint}\n"
         f"{dataset_hint}"
         f"{arm_block}"
         f"{anchor_block}"
-        f"{reasoning_domains_block}"
-        f"{hard_task_cards}"
-        f"{strategy_block}"
-        f"Generate exactly {n} questions, HARDEST first.\n"
-        "For each, follow this order strictly: task_card -> reasoning_domains -> reasoning_chain -> strategy_used -> visual_target -> text -> two_answer_test -> rationale.\n"
-        "IMPORTANT: <text> comes BEFORE <two_answer_test>. Write the open-ended question FIRST.\n"
-        "Question must end with '?' and have short verifiable answer.\n"
-        "- No XML tags inside <text>.\n"
-        "Final self-check before output:\n"
-        "- If reasoning_domains has fewer than 2 domains, rewrite.\n"
-        "- If no non-relational domain is present, rewrite.\n"
-        "- If <text> contains 'or' offering two choices, or mentions the two_answer_test options, rewrite as open-ended.\n"
-        "- If two_answer_test alternatives are not distinct, rewrite.\n"
-        "- If two_answer_test contains vague alternatives (many/several/unclear/unknown), rewrite.\n"
-        "- If question is not grounded in visual_target/reasoning_chain, rewrite.\n"
-        "Output XML only:\n"
-        "<questions>\n"
-        f"{qa_template}\n"
-        "</questions>"
+        f"{reasoning_domains_block}\n"
+        f"{strategy_block}\n"
+        f"Generate exactly {n} different questions. Put the best question first.\n"
+        "Output only the questions, one per line. Prefix lines as Q1:, Q2:, etc. "
+        "Each line must end with '?'."
     )

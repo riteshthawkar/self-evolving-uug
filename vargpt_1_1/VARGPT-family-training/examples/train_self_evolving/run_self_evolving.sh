@@ -30,6 +30,11 @@ while [[ "${BOOTSTRAP_SEARCH_DIR}" != "/" ]]; do
 done
 unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 
+HF_TOKEN_FILE="${HF_TOKEN_FILE:-${ORIGINAL_HOME:-$HOME}/.cache/huggingface/token}"
+if [[ -z "${HF_TOKEN:-}" && -f "$HF_TOKEN_FILE" ]]; then
+  export HF_TOKEN="$(< "$HF_TOKEN_FILE")"
+fi
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 detect_num_gpus() {
     # 1) explicit arg/environment
@@ -290,7 +295,8 @@ EXPECTED_MODULE_DIR="${REPO_ROOT}/src/llamafactory"
 if [ ! -d "${EXPECTED_MODULE_DIR}" ]; then
     echo "[ERROR] Expected llamafactory source dir does not exist: ${EXPECTED_MODULE_DIR}" >&2
     echo "[ERROR] This usually means you are running the wrong launcher copy/path." >&2
-    echo "[ERROR] Use: /workspace/self-evolving-uug/self-evolving-uug/vargpt_1_1/VARGPT-family-training/examples/train_self_evolving/run_self_evolving.sh" >&2
+    echo "[ERROR] Run this launcher from the VARGPT-family-training checkout, for example:" >&2
+    echo "[ERROR]   bash examples/train_self_evolving/run_self_evolving.sh joint 8" >&2
     exit 1
 fi
 if [ -z "${LLAMAFACTORY_MODULE_DIR}" ]; then
@@ -345,7 +351,7 @@ fi
 if [ -z "${IMAGE_FOLDER}" ]; then
     echo "[ERROR] IMAGE_FOLDER is not set." >&2
     echo "[ERROR] This launcher expects image-folder mode for self-evolving training." >&2
-    echo "[ERROR] Example: IMAGE_FOLDER=/workspace/self-evolving-uug/data/joint_pool_10k/images \\" >&2
+    echo "[ERROR] Example: IMAGE_FOLDER=/path/to/unlabeled/images \\" >&2
     echo "[ERROR]          bash examples/train_self_evolving/run_self_evolving.sh joint 8" >&2
     exit 1
 fi
@@ -379,13 +385,13 @@ echo "  GPUs       : $NUM_GPUS"
 echo "  Master Port: $MASTER_PORT"
 echo "  W&B Project: $WANDB_PROJECT"
 echo "  Launcher   : ${LAUNCHER[*]}"
-echo "  Dataset dir: ${DATASET_DIR:-data_temp}"
+echo "  Dataset dir: ${DATASET_DIR:-data}"
 echo "  Image folder: ${IMAGE_FOLDER}"
 echo "  Image count : ${IMAGE_COUNT}"
 echo "=============================================="
 
 # ── Build temporary YAML with overrides ──────────────────────────────────────
-DATASET_DIR="${DATASET_DIR:-data_temp}"
+DATASET_DIR="${DATASET_DIR:-data}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 if [ -z "${OUTPUT_DIR}" ]; then
     OUTPUT_DIR="${REPO_ROOT}/outputs/vargpt/${EXPERIMENT}"
@@ -452,6 +458,8 @@ yaml_delete_key "resume_from_checkpoint"
 yaml_delete_key "overwrite_output_dir"
 yaml_delete_key "output_dir"
 yaml_delete_key "se_image_folder"
+yaml_delete_key "se_proposer_num_candidates"
+yaml_delete_key "se_use_ref_answer_scoring"
 yaml_delete_key "flash_attn"
 yaml_delete_key "se_solver_use_forced_choice_from_proposer"
 yaml_delete_key "se_solver_skip_update_on_easy"
@@ -483,15 +491,21 @@ yaml_delete_key "se_generat_trainion_failfast_min_success_rate"
 
     append_se_override "se_image_folder" "\"$(yaml_quote "${IMAGE_FOLDER}")\""
 
+    append_se_override "se_proposer_num_candidates" "${SE_PROPOSER_NUM_CANDIDATES:-3}"
+    append_se_override "se_use_ref_answer_scoring" "${SE_USE_REF_ANSWER_SCORING:-false}"
     append_se_override "se_num_solver_samples" "${SE_NUM_SOLVER_SAMPLES:-7}"
     append_se_override "se_proposer_spot_check_samples" "${SE_PROPOSER_SPOT_CHECK_SAMPLES:-3}"
+    append_se_override "se_proposer_question_quality_min_score" "${SE_PROPOSER_QUESTION_QUALITY_MIN_SCORE:-0.60}"
+    append_se_override "se_proposer_question_structural_min_score" "${SE_PROPOSER_QUESTION_STRUCTURAL_MIN_SCORE:-0.50}"
+    append_se_override "se_proposer_question_model_judge_enabled" "${SE_PROPOSER_QUESTION_MODEL_JUDGE_ENABLED:-true}"
+    append_se_override "se_proposer_question_model_judge_weight" "${SE_PROPOSER_QUESTION_MODEL_JUDGE_WEIGHT:-0.15}"
     append_se_override "se_solver_temp_min" "${SE_SOLVER_TEMP_MIN:-0.5}"
     append_se_override "se_solver_temp_max" "${SE_SOLVER_TEMP_MAX:-2.5}"
     append_se_override "se_solver_top_p_min" "${SE_SOLVER_TOP_P_MIN:-0.3}"
     append_se_override "se_solver_top_p_max" "${SE_SOLVER_TOP_P_MAX:-1.0}"
     append_se_override "se_solver_use_forced_choice_from_proposer" "${SE_SOLVER_USE_FORCED_CHOICE_FROM_PROPOSER:-true}"
-    append_se_override "se_solver_skip_update_on_easy" "${SE_SOLVER_SKIP_UPDATE_ON_EASY:-false}"
-    append_se_override "se_easy_update_majority_frac_threshold" "${SE_EASY_UPDATE_MAJORITY_FRAC_THRESHOLD:-1.0}"
+    append_se_override "se_solver_skip_update_on_easy" "${SE_SOLVER_SKIP_UPDATE_ON_EASY:-true}"
+    append_se_override "se_easy_update_majority_frac_threshold" "${SE_EASY_UPDATE_MAJORITY_FRAC_THRESHOLD:-0.85}"
     append_se_override "se_difficulty_sampler_enabled" "${SE_DIFFICULTY_SAMPLER_ENABLED:-true}"
     append_se_override "se_difficulty_target_easy" "${SE_DIFFICULTY_TARGET_EASY:-0.0}"
     append_se_override "se_difficulty_target_medium" "${SE_DIFFICULTY_TARGET_MEDIUM:-0.7}"

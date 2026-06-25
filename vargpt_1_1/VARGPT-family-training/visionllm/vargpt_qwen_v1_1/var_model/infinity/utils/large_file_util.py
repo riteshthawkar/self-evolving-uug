@@ -50,6 +50,10 @@ def split_large_txt_files(filepath, chunk_id2save_files):
                 chunk = []
                 chunk_id += 1
         if len(chunk):
+            raise ValueError(
+                f"Unexpected trailing lines while splitting {filepath}: "
+                f"{len(chunk)} lines remain after expected chunks."
+            )
         assert not len(chunk)
         for thread in thread_list:
             thread.join()

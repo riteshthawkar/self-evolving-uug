@@ -75,7 +75,7 @@ class RolloutConfig:
     acceptance_require_non_easy: bool = True
     rejected_question_penalty: float = 0.35
 
-    # Persist all raw generations for debugging.
+    # Persist raw generations for auditability and reproducibility.
     save_raw_generations: bool = True
 
     # Generation phase (BLIP-style candidate scoring on generated images).
@@ -122,8 +122,8 @@ class RolloutConfig:
     kl_min: float = 0.001
     kl_max: float = 1e2
     solver_reward_mix_gamma: float = 0.7
-    solver_skip_easy_updates: bool = False
-    solver_easy_update_majority_threshold: float = 0.98
+    solver_skip_easy_updates: bool = True
+    solver_easy_update_majority_threshold: float = 0.85
     train_understanding_proposer: bool = True
     train_solver: bool = True
     train_generation_proposer: bool = True
@@ -152,7 +152,7 @@ class RolloutConfig:
     reward_ema_momentum: float = 0.95
 
     # Proposer framework parity knobs (progressively wired in trainer updates).
-    proposer_num_candidates: int = 3
+    proposer_num_candidates: int = 5
     proposer_spot_check_samples: int = 3
     proposer_spot_entropy_min_gate: float = 0.05
     proposer_grpo_gen_group_size: int = 3

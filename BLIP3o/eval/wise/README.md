@@ -9,7 +9,7 @@ Metric: **WiScore** (GPT-4o based evaluation of consistency, realism, aesthetics
 
 ```bash
 # 1. Clone WISE repo
-cd /workspace/self-evolving-uug/self-evolving-uug/BLIP3o/eval/wise
+cd BLIP3o/eval/wise
 git clone https://github.com/PKU-YuanGroup/WISE.git wise_repo
 
 # 2. Set OpenAI API key (required for GPT-4o evaluation)

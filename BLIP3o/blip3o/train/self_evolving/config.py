@@ -64,10 +64,10 @@ class UnderstandingSelfEvolvingConfig:
     sc_informative_ratio_min: float = 0.25
     sc_negative_weight: float = 0.25
     easy_solver_penalty_scale: float = 1.0
-    solver_update_on_low_info_easy: bool = True
+    solver_update_on_low_info_easy: bool = False
     solver_low_info_easy_penalty_scale: float = 2.5
     skip_solver_update_when_uninformative: bool = True
-    solver_always_update_with_informative_scaling: bool = True
+    solver_always_update_with_informative_scaling: bool = False
     solver_update_min_scale: float = 0.20
     len_penalty_weight: float = 0.10
     len_penalty_target_words: int = 6
@@ -111,7 +111,7 @@ class UnderstandingSelfEvolvingConfig:
     replay_anchor_inject_easy_streak: int = 2
     proposer_require_objective: bool = True
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
-    proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
+    proposer_num_candidates: int = 5      # K candidate questions generated in one proposer call
     proposer_spot_check_samples: int = 3  # 3 samples give ternary entropy for candidate selection
     proposer_spot_entropy_min_gate: float = 0.05
     # Reasoning-first proposer schema validation.
@@ -191,7 +191,7 @@ class UnderstandingSelfEvolvingConfig:
     proposer_early_solver_updates_min: int = 1
     proposer_early_collapse_streak_max: int = 3
     proposer_health_window_size: int = 256
-    solver_skip_update_on_easy: bool = False
+    solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
     rejected_question_penalty: float = 0.35
@@ -219,7 +219,7 @@ class UnderstandingSelfEvolvingConfig:
     #               No extra inference cost — candidates are already generated for selection.
     proposer_update_rule: str = "grpo"
     # Gen-phase proposer: how many specs to sample for the GRPO group.
-    # Understanding phase always uses proposer_num_candidates (already K=3).
+    # Understanding phase always uses proposer_num_candidates.
     proposer_grpo_gen_group_size: int = 3
     # Score extra GRPO candidates with a configurable solver spot-check instead of
     # assigning them a neutral reward of 0.0.  This gives real differential
@@ -499,10 +499,10 @@ class GenerationSelfEvolvingConfig:
     sc_informative_ratio_min: float = 0.25
     sc_negative_weight: float = 0.25
     easy_solver_penalty_scale: float = 1.0
-    solver_update_on_low_info_easy: bool = True
+    solver_update_on_low_info_easy: bool = False
     solver_low_info_easy_penalty_scale: float = 2.5
     skip_solver_update_when_uninformative: bool = True
-    solver_always_update_with_informative_scaling: bool = True
+    solver_always_update_with_informative_scaling: bool = False
     solver_update_min_scale: float = 0.20
     len_penalty_weight: float = 0.10
     len_penalty_target_words: int = 6
@@ -546,7 +546,7 @@ class GenerationSelfEvolvingConfig:
     replay_anchor_inject_easy_streak: int = 2
     proposer_require_objective: bool = True
     # Multi-candidate generation (single proposer call, pick hardest via spot-check)
-    proposer_num_candidates: int = 3      # K candidate questions generated in one proposer call
+    proposer_num_candidates: int = 5      # K candidate questions generated in one proposer call
     proposer_spot_check_samples: int = 3  # 3 samples give ternary entropy for candidate selection
     proposer_spot_entropy_min_gate: float = 0.05
     # Reasoning-first proposer schema validation.
@@ -626,7 +626,7 @@ class GenerationSelfEvolvingConfig:
     proposer_early_solver_updates_min: int = 1
     proposer_early_collapse_streak_max: int = 3
     proposer_health_window_size: int = 256
-    solver_skip_update_on_easy: bool = False
+    solver_skip_update_on_easy: bool = True
     easy_update_majority_frac_threshold: float = 0.95
     acceptance_require_non_easy: bool = True
     rejected_question_penalty: float = 0.35
@@ -786,11 +786,13 @@ class UnifiedSelfEvolvingConfig(GenerationSelfEvolvingConfig):
     solver_hardness_min_entropy: float = 0.2
 
     # ---- Self-evolving feedback loop ---- #
-    # Reference-answer log-prob scoring for generation (MODE B).
-    # Solver answers Qs on real image → logP(ref_answer | candidate, Q).
+    # Solver-derived reference-answer log-prob scoring for generation (MODE B).
+    # The Solver answers Qs on the real image, producing internal reference
+    # answers used for logP(ref_answer | candidate, Q). These are not dataset
+    # labels, human annotations, or external supervision.
     # Continuous reward, no hallucination, mutual supervision.
     # When False, falls back to multi-component scoring (spec+cycle+diversity).
-    use_ref_answer_scoring: bool = True
+    use_ref_answer_scoring: bool = False
 
     # Replay buffer: stores best generated images for mixing into understanding training.
     replay_buffer_size: int = 1000

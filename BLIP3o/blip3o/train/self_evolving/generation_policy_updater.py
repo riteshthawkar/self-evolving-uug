@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from .generation_helpers import _prepare_text_inputs
+from .policy_updater import _reinforce_loss_from_ce
 from .utils import (_build_chat_text, _clip_grad_norm_multi_device, _collect_trainable_params, _prepare_mm_inputs, _unwrap_model, use_adapter)
 
 
@@ -539,8 +540,14 @@ class TextPolicyUpdater:
                                          dtype=out_pi.logits.dtype, requires_grad=True)
             skipped_reason = "no_valid_completion_tokens" if valid_token_count <= 0 else "non_finite_ce_loss"
         else:
-            # REINFORCE sign: maximize (advantage * logprob) via gradient descent.
-            total_loss = (-advantage) * ce_loss + beta_before * kl_loss
+            # CE is -logprob, so minimizing advantage * CE maximizes
+            # advantage * logprob.
+            total_loss = _reinforce_loss_from_ce(
+                ce_loss,
+                kl_loss,
+                advantage,
+                beta_before,
+            )
             skipped_reason = None
             if not bool(torch.isfinite(total_loss.detach()).all().item()):
                 # Non-finite total_loss: backward zero instead.

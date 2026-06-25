@@ -132,7 +132,10 @@ class RolePolicyUpdater:
     """KL-regularized REINFORCE updater for a role adapter (proposer/solver).
 
     Computes:
-        loss = -advantage * CE_loss + beta * KL_loss
+        loss = advantage * CE_loss + beta * KL_loss
+
+    CE_loss is negative log-likelihood. A positive advantage should reduce CE
+    and increase completion probability; a negative advantage should increase CE.
 
     with adaptive beta based on KL target.
 
@@ -373,7 +376,7 @@ class RolePolicyUpdater:
                 else "non_finite_ce_loss"
             )
         else:
-            total_loss = (-advantage) * ce_loss + beta_before * kl_loss
+            total_loss = advantage * ce_loss + beta_before * kl_loss
             skipped_reason = None
             if not bool(torch.isfinite(total_loss.detach()).all().item()):
                 total_loss = out_pi.logits.sum() * 0.0

@@ -211,7 +211,11 @@ def get_train_args(args: Optional[Dict[str, Any]] = None) -> _TRAIN_CLS:
     if training_args.max_steps == -1 and data_args.streaming:
         raise ValueError("Please specify `max_steps` in streaming mode.")
 
-    if training_args.do_train and data_args.dataset is None:
+    image_folder_self_evolving = (
+        finetuning_args.stage == "self_evolving"
+        and getattr(finetuning_args, "se_image_folder", None)
+    )
+    if training_args.do_train and data_args.dataset is None and not image_folder_self_evolving:
         raise ValueError("Please specify dataset for training.")
 
     if (training_args.do_eval or training_args.do_predict) and (

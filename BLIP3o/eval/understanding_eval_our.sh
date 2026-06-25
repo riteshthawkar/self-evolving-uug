@@ -39,6 +39,7 @@ export PYTHONPATH="${BLIP3O_ROOT}:${BLIP3O_ROOT}/eval/lmms-eval:${PYTHONPATH:-}"
 BASE_MODEL="${BASE_MODEL:-BLIP3o/BLIP3o-Model-8B}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:?Please set CHECKPOINT_DIR to your training checkpoint path (e.g. /path/to/step_00500)}"
 ADAPTER="${ADAPTER:-solver}"
+USE_FLASH_ATTENTION_2="${USE_FLASH_ATTENTION_2:-false}"
 TASKS="${TASKS:-mmmu_val,mmbench_en_dev,textvqa_val,seedbench,realworldqa,mmvet,mme}"
 OUTPUT_DIR="${OUTPUT_DIR:-${BLIP3O_ROOT}/eval/logs}"
 
@@ -51,6 +52,7 @@ echo "Understanding Evaluation (Self-Evolving)"
 echo "  Base model:      ${BASE_MODEL}"
 echo "  Checkpoint:      ${CHECKPOINT_DIR}"
 echo "  Adapter:         ${ADAPTER}"
+echo "  FlashAttn2:      ${USE_FLASH_ATTENTION_2}"
 echo "  Tasks:           ${TASKS}"
 echo "  Output:          ${OUTPUT_DIR}"
 echo "  Num GPUs:        ${NUM_GPUS}"
@@ -61,7 +63,7 @@ python -m accelerate.commands.launch \
     --num_processes="${NUM_GPUS}" \
     -m lmms_eval \
     --model blip3o_our \
-    --model_args "pretrained=${BASE_MODEL},checkpoint_dir=${CHECKPOINT_DIR},adapter=${ADAPTER}" \
+    --model_args "pretrained=${BASE_MODEL},checkpoint_dir=${CHECKPOINT_DIR},adapter=${ADAPTER},use_flash_attention_2=${USE_FLASH_ATTENTION_2}" \
     --tasks "${TASKS}" \
     --batch_size 1 \
     --log_samples \

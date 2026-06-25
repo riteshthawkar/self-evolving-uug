@@ -62,8 +62,13 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
-MIN_DATA_IMAGES="${MIN_DATA_IMAGES:-6000}"
+
+HF_TOKEN_FILE="${HF_TOKEN_FILE:-${ORIGINAL_HOME:-$HOME}/.cache/huggingface/token}"
+if [[ -z "${HF_TOKEN:-}" && -f "$HF_TOKEN_FILE" ]]; then
+  export HF_TOKEN="$(< "$HF_TOKEN_FILE")"
+fi
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_pool_10k/images}"
+MIN_DATA_IMAGES="${MIN_DATA_IMAGES:-10000}"
 ALLOW_SMALL_DATA="${ALLOW_SMALL_DATA:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E6_single_step}"
 RUN_NAME="E6_single_step_s42"
@@ -254,7 +259,7 @@ IMAGE_COUNT="$(find "$DATA_DIR" -type f \
   | wc -l | tr -d '[:space:]')"
 if [[ "$IMAGE_COUNT" -lt "$MIN_DATA_IMAGES" && "$ALLOW_SMALL_DATA" != "1" ]]; then
   echo "[E6] ERROR: DATA_DIR has $IMAGE_COUNT images; paper protocol requires at least $MIN_DATA_IMAGES." >&2
-  echo "[E6] Prepare data with: bash scripts/self_evolving/paper/prepare_data_6k.sh" >&2
+  echo "[E6] Set DATA_DIR to a local directory of unlabeled training images." >&2
   echo "[E6] For smoke tests only, set ALLOW_SMALL_DATA=1." >&2
   exit 1
 fi
@@ -399,7 +404,7 @@ fi
   \
   `# ── Misc ───────────────────────────────────────────────────────────────` \
   --clear_cache_every 10 \
-  --use_ref_answer_scoring \
+  --no_ref_answer_scoring \
   \
   `# ── Unicorn reconstruction (disabled) ──────────────────────────────────` \
   --disable_unicorn_reconstruction_sft \

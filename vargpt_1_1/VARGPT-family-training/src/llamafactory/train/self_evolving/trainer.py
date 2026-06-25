@@ -565,6 +565,8 @@ class SelfEvolvingTrainer(Trainer):
         selected_choice_mode = False
         selected_choice_option_a = ""
         selected_choice_option_b = ""
+        proposer_reject_counts: collections.Counter = collections.Counter()
+        proposer_raw_previews: List[str] = []
         controller_state = self._choose_difficulty_target()
         desired_difficulty_bucket = str(controller_state.get("desired_bucket", "medium"))
         warm_start_active = bool(self._is_proposer_warm_start_active(u_step))
@@ -612,7 +614,9 @@ class SelfEvolvingTrainer(Trainer):
                     temperature=proposer_temp,
                     top_p=proposer_top_p,
                 )
+            proposer_raw_previews.append(str(proposer_raw or "")[:500])
             if not candidates:
+                proposer_reject_counts["parser_no_candidates"] += 1
                 continue
 
             spot_n = max(1, min(int(cfg.proposer_spot_check_samples), int(cfg.num_solver_samples)))
@@ -633,6 +637,28 @@ class SelfEvolvingTrainer(Trainer):
                 if q_compiled:
                     q = q_compiled
                 if not q:
+                    proposer_reject_counts["empty_question"] += 1
+                    continue
+                quality = self._question_quality_score(q, meta)
+                structural_score = float(quality.get("score", 0.0))
+                structural_valid = bool(quality.get("valid", False))
+                structural_min = float(getattr(cfg, "proposer_question_structural_min_score", 0.60))
+                if (not structural_valid) or structural_score < structural_min:
+                    proposer_reject_counts["structural_quality"] += 1
+                    continue
+                judge_score = 1.0
+                judge_raw = "disabled"
+                if bool(getattr(cfg, "proposer_question_model_judge_enabled", True)):
+                    with use_role(self.model, ROLE_SOLVER):
+                        judge_score, judge_raw = self._judge_visual_question(image, q)
+                judge_weight = max(
+                    0.0,
+                    min(1.0, float(getattr(cfg, "proposer_question_model_judge_weight", 0.35))),
+                )
+                quality_score = (1.0 - judge_weight) * structural_score + judge_weight * float(judge_score)
+                quality_min = float(getattr(cfg, "proposer_question_quality_min_score", 0.70))
+                if quality_score < quality_min:
+                    proposer_reject_counts["combined_quality"] += 1
                     continue
                 opt_a, opt_b = self._extract_forced_choice_options(
                     str(meta.get("two_answer_test", "") or "")
@@ -656,6 +682,7 @@ class SelfEvolvingTrainer(Trainer):
                         image, solver_q, num_samples=spot_n,
                     )
                 if not ans_spot:
+                    proposer_reject_counts["no_spot_answers"] += 1
                     continue
 
                 if choice_mode:
@@ -670,6 +697,7 @@ class SelfEvolvingTrainer(Trainer):
                     norm = [normalize_answer(a) for a in ans_spot]
                 norm = [n for n in norm if n]
                 if not norm:
+                    proposer_reject_counts["empty_spot_answers"] += 1
                     continue
 
                 _, mc = majority_vote(norm)
@@ -693,7 +721,7 @@ class SelfEvolvingTrainer(Trainer):
                 if cfg.acceptance_require_non_easy and easy_spot:
                     spot_reward -= controller_penalty_boost * float(cfg.rejected_question_penalty)
 
-                objective_ok = bool(self._is_objective_question(q))
+                objective_ok = bool(quality_score >= quality_min)
                 if cfg.proposer_require_objective and not objective_ok:
                     spot_reward -= controller_penalty_boost * float(cfg.proposer_non_objective_penalty)
 
@@ -741,6 +769,10 @@ class SelfEvolvingTrainer(Trainer):
                         "spot_majority_frac": float(mf),
                         "easy_spot": bool(easy_spot),
                         "objective_ok": bool(objective_ok),
+                        "question_quality_score": float(quality_score),
+                        "question_structural_score": float(structural_score),
+                        "question_model_judge_score": float(judge_score),
+                        "question_model_judge_raw": str(judge_raw)[:80],
                         "certificate_score": float(cert_score),
                         "certificate_valid": float(cert_valid),
                         "certificate_bonus": float(cert_bonus),
@@ -752,6 +784,7 @@ class SelfEvolvingTrainer(Trainer):
                 )
 
             if not current_candidates:
+                proposer_reject_counts["no_rankable_candidates"] += 1
                 continue
 
             def _cand_key(cand: Dict[str, object]) -> Tuple[float, float, float, float]:
@@ -825,7 +858,12 @@ class SelfEvolvingTrainer(Trainer):
         if self._is_ddp and not self._dist_all_true(have_question, device=self.device):
             return {"u_skipped": True, "reason": "ddp_question_mismatch"}
         if not have_question:
-            return {"u_skipped": True, "reason": "no_question"}
+            return {
+                "u_skipped": True,
+                "reason": "no_question",
+                "proposer_candidate_reject_counts": dict(proposer_reject_counts),
+                "proposer_raw_previews": proposer_raw_previews[-3:],
+            }
 
         # ── 4. Full solver rollout on selected candidate ────────────────
         solver_rollout_question = question_text
@@ -861,8 +899,23 @@ class SelfEvolvingTrainer(Trainer):
         stats["proposer_controller_top_p"] = float(proposer_top_p)
         stats["proposer_controller_penalty_boost"] = float(controller_penalty_boost)
         stats["proposer_warm_start_active"] = bool(warm_start_active)
+        stats["proposer_candidate_reject_counts"] = dict(proposer_reject_counts)
+        stats["proposer_raw_previews"] = proposer_raw_previews[-3:]
         stats["proposer_candidate_count"] = len(candidate_records)
         stats["proposer_selected_candidate_index"] = selected_candidate_idx
+        if selected_candidate:
+            stats["proposer_question_quality_score"] = float(
+                selected_candidate.get("question_quality_score", 0.0)
+            )
+            stats["proposer_question_structural_score"] = float(
+                selected_candidate.get("question_structural_score", 0.0)
+            )
+            stats["proposer_question_model_judge_score"] = float(
+                selected_candidate.get("question_model_judge_score", 0.0)
+            )
+            stats["proposer_question_model_judge_raw"] = str(
+                selected_candidate.get("question_model_judge_raw", "")
+            )[:80]
         if candidate_records:
             stats["proposer_candidate_non_easy_rate"] = (
                 sum(1 for c in candidate_records if not bool(c.get("easy_spot", True)))
@@ -1167,12 +1220,21 @@ class SelfEvolvingTrainer(Trainer):
         # ── 7. Update solver ────────────────────────────────────────────
         # Skip solver update on easy questions to avoid wasting gradient
         # budget on trivial cases (the solver already knows the answer).
-        skip_solver = (
+        skip_solver = False
+        solver_skip_reason = None
+        if cfg.proposer_require_objective and non_objective_question:
+            skip_solver = True
+            solver_skip_reason = "non_objective_question"
+        elif (
             easy_question
             and cfg.solver_skip_update_on_easy
             and majority_frac >= cfg.easy_update_majority_frac_threshold
-        )
+        ):
+            skip_solver = True
+            solver_skip_reason = "easy_question"
         stats["solver_update_skipped"] = skip_solver
+        if solver_skip_reason is not None:
+            stats["solver_update_skipped_reason"] = solver_skip_reason
         solver_update_applied = False
 
         do_solver_update = not skip_solver
@@ -1198,8 +1260,8 @@ class SelfEvolvingTrainer(Trainer):
             )
             stats.update({f"sol_{k}": v for k, v in sol_stats.items()})
             solver_update_applied = not bool(sol_stats.get("skipped_reason"))
-        elif skip_solver:
-            stats["solver_update_skipped_reason"] = "easy_question"
+        elif skip_solver and solver_skip_reason is not None:
+            stats["solver_update_skipped_reason"] = solver_skip_reason
         stats["solver_update_applied"] = bool(solver_update_applied)
 
         # ── 8. Update controller state & fail-fast diagnostics ─────────
@@ -1776,6 +1838,39 @@ class SelfEvolvingTrainer(Trainer):
         text = str(completion or "")
         candidates: List[Dict[str, object]] = []
 
+        def _clean_question_text(candidate: str) -> str:
+            q = str(candidate or "").replace("\n", " ").strip()
+            if not q:
+                return ""
+            q = re.sub(r"</?[^>]+>", " ", q)
+            q = re.sub(
+                r"^\s*(?:q(?:uestion)?\s*)?\d+\s*[\).:\-\s]*",
+                "",
+                q,
+                flags=re.IGNORECASE,
+            )
+            q = re.sub(r"^\s*(?:question|text)\s*[:=-]\s*", "", q, flags=re.IGNORECASE)
+            q = re.sub(
+                r"^\s*(?:[a-d]|option\s*[a-d]|answer\s*[a-d])\s*[\).:-]\s*",
+                "",
+                q,
+                flags=re.IGNORECASE,
+            )
+            q = " ".join(q.strip(" \"'`").split())
+            if "?" in q:
+                q = q[: q.find("?") + 1].strip()
+            if not q.endswith("?"):
+                return ""
+            qn = normalize_answer(q, max_words=0)
+            if not qn:
+                return ""
+            if re.match(r"^(?:a|b|c|d|option [a-d]|answer [a-d])\b", qn):
+                return ""
+            q_quality = self._question_quality_score(q)
+            if (not bool(q_quality.get("valid", False))) or float(q_quality.get("score", 0.0)) < 0.50:
+                return ""
+            return q
+
         blocks = list(re.finditer(r"<question[^>]*>.*?</question>", text, flags=re.IGNORECASE | re.DOTALL))
         for idx, match in enumerate(blocks):
             block = match.group(0)
@@ -1788,7 +1883,7 @@ class SelfEvolvingTrainer(Trainer):
             q_text = _tag_value("text")
             if not q_text:
                 q_text = _parse_first_question(inner)
-            q_text = str(q_text).strip()
+            q_text = _clean_question_text(q_text)
             if not q_text:
                 continue
             candidates.append(
@@ -1811,7 +1906,7 @@ class SelfEvolvingTrainer(Trainer):
         if not candidates:
             qs = _parse_all_questions(text)
             for idx, q in enumerate(qs):
-                q_text = str(q).strip()
+                q_text = _clean_question_text(str(q).strip())
                 if not q_text:
                     continue
                 candidates.append(
@@ -1827,7 +1922,11 @@ class SelfEvolvingTrainer(Trainer):
         seen = set()
         deduped: List[Dict[str, object]] = []
         for cand in candidates:
-            key = normalize_answer(str(cand.get("question", "")))
+            q_text = _clean_question_text(str(cand.get("question", "")))
+            if not q_text:
+                continue
+            cand["question"] = q_text
+            key = normalize_answer(q_text, max_words=0)
             if not key or key in seen:
                 continue
             seen.add(key)
@@ -2215,21 +2314,145 @@ class SelfEvolvingTrainer(Trainer):
 
         return None, None
 
+    @staticmethod
+    def _content_tokens(text: str) -> List[str]:
+        """Return non-function tokens for generic question-quality checks."""
+        stop = {
+            "a", "an", "the", "this", "that", "these", "those",
+            "is", "are", "was", "were", "be", "being", "been",
+            "do", "does", "did", "can", "could", "has", "have", "had",
+            "what", "which", "who", "where", "when", "how", "many",
+            "of", "to", "in", "on", "at", "by", "for", "from", "with",
+            "and", "or", "as", "than", "visible", "shown", "seen",
+        }
+        norm = normalize_answer(str(text or ""), max_words=0)
+        return [t for t in re.findall(r"[a-z0-9]+", norm) if t not in stop]
+
+    def _question_quality_score(
+        self,
+        question: str,
+        meta: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, object]:
+        """General rubric score for whether a candidate is trainable."""
+        meta = meta or {}
+        q = " ".join(str(question or "").replace("\n", " ").strip().split())
+        tokens = re.findall(r"[a-z0-9]+", q.lower())
+        qn = " ".join(tokens)
+        issues: List[str] = []
+
+        format_ok = bool(q) and q.rstrip().endswith("?")
+        if (not format_ok) or re.search(r"</?[^>]+>|[{}\[\]|]", q):
+            issues.append("format")
+            format_ok = False
+        if "..." in q or re.search(r"\b[a-z]+_[a-z0-9_]+\b", q.lower()):
+            issues.append("artifact")
+            format_ok = False
+
+        length_ok = 4 <= len(tokens) <= 24
+        if not length_ok:
+            issues.append("length")
+
+        question_start_re = (
+            r"^(?:what|which|who|where|when|how|is|are|was|were|do|does|did|"
+            r"can|could|has|have|will|would|on which|in which|at which|"
+            r"under which|above which|behind which|beside which|next to which)\b"
+        )
+        start_ok = bool(re.match(question_start_re, qn))
+        if not start_ok:
+            issues.append("question_start")
+
+        grammar_ok = True
+        if re.search(r"\b([a-z0-9]+)\s+\1\b", qn):
+            grammar_ok = False
+        if re.search(r"\b(?:a|an|the)\s+(?:a|an|the)\b", qn):
+            grammar_ok = False
+        dangling_tokens = {
+            "of", "to", "by", "with", "from", "on", "in", "at", "for",
+            "or", "and", "the", "a", "an",
+        }
+        if tokens and tokens[-1] in dangling_tokens:
+            grammar_ok = False
+        if not grammar_ok:
+            issues.append("grammar")
+
+        content = self._content_tokens(q)
+        content_ok = bool(content)
+        if content_ok and not qn.startswith("how many") and len(set(content)) < 2:
+            content_ok = False
+        if not content_ok:
+            issues.append("content")
+
+        schema_values = [str(v or "").strip() for v in meta.values()]
+        has_schema = any(schema_values)
+        target = str(meta.get("visual_target", "") or "").strip()
+        target_content = self._content_tokens(target)
+        target_ok = True
+        if has_schema:
+            target_ok = bool(target_content) and len(target_content) <= 6
+            if target_ok:
+                target_ok = bool(set(content).intersection(target_content))
+            if not target_ok:
+                issues.append("target")
+
+        checks = [format_ok, length_ok, start_ok, grammar_ok, content_ok]
+        if has_schema:
+            checks.append(target_ok)
+        score = sum(1.0 for ok in checks if ok) / float(max(1, len(checks)))
+        mandatory_ok = bool(format_ok and length_ok and start_ok and grammar_ok and content_ok)
+        return {
+            "score": float(score),
+            "valid": float(mandatory_ok and score >= 0.50),
+            "issues": issues,
+        }
+
+    def _judge_visual_question(self, image: Image.Image, question: str) -> Tuple[float, str]:
+        """Use the current VLM as a general rubric judge for question quality."""
+        prompt = (
+            "You are validating a candidate training question for a vision-language model.\n"
+            "Answer yes only if the question is grammatical, complete, objective, "
+            "answerable from the image alone, and asks about concrete visible evidence. "
+            "Answer no if it is malformed, template-like, vague, meta-text, subjective, "
+            "or not visually grounded.\n"
+            "Return exactly one XML tag: <answer>yes</answer> or <answer>no</answer>.\n"
+            f"Candidate question: {question}"
+        )
+        try:
+            chat_text = _build_chat_text(self.processor, image, prompt)
+            mm_inputs = _prepare_mm_inputs(
+                self.processor, self.device, image, chat_text, model=self.model
+            )
+            base_model = _unwrap_model(self.model)
+            with torch.no_grad():
+                gen_ids = base_model.generate(
+                    **mm_inputs,
+                    max_new_tokens=8,
+                    do_sample=False,
+                )
+            input_len = mm_inputs["input_ids"].shape[1]
+            new_ids = gen_ids[0, input_len:]
+            tokenizer = getattr(self.processor, "tokenizer", self.processor)
+            completion = _decode_tokens(tokenizer, new_ids)
+            parsed = normalize_answer(_parse_answer(completion) or completion, max_words=4)
+            if re.search(r"\byes\b", parsed) and not re.search(r"\bno\b", parsed):
+                return 1.0, completion
+            if re.search(r"\bno\b", parsed):
+                return 0.0, completion
+            return 0.5, completion
+        except Exception as exc:
+            return 0.5, f"judge_error:{type(exc).__name__}"
+
     def _is_objective_question(self, question: str) -> bool:
-        """Best-effort objective question validator."""
+        """General objective-question validator."""
+        quality = self._question_quality_score(question)
+        if float(quality.get("score", 0.0)) < 0.70:
+            return False
         q = str(question or "").strip()
-        if not q:
-            return False
-        if "?" not in q:
-            return False
-        qn = normalize_answer(q)
+        qn = normalize_answer(q, max_words=0)
         if not qn:
             return False
         if re.search(r"\b(why|might|could|likely|opinion|feel|believe|think)\b", qn):
             return False
         if re.search(r"\b(something|anything|stuff|thing)\b", qn):
-            return False
-        if "<" in q or ">" in q:
             return False
         return True
 
@@ -2261,20 +2484,27 @@ class SelfEvolvingTrainer(Trainer):
         if not bool(getattr(self.se_config, "proposer_slot_compiler_enabled", True)):
             return q, True, "disabled"
         strict = bool(getattr(self.se_config, "proposer_slot_compiler_strict", True))
-        target = normalize_answer(str(meta.get("visual_target", "") or ""), max_words=8)
+        target_from_meta = normalize_answer(str(meta.get("visual_target", "") or ""), max_words=8)
+        target = target_from_meta
         if not target:
             target = self._extract_target_from_question(q)
+        target = re.sub(r"^(?:a|an|the)\s+", "", target).strip()
+        target_invalid = bool(target) and not bool(self._content_tokens(target))
 
         compiled = q
         qn = normalize_answer(q, max_words=32)
-        if " or " in qn and target:
+        # Only rewrite the candidate when the proposer supplied an explicit
+        # target. Inferred targets can be partial phrases; rewriting with them
+        # can damage otherwise valid questions.
+        rewrite_target = re.sub(r"^(?:a|an|the)\s+", "", target_from_meta).strip()
+        if " or " in qn and rewrite_target:
             # Rewrite forced-choice question into open-ended form.
             if qn.startswith("how many"):
-                compiled = f"How many {target} are visible?"
+                compiled = f"How many {rewrite_target} are visible?"
             else:
-                compiled = f"What is the {target}?"
-        elif qn.startswith("how many") and target:
-            compiled = f"How many {target} are visible?"
+                compiled = f"What is the {rewrite_target}?"
+        elif qn.startswith("how many") and rewrite_target:
+            compiled = f"How many {rewrite_target} are visible?"
 
         compiled = compiled.strip()
         if compiled and not compiled.endswith("?"):
@@ -2282,7 +2512,15 @@ class SelfEvolvingTrainer(Trainer):
 
         if strict and (not target):
             return "", False, "target_missing"
-        if strict and (not self._is_objective_question(compiled)):
+        if strict and target_invalid:
+            return "", False, "target_invalid"
+        compiled_quality = self._question_quality_score(
+            compiled,
+            {**dict(meta), "visual_target": target},
+        )
+        if strict and float(compiled_quality.get("score", 0.0)) < float(
+            getattr(self.se_config, "proposer_question_structural_min_score", 0.60)
+        ):
             return "", False, "non_objective"
         if not compiled:
             return "", False, "empty_compiled"
@@ -2348,6 +2586,26 @@ class SelfEvolvingTrainer(Trainer):
         reasoning_domains = str(meta.get("reasoning_domains", "") or "").strip()
         rationale = str(meta.get("rationale", "") or "").strip()
         two_answer_test = str(meta.get("two_answer_test", "") or "").strip()
+
+        has_aux_meta = any(
+            bool(v)
+            for v in (
+                visual_target,
+                strategy_used,
+                reasoning_chain,
+                reasoning_domains,
+                rationale,
+                two_answer_test,
+            )
+        )
+        if not has_aux_meta:
+            quality = self._question_quality_score(
+                question,
+                {"visual_target": self._extract_target_from_question(question)},
+            )
+            score = float(quality.get("score", 0.0))
+            valid = 1.0 if bool(quality.get("valid", False)) and score >= 0.50 else 0.0
+            return {"score": score, "valid": valid}
 
         strategy_ok = 1.0 if strategy_used else 0.0
         target_ok = 1.0 if visual_target else 0.0

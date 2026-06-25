@@ -376,6 +376,10 @@ class FinetuningArguments(FreezeArguments, LoraArguments, RLHFArguments, GaloreA
         default=10000,
         metadata={"help": "Total training steps for self-evolving."},
     )
+    se_save_every: int = field(
+        default=500,
+        metadata={"help": "Save a self-evolving checkpoint every N steps."},
+    )
     se_replay_buffer_size: int = field(
         default=1,
         metadata={"help": "Max size of the replay buffer for generated images."},
@@ -428,6 +432,10 @@ class FinetuningArguments(FreezeArguments, LoraArguments, RLHFArguments, GaloreA
         default=24,
         metadata={"help": "Maximum allowed words in a generation spec question."},
     )
+    se_use_ref_answer_scoring: bool = field(
+        default=False,
+        metadata={"help": "Use reference-answer log-prob scoring instead of multi-component generation reward."},
+    )
     se_lr: float = field(
         default=1e-6,
         metadata={"help": "Learning rate for self-evolving role updaters."},
@@ -451,13 +459,37 @@ class FinetuningArguments(FreezeArguments, LoraArguments, RLHFArguments, GaloreA
         default=7,
         metadata={"help": "Number of solver samples per understanding step."},
     )
+    se_proposer_num_candidates: int = field(
+        default=5,
+        metadata={"help": "Number of proposer candidate questions per understanding step."},
+    )
     se_proposer_spot_check_samples: int = field(
         default=3,
         metadata={"help": "Solver samples used to spot-check proposer candidates."},
     )
+    se_proposer_question_quality_min_score: float = field(
+        default=0.60,
+        metadata={"help": "Minimum combined rubric/model-judge score for accepting proposer questions."},
+    )
+    se_proposer_question_structural_min_score: float = field(
+        default=0.50,
+        metadata={"help": "Minimum structural rubric score before model-judge validation."},
+    )
+    se_proposer_question_model_judge_enabled: bool = field(
+        default=True,
+        metadata={"help": "Use the current VLM as a short rubric judge for proposer question quality."},
+    )
+    se_proposer_question_model_judge_weight: float = field(
+        default=0.15,
+        metadata={"help": "Weight of the model-judge score in the combined proposer question quality score."},
+    )
     se_solver_use_temperature_mix: bool = field(
         default=True,
         metadata={"help": "Use solver temperature/top-p schedules across samples."},
+    )
+    se_solver_use_forced_choice_from_proposer: bool = field(
+        default=True,
+        metadata={"help": "Force solver answers to choose from proposer-provided answer options when available."},
     )
     se_solver_temp_min: float = field(
         default=0.5,
@@ -480,7 +512,7 @@ class FinetuningArguments(FreezeArguments, LoraArguments, RLHFArguments, GaloreA
         metadata={"help": "Skip solver updates on unanimous easy cases."},
     )
     se_easy_update_majority_frac_threshold: float = field(
-        default=1.0,
+        default=0.85,
         metadata={"help": "Majority fraction threshold for easy-case solver skip."},
     )
     se_difficulty_sampler_enabled: bool = field(
@@ -562,6 +594,30 @@ class FinetuningArguments(FreezeArguments, LoraArguments, RLHFArguments, GaloreA
     se_proposer_early_failfast_recover: bool = field(
         default=True,
         metadata={"help": "Arm forced exploration instead of stopping on early failfast trigger."},
+    )
+    se_fail_on_step_error: bool = field(
+        default=True,
+        metadata={"help": "Raise on self-evolving step errors instead of continuing."},
+    )
+    se_max_consecutive_step_errors: int = field(
+        default=0,
+        metadata={"help": "Maximum consecutive self-evolving step errors before failing."},
+    )
+    se_max_total_step_errors: int = field(
+        default=0,
+        metadata={"help": "Maximum total self-evolving step errors before failing."},
+    )
+    se_generation_failfast_enabled: bool = field(
+        default=True,
+        metadata={"help": "Enable generation health fail-fast checks."},
+    )
+    se_generation_failfast_consecutive_skips: int = field(
+        default=5,
+        metadata={"help": "Consecutive unhealthy generation steps before fail-fast triggers."},
+    )
+    se_generation_failfast_min_success_rate: float = field(
+        default=0.10,
+        metadata={"help": "Minimum generation success rate required by the fail-fast window."},
     )
 
     def __post_init__(self):

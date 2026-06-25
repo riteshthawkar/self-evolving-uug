@@ -32,6 +32,7 @@ echo "  Checkpoint: ${CHECKPOINT_DIR}"
 echo "  Adapter:    ${ADAPTER}"
 echo "  Steps:      ${STEPS}"
 
+pids=()
 for i in $(seq 0 $(($N_CHUNKS - 1))); do
     CUDA_VISIBLE_DEVICES=$i python "${SCRIPT_DIR}/generate_wise_our.py" \
         --model "$MODEL" --checkpoint_dir "$CHECKPOINT_DIR" --adapter "$ADAPTER" \

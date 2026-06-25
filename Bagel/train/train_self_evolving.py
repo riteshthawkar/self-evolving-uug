@@ -198,14 +198,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--kl_min", type=float, default=0.001)
     p.add_argument("--kl_max", type=float, default=1e2)
     p.add_argument("--solver_reward_mix_gamma", type=float, default=0.7)
-    p.add_argument("--solver_skip_easy_updates", action="store_true", default=False)
+    p.add_argument("--solver_skip_easy_updates", action="store_true", default=True)
     p.add_argument(
         "--disable_solver_skip_easy_updates",
         dest="solver_skip_easy_updates",
         action="store_false",
     )
-    p.add_argument("--solver_easy_update_majority_threshold", type=float, default=0.98)
-    p.add_argument("--proposer_num_candidates", type=int, default=3)
+    p.add_argument("--solver_easy_update_majority_threshold", type=float, default=0.85)
+    p.add_argument("--proposer_num_candidates", type=int, default=5)
     p.add_argument("--proposer_spot_check_samples", type=int, default=3)
     p.add_argument("--proposer_spot_entropy_min_gate", type=float, default=0.05)
     p.add_argument("--proposer_grpo_gen_group_size", type=int, default=3)

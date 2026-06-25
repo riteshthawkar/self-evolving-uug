@@ -308,7 +308,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
             if bool(getattr(config, "use_ref_answer_scoring", False)):
                 config.use_ref_answer_scoring = False
                 print(
-                    "[Unified] strict_imageless_mode=True: disabling ref-answer scoring "
+                    "[Unified] strict_imageless_mode=True: disabling Solver-derived reference-answer scoring "
                     "(requires a real reference image)."
                 )
         # GenerationSelfEvolvingTrainer.__init__ invokes self._maybe_resume_state().
@@ -3601,29 +3601,17 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 and solver_low_info_majority
             )
         )
-        # NOTE: We intentionally do NOT block the solver update when question_rejected.
-        # The solver should train even on rejected (easy/non-objective) questions:
-        #   - On easy questions: solver_rewards_raw already assigns a NEGATIVE reward
-        #     to the majority answer (penalising unanimous easy agreement) and a small
-        #     positive to minority answers.  This is correct supervision — the solver
-        #     learns "don't be so confident on easy-looking questions".
-        #   - On non-objective questions: the answers are still real outputs with real
-        #     rewards; excluding them starves the solver of data.
-        # The PROPOSER is penalised for rejected questions (via rejected_question_penalty).
-        # The SOLVER should always learn from whatever question it sees.
-        # Block is applied only for the easy_case fast-path (solver_easy_update_blocked)
-        # which uses the already-gated majority_frac threshold.
-        if local_solver_update_applied and solver_entropy_iqr_blocked:
+        if local_solver_update_applied and question_rejected:
+            local_solver_update_applied = False
+            solver_update_skip_reason_local = (
+                question_reject_reason or "question_rejected"
+            )
+        elif local_solver_update_applied and solver_entropy_iqr_blocked:
             local_solver_update_applied = False
             solver_update_skip_reason_local = "entropy_iqr_filter"
         elif local_solver_update_applied and solver_easy_update_blocked:
             local_solver_update_applied = False
             solver_update_skip_reason_local = "easy_case"
-        # NOTE: With solver_always_update_with_informative_scaling=True (default),
-        # `not always_scale` is False, making this branch unreachable.  The solver
-        # always gets scaled updates (scale >= min_update_scale=0.20) rather than
-        # full skips.  --skip_solver_update_when_uninformative only takes effect
-        # when solver_always_update_with_informative_scaling is explicitly False.
         elif local_solver_update_applied and (not always_scale) and skip_uninformative and not solver_informative_gate:
             local_solver_update_applied = False
             solver_update_skip_reason_local = "uninformative_local"
@@ -4337,7 +4325,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                         proposer_stats["grpo_bucket_baseline_medium"] = self._get_proposer_bucket_baseline("medium")
                         proposer_stats["grpo_bucket_baseline_hard"] = self._get_proposer_bucket_baseline("hard")
                         proposer_stats["grpo_baseline_input"] = effective_reward
-                        # Debug: log valid completions to diagnose GRPO loss=0
+                        # Record valid completion count for GRPO diagnostics.
                         proposer_stats["grpo_valid_completions"] = proposer_stats.get("valid_completions", -1)
                         proposer_stats["grpo_bucket_labels"] = list(_grpo_buckets)
                 else:
@@ -5550,7 +5538,7 @@ class UnifiedSelfEvolvingTrainer(GenerationSelfEvolvingTrainer):
                 f"[Unified] Cycle order: {cycle_order}, bootstrap_generated_pool_steps={bootstrap_steps}"
             )
             print(
-                f"[Unified] Ref-answer scoring: {getattr(cfg, 'use_ref_answer_scoring', False)}, "
+                f"[Unified] Solver-derived reference-answer scoring: {getattr(cfg, 'use_ref_answer_scoring', False)}, "
                 f"Replay buffer: size={len(self.replay_buffer) if self.replay_buffer is not None else 0}, "
                 f"Mix ratio: {getattr(cfg, 'gen_mix_ratio_start', 0)}->{getattr(cfg, 'gen_mix_ratio_max', 0)}"
             )

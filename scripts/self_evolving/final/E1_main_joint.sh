@@ -25,7 +25,7 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 #   • Proposer LoRA  — learns the visual-understanding curriculum
 #
 # Key differences from X09 (the easy-data pilot):
-#   • Uses the paper natural-image pool (joint_6k), not chart-heavy 50k
+#   • Uses the paper 10k natural-image pool, not chart-heavy 50k
 #   • Trains for 10k steps (was 650 in pilot)
 #
 # What this experiment proves:
@@ -42,16 +42,22 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 # Usage:
 #   TRAIN_STAGE=warmup bash E1_main_joint.sh
 #   RESUME_FROM=/path/to/step_N TRAIN_STAGE=warmup bash E1_main_joint.sh
+#   USE_REF_ANSWER_SCORING=1 bash E1_main_joint.sh  # legacy Solver-derived reference-answer scoring
 # ══════════════════════════════════════════════════════════════════════════════
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
-MIN_DATA_IMAGES="${MIN_DATA_IMAGES:-6000}"
+
+HF_TOKEN_FILE="${HF_TOKEN_FILE:-${ORIGINAL_HOME:-$HOME}/.cache/huggingface/token}"
+if [[ -z "${HF_TOKEN:-}" && -f "$HF_TOKEN_FILE" ]]; then
+  export HF_TOKEN="$(< "$HF_TOKEN_FILE")"
+fi
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_pool_10k/images}"
+MIN_DATA_IMAGES="${MIN_DATA_IMAGES:-10000}"
 ALLOW_SMALL_DATA="${ALLOW_SMALL_DATA:-0}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E1_main_joint}"
-RUN_NAME="E1_main_joint_s42"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/BLIP3o/run_outputs}"
+RUN_NAME="${RUN_NAME:-E1_main_joint_s42_rewardfix}"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"
 RESUME_FROM="${RESUME_FROM:-}"
 RESET_PROPOSER_BASELINE="${RESET_PROPOSER_BASELINE:-0}"
@@ -101,6 +107,7 @@ PROPOSER_SPOT_CHECK_SAMPLES="${PROPOSER_SPOT_CHECK_SAMPLES:-3}"
 GRPO_EXTRA_SC_SAMPLES="${GRPO_EXTRA_SC_SAMPLES:-3}"
 GENERATION_NUM_INFERENCE_STEPS="${GENERATION_NUM_INFERENCE_STEPS:-50}"
 GENERATION_GUIDANCE_SCALE="${GENERATION_GUIDANCE_SCALE:-2.0}"
+USE_REF_ANSWER_SCORING="${USE_REF_ANSWER_SCORING:-0}"
 REWARD_SPEC_WEIGHT="${REWARD_SPEC_WEIGHT:-0.65}"
 REWARD_CYCLE_WEIGHT="${REWARD_CYCLE_WEIGHT:-0.20}"
 REWARD_DIVERSITY_WEIGHT="${REWARD_DIVERSITY_WEIGHT:-0.10}"
@@ -123,6 +130,13 @@ PROPOSER_SAMPLE_ENTROPY_WEIGHT="${PROPOSER_SAMPLE_ENTROPY_WEIGHT:-0.30}"
 PROPOSER_STE_REWARD_WEIGHT="${PROPOSER_STE_REWARD_WEIGHT:-0.30}"
 SOLVER_PPS_ENABLED="${SOLVER_PPS_ENABLED:-1}"
 DIT_REWARD_LOSS_WEIGHT="${DIT_REWARD_LOSS_WEIGHT:-0.5}"
+REPLAY_BUFFER_SIZE="${REPLAY_BUFFER_SIZE:-1}"
+REPLAY_MIN_REWARD="${REPLAY_MIN_REWARD:-1.10}"
+REPLAY_MAX_STALENESS="${REPLAY_MAX_STALENESS:-1}"
+GEN_MIX_SOURCE_MODE="${GEN_MIX_SOURCE_MODE:-folder}"
+GEN_MIX_RATIO_START="${GEN_MIX_RATIO_START:-0.0}"
+GEN_MIX_RATIO_MAX="${GEN_MIX_RATIO_MAX:-0.0}"
+GEN_MIX_RATIO_WARMUP_STEPS="${GEN_MIX_RATIO_WARMUP_STEPS:-1}"
 
 DIT_ARGS=()
 if [[ "$DIT_UPDATE_ENABLED" == "1" ]]; then
@@ -152,6 +166,22 @@ GEN_STEP_SOLVER_ARGS=()
 if [[ "$GEN_STEP_SOLVER_UPDATE_ENABLED" == "1" ]]; then
   GEN_STEP_SOLVER_ARGS+=(--gen_step_solver_update_enabled)
 fi
+
+REF_ANSWER_SCORING_ARGS=()
+case "$USE_REF_ANSWER_SCORING" in
+  1|true|TRUE|yes|YES)
+    REF_ANSWER_SCORING_ARGS+=(--use_ref_answer_scoring)
+    REWARD_MODE="ref_answer"
+    ;;
+  0|false|FALSE|no|NO)
+    REF_ANSWER_SCORING_ARGS+=(--no_ref_answer_scoring)
+    REWARD_MODE="multi_component"
+    ;;
+  *)
+    echo "[E1] ERROR: USE_REF_ANSWER_SCORING must be 0/1 or true/false (got: $USE_REF_ANSWER_SCORING)" >&2
+    exit 1
+    ;;
+esac
 
 STE_ARGS=(
   --solver_token_entropy_tokens "$SOLVER_TOKEN_ENTROPY_TOKENS"
@@ -452,7 +482,7 @@ IMAGE_COUNT="$(find "$DATA_DIR" -type f \
   | wc -l | tr -d '[:space:]')"
 if [[ "$IMAGE_COUNT" -lt "$MIN_DATA_IMAGES" && "$ALLOW_SMALL_DATA" != "1" ]]; then
   echo "[E1] ERROR: DATA_DIR has $IMAGE_COUNT images; paper protocol requires at least $MIN_DATA_IMAGES." >&2
-  echo "[E1] Prepare data with: bash scripts/self_evolving/paper/prepare_data_6k.sh" >&2
+  echo "[E1] Set DATA_DIR to a local directory of unlabeled training images." >&2
   echo "[E1] For smoke tests only, set ALLOW_SMALL_DATA=1." >&2
   exit 1
 fi
@@ -472,6 +502,7 @@ echo "[E1]   Params:      use_lora=$USE_LORA r=$LORA_R alpha=$LORA_ALPHA dropout
 echo "[E1]   Samples:     PPS/solver=$NUM_SOLVER_SAMPLES, candidates K=$PROPOSER_NUM_CANDIDATES, generations L=$NUM_GENERATIONS"
 echo "[E1]   STE/PPS:     enabled=$SOLVER_TOKEN_ENTROPY_ENABLED aggregation=$SOLVER_TOKEN_ENTROPY_AGGREGATION window=$SOLVER_TOKEN_ENTROPY_WINDOW_SIZE pps=$SOLVER_PPS_ENABLED"
 echo "[E1]   Rewards:     qa=$REWARD_SPEC_WEIGHT cycle=$REWARD_CYCLE_WEIGHT diversity=$REWARD_DIVERSITY_WEIGHT contradiction=$REWARD_CONTRADICTION_WEIGHT"
+echo "[E1]   Reward mode: $REWARD_MODE"
 echo "[E1]   Gen freq:    $GENERATOR_UPDATE_FREQ, DiT enabled: $DIT_UPDATE_ENABLED (freq=$DIT_UPDATE_FREQ)"
 echo "[E1]   Gen->U aux:  proposer_reward=$PROPOSER_GEN_REWARD_ENABLED, solver_update=$GEN_STEP_SOLVER_UPDATE_ENABLED"
 if [[ -n "${RESUME_FROM:-}" ]]; then
@@ -570,10 +601,13 @@ fi
   --entropy_iqr_min_threshold 0.10 \
   --sc_negative_weight 0.25 \
   --skip_solver_update_when_uninformative \
+  --disable_solver_always_update_with_informative_scaling \
+  --solver_skip_update_on_easy \
+  --disable_solver_update_on_low_info_easy \
   --len_penalty_weight 0.10 \
   --len_penalty_target_words 6 \
   --solver_hardness_min_entropy 0.20 \
-  --easy_update_majority_frac_threshold 1.00 \
+  --easy_update_majority_frac_threshold 0.85 \
   --entropy_iqr_filter_enabled \
   \
   `# ── Proposer entropy target ─────────────────────────────────────────────` \
@@ -601,20 +635,20 @@ fi
   \
   `# ── Misc ───────────────────────────────────────────────────────────────` \
   --clear_cache_every 10 \
-  --use_ref_answer_scoring \
+  "${REF_ANSWER_SCORING_ARGS[@]}" \
   \
   `# ── Unicorn reconstruction (disabled) ──────────────────────────────────` \
   --disable_unicorn_reconstruction_sft \
   --disable_unicorn_reconstruction_generator \
   \
   `# ── Replay buffer (disabled) ───────────────────────────────────────────` \
-  --replay_buffer_size 1 \
-  --replay_min_reward 1.10 \
-  --replay_max_staleness 1 \
-  --gen_mix_source_mode folder \
-  --gen_mix_ratio_start 0.0 \
-  --gen_mix_ratio_max 0.0 \
-  --gen_mix_ratio_warmup_steps 1 \
+  --replay_buffer_size "$REPLAY_BUFFER_SIZE" \
+  --replay_min_reward "$REPLAY_MIN_REWARD" \
+  --replay_max_staleness "$REPLAY_MAX_STALENESS" \
+  --gen_mix_source_mode "$GEN_MIX_SOURCE_MODE" \
+  --gen_mix_ratio_start "$GEN_MIX_RATIO_START" \
+  --gen_mix_ratio_max "$GEN_MIX_RATIO_MAX" \
+  --gen_mix_ratio_warmup_steps "$GEN_MIX_RATIO_WARMUP_STEPS" \
   \
   `# ── DiT SFT + Joint Conditioning + RWR ─────────────────────────────────` \
   ${DIT_ARGS[@]+"${DIT_ARGS[@]}"} \

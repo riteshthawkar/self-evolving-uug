@@ -112,7 +112,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sc_negative_weight", type=float, default=0.25)
     p.add_argument("--easy_solver_penalty_scale", type=float, default=1.0)
     p.add_argument("--solver_low_info_easy_penalty_scale", type=float, default=2.5)
-    p.add_argument("--solver_update_on_low_info_easy", action="store_true", default=True)
+    p.add_argument("--solver_update_on_low_info_easy", action="store_true", default=False)
     p.add_argument(
         "--disable_solver_update_on_low_info_easy",
         dest="solver_update_on_low_info_easy",
@@ -124,7 +124,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="skip_solver_update_when_uninformative",
         action="store_false",
     )
-    p.add_argument("--solver_always_update_with_informative_scaling", action="store_true", default=True)
+    p.add_argument("--solver_always_update_with_informative_scaling", action="store_true", default=False)
     p.add_argument(
         "--disable_solver_always_update_with_informative_scaling",
         dest="solver_always_update_with_informative_scaling",
@@ -244,7 +244,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="solver_pps_enabled",
         action="store_false",
     )
-    p.add_argument("--solver_skip_update_on_easy", action="store_true", default=False)
+    p.add_argument("--solver_skip_update_on_easy", action="store_true", default=True)
     p.add_argument(
         "--allow_solver_update_on_easy",
         dest="solver_skip_update_on_easy",
@@ -565,7 +565,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Self-evolving feedback loop
     p.add_argument("--use_ref_answer_scoring", action="store_true", default=True,
-                    help="Use reference-answer log-prob scoring (default, MODE B)")
+                    help="Use Solver-derived reference-answer log-prob scoring (default, MODE B)")
     p.add_argument("--no_ref_answer_scoring", dest="use_ref_answer_scoring", action="store_false",
                     help="Fall back to multi-component scoring (MODE A)")
     p.add_argument("--replay_buffer_size", type=int, default=1000)
@@ -604,7 +604,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help=(
             "Enforce imageless E5 constraints: imageless proposer + generated-only understanding + "
-            "ref-answer scoring disabled."
+            "Solver-derived reference-answer scoring disabled."
         ),
     )
     p.add_argument("--gen_mix_ratio_start", type=float, default=0.02)
@@ -1097,7 +1097,7 @@ def _build_unified_config(args):
     use_ref_answer_scoring = bool(args.use_ref_answer_scoring)
     if imageless_proposer_mode and use_ref_answer_scoring:
         print(
-            "[Config] imageless proposer mode is enabled; disabling ref-answer scoring "
+            "[Config] imageless proposer mode is enabled; disabling Solver-derived reference-answer scoring "
             "because it requires a real reference image."
         )
         use_ref_answer_scoring = False

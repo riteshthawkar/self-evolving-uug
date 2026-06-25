@@ -19,6 +19,7 @@ BLIP3O_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 BASE_MODEL="${BASE_MODEL:-BLIP3o/BLIP3o-Model-8B}"
 TASKS="${TASKS:-realworldqa,textvqa}"
 OUTPUT_DIR="${OUTPUT_DIR:-${BLIP3O_ROOT}/eval/logs}"
+USE_FLASH_ATTENTION_2="${USE_FLASH_ATTENTION_2:-false}"
 
 export PYTHONPATH="${BLIP3O_ROOT}:${BLIP3O_ROOT}/eval/lmms-eval:${PYTHONPATH:-}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -28,7 +29,7 @@ python -m accelerate.commands.launch \
     --num_processes=1 \
     -m lmms_eval \
     --model blip3o \
-    --model_args "pretrained=${BASE_MODEL}" \
+    --model_args "pretrained=${BASE_MODEL},use_flash_attention_2=${USE_FLASH_ATTENTION_2}" \
     --tasks "${TASKS}" \
     --batch_size 1 \
     --log_samples \

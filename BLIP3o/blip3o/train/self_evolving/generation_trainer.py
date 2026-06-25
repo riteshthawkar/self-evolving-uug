@@ -28,6 +28,7 @@ from PIL import Image
 from transformers import AutoProcessor
 
 from .config import GenerationSelfEvolvingConfig
+from .checkpoint_adapters import sanitize_peft_adapter_dir
 from .dit_updater import DiTUpdater
 from .image_pool import ImagePool, ImagePoolConfig
 from .policy_updater import RolePolicyUpdater
@@ -3832,7 +3833,7 @@ class GenerationSelfEvolvingTrainer:
 
         return scored
 
-    # ---- Phase 2: reference-answer log-prob scoring ---- #
+    # ---- Phase 2: Solver-derived reference-answer log-prob scoring ---- #
 
     @torch.no_grad()
     def _compute_ref_answer_logp(
@@ -3845,8 +3846,10 @@ class GenerationSelfEvolvingTrainer:
         """Compute log P(reference_answer | image, question) under solver.
 
         Returns the *mean* per-token log-probability of the reference answer
-        conditioned on the generated image and the question.  This is used
-        as a continuous reward signal for ranking candidate images.
+        conditioned on the generated image and the question. The reference
+        answer is Solver-derived from the real image, not a dataset label or
+        human annotation. This is used as a continuous reward signal for
+        ranking candidate images.
 
         Runs under ``torch.no_grad()`` — inference only, no gradient.
         Uses the solver adapter ("default") on the *wrapped* model to stay
@@ -3988,10 +3991,11 @@ class GenerationSelfEvolvingTrainer:
         step: Optional[int] = None,
         verbose: bool = False,
     ) -> Tuple[List[Dict[str, object]], List[str], List[str]]:
-        """Phase 2 scoring: reference-answer log-prob on generated images.
+        """Phase 2 scoring: Solver-derived reference-answer log-prob on generated images.
 
         1. Extract questions from ``spec.qa_pairs``.
-        2. Solver answers each question looking at ``real_image`` → reference answers.
+        2. Solver answers each question looking at ``real_image`` to produce
+           Solver-derived reference answers.
         3. For each candidate, compute mean log P(ref_answer | candidate, question).
         4. That mean log-prob is the ``total_reward``.
 
@@ -3999,7 +4003,7 @@ class GenerationSelfEvolvingTrainer:
         -------
         scored : list of dicts (same schema as ``_score_candidates``)
         questions : list of question strings
-        reference_answers : list of solver answers on the real image
+        reference_answers : list of Solver-derived answers on the real image
         """
         questions = [qa.question for qa in spec.qa_pairs if qa.question.strip()]
         if not questions:
@@ -4028,9 +4032,9 @@ class GenerationSelfEvolvingTrainer:
             ]
             return scored, [], []
 
-        # Step 1: Solver generates reference answers on the REAL image.
+        # Step 1: Solver generates Solver-derived reference answers on the REAL image.
         # Uses the trained solver LoRA — as solver improves through
-        # understanding training, it provides better reference answers,
+        # understanding training, it provides better Solver-derived reference answers,
         # which means harder/more accurate scoring for generation (mutual supervision).
         device = self.device
         cfg = self.cfg
@@ -4259,6 +4263,15 @@ class GenerationSelfEvolvingTrainer:
                 if not saved:
                     with use_adapter(self.model, adapter_name):
                         self.model.save_pretrained(subdir)
+                try:
+                    sanitize_peft_adapter_dir(
+                        subdir,
+                        in_place=True,
+                        backup=False,
+                        log=lambda msg: print(f"[Generation] {msg}"),
+                    )
+                except Exception as exc:
+                    print(f"[Generation] WARNING: failed to sanitize {sub_name} adapter checkpoint: {exc}")
                 if sub_name == "solver":
                     try:
                         self.processor.save_pretrained(subdir)
@@ -4694,19 +4707,19 @@ class GenerationSelfEvolvingTrainer:
         # ---- Score candidates (Phase 1 vs Phase 2 scoring) ---- #
         _use_ref_scoring = bool(getattr(self.cfg, "use_ref_answer_scoring", False))
         _use_self_clip_scoring = bool(getattr(self.cfg, "use_self_clip_reward_scoring", False))
-        # In imageless mode, ref-answer scoring requires a real image (which we don't have).
+        # In imageless mode, Solver-derived reference-answer scoring requires a real image.
         # Fall back to spec-based scoring which uses the generated images + QA pairs.
         if _imageless and _use_ref_scoring:
             _use_ref_scoring = False
             if verbose:
-                print(f"[Step {step:05d}][G] imageless mode: disabling ref-answer scoring (no real image)")
+                print(f"[Step {step:05d}][G] imageless mode: disabling Solver-derived reference-answer scoring (no real image)")
         _ref_questions: Optional[List[str]] = None
         _ref_answers: Optional[List[str]] = None
 
         if _use_self_clip_scoring:
             if _use_ref_scoring and verbose and self.is_main_process:
                 print(
-                    f"[Step {step:05d}][G] both self-clip and ref-answer scoring enabled; "
+                    f"[Step {step:05d}][G] both self-clip and Solver-derived reference-answer scoring enabled; "
                     "using self-clip scoring."
                 )
             scored = self._score_candidates_self_clip(
@@ -4742,7 +4755,7 @@ class GenerationSelfEvolvingTrainer:
         # understanding training. The buffer's quality gate (min_reward)
         # ensures only good images are kept.
         #
-        # For ref-answer scoring (MODE B), total_reward is a log-prob (negative).
+        # For Solver-derived reference-answer scoring (MODE B), total_reward is a log-prob (negative).
         # Normalize to [0, 1] so the replay buffer quality gate works uniformly:
         #   sigmoid(logp) maps (-inf, 0] → (0, 0.5], typical range [-5, 0] → [0.007, 0.5]
         #   We use sigmoid(logp + 2) to shift the useful range up, so:

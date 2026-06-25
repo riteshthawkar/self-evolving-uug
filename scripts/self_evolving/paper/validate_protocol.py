@@ -48,6 +48,8 @@ def validate() -> tuple[list[str], list[str]]:
     _check_equal(errors, "protocol.weight_decay", protocol.get("weight_decay"), 0.01)
     _check_equal(errors, "protocol.grad_clip", protocol.get("grad_clip"), 1.0)
     _check_equal(errors, "protocol.grad_accum_steps", protocol.get("grad_accum_steps"), 1)
+    _check_equal(errors, "protocol.default_data_dir", protocol.get("default_data_dir"), "data/joint_pool_10k/images")
+    _check_equal(errors, "protocol.minimum_data_images", protocol.get("minimum_data_images"), 10000)
     _check_equal(
         errors,
         "protocol.lora.targets",
@@ -120,7 +122,7 @@ def validate() -> tuple[list[str], list[str]]:
             errors.append(f"run_experiment.sh missing two-stage control: {required}")
 
     e1_defaults = {
-        "DATA_DIR": "$REPO_ROOT/data/joint_6k/images",
+        "DATA_DIR": "$REPO_ROOT/data/joint_pool_10k/images",
         "TOTAL_STEPS": "10000",
         "LR": "1e-6",
         "WEIGHT_DECAY": "0.01",

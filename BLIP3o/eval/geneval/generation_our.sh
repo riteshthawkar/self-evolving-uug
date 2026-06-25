@@ -48,6 +48,7 @@ echo "  Output:          ${OUTDIR}"
 echo "============================================"
 
 # Launch processes in parallel for each GPU/chunk.
+pids=()
 for i in $(seq 0 $(($N_CHUNKS - 1))); do
     echo "Launching process for GPU $i (chunk index $i of $N_CHUNKS)"
     CUDA_VISIBLE_DEVICES=$i python "${SCRIPT_DIR}/generate_our.py" \
@@ -59,9 +60,17 @@ for i in $(seq 0 $(($N_CHUNKS - 1))); do
         --outdir "$OUTDIR" \
         --index $i \
         --n_chunks $N_CHUNKS &
+    pids+=("$!")
 done
-
-# Wait for all background processes to finish.
-wait
+status=0
+for pid in "${pids[@]}"; do
+    if ! wait "$pid"; then
+        status=1
+    fi
+done
+if [[ "$status" != "0" ]]; then
+    echo "ERROR: one or more generation workers failed." >&2
+    exit "$status"
+fi
 echo "All generation processes finished."
 echo "Output saved to: ${OUTDIR}"

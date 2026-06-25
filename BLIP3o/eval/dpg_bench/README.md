@@ -7,7 +7,7 @@ using hierarchical VQA-based scoring.
 
 ```bash
 # 1. Clone ELLA repo (contains DPG-Bench eval code)
-cd /workspace/self-evolving-uug/self-evolving-uug/BLIP3o/eval/dpg_bench
+cd BLIP3o/eval/dpg_bench
 git clone https://github.com/TencentQQGYLab/ELLA.git ella_repo
 
 # 2. Install dependencies

@@ -76,12 +76,16 @@ class SelfEvolvingConfig:
     # ── Proposer Configuration ───────────────────────────────────────────
     proposer_update_rule: str = "grpo"             # reinforce|grpo
     proposer_grpo_gen_group_size: int = 3
-    proposer_num_candidates: int = 3               # K candidate questions per proposer call
+    proposer_num_candidates: int = 5               # K candidate questions per proposer call
     proposer_spot_check_samples: int = 3           # solver samples for spot-checking
     proposer_certificate_enabled: bool = True
     proposer_certificate_min_score: float = 0.55
     proposer_certificate_weight: float = 0.75
     proposer_certificate_strict_struct: bool = True
+    proposer_question_quality_min_score: float = 0.60
+    proposer_question_structural_min_score: float = 0.50
+    proposer_question_model_judge_enabled: bool = True
+    proposer_question_model_judge_weight: float = 0.15
     proposer_gen_reward_enabled: bool = True
     proposer_gen_entropy_weight: float = 0.7
     proposer_gen_baseline_momentum: float = 0.6
@@ -103,7 +107,7 @@ class SelfEvolvingConfig:
     sc_negative_weight: float = 0.25
     easy_solver_penalty_scale: float = 1.0
     skip_solver_update_when_uninformative: bool = True
-    solver_always_update_with_informative_scaling: bool = True
+    solver_always_update_with_informative_scaling: bool = False
     solver_update_min_scale: float = 0.20
     len_penalty_weight: float = 0.10
     len_penalty_target_words: int = 6
@@ -129,8 +133,8 @@ class SelfEvolvingConfig:
     solver_token_entropy_window_size: int = 128
     solver_token_entropy_sigmoid_alpha: float = 1.5
     solver_token_entropy_sigmoid_beta: float = 2.0
-    solver_skip_update_on_easy: bool = False
-    easy_update_majority_frac_threshold: float = 0.95
+    solver_skip_update_on_easy: bool = True
+    easy_update_majority_frac_threshold: float = 0.85
     acceptance_require_non_easy: bool = True
     rejected_question_penalty: float = 0.35
 
@@ -236,7 +240,7 @@ class SelfEvolvingConfig:
     max_question_words: int = 24
 
     # ── Reference-answer Scoring ─────────────────────────────────────────
-    use_ref_answer_scoring: bool = True
+    use_ref_answer_scoring: bool = False
     verification_use_reference_solver: bool = False
     use_self_clip_reward_scoring: bool = False
 

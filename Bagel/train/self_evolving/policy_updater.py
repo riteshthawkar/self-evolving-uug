@@ -859,7 +859,11 @@ class BagelRolePolicyUpdater:
                             else:
                                 kl_loss = torch.zeros((), device=ce_mean.device, dtype=ce_mean.dtype)
                             beta_before = float(self.kl_coef)
-                            loss = (-float(advantage)) * ce_mean + beta_before * kl_loss
+                            # ce_mean is negative log-likelihood. A positive
+                            # advantage should lower CE and increase the
+                            # completion probability; a negative advantage
+                            # should do the opposite.
+                            loss = float(advantage) * ce_mean + beta_before * kl_loss
 
                         if not bool(torch.isfinite(loss.detach()).all().item()):
                             kl_value = float(kl_loss.detach().item()) if "kl_loss" in locals() else 0.0

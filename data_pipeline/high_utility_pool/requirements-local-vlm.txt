@@ -1,3 +1,0 @@
-# Install this in an isolated Python 3.12 environment on Apple Silicon.
-# mlx-vlm may upgrade transformers beyond the BLIP3o training environment.
-mlx-vlm==0.5.0

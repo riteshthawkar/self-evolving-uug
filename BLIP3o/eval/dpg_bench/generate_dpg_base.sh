@@ -28,6 +28,7 @@ echo "=== DPG-Bench Generation (Base BLIP3o) ==="
 echo "  Model:   ${MODEL}"
 echo "  Output:  ${OUTDIR}"
 
+pids=()
 for i in $(seq 0 $(($N_CHUNKS - 1))); do
     CUDA_VISIBLE_DEVICES=$i python "${SCRIPT_DIR}/generate_dpg_base.py" \
         --model "$MODEL" \

@@ -21,6 +21,14 @@ from blip3o.constants import *
 from blip3o.conversation import conv_templates
 from blip3o.model.builder import load_pretrained_model
 from blip3o.utils import disable_torch_init
+from blip3o.train.self_evolving.checkpoint_adapters import prepare_peft_adapter_dir_for_loading
+
+
+def diffusion_pretrained_args(model_name):
+    local_decoder = os.path.join(model_name, "diffusion-decoder")
+    if os.path.isdir(local_decoder):
+        return local_decoder, {}
+    return model_name, {"subfolder": "diffusion-decoder"}
 
 
 def set_global_seed(seed=42):
@@ -73,6 +81,7 @@ def load_lora_adapter(model, checkpoint_dir, adapter="generator"):
                 break
         else:
             raise FileNotFoundError(f"adapter_config.json not found in {adapter_path}")
+    adapter_path = str(prepare_peft_adapter_dir_for_loading(adapter_path, log=print))
     print(f"Loading LoRA '{adapter}' from {adapter_path}")
     model = PeftModel.from_pretrained(model, adapter_path)
     model = model.merge_and_unload()
@@ -107,6 +116,17 @@ def _load_dit_lora_adapter(model, checkpoint_dir):
     dit_module = getattr(core_model, "dit", None) if core_model is not None else None
     if dit_module is None:
         raise RuntimeError("Checkpoint contains dit_lora/, but the loaded model has no core_model.dit module.")
+    if hasattr(dit_module, "gradient_checkpointing_disable"):
+        try:
+            dit_module.gradient_checkpointing_disable()
+        except Exception as exc:
+            print(f"WARNING: failed to disable DiT gradient checkpointing via helper: {exc}")
+    for submodule in dit_module.modules():
+        if hasattr(submodule, "gradient_checkpointing"):
+            submodule.gradient_checkpointing = False
+    if hasattr(dit_module, "config") and hasattr(dit_module.config, "_gradient_checkpointing"):
+        dit_module.config._gradient_checkpointing = False
+    adapter_path = str(prepare_peft_adapter_dir_for_loading(adapter_path, log=print))
     print(f"Loading DiT LoRA from {adapter_path}")
     dit_model = PeftModel.from_pretrained(dit_module, adapter_path)
     try:
@@ -162,7 +182,7 @@ torch.set_grad_enabled(False)
 def main():
     opt = parse_args()
     model_name = opt.model
-    diffusion_path = model_name + "/diffusion-decoder"
+    diffusion_path, diffusion_kwargs = diffusion_pretrained_args(model_name)
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     if opt.wise_data_dir is None:
@@ -198,6 +218,7 @@ def main():
 
     pipe = DiffusionPipeline.from_pretrained(
         diffusion_path,
+        **diffusion_kwargs,
         custom_pipeline="pipeline_llava_gen",
         torch_dtype=torch.bfloat16,
         use_safetensors=True,

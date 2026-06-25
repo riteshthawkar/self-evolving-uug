@@ -34,6 +34,7 @@ from lmms_eval.api.model import lmms
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.model_utils.load_video import read_video_pyav_base64
 from blip3o.model.builder import load_pretrained_model_lmms_eval
+from blip3o.train.self_evolving.checkpoint_adapters import prepare_peft_adapter_dir_for_loading
 
 try:
     from qwen_vl_utils import process_vision_info
@@ -136,6 +137,7 @@ def _load_and_merge_lora(model, checkpoint_dir: str, adapter: str = "solver"):
                 f"adapter_config.json not found in {adapter_path} or any subdirectory."
             )
 
+    adapter_path = str(prepare_peft_adapter_dir_for_loading(adapter_path, log=lambda msg: eval_logger.info(msg)))
     eval_logger.info(f"Loading LoRA adapter from {adapter_path}")
     model = PeftModel.from_pretrained(model, adapter_path)
     eval_logger.info("Merging LoRA adapter into base model")

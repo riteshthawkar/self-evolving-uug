@@ -52,7 +52,7 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 #   • gen_step_solver_update_enabled = True (ALSO trains solver during G-steps)
 #   • replay_buffer_size = 500           (stores best generated images)
 #   • gen_mix_ratio_start/max = 1.0      (U-steps use 100% generated images)
-#   • no_ref_answer_scoring + strict_imageless_mode
+#   • no_ref_answer_scoring + strict_imageless_mode (disables Solver-derived reference-answer scoring)
 #
 # Startup behavior:
 #   • Bootstrap runs generation-only steps first to prefill replay buffer
@@ -85,8 +85,13 @@ unset BOOTSTRAP_DIR BOOTSTRAP_SEARCH_DIR
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../../.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+HF_TOKEN_FILE="${HF_TOKEN_FILE:-${ORIGINAL_HOME:-$HOME}/.cache/huggingface/token}"
+if [[ -z "${HF_TOKEN:-}" && -f "$HF_TOKEN_FILE" ]]; then
+  export HF_TOKEN="$(< "$HF_TOKEN_FILE")"
+fi
 # DATA_DIR is needed for pool init; U-steps use 100% replay buffer (generated images)
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_pool_10k/images}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/blip3o/E5_synthetic_loop}"
 RUN_NAME="E5_synthetic_loop_s42"
 TRAIN_STAGE="${TRAIN_STAGE:-strict}"

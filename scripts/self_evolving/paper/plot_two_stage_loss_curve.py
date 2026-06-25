@@ -88,8 +88,8 @@ def main() -> None:
         default=Path("docs/Self_Evolving_UUG_manuscript/rebuttal-template/two_stage_loss_curve.pdf"),
     )
     parser.add_argument("--png-output", type=Path, default=None)
-    parser.add_argument("--mark-step", type=int, default=6000)
-    parser.add_argument("--stage1-steps", type=int, default=6000)
+    parser.add_argument("--mark-step", type=int, default=10000)
+    parser.add_argument("--stage1-steps", type=int, default=10000)
     parser.add_argument("--loss-name", type=str, default="total_loss")
     parser.add_argument("--smooth-window", type=int, default=75)
     parser.add_argument("--title", type=str, default="Two-stage actual loss curve")

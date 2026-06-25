@@ -6,7 +6,7 @@ set -euo pipefail
 # Usage:
 #   bash scripts/self_evolving/paper/run_experiment.sh blip3o_joint
 #   DRY_RUN=1 bash scripts/self_evolving/paper/run_experiment.sh bagel_joint
-#   DATA_DIR=/path/to/data/joint_6k/images NPROC_PER_NODE=8 \
+#   DATA_DIR=/path/to/unlabeled/images NPROC_PER_NODE=8 \
 #     bash scripts/self_evolving/paper/run_experiment.sh blip3o_two_stage
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,7 +24,7 @@ if [[ -n "${DATA_DIR+x}" ]]; then
 else
   USER_SUPPLIED_DATA_DIR=""
 fi
-DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_6k/images}"
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/joint_pool_10k/images}"
 TWO_STAGE_DATA_DIR="${TWO_STAGE_DATA_DIR:-${USER_SUPPLIED_DATA_DIR:-$REPO_ROOT/data/joint_pool_10k/images}}"
 TWO_STAGE_IMAGE_SAMPLES="${TWO_STAGE_IMAGE_SAMPLES:-10000}"
 TWO_STAGE_UNDERSTANDING_STEPS="${TWO_STAGE_UNDERSTANDING_STEPS:-10000}"
@@ -62,13 +62,13 @@ preflight_data() {
   fi
   if [[ ! -d "$DATA_DIR" ]]; then
     echo "[run_experiment] ERROR: DATA_DIR does not exist: $DATA_DIR" >&2
-    echo "[run_experiment] Build it with: bash scripts/self_evolving/paper/prepare_data_6k.sh" >&2
+    echo "[run_experiment] Set DATA_DIR to a local directory of unlabeled training images." >&2
     exit 1
   fi
   local n
   n="$(count_images "$DATA_DIR")"
-  if [[ "$n" -lt 6000 ]]; then
-    echo "[run_experiment] ERROR: DATA_DIR has $n images, expected at least 6000: $DATA_DIR" >&2
+  if [[ "$n" -lt 10000 ]]; then
+    echo "[run_experiment] ERROR: DATA_DIR has $n images, expected at least 10000: $DATA_DIR" >&2
     exit 1
   fi
 }
@@ -124,6 +124,8 @@ launch_bagel() {
     OUTPUT_DIR="$out" \
     MODEL_PATH="$model_path" \
     NPROC_PER_NODE="$NPROC_PER_NODE" \
+    RESUME_FROM= \
+    LORA_CHECKPOINT_PATH= \
     NUM_GPUS="$NUM_GPUS" \
     TRAIN_STAGE="$TRAIN_STAGE" \
     "$@" \
@@ -139,6 +141,7 @@ launch_vargpt() {
     OUTPUT_DIR="$out" \
     NPROC_PER_NODE="$NPROC_PER_NODE" \
     NUM_GPUS="$NUM_GPUS" \
+    RESUME_FROM= \
     bash "$REPO_ROOT/vargpt_1_1/VARGPT-family-training/examples/train_self_evolving/run_self_evolving.sh" \
     "$mode" "$NUM_GPUS"
 }

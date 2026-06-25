@@ -23,6 +23,13 @@ import requests
 import random
 from blip3o.conversation import conv_templates, SeparatorStyle
 
+def diffusion_pretrained_args(model_name):
+    local_decoder = os.path.join(model_name, "diffusion-decoder")
+    if os.path.isdir(local_decoder):
+        return local_decoder, {}
+    return model_name, {"subfolder": "diffusion-decoder"}
+
+
 def set_global_seed(seed=42):
 
     random.seed(seed)
@@ -122,7 +129,7 @@ def parse_args():
 
 def main(opt):
     model_name = opt.model
-    diffusion_path = model_name + "/diffusion-decoder"
+    diffusion_path, diffusion_kwargs = diffusion_pretrained_args(model_name)
 
     outdir = f"{model_name}/geneval_{opt.prompt_template}"
     os.makedirs(outdir, exist_ok=True)
@@ -132,6 +139,7 @@ def main(opt):
 
     pipe = DiffusionPipeline.from_pretrained(
         diffusion_path,
+        **diffusion_kwargs,
         custom_pipeline="pipeline_llava_gen",
         torch_dtype=torch.bfloat16,
         use_safetensors=True,
