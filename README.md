@@ -4,8 +4,8 @@ Ask, Solve, Generate: Self-Evolving Unified Multimodal Understanding and Generat
 
 <p align="center">
   <img alt="Paper" src="https://img.shields.io/badge/Paper-coming_soon-lightgrey.svg">
-  <img alt="Project Page" src="https://img.shields.io/badge/Project_Page-coming_soon-lightgrey.svg">
-  <img alt="Models" src="https://img.shields.io/badge/Models-coming_soon-fcd734.svg?logo=huggingface&logoColor=black">
+  <a href="https://riteshthawkar.github.io/self-evolving-uug/"><img alt="Project Page" src="https://img.shields.io/badge/Project_Page-online-blue.svg"></a>
+  <a href="https://huggingface.co/collections/Ritesh-hf/ask-solve-generate-paper-models"><img alt="Models" src="https://img.shields.io/badge/Models-HuggingFace-fcd734.svg?logo=huggingface&logoColor=black"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache--2.0-4caf50.svg"></a>
   <a href="https://pytorch.org/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-EE4C2C.svg?logo=pytorch&logoColor=white"></a>
 </p>
@@ -206,14 +206,15 @@ bash scripts/E1_main_joint.sh
 
 ## 🤗 Model Zoo
 
-Public model links will be added after release. Until then, the training and
-evaluation scripts expect local checkpoint paths.
+Released checkpoints are available in the
+[Ask, Solve, Generate Hugging Face collection](https://huggingface.co/collections/Ritesh-hf/ask-solve-generate-paper-models).
+The training and evaluation scripts expect local checkpoint paths.
 
 | Backend | Checkpoint status | Notes |
 | --- | --- | --- |
-| BLIP3o | Coming soon | Main implementation for self-evolving unified training |
-| BAGEL | Coming soon | Baseline integration for the same training recipe |
-| VARGPT-v1.1 | Coming soon | 7B+2B baseline integration |
+| BLIP3o | [Released](https://huggingface.co/collections/Ritesh-hf/ask-solve-generate-paper-models) | Main implementation for self-evolving unified training |
+| BAGEL | [Released](https://huggingface.co/collections/Ritesh-hf/ask-solve-generate-paper-models) | Baseline integration for the same training recipe |
+| VARGPT-v1.1 | [Released](https://huggingface.co/collections/Ritesh-hf/ask-solve-generate-paper-models) | 7B+2B baseline integration |
 
 ---
 
