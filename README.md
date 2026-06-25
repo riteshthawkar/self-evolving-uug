@@ -10,8 +10,12 @@ Ask, Solve, Generate: Self-Evolving Unified Multimodal Understanding and Generat
   <a href="https://pytorch.org/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-EE4C2C.svg?logo=pytorch&logoColor=white"></a>
 </p>
 
-Ritesh Thawkar · Shravan Venkatraman · Omkar Thawakar · Abdelrahman M Shaker ·
-Fahad Shahbaz Khan · Hisham Cholakkal · Salman Khan · Rao Muhammad Anwer
+<p align="center">
+  Ritesh Thawkar · Shravan Venkatraman · Omkar Thawakar · Abdelrahman M Shaker ·
+  Fahad Shahbaz Khan · Hisham Cholakkal · Salman Khan · Rao Muhammad Anwer
+</p>
+
+---
 
 **Ask, Solve, Generate** studies whether unified multimodal models can improve
 visual understanding and image generation from unlabeled images alone. The
@@ -23,25 +27,6 @@ This repository contains the public training, inference, and evaluation code.
 The release focuses on model-side implementation. Private data-construction
 pipelines, manuscript source, local checkpoints, generated outputs, and
 cluster-specific logs are intentionally not included.
-
-## Contents
-
-- [News](#news)
-- [Overview](#overview)
-- [Method at a Glance](#method-at-a-glance)
-- [Release Scope](#release-scope)
-- [Repository Layout](#repository-layout)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Secrets](#secrets)
-- [Model Zoo](#model-zoo)
-- [Training](#training)
-- [Inference](#inference)
-- [Resume and Monitoring](#resume-and-monitoring)
-- [Evaluation](#evaluation)
-- [Cluster Usage](#cluster-usage)
-- [Citation](#citation)
-- [License](#license)
 
 ## News
 
