@@ -34,7 +34,6 @@ cluster-specific logs are intentionally not included.
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Secrets](#secrets)
-- [Data](#data)
 - [Model Zoo](#model-zoo)
 - [Training](#training)
 - [Inference](#inference)
@@ -43,7 +42,6 @@ cluster-specific logs are intentionally not included.
 - [Cluster Usage](#cluster-usage)
 - [Citation](#citation)
 - [License](#license)
-- [Release Checklist](#release-checklist)
 
 ## News
 
@@ -222,25 +220,6 @@ Common variables:
 | `OPENAI_API_KEY` | API-based WISE scoring |
 | `WANDB_API_KEY` | Optional experiment logging |
 | `HF_HOME` | Hugging Face cache location |
-
-## Data
-
-The public release expects a local directory of unlabeled images. The default
-launcher path is:
-
-```text
-data/joint_pool_10k/images/
-```
-
-A full training run expects at least 10,000 images. You can also point the
-launchers to any local image directory:
-
-```bash
-export DATA_DIR=/path/to/unlabeled/images
-```
-
-Supported image extensions are detected by the launch scripts, including
-`.jpg`, `.jpeg`, `.png`, `.webp`, and `.bmp`.
 
 ## Model Zoo
 
@@ -479,15 +458,3 @@ Third-party code and model integrations under `Bagel/`, `BLIP3o/`, and
 `vargpt_1_1/` may retain their upstream licenses and usage terms. Check the
 corresponding upstream projects and model cards before redistributing model
 weights or derived checkpoints.
-
-## Release Checklist
-
-Before publishing a release branch, confirm that:
-
-- `docs/`, private manuscripts, and reviewer materials are not tracked.
-- `data_pipeline/` and private data-construction code are not tracked.
-- Checkpoints, model weights, generated images, logs, and caches are not
-  tracked.
-- `.env`, API keys, Hugging Face tokens, and W&B credentials are not tracked.
-- Paper links, project page links, model links, and BibTeX metadata are updated
-  only after they are final.
