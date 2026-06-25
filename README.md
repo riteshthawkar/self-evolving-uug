@@ -3,12 +3,11 @@ Ask, Solve, Generate: Self-Evolving Unified Multimodal Understanding and Generat
 </h1>
 
 <p align="center">
-  <img alt="arXiv Paper" src="https://img.shields.io/badge/arXiv-Paper_coming_soon-B31B1B.svg?logo=arxiv&logoColor=white">
-  <a href="https://github.com/riteshthawkar/self-evolving-uug"><img alt="GitHub Code" src="https://img.shields.io/badge/GitHub-Code-181717.svg?logo=github&logoColor=white"></a>
-  <a href="https://riteshthawkar.github.io/self-evolving-uug/"><img alt="Project Page" src="https://img.shields.io/badge/Project_Page-online-1f6feb.svg?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTIiIHI9IjEwIi8+PHBhdGggZD0iTTIgMTJoMjAiLz48cGF0aCBkPSJNMTIgMmExNS4zIDE1LjMgMCAwIDEgMCAyMCIvPjxwYXRoIGQ9Ik0xMiAyYTE1LjMgMTUuMyAwIDAgMCAwIDIwIi8+PC9zdmc+"></a>
-  <a href="https://huggingface.co/collections/Ritesh-hf/ask-solve-generate-paper-models"><img alt="Hugging Face Models" src="https://img.shields.io/badge/Models-HuggingFace-fcd734.svg?logo=huggingface&logoColor=black"></a>
-  <a href="LICENSE"><img alt="Apache License" src="https://img.shields.io/badge/License-Apache--2.0-CA2133.svg?logo=apache&logoColor=white"></a>
-  <a href="https://pytorch.org/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-EE4C2C.svg?logo=pytorch&logoColor=white"></a>
+  <img alt="arXiv Paper" src="https://img.shields.io/badge/arXiv-Paper_coming_soon-000000.svg?logo=arxiv&logoColor=B31B1B&labelColor=f5f5f5">
+  <a href="https://riteshthawkar.github.io/self-evolving-uug/"><img alt="Project Page" src="https://img.shields.io/badge/Project_Page-online-1f6feb.svg?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMWY2ZmViIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiLz48cGF0aCBkPSJNMiAxMmgyMCIvPjxwYXRoIGQ9Ik0xMiAyYTE1LjMgMTUuMyAwIDAgMSAwIDIwIi8+PHBhdGggZD0iTTEyIDJhMTUuMyAxNS4zIDAgMCAwIDAgMjAiLz48L3N2Zz4="></a>
+  <a href="https://huggingface.co/collections/Ritesh-hf/ask-solve-generate-paper-models"><img alt="Hugging Face Models" src="https://img.shields.io/badge/Models-HuggingFace-fcd734.svg?logo=huggingface&logoColor=FFD21E&labelColor=555555"></a>
+  <a href="LICENSE"><img alt="Apache License" src="https://img.shields.io/badge/License-Apache--2.0-CA2133.svg?logo=apache&logoColor=CA2133&labelColor=555555"></a>
+  <a href="https://pytorch.org/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-EE4C2C.svg?logo=pytorch&logoColor=EE4C2C&labelColor=555555"></a>
 </p>
 
 <p align="center">
