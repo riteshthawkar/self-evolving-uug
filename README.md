@@ -28,12 +28,14 @@ The release focuses on model-side implementation. Private data-construction
 pipelines, manuscript source, local checkpoints, generated outputs, and
 cluster-specific logs are intentionally not included.
 
-## News
+## Announcement
 
 - **[Release]** Public training, inference, and evaluation code is prepared for
   BLIP3o, BAGEL, and VARGPT-v1.1 backends.
 - **[Coming soon]** Paper, project page, and released model checkpoints will be
   linked here after the public release metadata is finalized.
+
+---
 
 ## Overview
 
@@ -55,6 +57,19 @@ The main implementation is built around BLIP3o. BAGEL and VARGPT-v1.1
 integrations are included to evaluate the same self-evolving recipe on different
 unified model families.
 
+---
+
+## Model Capabilities
+
+| Capability | Input | Output | Description |
+| --- | --- | --- | --- |
+| Visual understanding | Image + question | Text answer | VQA, OCR-style reasoning, visual recognition, and multimodal reasoning |
+| Image generation | Prompt or generated QA specification | Image | Text-to-image generation with self-supervised reward signals |
+| Unified self-evolution | Unlabeled images | LoRA adapters | Joint improvement of proposer, solver, and generator roles |
+| Multi-backbone training | BLIP3o, BAGEL, VARGPT-v1.1 | Backend-specific adapters | Same self-evolving recipe across different unified model families |
+
+---
+
 ## Architecture
 
 <p align="center">
@@ -68,7 +83,22 @@ training signals. In the generation step, question-answer-derived generation
 specifications guide image synthesis, while the Solver evaluates QA fidelity and
 cycle consistency.
 
-## Method at a Glance
+---
+
+## Supported Tasks
+
+| Task | Backend support | Primary scripts |
+| --- | --- | --- |
+| BLIP3o self-evolving training | BLIP3o-8B | `scripts/E1_main_joint.sh` |
+| BLIP3o ablations | BLIP3o-8B | `scripts/E2_understanding_only.sh` to `scripts/E7_two_stage.sh` |
+| BAGEL self-evolving training | BAGEL | `Bagel/scripts/B1_unified_training.sh` |
+| VARGPT-v1.1 self-evolving training | VARGPT-v1.1 | `vargpt_1_1/VARGPT-family-training/examples/train_self_evolving/run_self_evolving.sh` |
+| Understanding evaluation | BLIP3o, BAGEL, VARGPT-v1.1 | `BLIP3o/eval/`, `Bagel/eval/vlm/`, `vargpt_1_1/understand_eval/` |
+| Generation evaluation | BLIP3o, BAGEL, VARGPT-v1.1 | GenEval, DPG-Bench, and WISE wrappers under each backend |
+
+---
+
+## Framework Components
 
 The release combines:
 
@@ -79,6 +109,8 @@ The release combines:
 - **Cycle consistency** that checks generated images against the original
   multimodal interaction.
 - **Backend adapters** for BLIP3o, BAGEL, and VARGPT-v1.1.
+
+---
 
 ## Main Results
 
@@ -104,6 +136,8 @@ GenEval scores are percentages.
 | BAGEL | 99 -> 99 | 94 -> 95 | 81 -> 87 | 88 -> 90 | 64 -> 67 | 63 -> 72 | 82 -> 85 |
 | VARGPT-v1.1 | 96 -> 97 | 53 -> 59 | 48 -> 56 | 83 -> 85 | 13 -> 15 | 21 -> 24 | 53 -> 56 |
 
+---
+
 ## Release Scope
 
 Included:
@@ -122,6 +156,8 @@ Not included:
 - Manuscript source, Overleaf folders, reviewer materials, or internal notes.
 - API keys, Hugging Face tokens, W&B credentials, or machine-specific paths.
 
+---
+
 ## Repository Layout
 
 | Path | Purpose |
@@ -136,7 +172,9 @@ Generated outputs are ignored by git. Keep datasets, model weights,
 checkpoints, logs, and caches outside the tracked source tree or under ignored
 paths such as `data/`, `models/`, `outputs/`, and `logs/`.
 
-## Installation
+---
+
+## Setup
 
 Use separate environments for the three backends. The dependency stacks differ,
 and mixing them in one environment can create version conflicts.
@@ -199,6 +237,8 @@ The standalone upstream inference examples under `vargpt_1_1/inference_v1_1`
 use `vargpt_1_1/requirements.txt`, which pins a PyTorch/flash-attn stack. Use
 that file in a separate environment if it conflicts with the training setup.
 
+---
+
 ## Quick Start
 
 After installing the BLIP3o environment, run a small launcher smoke test on any
@@ -225,7 +265,9 @@ OUTPUT_DIR=$PWD/outputs/blip3o/E1_main_joint \
 bash scripts/E1_main_joint.sh
 ```
 
-## Secrets
+---
+
+## Environment Variables
 
 Do not commit secrets. Use environment variables or an untracked local `.env`
 file. Start from the provided template:
@@ -243,6 +285,8 @@ Common variables:
 | `WANDB_API_KEY` | Optional experiment logging |
 | `HF_HOME` | Hugging Face cache location |
 
+---
+
 ## Model Zoo
 
 Public model links will be added after release. Until then, the training and
@@ -253,6 +297,38 @@ evaluation scripts expect local checkpoint paths.
 | BLIP3o | Coming soon | Main implementation for self-evolving unified training |
 | BAGEL | Coming soon | Baseline integration for the same training recipe |
 | VARGPT-v1.1 | Coming soon | 7B+2B baseline integration |
+
+---
+
+## Inference
+
+For BLIP3o interactive qualitative inspection:
+
+```bash
+python BLIP3o/gradio/app.py /path/to/BLIP3o-Model-8B
+```
+
+For a minimal BLIP3o text-to-image example:
+
+```bash
+python BLIP3o/inference.py /path/to/BLIP3o-Model-8B
+```
+
+The standalone BLIP3o example contains an inline prompt for quick inspection;
+edit the prompt in the script or use the benchmark-generation wrappers for
+batch sampling.
+
+For VARGPT-v1.1 standalone examples:
+
+```bash
+python vargpt_1_1/inference_v1_1/understanding_vargpt_v1_1.py
+python vargpt_1_1/inference_v1_1/generation_vargpt_v1_1.py
+```
+
+BAGEL inference utilities are exposed through `Bagel/inferencer.py` and are used
+by the BAGEL training and evaluation launchers.
+
+---
 
 ## Training
 
@@ -316,33 +392,7 @@ bash examples/train_self_evolving/run_self_evolving.sh joint 8
 
 Available VARGPT modes are `joint`, `u_only`, and `gen_only`.
 
-## Inference
-
-For BLIP3o interactive qualitative inspection:
-
-```bash
-python BLIP3o/gradio/app.py /path/to/BLIP3o-Model-8B
-```
-
-For a minimal BLIP3o text-to-image example:
-
-```bash
-python BLIP3o/inference.py /path/to/BLIP3o-Model-8B
-```
-
-The standalone BLIP3o example contains an inline prompt for quick inspection;
-edit the prompt in the script or use the benchmark-generation wrappers for
-batch sampling.
-
-For VARGPT-v1.1 standalone examples:
-
-```bash
-python vargpt_1_1/inference_v1_1/understanding_vargpt_v1_1.py
-python vargpt_1_1/inference_v1_1/generation_vargpt_v1_1.py
-```
-
-BAGEL inference utilities are exposed through `Bagel/inferencer.py` and are used
-by the BAGEL training and evaluation launchers.
+---
 
 ## Resume and Monitoring
 
@@ -366,6 +416,8 @@ Typical run files:
 | `logs/training_watch.log` | Human-readable training trace |
 | `logs/training_monitor.jsonl` | Structured monitor events |
 | `logs/training_monitor.tsv` | Tabular monitor events |
+
+---
 
 ## Evaluation
 
@@ -440,6 +492,8 @@ CHECKPOINT_DIR=/path/to/se_checkpoint_10000 \
 bash run_scripts/run_eval_vargpt_generation_our.sh
 ```
 
+---
+
 ## Cluster Usage
 
 On Slurm systems, enter an allocated shell before launching training or
@@ -456,6 +510,8 @@ srun --partition=gpu \
 
 Then activate the appropriate conda environment and run the launcher.
 
+---
+
 ## Citation
 
 If this codebase is useful for your research, please cite:
@@ -471,6 +527,16 @@ If this codebase is useful for your research, please cite:
 
 This entry intentionally omits arXiv, DOI, URL, and conference fields until the
 public paper metadata is finalized.
+
+---
+
+## Acknowledgements
+
+This repository builds on BLIP3o, BAGEL, VARGPT-v1.1, lmms-eval, GenEval,
+DPG-Bench, and WISE evaluation tooling. We thank the authors and maintainers of
+these projects for releasing their code and models.
+
+---
 
 ## License
 
